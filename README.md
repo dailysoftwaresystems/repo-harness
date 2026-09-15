@@ -41,7 +41,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `init` | Create `.harness-config`, seed `config.json`, add ignore rules |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
-| `delete-worktree <name>` | Remove a worktree and everything under it |
+| `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses uncommitted changes without `--force` |
 | `list-worktree` | List existing worktrees |
 | `write-anchor <id> --priority P --trigger TEXT` | Add an anchor: to the pending registry, or to done when closed |
 | `set-anchor <id>` | Change an anchor; changing its status moves it between registries |

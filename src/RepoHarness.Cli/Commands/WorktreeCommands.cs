@@ -55,10 +55,16 @@ internal static class DeleteWorktreeCommand
         Description = "Worktree to remove.",
     };
 
+    private static readonly Option<bool> ForceOption = new("--force")
+    {
+        Description = "Delete the worktree even if it has uncommitted changes, which are then lost.",
+    };
+
     internal static Command Create()
     {
-        var command = new Command(Name, "Remove a worktree and everything under it.");
+        var command = new Command(Name, "Remove a worktree and everything under it; refuses uncommitted changes without --force.");
         command.Arguments.Add(NameArgument);
+        command.Options.Add(ForceOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -67,6 +73,7 @@ internal static class DeleteWorktreeCommand
                 .DeleteAsync(
                     context.Directory,
                     context.ParseResult.GetRequiredValue(NameArgument),
+                    context.ParseResult.GetValue(ForceOption),
                     cancellationToken)
                 .ConfigureAwait(false);
 

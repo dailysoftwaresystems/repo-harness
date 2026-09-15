@@ -19,13 +19,18 @@ public interface IWorktreeService
         bool useRandomName,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Removes a worktree and everything under it.</summary>
+    /// <summary>
+    /// Removes a worktree and everything under it. Unless <paramref name="force"/> is set, a
+    /// worktree with uncommitted changes is refused and left untouched, and so is one whose
+    /// status git cannot report.
+    /// </summary>
     /// <exception cref="HarnessException">
     /// As for <see cref="CreateAsync"/>, or the path resolved outside the worktrees directory.
     /// </exception>
     Task<WorktreeOutcome> DeleteAsync(
         string startDirectory,
         string name,
+        bool force,
         CancellationToken cancellationToken = default);
 
     /// <summary>Lists existing worktree names.</summary>
@@ -61,6 +66,8 @@ public sealed class WorktreeService(
     IHostPlatform platform) : IWorktreeService
 {
     private const int GenerateAttempts = 10;
+
+    private const int NamedChangeLimit = 3;
 
     private readonly IHarnessContextLoader _contextLoader = contextLoader;
     private readonly IGitClient _gitClient = gitClient;
@@ -177,6 +184,7 @@ public sealed class WorktreeService(
     public async Task<WorktreeOutcome> DeleteAsync(
         string startDirectory,
         string name,
+        bool force,
         CancellationToken cancellationToken = default)
     {
         // Only the shape is checked, not the length: a worktree created under a longer
@@ -195,6 +203,19 @@ public sealed class WorktreeService(
             return WorktreeOutcome.Failed(CommandOutcome.Refused($"No worktree named '{worktreeName}'."));
         }
 
+        if (!force)
+        {
+            var refusal = await RefuseIfWorkWouldBeLostAsync(worktreeName, path, cancellationToken).ConfigureAwait(false);
+
+            if (refusal is not null)
+            {
+                return WorktreeOutcome.Failed(refusal);
+            }
+        }
+
+        // git's own check is always overridden, because git also refuses a clean worktree
+        // that holds a submodule. Whether work would be lost is settled above, from the
+        // worktree's status, never from the wording of a refusal git printed.
         var removal = await _gitClient
             .RunAsync(
                 layout.MainCheckoutRoot,
@@ -279,6 +300,57 @@ public sealed class WorktreeService(
 
     private static WorktreeOutcome Usage(string message)
         => WorktreeOutcome.Failed(CommandOutcome.Failed(HarnessExit.UsageError, message));
+
+    /// <summary>
+    /// The refusal to report when deleting the worktree at <paramref name="path"/> would lose
+    /// uncommitted changes, or <see langword="null"/> when it would lose none. Ignored files do
+    /// not count: they are what a build leaves behind, and a build makes them again.
+    /// </summary>
+    private async Task<CommandOutcome?> RefuseIfWorkWouldBeLostAsync(
+        string name,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<string> changes;
+
+        try
+        {
+            // In a directory that is not the root of a worktree of its own, such as one whose
+            // .git file is gone, git answers for the main checkout around it, which ignores
+            // the worktrees directory, so nothing in the directory would ever be reported.
+            var root = await _gitClient.GetRepositoryRootAsync(path, cancellationToken).ConfigureAwait(false);
+
+            if (root is null || !PathsEqual(root, path))
+            {
+                return CannotTellIfWorkWouldBeLost(name, $"git does not see '{path}' as a worktree of its own.");
+            }
+
+            changes = await _gitClient.GetStatusAsync(path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (ex.ExitCode == HarnessExit.CommandFailed)
+        {
+            // A question git could not answer is not a clean worktree.
+            return CannotTellIfWorkWouldBeLost(name, ex.Message);
+        }
+
+        if (changes.Count == 0)
+        {
+            return null;
+        }
+
+        // A few paths are named and the rest only counted, so the refusal stays one line.
+        var named = string.Join(", ", changes.Take(NamedChangeLimit).Select(entry => entry[3..]));
+        var listed = changes.Count > NamedChangeLimit
+            ? $"{named} and {changes.Count - NamedChangeLimit} more"
+            : named;
+
+        return CommandOutcome.Refused(
+            $"Worktree '{name}' has {changes.Count} uncommitted change(s) that would be lost: {listed}. Commit or stash them, or pass --force to delete it anyway.");
+    }
+
+    private static CommandOutcome CannotTellIfWorkWouldBeLost(string name, string reason)
+        => CommandOutcome.Refused(
+            $"Could not tell whether worktree '{name}' has uncommitted changes, so it was not deleted; pass --force to delete it anyway. {reason}");
 
     /// <summary>
     /// Generates a name no existing worktree already uses, or <see langword="null"/>

@@ -96,7 +96,7 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness help exit-codes         What each exit code means");
         builder.AppendLine("  DssHarness help config             What config.json declares");
         builder.AppendLine("  DssHarness help legs               Hosts, emulators, and how a leg finds where it runs");
-        builder.AppendLine("  DssHarness help worktrees          Naming rules and the path budget");
+        builder.AppendLine("  DssHarness help worktrees          Naming rules, the path budget, and when deleting refuses");
         builder.AppendLine("  DssHarness help anchors            Anchor registries and the commands that change them");
         builder.AppendLine("  DssHarness help layout             What init creates, and what git tracks");
         builder.AppendLine();
@@ -249,6 +249,13 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("Worktrees always belong to the main checkout, so running create-worktree from");
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
+        builder.AppendLine();
+        builder.AppendLine("delete-worktree removes a worktree and everything under it, but refuses one with");
+        builder.AppendLine("uncommitted changes: a modified or staged file, or an untracked file git does");
+        builder.AppendLine("not ignore. Ignored files, such as build output, do not count. When git cannot");
+        builder.AppendLine("say whether there are any, delete-worktree refuses as well: not knowing is not");
+        builder.AppendLine($"clean. A refusal deletes nothing and exits {HarnessExit.Refused}. --force deletes the worktree");
+        builder.AppendLine("anyway, and its uncommitted changes with it.");
 
         return builder.ToString();
     }

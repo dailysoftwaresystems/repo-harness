@@ -41,9 +41,15 @@ public interface IGitClient
     Task<GitWorktree?> GetMainWorktreeAsync(string directory, CancellationToken cancellationToken = default);
 
     /// <summary>Whether the work tree has uncommitted changes, including untracked files.</summary>
+    /// <exception cref="HarnessException">git could not read the status.</exception>
     Task<bool> IsDirtyAsync(string directory, CancellationToken cancellationToken = default);
 
-    /// <summary>Porcelain status entries, one per changed path.</summary>
+    /// <summary>
+    /// Porcelain status entries, one per changed path: two status letters and a space, then the
+    /// path. Untracked files and changed submodules are listed even where configuration would hide
+    /// them; an untracked directory is one entry, and an ignored file is none.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not read the status.</exception>
     Task<IReadOnlyList<string>> GetStatusAsync(string directory, CancellationToken cancellationToken = default);
 
     /// <summary>Lists every worktree attached to the repository, the main worktree first.</summary>

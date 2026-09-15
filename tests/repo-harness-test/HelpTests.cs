@@ -109,6 +109,17 @@ public sealed partial class HelpTests
     }
 
     [Fact]
+    public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
+    {
+        var result = await CliRunner.RunAsync(["help", "worktrees"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[] { "delete-worktree", "uncommitted changes", "--force", $"exits {HarnessExit.Refused}" })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task AnchorsTopic_DocumentsEveryStatus_Command_AndDefault()
     {
         var result = await CliRunner.RunAsync(["help", "anchors"], TestContext.Current.CancellationToken);

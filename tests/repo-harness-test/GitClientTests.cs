@@ -159,6 +159,41 @@ public sealed class GitClientTests
     }
 
     [Fact]
+    public async Task GetStatusAsync_ListsAnUntrackedFile_WhenConfigurationHidesThem()
+    {
+        // Under status.showUntrackedFiles=no a plain status lists nothing for a new file, and a
+        // caller about to discard the tree would read it as clean.
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["config", "status.showUntrackedFiles", "no"], cancellationToken);
+        temp.WriteFile("notes.txt", "never committed");
+
+        var entry = Assert.Single(await harness.GitClient.GetStatusAsync(temp.Path, cancellationToken));
+
+        Assert.Equal("?? notes.txt", entry);
+        Assert.True(await harness.GitClient.IsDirtyAsync(temp.Path, cancellationToken));
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_ReportsARenameInTheWorkTree_AsOneChange()
+    {
+        // git marks a rename it finds in the work tree, here of an intent-to-add file, in the
+        // second status column rather than the first, and still follows it with the old path.
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        File.Move(temp.Combine("README.md"), temp.Combine("RENAMED.md"));
+        await harness.RunGitAsync(temp.Path, ["add", "--intent-to-add", "RENAMED.md"], cancellationToken);
+
+        var entry = Assert.Single(await harness.GitClient.GetStatusAsync(temp.Path, cancellationToken));
+
+        Assert.Equal(" R RENAMED.md", entry);
+    }
+
+    [Fact]
     public async Task GetStatusAsync_Throws_WhenGitCannotAnswer()
     {
         // An empty answer here would read as a clean tree, and a caller would proceed
@@ -361,13 +396,15 @@ public sealed class GitClientProtocolTests
     }
 
     [Fact]
-    public async Task GetStatusAsync_CountsARenameOnce()
+    public async Task GetStatusAsync_CountsARenameOnce_WhicheverColumnMarksIt()
     {
-        var (git, _) = Scripted(Exited(0, "R  new.txt\0old.txt\0?? untracked.txt\0"));
+        // A staged rename is marked in the first status column and one found in the work tree in
+        // the second; both are followed by the original path.
+        var (git, _) = Scripted(Exited(0, "R  new.txt\0old.txt\0 R moved.txt\0was.txt\0?? untracked.txt\0"));
 
         var entries = await git.GetStatusAsync("/repo", TestContext.Current.CancellationToken);
 
-        Assert.Equal(["R  new.txt", "?? untracked.txt"], entries);
+        Assert.Equal(["R  new.txt", " R moved.txt", "?? untracked.txt"], entries);
     }
 
     [Fact]

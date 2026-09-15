@@ -96,10 +96,13 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         CancellationToken cancellationToken = default)
     {
         // -z keeps paths NUL separated so a path containing a space or a quote is
-        // never mangled by the textual quoting git would otherwise apply.
+        // never mangled by the textual quoting git would otherwise apply. Untracked
+        // files and submodules are asked for explicitly because configuration can hide
+        // both: under status.showUntrackedFiles=no a new file is not listed at all, and
+        // the tree reads as clean to a caller about to discard it.
         var result = await RunAsync(
             directory,
-            ["status", "--porcelain", "-z"],
+            ["status", "--porcelain", "-z", "--untracked-files=normal", "--ignore-submodules=none"],
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // An empty list must mean "nothing changed", never "the question failed":
@@ -117,8 +120,10 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             // A rename or copy is one change encoded as two NUL separated fields: the
             // status with the new path, then the original path. Treating the second
             // field as another entry would report one rename as two changes, and the
-            // second would have no status prefix at all.
-            if (entry[0] is 'R' or 'C')
+            // second would have no status prefix at all. Either status column can mark
+            // one: a staged rename is marked in the first, and a rename git finds in the
+            // work tree, such as that of an intent-to-add file, in the second.
+            if (entry is ['R' or 'C', ..] or [_, 'R' or 'C', ..])
             {
                 index++;
             }

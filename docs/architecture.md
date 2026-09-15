@@ -108,6 +108,30 @@ at once, with the line it concerns where the parser knows it:
 It is written with LF line endings and no byte order mark on every platform. The file
 is tracked, and its bytes must not depend on which machine ran `init`.
 
+## Worktrees
+
+`create-worktree` adds a worktree under the main checkout's `.harness-config/worktrees`, and
+`delete-worktree` removes one and everything under it.
+
+`delete-worktree` refuses a worktree with uncommitted changes, since deleting it would lose
+them for good: a modified or staged file, or an untracked file git does not ignore. Ignored
+files, such as build output, do not count. git is asked in the worktree itself, with
+`--untracked-files=normal` and `--ignore-submodules=none`, so neither
+`status.showUntrackedFiles` nor a submodule's `ignore` setting can hide a change from the
+check. A refusal deletes nothing, names a few of the changed paths, and exits 13; `--force`
+skips the check.
+
+A question git cannot answer refuses too, because not knowing is not clean. So does a
+directory git does not see as the root of a worktree of its own, such as one whose `.git`
+file is gone: asked there, git answers for the main checkout around it, which ignores
+everything under `.harness-config/worktrees`, and would report nothing.
+
+Removal always passes `--force` to `git worktree remove`, because git also refuses a clean
+worktree that holds a submodule; the refusal comes from the check alone, never from reading
+git's message. Removal is then verified: a directory git left behind is deleted, and git's
+record of the worktree is pruned and confirmed gone, since a record that survives makes the
+name unusable.
+
 ## Anchor registries
 
 An anchor is a named piece of deferred work, kept as one row of a markdown registry. Two
