@@ -1,0 +1,139 @@
+name: Diagnose Deploy's push
+
+# TEMPORARY, removed before this pull request merges. Deploy's push to main and release/beta was
+# refused with HTTP 403 for daily-software-deploy[bot], although the app is configured and granted
+# contents and workflows write. This mints app tokens several ways and reports, for each, whether
+# GitHub lets it push to this repository.
+#
+# It writes nothing: every push is a dry run, which asks GitHub for push access and sends no
+# update. It prints no token, and nothing about any repository but this one.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: "Token 1: exactly as Deploy mints it"
+        id: as-deploy
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
+      - name: "Token 2: contents write only"
+        id: contents-only
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: "Token 3: every permission the deploy app has"
+        id: all-permissions
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
+
+      - name: "Token 4: the organisation's public bot app"
+        id: public-bot
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DSS_PUBLIC_BOTS_APP_ID }}
+          private-key: ${{ secrets.DSS_PUBLIC_BOTS_APP_PRIVATE_KEY }}
+
+      - name: Probe each token
+        env:
+          TOKEN_1: ${{ steps.as-deploy.outputs.token }}
+          TOKEN_2: ${{ steps.contents-only.outputs.token }}
+          TOKEN_3: ${{ steps.all-permissions.outputs.token }}
+          TOKEN_4: ${{ steps.public-bot.outputs.token }}
+        run: |
+          # Every probe runs, whatever the one before it answered.
+          set +e
+          set -uo pipefail
+
+          probe() {
+            local name=$1 token=$2
+
+            echo "::group::$name"
+
+            if [ -z "$token" ]; then
+              echo "RESULT $name: no token; minting failed, see that step"
+              echo "::endgroup::"
+              return
+            fi
+
+            echo "-- this repository, as the token's installation lists it"
+            GH_TOKEN="$token" gh api installation/repositories --paginate \
+              --jq ".repositories[] | select(.full_name == \"$GITHUB_REPOSITORY\") | {full_name, permissions}" 2>&1
+
+            basic=$(printf 'x-access-token:%s' "$token" | base64 -w0)
+            echo "::add-mask::$basic"
+
+            echo "-- read: git ls-remote"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
+              git ls-remote --heads origin main 2>&1
+            echo "ls-remote exit=$?"
+
+            echo "-- write: git push --dry-run, which sends no update"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
+              git push --dry-run origin "HEAD:refs/heads/bugfix/deploy-push-probe" 2>&1
+            pushed=$?
+
+            if [ "$pushed" -eq 0 ]; then
+              echo "RESULT $name: push allowed"
+            else
+              echo "RESULT $name: push refused (exit $pushed)"
+            fi
+
+            echo "::endgroup::"
+          }
+
+          probe "1 as Deploy, contents and workflows" "$TOKEN_1"
+          probe "2 contents only" "$TOKEN_2"
+          probe "3 every deploy app permission" "$TOKEN_3"
+          probe "4 public bot app" "$TOKEN_4"
+
+      - name: "Checkout with token 1 persisted, as other workflows push"
+        if: steps.as-deploy.outputs.token != ''
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: probe-checkout
+          fetch-depth: 1
+          token: ${{ steps.as-deploy.outputs.token }}
+
+      - name: Dry-run push from that checkout
+        if: steps.as-deploy.outputs.token != ''
+        continue-on-error: true
+        working-directory: probe-checkout
+        run: |
+          set +e
+          set -uo pipefail
+          git push --dry-run origin "HEAD:refs/heads/bugfix/deploy-push-probe" 2>&1
+          echo "RESULT checkout with token 1 persisted: exit $?"
