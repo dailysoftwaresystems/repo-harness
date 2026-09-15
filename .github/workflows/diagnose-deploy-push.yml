@@ -1,12 +1,16 @@
 name: Diagnose Deploy's push
 
 # TEMPORARY, removed before this pull request merges. Deploy's push to main and release/beta was
-# refused with HTTP 403 for daily-software-deploy[bot], although the app is configured and granted
-# contents and workflows write. This mints app tokens several ways and reports, for each, whether
-# GitHub lets it push to this repository.
-#
-# It writes nothing: every push is a dry run, which asks GitHub for push access and sends no
-# update. It prints no token, and nothing about any repository but this one.
+# refused with HTTP 403 for daily-software-deploy[bot]. A dry run with the same token was allowed,
+# but a dry run uploads nothing, so this round pushes for real, in the shapes Deploy pushes, to
+# branches that exist only for the test and are deleted at the end of it:
+#   1. create a branch at the commit the release branches still point at
+#   2. fast-forward it over this repository's workflow changes, as release/beta would move
+#   3. push a new commit to two branches in one atomic push, as Deploy pushes main and release/beta
+#   4. create and fast-forward a ruleset-protected release branch no channel uses, which the
+#      deploy app may bypass, then delete it
+# Nothing that publishes starts on any of these branches. It prints no token, and nothing about
+# any repository but this one.
 
 on:
   pull_request:
@@ -24,7 +28,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: "Token 1: exactly as Deploy mints it"
@@ -37,15 +41,6 @@ jobs:
           permission-contents: write
           permission-workflows: write
 
-      - name: "Token 2: contents write only"
-        id: contents-only
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
-          private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
-          permission-contents: write
-
       - name: "Token 3: every permission the deploy app has"
         id: all-permissions
         continue-on-error: true
@@ -54,86 +49,76 @@ jobs:
           client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
           private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
 
-      - name: "Token 4: the organisation's public bot app"
-        id: public-bot
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.DSS_PUBLIC_BOTS_APP_ID }}
-          private-key: ${{ secrets.DSS_PUBLIC_BOTS_APP_PRIVATE_KEY }}
-
-      - name: Probe each token
+      - name: Push for real with each token
         env:
           TOKEN_1: ${{ steps.as-deploy.outputs.token }}
-          TOKEN_2: ${{ steps.contents-only.outputs.token }}
           TOKEN_3: ${{ steps.all-permissions.outputs.token }}
-          TOKEN_4: ${{ steps.public-bot.outputs.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_BASE: f993229e268d
         run: |
           # Every probe runs, whatever the one before it answered.
           set +e
           set -uo pipefail
 
-          probe() {
-            local name=$1 token=$2
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            echo "::group::$name"
+          # A new commit on top of the pull request's head, as Deploy commits its version bump.
+          git checkout --quiet --detach "$HEAD_SHA"
+          echo "probe" > deploy-push-probe.txt
+          git add deploy-push-probe.txt
+          git commit --quiet -m "Deploy push probe"
+          NEW=$(git rev-parse HEAD)
+
+          run_probes() {
+            local name=$1 token=$2 protected=$3
+            local base="bugfix/deploy-push-probe-$name"
 
             if [ -z "$token" ]; then
               echo "RESULT $name: no token; minting failed, see that step"
-              echo "::endgroup::"
               return
             fi
 
-            echo "-- this repository, as the token's installation lists it"
-            GH_TOKEN="$token" gh api installation/repositories --paginate \
-              --jq ".repositories[] | select(.full_name == \"$GITHUB_REPOSITORY\") | {full_name, permissions}" 2>&1
-
+            local basic
             basic=$(printf 'x-access-token:%s' "$token" | base64 -w0)
             echo "::add-mask::$basic"
 
-            echo "-- read: git ls-remote"
-            GIT_CONFIG_COUNT=1 \
-              GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
-              git ls-remote --heads origin main 2>&1
-            echo "ls-remote exit=$?"
+            push() {
+              GIT_CONFIG_COUNT=1 \
+                GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
+                git push "$@" 2>&1
+            }
 
-            echo "-- write: git push --dry-run, which sends no update"
-            GIT_CONFIG_COUNT=1 \
-              GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
-              git push --dry-run origin "HEAD:refs/heads/bugfix/deploy-push-probe" 2>&1
-            pushed=$?
+            echo "::group::$name 1: create a branch at the release branches' commit"
+            push origin "$RELEASE_BASE:refs/heads/$base"
+            echo "RESULT $name 1 create a branch at $RELEASE_BASE: exit $?"
+            echo "::endgroup::"
 
-            if [ "$pushed" -eq 0 ]; then
-              echo "RESULT $name: push allowed"
-            else
-              echo "RESULT $name: push refused (exit $pushed)"
-            fi
+            echo "::group::$name 2: fast-forward it over the workflow changes"
+            push origin "$HEAD_SHA:refs/heads/$base"
+            echo "RESULT $name 2 fast-forward over workflow files: exit $?"
+            echo "::endgroup::"
 
+            echo "::group::$name 3: a new commit to two branches in one atomic push"
+            push --atomic origin "$NEW:refs/heads/$base" "$NEW:refs/heads/$base-second"
+            echo "RESULT $name 3 atomic push of a new commit to two branches: exit $?"
+            echo "::endgroup::"
+
+            echo "::group::$name 4: a ruleset-protected release branch no channel uses"
+            push origin "$RELEASE_BASE:refs/heads/$protected"
+            echo "RESULT $name 4a create $protected: exit $?"
+            push origin "$NEW:refs/heads/$protected"
+            echo "RESULT $name 4b fast-forward $protected over workflow files: exit $?"
+            echo "::endgroup::"
+
+            echo "::group::$name cleanup"
+            for ref in "$base" "$base-second" "$protected"; do
+              push origin --delete "refs/heads/$ref"
+              echo "cleanup $ref: exit $?"
+            done
             echo "::endgroup::"
           }
 
-          probe "1 as Deploy, contents and workflows" "$TOKEN_1"
-          probe "2 contents only" "$TOKEN_2"
-          probe "3 every deploy app permission" "$TOKEN_3"
-          probe "4 public bot app" "$TOKEN_4"
-
-      - name: "Checkout with token 1 persisted, as other workflows push"
-        if: steps.as-deploy.outputs.token != ''
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: probe-checkout
-          fetch-depth: 1
-          token: ${{ steps.as-deploy.outputs.token }}
-
-      - name: Dry-run push from that checkout
-        if: steps.as-deploy.outputs.token != ''
-        continue-on-error: true
-        working-directory: probe-checkout
-        run: |
-          set +e
-          set -uo pipefail
-          git push --dry-run origin "HEAD:refs/heads/bugfix/deploy-push-probe" 2>&1
-          echo "RESULT checkout with token 1 persisted: exit $?"
+          run_probes "t1" "$TOKEN_1" "release/rc"
+          run_probes "t3" "$TOKEN_3" "release/lts"
