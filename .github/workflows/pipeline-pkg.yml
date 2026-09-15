@@ -4,11 +4,13 @@ name: Package Pipeline
 # tag, publishing to nuget.org, and the GitHub release. Started by Deploy once it has
 # promoted a release branch, or by hand from the Actions tab for a release branch.
 #
-# Started by dispatch rather than by a push to the release branch. Deploy pushes with
-# the GITHUB_TOKEN, and GitHub deliberately starts no workflow from a push made with that
-# token, so a push trigger would never fire for the pushes that matter: every release
-# would promote and then publish nothing. A dispatch is the one event that token may
-# start. It also means a stray push to a release branch publishes nothing by itself.
+# Started by dispatch rather than by a push to the release branch. Deploy's dispatch names
+# the exact commit it promoted, which this refuses to substitute, and a push to a release
+# branch publishes nothing by itself, so a stray push can never ship.
+#
+# A run that stops part way resumes when it is started again for the same commit: a tag that
+# already names the commit is reused, a version already on nuget.org is not pushed again, and
+# the GitHub release, created last, is what marks a version published.
 #
 # Publishing uses nuget.org TRUSTED PUBLISHING: the job exchanges this workflow's
 # short-lived OIDC token for a temporary API key at publish time. There is no
@@ -17,7 +19,7 @@ name: Package Pipeline
 # here because the repository is public.
 #
 # Self-contained by design: no reusable workflow from the private DevOps
-# repository is called, and no organisation secret is available to this repository.
+# repository is called, and no organisation secret is used here.
 # Every action is pinned to a full commit SHA; see docs/releasing.md.
 
 on:
@@ -36,11 +38,15 @@ permissions:
   id-token: write
 
 concurrency:
+  # One publish per release branch at a time. Runs started meanwhile wait in the order they
+  # started; by default a newer waiting run would cancel an older one, such as one waiting for
+  # the nuget environment's approval, and leave a promoted version unpublished.
   group: pkg-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 env:
   PROJECT: src/RepoHarness.Cli/RepoHarness.Cli.csproj
+  PACKAGE_ID: RepoHarness
   PACKAGE_DIRECTORY: build/package
 
 jobs:
@@ -104,26 +110,84 @@ jobs:
 
           echo "Publishing $package from $REF_NAME"
 
-      - name: Refuse to republish an existing version
+      - name: Resume, or refuse to republish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::Tag ${TAG} already exists; a published version is never rewritten."
-            exit 1
-          fi
-
-          # The release is checked as well as the tag, because one can exist without the
-          # other: a release drafted by hand has no tag until it is published. A check that
-          # gets no clear answer refuses too, since "could not tell" is not "does not exist".
+          # The GitHub release is created last, so one that exists means this version was
+          # published, and a published version is never rewritten. A check that gets no clear
+          # answer refuses too: "could not tell" is not "does not exist".
           if out=$(gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" 2>&1); then
             echo "::error::Release ${TAG} already exists; a published version is never rewritten."
             exit 1
           elif [[ "$out" != *"release not found"* ]]; then
             echo "::error::Could not tell whether release ${TAG} exists, so nothing was published: $out"
             exit 1
+          fi
+
+          # A tag an earlier run created before it stopped is reused when it names this commit;
+          # a tag naming any other commit belongs to a different release.
+          tag_exists=false
+          if tagged=$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}"); then
+            if [ "$tagged" != "${RELEASE_SHA}" ]; then
+              echo "::error::Tag ${TAG} names ${tagged}, not ${RELEASE_SHA}; it belongs to a different release."
+              exit 1
+            fi
+
+            tag_exists=true
+          fi
+
+          # nuget.org is the record of what is published. A version an earlier run pushed before
+          # it stopped is not pushed again, which nuget.org would refuse.
+          on_nuget=false
+          versions="$RUNNER_TEMP/nuget-versions.json"
+
+          if ! status=$(curl -sS -o "$versions" -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/${PACKAGE_ID,,}/index.json"); then
+            echo "::error::Could not reach nuget.org, so whether ${PACKAGE_VERSION} is published could not be told."
+            exit 1
+          fi
+
+          case "$status" in
+            404)
+              ;;
+            200)
+              set +e
+              jq -e --arg version "${PACKAGE_VERSION,,}" '.versions | index($version) != null' "$versions" >/dev/null
+              listed=$?
+              set -e
+
+              case "$listed" in
+                0) on_nuget=true ;;
+                1) ;;
+                *)
+                  echo "::error::nuget.org's version list could not be read, so whether ${PACKAGE_VERSION} is published could not be told."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::nuget.org answered HTTP ${status}, so whether ${PACKAGE_VERSION} is published could not be told."
+              exit 1
+              ;;
+          esac
+
+          # This pipeline tags a version before it publishes it, so a version on nuget.org that no
+          # tag names at this commit was published some other way, from code this run cannot vouch for.
+          if [ "$on_nuget" = true ] && [ "$tag_exists" != true ]; then
+            echo "::error::${PACKAGE_VERSION} is already on nuget.org, but no tag ${TAG} names ${RELEASE_SHA}, so it was not published from this commit by this pipeline."
+            exit 1
+          fi
+
+          if [ "$tag_exists" = true ]; then
+            echo "TAG_EXISTS=true" >> "$GITHUB_ENV"
+            echo "::notice::Tag ${TAG} already names this commit; resuming an earlier run."
+          fi
+
+          if [ "$on_nuget" = true ]; then
+            echo "ON_NUGET=true" >> "$GITHUB_ENV"
+            echo "::notice::${PACKAGE_VERSION} is already on nuget.org; it is not pushed again, and the release carries the package nuget.org has."
           fi
 
       - name: Build
@@ -137,8 +201,9 @@ jobs:
 
       - name: Test
         # The package is only worth publishing if the suite passes on the commit being
-        # published. This run is Linux x86_64 only: the full matrix already passed for this
-        # commit in Deploy before it was promoted.
+        # published. This run is Linux x86_64 only. The full matrix already passed in Deploy:
+        # for this commit on stable, and on beta for its parent, which differs only in
+        # <Version>. Started by hand, it may have only this run behind it.
         run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build
 
       - name: Pack
@@ -146,18 +211,41 @@ jobs:
           dotnet pack "$PROJECT" --configuration Release --no-build
           -p:Version=${{ env.PACKAGE_VERSION }} --output "$PACKAGE_DIRECTORY"
 
+      - name: Use the package nuget.org already has
+        # A resumed run verifies and releases exactly what is published, not a rebuild of it.
+        if: env.ON_NUGET == 'true'
+        run: |
+          set -euo pipefail
+
+          id="${PACKAGE_ID,,}"
+          version="${PACKAGE_VERSION,,}"
+
+          rm -f "$PACKAGE_DIRECTORY"/*.nupkg
+          curl -sSf -o "$PACKAGE_DIRECTORY/${PACKAGE_ID}.${PACKAGE_VERSION}.nupkg" \
+            "https://api.nuget.org/v3-flatcontainer/${id}/${version}/${id}.${version}.nupkg"
+
       - name: Verify the package
         uses: ./.github/actions/verify-tool-package
         with:
           package-directory: ${{ env.PACKAGE_DIRECTORY }}
           version: ${{ env.PACKAGE_VERSION }}
 
+      - name: Authenticate to nuget.org
+        # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
+        # a trusted publishing policy on nuget.org naming this repository, workflow
+        # and environment. No stored key is involved. It runs before the tag is created,
+        # so a run nuget.org does not trust leaves no tag behind.
+        if: env.ON_NUGET != 'true'
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Create the tag
-        # Created before publishing, not after. If tagging fails after a publish, the
-        # package is permanently on nuget.org with no tag, the "refuse to republish an
-        # existing version" guard does not fire on a re-run, and the re-run then dies
-        # against an immutable published version. A tag is cheap to delete; a
-        # published version is not.
+        # Created before publishing, not after. If tagging failed after a publish, the package
+        # would be permanently on nuget.org with no tag. A tag is cheap to delete; a published
+        # version is not. A resumed run reuses the tag it found naming this commit.
+        if: env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -165,16 +253,8 @@ jobs:
           git tag -a "${TAG}" -m "repo-harness ${TAG}"
           git push origin "${TAG}"
 
-      - name: Authenticate to nuget.org
-        # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
-        # a trusted publishing policy on nuget.org naming this repository, workflow
-        # and environment. No stored key is involved.
-        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
-        id: nuget-login
-        with:
-          user: ${{ vars.NUGET_USER }}
-
       - name: Publish to nuget.org
+        if: env.ON_NUGET != 'true'
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: >

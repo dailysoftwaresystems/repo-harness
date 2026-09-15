@@ -145,9 +145,9 @@ int Suffix(string baseVersion, string channel)
     }
 
     // stable publishes the bare version; beta publishes it as a prerelease. A beta needs
-    // no build number to be new: every beta deploy bumps <Version> first, and the package
-    // pipeline refuses a version whose tag or release already exists, so the same beta can
-    // never be published twice.
+    // no build number to be new: every beta deploy bumps <Version> first and refuses a
+    // version that is already tagged, and the package pipeline refuses a version whose
+    // release exists, so the same beta can never be published twice.
     switch (channel)
     {
         case "stable":
