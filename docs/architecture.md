@@ -14,12 +14,13 @@ If a behaviour cannot be expressed in `config.json`, that is a defect.
 
 Implemented today: `init`, `verify-git`, `create-worktree`, `delete-worktree`,
 `list-worktree`, the anchor commands (`write-anchor`, `set-anchor`, `read-anchor`,
-`read-anchors`, `check-anchor-balance`) and `help`.
+`read-anchors`, `check-anchor-balance`), `legs`, `host-exec` and `help`.
 
-Everything from **Targets, trees and legs** onward is the design the remaining
-commands — sync, build, run, test and the SSH commands — are built to. It is written
-in the present tense because it is the contract those commands must satisfy, not a
-description of code that already exists.
+Under **Hosts, trees and legs**, where a leg runs and how a host is reached are
+implemented. The verdict vocabulary, and everything from **Parallel execution** onward,
+is the design the remaining commands — sync, build, run and test — are built to. It is
+written in the present tense because it is the contract those commands must satisfy,
+not a description of code that already exists.
 
 ## Layering
 
@@ -43,9 +44,10 @@ the operating system. Everything else depends on `IHostPlatform`,
 
 A platform-specific implementation is created only where behaviour genuinely
 differs. Today that is one family of behaviour, file permissions: making a file
-readable only by its owner, and deciding whether a file is a program at all. Unix
-answers both with mode bits; Windows answers them with access lists and file
-extensions. Hence a POSIX implementation and a Windows implementation, and no third.
+readable only by its owner, deciding whether a file is a program at all, and whether
+other users can read or change a file. Unix answers these with mode bits; Windows
+answers them with access lists and file extensions. Hence a POSIX implementation and
+a Windows implementation, and no third.
 
 ### Process execution
 
@@ -55,13 +57,21 @@ preference: a neighbouring repository measured a shell-string invocation whose
 empty variable expanded into `rsync -a --delete / /`, ran for 70 minutes and
 reported exit 0.
 
-Child output is decoded as UTF-8 on every platform. Left to its default, Windows
-decodes redirected output with the console's legacy code page, so a path such as
-`C:\Users\João` printed by git would reach the harness garbled on Windows alone.
+Child output is decoded, and child input encoded, as UTF-8 on every platform. Left to
+its default, Windows decodes redirected output with the console's legacy code page, so
+a path such as `C:\Users\João` printed by git would reach the harness garbled on
+Windows alone.
 
 A missing working directory is reported as exactly that. Linux and macOS report it
 with the same error number as a missing executable, which would otherwise surface as
 "git is not installed".
+
+A program named without a path is looked up in the `PATH` directories and nowhere else.
+Left to the runtime, it would be looked for beside the running executable and in the
+current directory first, and the current directory is usually the repository, so a file
+committed there under a tool's name would run in place of the tool. On Windows a name
+without an extension starts only `<name>.exe`, never a batch file, whose arguments cmd.exe
+would parse a second time.
 
 ### Paths come from git
 
@@ -91,8 +101,9 @@ at once, with the line it concerns where the parser knows it:
 - `null` is refused wherever the model does not allow it, including inside lists and
   maps, which the serializer does not check on its own. Loaded, it would fail much later
   as a crash in whatever first read it.
-- References are resolved: a leg naming an undeclared target, a test aimed at an ssh
-  target that does not use ssh, a success pattern that does not compile.
+- References are resolved: a leg naming an undeclared host or emulator, an emulator that
+  runs programs for another processor than the leg's, a success pattern that does not
+  compile, a commit template placeholder no variable declares.
 
 It is written with LF line endings and no byte order mark on every platform. The file
 is tracked, and its bytes must not depend on which machine ran `init`.
@@ -174,19 +185,132 @@ that already existed), and whenever the registries as they stand are unsound: a 
 in pending, a live anchor in done, a missing registry, or a structural problem. Every problem
 is reported at once.
 
-## Targets, trees and legs
+## Hosts, trees and legs
 
 Three concepts that are frequently conflated, kept separate here:
 
 | Concept | Question it answers | Values |
 |---|---|---|
-| **Transport** | How do I reach and execute on this machine? | `local`, `wsl`, `ssh` |
-| **Tree** | Which checkout am I acting on? | main checkout, a worktree, a remote path |
-| **Leg** | One unit of work with a verdict | `(target, project, toolchain, config, sanitizer?)` |
+| **Host** | Where does this run, and how is it reached? | this machine, a WSL distribution, an ssh host |
+| **Tree** | Which checkout am I acting on? | main checkout, a worktree, a host's copy |
+| **Leg** | One unit of work with a verdict | `(os, processor, emulator?, project, toolchain, config, sanitizer?)` |
 
-A worktree is **not** a transport. It is a tree, and it composes with any
-transport. Keeping these apart is what lets one code path serve
-`build`, `build --worktree wt-a` and `build --ssh vps` without special cases.
+A worktree is **not** a host. It is a tree, and it composes with any host. Keeping
+these apart is what lets one code path serve `build`, `build --worktree wt-a` and
+`build --ssh vps` without special cases.
+
+### Where a leg runs
+
+A leg names what it needs, never where it runs: an operating system (`windows`, `linux`,
+`macos`), a processor (`x86_64`, `arm64` and the other processors .NET reports), and
+optionally the emulator allowed to run its programs on a host with another processor. A
+misspelt value is refused when the file is read, since it could never match a host.
+
+Where it runs is measured before anything starts, never declared:
+
+- A leg's candidates are this machine, then the WSL distributions under `hosts.wsl`, then
+  the ssh hosts under `hosts.ssh`, each in the order the configuration declares them. A leg
+  that sets `wsl` or `ssh` has that one host as its only candidate.
+- This machine is measured first, because it costs nothing to reach. Other hosts are
+  measured only for the legs it cannot run, and all at once, so an unreachable host costs
+  its connect timeout once.
+- A leg runs on the first candidate whose measured operating system matches and whose
+  processor matches, or, for an emulated leg, where that emulator's check passed.
+- `--legs` takes leg names and leg set names, separated by commas or spaces. A name that is
+  neither is a usage error before any host is measured. No `--legs` selects every leg.
+- A leg no host can run is a warning naming the leg and each candidate's reason, and the
+  other legs still go ahead. The check fails, and `legs` exits 1, when a leg named with
+  `--legs` cannot run, or when no selected leg can: a declared leg on a machine that is
+  switched off is normal, and a leg asked for by name is not.
+
+A native run and an emulated run are different legs. Neither their timings nor their
+failures compare.
+
+### Emulators
+
+An emulator runs programs built for another processor without leaving the host's
+operating system: qemu's user mode on Linux, Rosetta on macOS, Prism on Windows. It
+declares the hosts it runs on, the processor it runs programs for, the launcher placed in
+front of each program (none where the operating system runs such programs itself), what it
+requires, the phases it runs (tests by default, since the usual way to build for another
+processor is a native cross-build), and a witness.
+
+The witness is a program run through the emulator whose output must match a pattern, such
+as `uname -m` from an arm64 userland printing `aarch64`. Without it, an emulator that ran
+nothing, or a program the host quietly ran natively, would count as coverage of a processor
+that was never exercised.
+
+A whole virtual machine is not an emulator in this sense. It runs an operating system of
+its own, and is declared as the ssh host it is. A virtual machine with a different processor
+runs repo-harness under full emulation, where .NET is not supported, so repo-harness itself
+is not dependable on such a host.
+
+### Reaching a host
+
+- **WSL.** A distribution is available when this machine runs Windows, `wsl.exe` exists,
+  and a program starts in the distribution. Programs start with
+  `wsl.exe --distribution <name> --cd ~ --exec`, so no shell in the distribution parses
+  the arguments, and with `WSL_UTF8=1`, because wsl.exe otherwise writes its own messages in
+  UTF-16. Its errors are recognised by the code they carry, such as
+  `WSL_E_DISTRO_NOT_FOUND`, never by their sentence, which is translated. `--wsl` with no
+  name is WSL's default distribution, as the distribution itself reports it.
+- **ssh.** A host is a `Host` entry in `.harness-config/ssh/config`, passed with `-F`, and
+  only an entry that names the host exactly counts: a wildcard alone would let a misspelt
+  name connect somewhere. ssh runs in batch mode, so an untrusted host key or a password
+  prompt fails with ssh's own reason instead of waiting, and `connectTimeoutSeconds` and
+  `keepAliveSeconds` bound a dead link. ssh refuses a configuration file other users can
+  change and ignores a key they can read, both with messages that point nowhere near the
+  file, so both are checked first and reported with the command that fixes them. The keys
+  checked are every key ssh would offer: those of each `Host` entry whose patterns select
+  the host, `Host *` included. `Match` blocks and `Include` are not evaluated; a key named
+  only there is still ignored by ssh itself when other users can read it.
+- **No quoting.** An ssh server hands its command line to a shell, and which shell is not
+  known in advance: sh, bash, zsh, fish, cmd or PowerShell. The harness quotes for none of
+  them. The command line holds only words every one of them reads literally (letters,
+  digits and `._-/=:+`), and anything else travels on standard input. Which shell answers is
+  measured once per connection, by whether `echo %COMSPEC%` comes back expanded, because cmd
+  needs backslashes in the path of a program.
+
+### repo-harness on every host
+
+Every WSL distribution and ssh host runs repo-harness itself, installed as a global .NET tool
+from nuget.org, so it needs the .NET 10 SDK. Every install and update names nuget.org as its
+only source, so no feed configured on the host can supply a different package under the same
+name. The machine that reaches it asks it questions
+through a hidden `host-agent` command, with the request as JSON on standard input: which build
+it is, what the host is, and whether each emulator works there; or to run one of its own
+commands in the host's copy of the repository, which is what `host-exec` does.
+
+Both ends must be the same build, so before anything runs on a host:
+
+- A host without repo-harness has this machine's version installed.
+- A host that is behind is updated to this machine's version. It is never downgraded, and
+  not updated while repo-harness is running there: an update replaces a running tool's
+  files underneath it on Linux and macOS, and fails part way on Windows.
+- A host that is ahead stops everything (exit 13) until this machine is updated, with the
+  command that updates it. Moving the host down would undo somebody else's update.
+- The version and the SHA-256 of the tool's assembly are both compared. A build from source
+  reports the same version as the published package, while the assembly installed from one
+  package is the same bytes on every operating system.
+
+`host-exec` returns the exit code of the command it ran on the host, unchanged, and 15 when
+nothing could run there: the host is unreachable, has no SDK, could not be brought to this
+build, or has no copy of the repository.
+
+### What legs and host-exec run
+
+`legs` and `host-exec` run what the configuration declares, without asking first: each
+emulator's witness, on every host they measure, and repo-harness itself on WSL distributions
+and ssh hosts, which they install or update there. That is the trust building the repository
+already asks for, since a build runs the repository's own code.
+
+- An ssh host is reached only when this checkout's own `.harness-config/ssh/config`, which
+  git ignores, declares it, and ssh reads no other configuration. A `config.json` that
+  arrives through git cannot point the harness at a machine nobody set up here.
+- A launcher, a witness and a required file are each a program name, looked up on the
+  host's `PATH`, or an absolute path. A relative path would resolve against whichever
+  directory a host starts programs in, and would let a file shipped in the repository stand
+  in for the tool it is named after.
 
 ### Verdict vocabulary (closed)
 
@@ -203,7 +327,7 @@ from the report.
 | `unmeasured` | Whether those files held still could not be established | **yes** |
 | `contended` | Another process used the leg's build directory while it ran | **yes** |
 | `skipped-not-selected` | Filtered out by `--legs` | no |
-| `skipped-unavailable` | Target not available on this host | warning |
+| `skipped-unavailable` | No host can run the leg | warning |
 | `skipped-tool-missing` | A required tool is not installed | warning |
 | `refused-locked` | Another run holds the lock for this leg | **yes** |
 | `poisoned` | The harness could not produce a verdict | **yes** |
@@ -229,15 +353,15 @@ machine; left unset, every selected leg starts immediately.
 Within a leg the order is fixed:
 
 ```
-sync (when the target needs it)  →  build on buildCores  →  test on testCores
+sync (when the host needs it)  →  build on buildCores  →  test on testCores
 ```
 
-- **A tree is synced once, not once per leg.** Legs on the same target share one
+- **A tree is synced once, not once per leg.** Legs on the same host share one
   tree; if each synced it, their copies would race over the same files. The legs
   sharing a tree wait for its single sync, then build and test in parallel, which is
   safe because each variant has its own build directory.
 - **Cores are configured, never "all of them".** `defaults.buildCores` and
-  `defaults.testCores` both default to 6. A target replaces them with its own
+  `defaults.testCores` both default to 6. A host replaces them with its own
   `buildCores` and `testCores`, because a remote host rarely has the same core count
   as the machine that wrote the configuration, and a test invocation can replace the
   test count again with its own `cores`.
@@ -260,8 +384,9 @@ tool replaces, where a green result had quietly stopped meaning anything.
   so a build that exited 0 cannot hand its tests a binary left over from an earlier one.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
-- Executables are resolved on the target before a leg starts, so a missing tool is
+- Executables are resolved on the host before a leg starts, so a missing tool is
   `skipped-tool-missing` and named, not a failure halfway through.
+- An emulated leg's emulator has passed its witness on that host before the leg starts.
 
 ### Inputs that hold still
 
@@ -335,7 +460,7 @@ while a gate ran turned a green suite red, with four test processes live at once
   reads a variable and `coresArgs` where it does not. A runner left to its own default
   runs serially on one host and on every core on another. A variable is preferred: an
   explicit option in the invocation's own `args` still wins.
-- A leg's environment is carried to its target explicitly. WSL passes on only the
+- A leg's environment is carried to its host explicitly. WSL passes on only the
   variables named in `WSLENV`, and ssh passes on none.
 - `countPattern` extracts how many tests each leg ran. Legs running the same tests that
   report different counts are flagged: a platform that quietly skips a group of tests
@@ -343,16 +468,22 @@ while a gate ran turned a green suite red, with four test processes live at once
 - The ledger reports command time and harness overhead (sync, fingerprints, sampling)
   separately. A phase slower than `defaults.durationWarningFactor` times the same phase
   on sibling legs, or times its own recent runs, is marked suspect. A timing mark never
-  changes a verdict.
-- `keepAwake` holds a target awake for the leg. A host that slept once reported a
+  changes a verdict. An emulated leg is never compared with a native one.
+- `keepAwake` holds a host awake for the leg. A host that slept once reported a
   4 millisecond test at 729 seconds. Without it, timings from a host that can sleep are
   marked suspect.
 
-### Transports and trees
+### Hosts and trees
 
-- An ssh target bounds how long a connection may take to open and how long it may go
+- An ssh host bounds how long a connection may take to open and how long it may go
   unanswered (`connectTimeoutSeconds`, `keepAliveSeconds`). Without both, a dead link
   hangs a leg indefinitely, with no output and no verdict.
+- A host's copy of the repository is a git repository sync creates at its
+  `repositoryPath`: the commit being tested is pushed into it, and uncommitted changes are
+  synced on top. It is never a clone from a remote, which would need credentials on the
+  host and could not see commits nobody has pushed. It must be a git repository because the
+  host's repo-harness finds everything through git, and sync never writes into a directory it
+  did not create, because it deletes whatever the source does not have.
 - A remote tree's identity is its content manifest, confirmed equal to the source after
   every sync. The ledger records the commit and manifest each leg built, and a build
   directory produced from a different manifest is flagged.
@@ -369,20 +500,20 @@ while a gate ran turned a green suite red, with four test processes live at once
 The hazard: two legs sharing state and silently corrupting each other's results.
 Seven independent guarantees, each addressing a measured failure mode:
 
-1. **Variant-keyed build directories.** `<tree>/build/<toolchain>-<config>[-<sanitizer>]`.
+1. **Variant-keyed build directories.** `<tree>/build/<processor>-<toolchain>-<config>[-<sanitizer>]`.
    CMake refuses a compiler change on an existing cache, so `msvc` and `gcc`
-   cannot share `build/release`.
+   cannot share `build/release`, and neither can a native build and a cross-build.
 2. **Tree-rooted paths.** Every path derives from the leg's tree root, so a
    worktree's build output can never land in the main checkout's.
 3. **Build directory guard.** Before configuring, `CMakeCache.txt` is read and
    the run is refused if `CMAKE_HOME_DIRECTORY` or the recorded compiler
    disagrees with this leg.
-4. **Per-target compiler cache.** `CCACHE_DIR` and `CCACHE_BASEDIR` are set
-   explicitly per target rather than inherited, so hosts never share a store.
+4. **Per-host compiler cache.** `CCACHE_DIR` and `CCACHE_BASEDIR` are set
+   explicitly per host rather than inherited, so hosts never share a store.
 5. **Clean run directories, incremental build directories.** Scratch and run
    directories are wiped before every leg; build directories are preserved.
 6. **Locking.** See below.
-7. **One sync per tree.** Legs sharing a target tree share its single sync instead
+7. **One sync per tree.** Legs sharing a host's tree share its single sync instead
    of each writing the same files at the same time.
 
 ### Incremental builds across a transport
@@ -395,9 +526,9 @@ as success.
 `repo-harness` syncs by **content hash**, writing only files whose content actually
 changed. An unchanged file is not touched, so its mtime does not move; a changed
 file is rewritten now, so its mtime advances. Ninja's incremental check is therefore
-correct after a sync, and incremental builds are preserved across every transport.
+correct after a sync, and incremental builds are preserved on every host.
 
-That holds while the target's clock is honest. *Clocks are never trusted to order
+That holds while the host's clock is honest. *Clocks are never trusted to order
 anything*, under Leg integrity, covers what the harness does when it is not.
 
 ### Locking
@@ -406,8 +537,10 @@ anything*, under Leg integrity, covers what the harness does when it is not.
 own `.harness-config`, so a per-tree lock would make two runs of the same leg
 invisible to each other). Gitignored.
 
-One entry per `(target, tree, variant)`, recording host, pid, process start
-time, run id, UTC timestamp and the command.
+One entry per `(host, tree, variant)`, recording host, pid, process start
+time, run id, UTC timestamp and the command. A host's copy of the repository is locked
+by the repo-harness on that host, in that copy's own `.harness-config/lock.json`, so runs
+started from two different machines against the same host see each other.
 
 Two granularities, because two kinds of work share a tree. Syncing a tree takes the
 tree exclusively, since it rewrites files every variant reads. Building or testing takes
@@ -437,7 +570,7 @@ win-msvc-release      passed            2m14s  412 tests
 wsl-clang-asan        failed            6m02s  3 of 412 tests failed
 mac-clang-release     passed           12m40s  412 tests; timings suspect: the host slept
 lin-gcc-release       inputs-moved      3m51s  2 inputs changed: config/c.lang.json, ...
-vps-arm64-gcc-rel     skipped-unavailable      host not reachable
+vps-arm64-gcc-rel     skipped-unavailable      ssh vps: ssh could not connect
 ```
 
 ## Exit codes
@@ -452,15 +585,18 @@ with "the harness could not run", because the remedies differ.
 | 10 | Usage error |
 | 11 | Not initialised |
 | 12 | Invalid configuration |
-| 13 | Refused: precondition not met (dirty tree, lock held, name taken) |
+| 13 | Refused: precondition not met (dirty tree, lock held, name taken, a host runs a newer repo-harness) |
 | 14 | A required tool is missing |
+| 15 | A host could not be reached, or repo-harness could not run there |
 | 20 | The wrapped command ran and failed |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
 | 130 | The run was interrupted before it finished |
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
-`2` not a git repository. `repo-harness help exit-codes` prints this table from
-the code itself; this copy is maintained by hand.
+`2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,
+or when no selected leg can. `host-exec` returns the exit code of the command it ran on
+the host, unchanged. `repo-harness help exit-codes` prints this table from the code
+itself; this copy is maintained by hand.
 
 Commands that run legs (`build`, `run`, `test`) will use three codes from the range
 reserved for command contracts, because each calls for a different remedy:
@@ -482,7 +618,8 @@ if the exit code is zero **and** the pattern matches the command's own output. T
 exists because a wrapper that reports success without evidence is indistinguishable
 from one that never ran, and it was measured happening three separate ways: a suite
 that printed `failed=0` while exiting 2, an exit code read after a pipe, and a test
-command that exited 0 having run no tests at all.
+command that exited 0 having run no tests at all. An emulator's witness applies the same
+rule to the emulator itself.
 
 ## Timeouts
 
@@ -491,4 +628,5 @@ about workload size, and honest runs exceeding it get killed. Where a bound is
 needed, a phase declares a **stall** bound instead — no output for N seconds means
 hung — because output cadence stays stable even when total duration is not.
 
-`IProcessRunner` does support a per-process budget, for a probe that must not hang.
+`IProcessRunner` does support a per-process budget, for a probe that must not hang: the
+probes that measure a host, and an emulator's witness, each have one.

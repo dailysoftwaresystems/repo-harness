@@ -57,46 +57,56 @@ internal static class CommandRunner
                 Report(output, commandName, outcome);
                 return outcome.ExitCode;
             }
-            catch (HarnessException ex)
+            catch (Exception ex)
             {
+                return Fail(output, commandName, ex);
+            }
+        };
+    }
+
+    /// <summary>
+    /// Reports the exception that ended a command, and returns the exit code that says what it means.
+    /// The one place a failure becomes an exit code, so a command a host serves for another machine
+    /// fails exactly as a command typed here does.
+    /// </summary>
+    internal static int Fail(IHarnessOutput output, string commandName, Exception exception)
+    {
+        switch (exception)
+        {
+            case HarnessException harness:
                 // The service already decided what this failure means.
-                output.Fail(commandName, ex.Message);
-                return ex.ExitCode;
-            }
-            catch (ConfigException ex)
-            {
-                output.Fail(commandName, ex.Message);
+                output.Fail(commandName, harness.Message);
+                return harness.ExitCode;
+
+            case ConfigException:
+                output.Fail(commandName, exception.Message);
                 return HarnessExit.ConfigInvalid;
-            }
-            catch (ExecutableNotFoundException ex)
-            {
-                output.Fail(commandName, ex.Message);
+
+            case ExecutableNotFoundException:
+                output.Fail(commandName, exception.Message);
                 return HarnessExit.ToolMissing;
-            }
-            catch (OperationCanceledException)
-            {
+
+            case OperationCanceledException:
                 // Not CommandFailed: nothing ran to completion, and a caller reading
                 // a failure code would report a red verdict for an interrupted run.
                 output.Fail(commandName, "Interrupted before completion.");
                 return HarnessExit.Cancelled;
-            }
-            catch (Exception ex)
-            {
+
+            default:
                 // A defect in the harness, not a failure of the thing being asked
                 // about. Reported as a message with a defined exit code rather than
                 // an unhandled exception, whose exit code would collide with a
                 // command's own contract. The stack trace is available under
                 // --verbose, where someone is actually diagnosing it.
-                output.Fail(commandName, $"Unexpected {ex.GetType().Name}: {ex.Message}");
+                output.Fail(commandName, $"Unexpected {exception.GetType().Name}: {exception.Message}");
 
                 if (output.IsVerbose)
                 {
-                    output.RawError(ex.ToString());
+                    output.RawError(exception.ToString());
                 }
 
                 return HarnessExit.InternalError;
-            }
-        };
+        }
     }
 
     /// <summary>

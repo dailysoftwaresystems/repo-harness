@@ -169,7 +169,14 @@ public sealed class InitServiceTests
         Assert.Equal("cmake", Assert.Single(config.Projects).Type);
         Assert.Contains("msvc", config.Toolchains.Keys);
         Assert.Contains("debug", config.BuildConfigs.Keys);
-        Assert.Contains("root", config.Targets.Keys);
+
+        // The seeded legs are for the machine init ran on, as measured, not for a guess.
+        Assert.NotEmpty(config.Legs);
+        Assert.All(config.Legs.Values, leg =>
+        {
+            Assert.Equal(harness.Platform.PlatformKey, leg.Os);
+            Assert.Equal(harness.Platform.Processor, leg.Processor);
+        });
     }
 
     [Fact]

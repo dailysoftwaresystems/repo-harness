@@ -3,6 +3,8 @@ using System.Text;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -22,13 +24,13 @@ internal static class HelpCommand
 
     private static readonly Argument<string?> TopicArgument = new("topic")
     {
-        Description = "Topic to explain: exit-codes, config, worktrees, anchors, layout. Omit for an overview.",
+        Description = "Topic to explain: exit-codes, config, legs, worktrees, anchors, layout. Omit for an overview.",
         Arity = ArgumentArity.ZeroOrOne,
     };
 
     internal static Command Create()
     {
-        var command = new Command(Name, "Explain exit codes, configuration, worktrees, anchors and layout.");
+        var command = new Command(Name, "Explain exit codes, configuration, legs and hosts, worktrees, anchors and layout.");
         command.Arguments.Add(TopicArgument);
         GlobalOptions.AddTo(command);
 
@@ -63,11 +65,12 @@ internal static class HelpCommand
     {
         "exit-codes" or "exit" => RenderExitCodes(),
         "config" or "configuration" => RenderConfig(),
+        "legs" or "hosts" or "emulators" => RenderLegs(),
         "worktrees" or "worktree" => RenderWorktrees(),
         "anchors" or "anchor" => RenderAnchors(),
         "layout" => RenderLayout(),
         null or "" => RenderOverview(),
-        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, worktrees, anchors, layout.{Environment.NewLine}",
+        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout.{Environment.NewLine}",
     };
 
     private static string RenderOverview()
@@ -81,6 +84,7 @@ internal static class HelpCommand
         builder.AppendLine("Getting started");
         builder.AppendLine("  repo-harness verify-git            Check git is present and this is a repository");
         builder.AppendLine("  repo-harness init                  Create .harness-config and seed config.json");
+        builder.AppendLine("  repo-harness legs                  Show where each leg can run, or why it cannot");
         builder.AppendLine("  repo-harness list-worktree         Show existing worktrees");
         builder.AppendLine("  repo-harness read-anchors          List the deferred work recorded as anchors");
         builder.AppendLine();
@@ -91,6 +95,7 @@ internal static class HelpCommand
         builder.AppendLine("Topics");
         builder.AppendLine("  repo-harness help exit-codes       What each exit code means");
         builder.AppendLine("  repo-harness help config           What config.json declares");
+        builder.AppendLine("  repo-harness help legs             Hosts, emulators, and how a leg finds where it runs");
         builder.AppendLine("  repo-harness help worktrees        Naming rules and the path budget");
         builder.AppendLine("  repo-harness help anchors          Anchor registries and the commands that change them");
         builder.AppendLine("  repo-harness help layout           What init creates, and what git tracks");
@@ -129,6 +134,84 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("  read-anchor, read-anchors --lint, check-anchor-balance");
         builder.AppendLine($"    {AnchorExit.Findings,3}  an id was not found, the registries have problems, or the balance did not hold");
+        builder.AppendLine();
+        builder.AppendLine("  legs");
+        builder.AppendLine($"    {LegsExit.Unavailable,3}  a leg named with --legs cannot run, or no selected leg can");
+        builder.AppendLine();
+        builder.AppendLine("host-exec returns the exit code of the command it ran on the host, unchanged, or");
+        builder.AppendLine($"{HarnessExit.HostUnavailable} when nothing ran there.");
+
+        return builder.ToString();
+    }
+
+    private static string RenderLegs()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Legs and hosts");
+        builder.AppendLine();
+        builder.AppendLine("A leg says what it needs, never where it runs:");
+        builder.AppendLine($"  os          {string.Join(", ", PlatformNames.OperatingSystems)}");
+        builder.AppendLine($"  processor   {string.Join(", ", PlatformNames.Processors)}");
+        builder.AppendLine("  emulator    optional: the emulator allowed to run its programs on a host with");
+        builder.AppendLine("              another processor; without one the leg runs only natively");
+        builder.AppendLine();
+        builder.AppendLine("Hosts are this machine, the WSL distributions under hosts.wsl and the ssh hosts");
+        builder.AppendLine("under hosts.ssh. Before anything runs, every host that could run a selected leg");
+        builder.AppendLine("is measured, never assumed: its operating system, its processor, and whether each");
+        builder.AppendLine("emulator the legs use works there. A leg runs on the first host that provides what");
+        builder.AppendLine("it needs: this machine, then the WSL distributions, then the ssh hosts, each in the");
+        builder.AppendLine("order the configuration declares them. A leg that sets \"wsl\" or \"ssh\" runs on");
+        builder.AppendLine("that host and nowhere else.");
+        builder.AppendLine();
+        builder.AppendLine("  repo-harness legs                          every declared leg");
+        builder.AppendLine("  repo-harness legs --legs a,b gate          legs a and b, and the legs of set gate");
+        builder.AppendLine("  repo-harness host-exec --ssh vps -- verify-git");
+        builder.AppendLine("  repo-harness host-exec --wsl -- list-worktree");
+        builder.AppendLine();
+        builder.AppendLine("A leg no host can run is a warning that names it and says why; the other legs");
+        builder.AppendLine("still go ahead. The check fails when a leg named with --legs cannot run, or when");
+        builder.AppendLine("no selected leg can.");
+        builder.AppendLine();
+        builder.AppendLine("A WSL distribution is available when this machine runs Windows, wsl.exe exists,");
+        builder.AppendLine("and a program starts in the distribution; --wsl with no name is WSL's default.");
+        builder.AppendLine("An ssh host is available when .harness-config/ssh/config has a 'Host <name>' entry,");
+        builder.AppendLine("ssh connects in batch mode, so without ever waiting at a prompt, and repo-harness");
+        builder.AppendLine("runs there. ssh refuses a configuration file other users can change, and ignores a");
+        builder.AppendLine("key they can read, so both are checked before connecting.");
+        builder.AppendLine();
+        builder.AppendLine("Every WSL distribution and ssh host runs repo-harness itself, installed as a global");
+        builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
+        builder.AppendLine("a host that is behind is installed or updated to this version, never downgraded,");
+        builder.AppendLine($"and a host that is ahead stops everything ({HarnessExit.Refused}) until this machine is updated. The");
+        builder.AppendLine("version and a hash of the tool's own assembly are both compared, because a build");
+        builder.AppendLine("from source reports the same version as the published package.");
+        builder.AppendLine();
+        builder.AppendLine("The repo-harness on a host is reached through a hidden host-agent command, with the");
+        builder.AppendLine("request on standard input. The command line ssh hands a remote shell holds only");
+        builder.AppendLine("fixed words, so no argument is ever reinterpreted by sh, cmd or PowerShell.");
+        builder.AppendLine();
+        builder.AppendLine("An emulator declares the hosts it runs on (hostOs, hostProcessor), the processor it");
+        builder.AppendLine("runs programs for, the launcher placed in front of each program (such as");
+        builder.AppendLine("qemu-aarch64 -L <sysroot>, or arch -x86_64; none for Prism and binfmt), what it");
+        builder.AppendLine("requires, the phases it runs (test by default), and a witness: a program run");
+        builder.AppendLine("through it whose output must match a pattern, proving it really runs programs for");
+        builder.AppendLine("that processor. A launcher, a witness and a required file are each a program name,");
+        builder.AppendLine("looked up on the host's PATH, or an absolute path.");
+        builder.AppendLine();
+        builder.AppendLine("legs and host-exec run what config.json declares: each emulator's witness, on every");
+        builder.AppendLine("host they measure, and repo-harness itself on WSL distributions and ssh hosts,");
+        builder.AppendLine("which they install or update there from nuget.org, and from nuget.org only. That is");
+        builder.AppendLine("the trust building the repository already asks for. An ssh host is reached only");
+        builder.AppendLine("when this checkout's own .harness-config/ssh/config declares it.");
+        builder.AppendLine();
+        builder.AppendLine("Exit codes");
+        builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run, or with no --legs, at least one leg can");
+        builder.AppendLine($"  {LegsExit.Unavailable,3}  legs: a leg named with --legs cannot run, or no selected leg can");
+        builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set");
+        builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer repo-harness than this machine");
+        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run repo-harness, or has no copy of the repository");
+        builder.AppendLine("       host-exec otherwise returns the exit code of the command it ran");
 
         return builder.ToString();
     }
@@ -255,6 +338,7 @@ internal static class HelpCommand
         builder.AppendLine("  .harness-config/config.json        tracked by git; the whole contract");
         builder.AppendLine("  .harness-config/worktrees/         contents ignored, .gitkeep tracked");
         builder.AppendLine("  .harness-config/ssh/               contents ignored, .gitkeep tracked");
+        builder.AppendLine($"  .harness-config/ssh/{HostInspector.SshConfigFileName}             ignored; the ssh hosts --ssh names: address, user, key");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");
         builder.AppendLine($"  {AnchorSettings.DefaultPendingAnchorsPath}");
         builder.AppendLine("                                     tracked; live anchors (anchors.pendingAnchorsPath)");
@@ -282,15 +366,18 @@ internal static class HelpCommand
         builder.AppendLine("config.json");
         builder.AppendLine();
         builder.AppendLine($"  defaults       buildCores and testCores ({HarnessDefaults.DefaultCores} each), maxParallelLegs, default");
-        builder.AppendLine("                 project and leg set, stall bound");
+        builder.AppendLine("                 project, stall bound");
         builder.AppendLine("  toolchains     compilers, as environment and cache variables (msvc, gcc, clang)");
         builder.AppendLine("  sanitizers     instrumentation overlays composed onto a build");
         builder.AppendLine("  buildConfigs   named configurations (debug, release, o1, o2)");
         builder.AppendLine("  projects       what to build, and with which adapter (cmake, dotnet, dart)");
-        builder.AppendLine("  targets        machines to reach, by transport (local, wsl, ssh), each with");
-        builder.AppendLine("                 its own core counts when they differ");
-        builder.AppendLine("  legs           units of work: target + project + toolchain + config (+ sanitizer)");
-        builder.AppendLine("  legSets        named groups of legs, so a gate runs under one name");
+        builder.AppendLine("  hosts          this machine (local), WSL distributions (wsl) and ssh hosts (ssh),");
+        builder.AppendLine("                 each with its own core counts when they differ");
+        builder.AppendLine("  emulators      ways to run programs for another processor on a host: qemu,");
+        builder.AppendLine("                 Rosetta, Prism");
+        builder.AppendLine("  legs           units of work: os + processor (+ emulator) + project + toolchain");
+        builder.AppendLine("                 + config (+ sanitizer)");
+        builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
         builder.AppendLine("  runners        multi-phase procedures such as a corpus test or a benchmark");
         builder.AppendLine("  exec           named commands to run through 'repo-harness exec'");
@@ -306,8 +393,9 @@ internal static class HelpCommand
         builder.AppendLine("so two toolchains never share one build tree.");
         builder.AppendLine();
         builder.AppendLine("Selected legs run at the same time, and a command waits for all of them. Within");
-        builder.AppendLine("a leg the order is fixed: sync when the target needs it, then build on buildCores");
-        builder.AppendLine("cores, then test on testCores cores.");
+        builder.AppendLine("a leg the order is fixed: sync when the host needs it, then build on buildCores");
+        builder.AppendLine("cores, then test on testCores cores. Where a leg runs is measured before anything");
+        builder.AppendLine("starts; see 'repo-harness help legs'.");
         builder.AppendLine();
         builder.AppendLine("A verdict must describe the code, not the moment it ran in. Every test invocation");
         builder.AppendLine("declares a successPattern, since exiting 0 is not proof anything ran. A leg whose");

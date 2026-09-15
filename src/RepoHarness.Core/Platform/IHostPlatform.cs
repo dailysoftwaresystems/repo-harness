@@ -13,13 +13,22 @@ public interface IHostPlatform
     PlatformId Current { get; }
 
     /// <summary>
-    /// The configuration key for <see cref="Current"/> (<c>windows</c>, <c>linux</c>, <c>macos</c>).
-    /// Used to select per-platform sections in config.json.
+    /// The configuration name for <see cref="Current"/> (<c>windows</c>, <c>linux</c>, <c>macos</c>):
+    /// the key of a per-platform section, and the <c>os</c> a leg is compared with on this machine.
     /// </summary>
     string PlatformKey { get; }
 
-    /// <summary>Network name of this machine, used to evaluate SSH <c>availableOn</c> rules.</summary>
-    string HostName { get; }
+    /// <summary>
+    /// This machine's processor, in configuration's words (<c>x86_64</c>, <c>arm64</c>). The
+    /// machine's own rather than this process's: repo-harness running as an x86_64 program under
+    /// emulation on an arm64 machine is still on an arm64 machine.
+    /// </summary>
+    string Processor { get; }
+
+    /// <summary>
+    /// The current user's home directory, which a host path starting with <c>~</c> is relative to.
+    /// </summary>
+    string HomeDirectory { get; }
 
     /// <summary>How file system paths compare on this platform (case insensitive on Windows).</summary>
     StringComparison PathComparison { get; }

@@ -16,11 +16,19 @@ public static class CliRunner
 
     private static readonly Lazy<string> CliAssembly = new(LocateCliAssembly, LazyThreadSafetyMode.PublicationOnly);
 
+    /// <summary>The CLI assembly the tests run: the build a host's repo-harness is compared with.</summary>
+    public static string CliAssemblyPath => CliAssembly.Value;
+
     /// <summary>Runs the CLI and returns its result.</summary>
+    /// <param name="arguments">The command line after <c>repo-harness</c>.</param>
+    /// <param name="cancellationToken">Stops the run.</param>
+    /// <param name="workingDirectory">The directory the CLI starts in, or the test's own.</param>
+    /// <param name="standardInput">Text the CLI reads on standard input, as a host's repo-harness reads a request.</param>
     public static async Task<ProcessResult> RunAsync(
         string[] arguments,
         CancellationToken cancellationToken,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        string? standardInput = null)
     {
         var runner = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
 
@@ -30,6 +38,7 @@ public static class CliRunner
                 FileName = TestHost.DotnetExecutable,
                 Arguments = ["exec", CliAssembly.Value, .. arguments],
                 WorkingDirectory = workingDirectory,
+                StandardInput = standardInput,
                 Timeout = Budget,
             },
             cancellationToken);

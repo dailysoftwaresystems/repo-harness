@@ -25,11 +25,13 @@ configuration, that is a defect.
 ```bash
 repo-harness verify-git     # is git installed, and is this a repository?
 repo-harness init           # create .harness-config and seed config.json
-repo-harness help           # reference material: exit codes, config, layout
+repo-harness legs           # where each leg can run, or why it cannot
+repo-harness help           # reference material: exit codes, config, legs, layout
 ```
 
 `init` inspects the repository and seeds a configuration that already matches it —
-a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test`.
+a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test` — with
+legs for the operating system and processor of the machine it ran on.
 
 ## Commands
 
@@ -45,7 +47,9 @@ a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test`.
 | `read-anchor <id>...` | Show anchors in full |
 | `read-anchors` | List anchors, or check the registries with `--lint` |
 | `check-anchor-balance` | Fail a change that leaves more open anchors than it found |
-| `help [topic]` | Explain exit codes, configuration, worktrees, anchors, layout |
+| `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
+| `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a repo-harness command on an ssh host or in a WSL distribution |
+| `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout |
 
 Every command takes `-C, --directory <dir>` and `-v, --verbose`.
 
@@ -62,7 +66,8 @@ listed at once.
 
 **One behaviour everywhere.** Windows, macOS and Linux run the same code path. The
 operating system is observed in two tightly scoped places and nowhere else;
-everything downstream is platform agnostic. CI runs the whole suite on all three.
+everything downstream is platform agnostic. CI runs the whole suite on all three, on
+both x86_64 and arm64.
 
 **Refuse early, with the arithmetic.** `create-worktree` will not create a worktree
 whose build paths cannot fit inside Windows' path limit, because that failure
@@ -76,6 +81,7 @@ in `config.json`.
 .harness-config/config.json                  tracked; the whole contract
 .harness-config/worktrees/                   contents ignored, .gitkeep tracked
 .harness-config/ssh/                         contents ignored, .gitkeep tracked
+.harness-config/ssh/config                   ignored; the ssh hosts --ssh names
 .harness-config/lock.json                    ignored; records in-progress runs
 .plans/_deferred-anchor-registry.md          tracked; live anchors
 .plans/_deferred-anchor-registry-done.md     tracked; closed anchors
@@ -84,6 +90,49 @@ in `config.json`.
 Ignored state lives only in the main checkout. A worktree receives the tracked part
 of `.harness-config` through git but never the ignored part, so secrets and the run
 lock resolve back to the originating checkout.
+
+## Legs and hosts
+
+A leg says what it needs, never where it runs: an operating system, a processor, and
+optionally the emulator allowed to stand in for that processor. This machine, WSL
+distributions and ssh hosts are measured before anything starts, and each leg runs on
+the first host that provides what it needs.
+
+```json
+{
+  "hosts": {
+    "wsl": { "Ubuntu": { "repositoryPath": "~/src/app" } },
+    "ssh": { "mac-mini": { "repositoryPath": "/Users/dev/src/app" } }
+  },
+  "emulators": {
+    "rosetta": {
+      "hostOs": "macos", "hostProcessor": "arm64", "processor": "x86_64",
+      "launcher": ["arch", "-x86_64"],
+      "witness": { "command": ["uname", "-m"], "pattern": "^x86_64$" }
+    }
+  },
+  "legs": {
+    "linux-release": { "os": "linux", "processor": "x86_64", "config": "release" },
+    "mac-x64-release": { "os": "macos", "processor": "x86_64", "emulator": "rosetta", "config": "release" }
+  }
+}
+```
+
+```bash
+repo-harness legs                                       # every leg: where it runs, or why it cannot
+repo-harness legs --legs linux-release,mac-x64-release
+repo-harness host-exec --ssh mac-mini -- verify-git
+```
+
+An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores; ssh
+runs in batch mode, so it never waits at a prompt. Every WSL distribution and ssh host
+runs repo-harness itself, installed from nuget.org at this machine's exact version: a
+host that is behind is updated, never downgraded. An emulator counts only once its
+witness proves it runs programs for its processor.
+
+`legs` and `host-exec` run what `config.json` declares: each emulator's witness, and
+repo-harness on the hosts they reach. That is the trust building the repository already
+asks for. Run `repo-harness help legs` for the rules.
 
 ## Anchors
 
@@ -117,7 +166,7 @@ Everything a build produces — binaries, intermediates and packages — lands u
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — layering, paths, legs, parallel execution, contamination guarantees
+- [Architecture](docs/architecture.md) — layering, paths, hosts and legs, parallel execution, contamination guarantees
 - [Releasing](docs/releasing.md) — channels, trusted publishing, the release pipelines
 
 ## License

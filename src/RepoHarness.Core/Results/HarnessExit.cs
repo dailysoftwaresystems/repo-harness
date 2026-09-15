@@ -32,6 +32,13 @@ public static class HarnessExit
     /// <summary>A required external tool is not installed.</summary>
     public const int ToolMissing = 14;
 
+    /// <summary>
+    /// A host the command was pointed at could not be used: it could not be reached, it has no
+    /// .NET SDK, repo-harness could not be brought to this machine's version there, or its copy of
+    /// the repository does not exist. Distinct from <see cref="CommandFailed"/>: nothing ran there.
+    /// </summary>
+    public const int HostUnavailable = 15;
+
     /// <summary>The wrapped command ran and reported failure.</summary>
     public const int CommandFailed = 20;
 
@@ -70,6 +77,7 @@ public static class HarnessExit
             [nameof(ConfigInvalid)] = "config.json is missing, unparseable, or failed validation.",
             [nameof(Refused)] = "A precondition refused the request (dirty tree, name taken, lock held).",
             [nameof(ToolMissing)] = "A required external tool is not installed.",
+            [nameof(HostUnavailable)] = "A host could not be reached, or repo-harness could not run there; nothing ran on it.",
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",
             [nameof(Cancelled)] = "The run was interrupted before it finished; nothing ran to completion.",

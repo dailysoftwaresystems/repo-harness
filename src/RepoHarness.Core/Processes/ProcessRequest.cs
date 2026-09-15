@@ -7,7 +7,9 @@ namespace RepoHarness.Core.Processes;
 /// </summary>
 public sealed record ProcessRequest
 {
-    /// <summary>Executable to run. Resolved against PATH by the operating system.</summary>
+    /// <summary>
+    /// The program: a name, looked up in the PATH directories and nowhere else, or a path, used as given.
+    /// </summary>
     public required string FileName { get; init; }
 
     /// <summary>Arguments, one element per argument. Never pre-quoted.</summary>
@@ -22,6 +24,13 @@ public sealed record ProcessRequest
     /// </summary>
     public IReadOnlyDictionary<string, string?> Environment { get; init; }
         = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Text written to the child's standard input, which is then closed so the child sees its
+    /// end; or <see langword="null"/> to leave standard input connected to this process's own.
+    /// Written as UTF-8 on every platform, the encoding output is read with.
+    /// </summary>
+    public string? StandardInput { get; init; }
 
     /// <summary>
     /// Invoked for each stdout line as it arrives, in addition to capture.

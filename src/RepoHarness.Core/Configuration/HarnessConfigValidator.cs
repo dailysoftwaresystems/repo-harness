@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Core.Configuration;
@@ -9,11 +10,10 @@ namespace RepoHarness.Core.Configuration;
 /// their cause.
 /// </summary>
 /// <remarks>
-/// A leg naming a target that does not exist is not a syntax error, so nothing
-/// rejects it at load; it fails much later, in the middle of a run, as a lookup
-/// miss with no indication of which config line was wrong. Every problem is
-/// collected and reported together, because fixing one error only to be shown the
-/// next is a poor way to correct a file.
+/// A leg naming a host that is not declared is not a syntax error, so nothing rejects it
+/// at load; it fails much later, in the middle of a run, as a lookup miss with no indication
+/// of which config line was wrong. Every problem is collected and reported together, because
+/// fixing one error only to be shown the next is a poor way to correct a file.
 /// </remarks>
 public static class HarnessConfigValidator
 {
@@ -23,11 +23,11 @@ public static class HarnessConfigValidator
     /// <summary>Adapters a project may declare.</summary>
     private static readonly string[] ProjectTypes = ["cmake", "dotnet", "dart"];
 
-    /// <summary>Ways a target can be reached.</summary>
-    private static readonly string[] Transports = ["local", "wsl", "ssh"];
-
     /// <summary>Platform keys a per-platform map may use.</summary>
-    private static readonly string[] PlatformKeys = ["all", "windows", "linux", "macos"];
+    private static readonly string[] PlatformKeys = ["all", PlatformNames.Windows, PlatformNames.Linux, PlatformNames.MacOs];
+
+    /// <summary>The phases of a leg, which an emulator may run.</summary>
+    private static readonly string[] LegPhases = ["build", "test"];
 
     /// <summary>Returns every problem found, in the order they would be read.</summary>
     public static IReadOnlyList<string> Validate(HarnessConfig config)
@@ -41,10 +41,13 @@ public static class HarnessConfigValidator
         ValidateAnchors(config.Anchors, problems);
         ValidateProjects(config, problems);
         ValidateToolchains(config, problems);
-        ValidateTargets(config, problems);
+        ValidateHosts(config.Hosts, problems);
+        ValidateEmulators(config, problems);
         ValidateLegs(config, problems);
         ValidateTools(config, problems);
         ValidateRunnersAndExec(config, problems);
+        ValidateCommit(config.Commit, problems);
+        ValidateSync(config.Sync, problems);
         ValidateContention(config.Contention, problems);
 
         return problems;
@@ -103,11 +106,6 @@ public static class HarnessConfigValidator
         }
 
         RequireAtLeastOne(defaults.ProcessSampleSeconds, "defaults.processSampleSeconds", problems);
-
-        if (defaults.LegSet is { } legSet && !config.LegSets.ContainsKey(legSet))
-        {
-            problems.Add($"defaults.legSet '{legSet}' is not declared in legSets");
-        }
 
         if (defaults.Project is { } project && !HasProject(config, project))
         {
@@ -243,47 +241,130 @@ public static class HarnessConfigValidator
         }
     }
 
-    private static void ValidateTargets(HarnessConfig config, List<string> problems)
+    private static void ValidateHosts(HostsConfig hosts, List<string> problems)
     {
-        foreach (var (name, target) in config.Targets)
+        ValidateHostSettings(hosts.Local, "hosts.local", problems);
+
+        foreach (var (name, host) in hosts.Wsl)
         {
-            if (target.BuildCores is { } buildCores)
-            {
-                RequireAtLeastOne(buildCores, $"target '{name}' buildCores", problems);
-            }
+            var owner = $"hosts.wsl '{name}'";
 
-            if (target.TestCores is { } testCores)
-            {
-                RequireAtLeastOne(testCores, $"target '{name}' testCores", problems);
-            }
+            CheckHostName(name, owner, problems);
+            ValidateHostSettings(host, owner, problems);
+            CheckRepositoryPath(host.RepositoryPath, owner, allowWindowsPaths: false, problems);
+        }
 
-            if (target.KeepAwake is { } keepAwake && (keepAwake.Count == 0 || string.IsNullOrWhiteSpace(keepAwake[0])))
-            {
-                problems.Add($"target '{name}' keepAwake has an empty command");
-            }
+        foreach (var (name, host) in hosts.Ssh)
+        {
+            var owner = $"hosts.ssh '{name}'";
 
-            RequireAtLeastOne(target.ConnectTimeoutSeconds, $"target '{name}' connectTimeoutSeconds", problems);
-            RequireAtLeastOne(target.KeepAliveSeconds, $"target '{name}' keepAliveSeconds", problems);
+            CheckHostName(name, owner, problems);
+            ValidateHostSettings(host, owner, problems);
+            CheckRepositoryPath(host.RepositoryPath, owner, allowWindowsPaths: true, problems);
+            RequireAtLeastOne(host.ConnectTimeoutSeconds, $"{owner} connectTimeoutSeconds", problems);
+            RequireAtLeastOne(host.KeepAliveSeconds, $"{owner} keepAliveSeconds", problems);
+        }
+    }
 
-            if (!Transports.Contains(target.Transport, StringComparer.OrdinalIgnoreCase))
+    private static void ValidateHostSettings(HostSettings host, string owner, List<string> problems)
+    {
+        if (host.BuildCores is { } buildCores)
+        {
+            RequireAtLeastOne(buildCores, $"{owner} buildCores", problems);
+        }
+
+        if (host.TestCores is { } testCores)
+        {
+            RequireAtLeastOne(testCores, $"{owner} testCores", problems);
+        }
+
+        if (host.KeepAwake is { } keepAwake && (keepAwake.Count == 0 || string.IsNullOrWhiteSpace(keepAwake[0])))
+        {
+            problems.Add($"{owner} keepAwake has an empty command");
+        }
+    }
+
+    private static void ValidateEmulators(HarnessConfig config, List<string> problems)
+    {
+        foreach (var (name, emulator) in config.Emulators)
+        {
+            var owner = $"emulator '{name}'";
+
+            CheckOs(emulator.HostOs, $"{owner} hostOs", problems);
+            CheckProcessor(emulator.HostProcessor, $"{owner} hostProcessor", problems);
+            CheckProcessor(emulator.Processor, $"{owner} processor", problems);
+
+            if (SameName(emulator.HostProcessor, emulator.Processor))
             {
                 problems.Add(
-                    $"target '{name}' has transport '{target.Transport}'; "
-                    + $"known transports are {string.Join(", ", Transports)}");
-                continue;
+                    $"{owner} runs {emulator.Processor} programs on {emulator.HostProcessor} hosts, which needs no emulator");
             }
 
-            if (string.Equals(target.Transport, "wsl", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(target.Distro))
+            // An empty launcher would run the witness, and every program after it, as though the
+            // host ran them natively: exactly what an emulator entry exists to rule out.
+            if (emulator.Launcher is { } launcher)
             {
-                problems.Add($"target '{name}' uses the wsl transport but declares no distro");
+                if (launcher.Count == 0 || string.IsNullOrWhiteSpace(launcher[0]))
+                {
+                    problems.Add($"{owner} launcher is empty; leave it out when the operating system runs the programs itself");
+                }
+                else
+                {
+                    CheckProgram(launcher[0], $"{owner} launcher", problems);
+                }
             }
 
-            if (string.Equals(target.Transport, "ssh", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(target.RepositoryPath))
+            if (emulator.Requires.Any(string.IsNullOrWhiteSpace))
             {
-                problems.Add($"target '{name}' uses the ssh transport but declares no repositoryPath");
+                problems.Add($"{owner} requires contains a blank entry");
             }
+
+            foreach (var requirement in emulator.Requires.Where(requirement => !string.IsNullOrWhiteSpace(requirement)))
+            {
+                CheckProgram(requirement, $"{owner} requires", problems);
+            }
+
+            if (emulator.Phases.Count == 0)
+            {
+                problems.Add($"{owner} phases is empty; list test, build or both");
+            }
+
+            foreach (var phase in emulator.Phases.Where(phase => !LegPhases.Contains(phase, StringComparer.OrdinalIgnoreCase)))
+            {
+                problems.Add($"{owner} phases names '{phase}'; expected one of {string.Join(", ", LegPhases)}");
+            }
+
+            if (emulator.Witness.Command.Count == 0 || string.IsNullOrWhiteSpace(emulator.Witness.Command[0]))
+            {
+                problems.Add($"{owner} witness has an empty command");
+            }
+            else
+            {
+                CheckProgram(emulator.Witness.Command[0], $"{owner} witness", problems);
+            }
+
+            CheckPattern(emulator.Witness.Pattern, $"{owner} witness.pattern", problems);
+
+            if (emulator.Tool is { } tool && !config.Tools.Any(declared => SameName(declared.Name, tool)))
+            {
+                problems.Add($"{owner} names tool '{tool}', which is not declared");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rejects a program, or a required file, named by a relative path. A bare name is looked up on the
+    /// PATH of the host it runs on, and an absolute path is used as given. A relative path would resolve
+    /// against whichever directory each host starts programs in, which differs from host to host, and
+    /// would let a file shipped in the repository stand in for the tool it is named after.
+    /// </summary>
+    private static void CheckProgram(string program, string setting, List<string> problems)
+    {
+        var isPath = program.Contains('/', StringComparison.Ordinal) || program.Contains('\\', StringComparison.Ordinal);
+
+        if (isPath && !program.StartsWith('/') && !IsWindowsAbsolute(program))
+        {
+            problems.Add($"{setting} '{program}' must be a program name, looked up on the PATH, or an absolute path");
         }
     }
 
@@ -291,42 +372,51 @@ public static class HarnessConfigValidator
     {
         foreach (var (name, leg) in config.Legs)
         {
-            if (!config.Targets.ContainsKey(leg.Target))
-            {
-                problems.Add($"leg '{name}' names target '{leg.Target}', which is not declared");
-            }
+            var owner = $"leg '{name}'";
+
+            CheckOs(leg.Os, $"{owner} os", problems);
+            CheckProcessor(leg.Processor, $"{owner} processor", problems);
+            ValidateLegHost(config, owner, leg, problems);
+            ValidateLegEmulator(config, owner, leg, problems);
 
             if (!config.BuildConfigs.ContainsKey(leg.Config))
             {
-                problems.Add($"leg '{name}' names config '{leg.Config}', which is not declared");
+                problems.Add($"{owner} names config '{leg.Config}', which is not declared");
             }
 
             if (leg.Toolchain is { } toolchain && !config.Toolchains.ContainsKey(toolchain))
             {
-                problems.Add($"leg '{name}' names toolchain '{toolchain}', which is not declared");
+                problems.Add($"{owner} names toolchain '{toolchain}', which is not declared");
             }
 
             if (leg.Sanitizer is { } sanitizer && !config.Sanitizers.ContainsKey(sanitizer))
             {
-                problems.Add($"leg '{name}' names sanitizer '{sanitizer}', which is not declared");
+                problems.Add($"{owner} names sanitizer '{sanitizer}', which is not declared");
             }
 
             if (leg.Project is { } project && !HasProject(config, project))
             {
-                problems.Add($"leg '{name}' names project '{project}', which is not declared");
+                problems.Add($"{owner} names project '{project}', which is not declared");
             }
 
             if (leg.Worktree is { } worktree
                 && !WorktreeName.ValidateFormat(worktree).TryGetName(out _, out var worktreeError))
             {
-                problems.Add($"leg '{name}' worktree: {worktreeError}");
+                problems.Add($"{owner} worktree: {worktreeError}");
             }
 
-            ValidateTest(leg.Test, $"leg '{name}'", config, problems);
+            ValidateTest(leg.Test, owner, config, problems);
         }
 
         foreach (var (setName, legs) in config.LegSets)
         {
+            // --legs accepts both kinds of name, so one that is both would select either depending
+            // on which the harness happened to look up first.
+            if (config.Legs.ContainsKey(setName))
+            {
+                problems.Add($"legSet '{setName}' has the same name as a leg, so --legs {setName} would be ambiguous");
+            }
+
             if (legs.Count == 0)
             {
                 problems.Add($"legSet '{setName}' is empty");
@@ -336,6 +426,57 @@ public static class HarnessConfigValidator
             {
                 problems.Add($"legSet '{setName}' names leg '{leg}', which is not declared");
             }
+        }
+    }
+
+    private static void ValidateLegHost(HarnessConfig config, string owner, LegConfig leg, List<string> problems)
+    {
+        if (leg.Wsl is not null && leg.Ssh is not null)
+        {
+            problems.Add($"{owner} names both a wsl and an ssh host; a leg runs on one host");
+        }
+
+        if (leg.Wsl is { } wsl)
+        {
+            if (!config.Hosts.Wsl.ContainsKey(wsl))
+            {
+                problems.Add($"{owner} names wsl host '{wsl}', which is not declared under hosts.wsl");
+            }
+            else if (!SameName(leg.Os, PlatformNames.Linux))
+            {
+                problems.Add($"{owner} runs on {leg.Os} but names wsl host '{wsl}', which runs linux");
+            }
+        }
+
+        if (leg.Ssh is { } ssh && !config.Hosts.Ssh.ContainsKey(ssh))
+        {
+            problems.Add($"{owner} names ssh host '{ssh}', which is not declared under hosts.ssh");
+        }
+    }
+
+    private static void ValidateLegEmulator(HarnessConfig config, string owner, LegConfig leg, List<string> problems)
+    {
+        if (leg.Emulator is not { } emulatorName)
+        {
+            return;
+        }
+
+        if (!config.Emulators.TryGetValue(emulatorName, out var emulator))
+        {
+            problems.Add($"{owner} names emulator '{emulatorName}', which is not declared");
+            return;
+        }
+
+        // An emulator runs programs for one processor, without changing the operating system, so
+        // a leg it can never serve is a mistake in the file rather than something to measure.
+        if (!SameName(emulator.Processor, leg.Processor))
+        {
+            problems.Add($"{owner} is for {leg.Processor}, but emulator '{emulatorName}' runs {emulator.Processor} programs");
+        }
+
+        if (!SameName(emulator.HostOs, leg.Os))
+        {
+            problems.Add($"{owner} runs on {leg.Os}, but emulator '{emulatorName}' runs on {emulator.HostOs} hosts");
         }
     }
 
@@ -428,6 +569,71 @@ public static class HarnessConfigValidator
         }
     }
 
+    /// <summary>
+    /// Checks that the commit template and its variables agree. A placeholder nobody declared is
+    /// written into a message literally, and a variable the template never uses is a value asked
+    /// for and then dropped; both are found here instead of in a commit someone has already pushed.
+    /// </summary>
+    private static void ValidateCommit(CommitConfig commit, List<string> problems)
+    {
+        if (commit.Template is { } blank && string.IsNullOrWhiteSpace(blank))
+        {
+            problems.Add("commit.template is blank; leave it out to write messages by hand");
+        }
+
+        foreach (var (name, variable) in commit.Variables)
+        {
+            if (!Regex.IsMatch(name, "^[A-Za-z][A-Za-z0-9_-]*$", RegexOptions.CultureInvariant))
+            {
+                problems.Add(
+                    $"commit.variables '{name}' must be letters, digits, hyphens and underscores, starting with a letter");
+            }
+
+            // A default means the value is never missing, so "required" would promise a check that
+            // can never fire.
+            if (variable.Required && variable.Default is not null)
+            {
+                problems.Add(
+                    $"commit.variables '{name}' is required and has a default, so it can never be missing; drop one of them");
+            }
+        }
+
+        if (commit.Template is not { } template)
+        {
+            if (commit.Variables.Count > 0)
+            {
+                problems.Add("commit.variables are declared but there is no commit.template to use them");
+            }
+
+            return;
+        }
+
+        var used = Regex.Matches(template, @"\{(?<name>[^{}]*)\}", RegexOptions.CultureInvariant)
+            .Select(match => match.Groups["name"].Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var placeholder in used.Where(placeholder => !commit.Variables.ContainsKey(placeholder)))
+        {
+            problems.Add($"commit.template uses {{{placeholder}}}, which is not declared in commit.variables");
+        }
+
+        foreach (var name in commit.Variables.Keys.Where(name => !used.Contains(name, StringComparer.OrdinalIgnoreCase)))
+        {
+            problems.Add($"commit.variables '{name}' is never used by commit.template");
+        }
+    }
+
+    /// <summary>
+    /// Checks the paths sync is told about. Each is resolved inside the tree being mirrored, so one
+    /// that is absolute or climbs out with ".." would name something that is not part of it.
+    /// </summary>
+    private static void ValidateSync(SyncConfig sync, List<string> problems)
+    {
+        RequireRelativePaths(sync.Exclude, "sync.exclude", problems);
+        RequireRelativePaths(sync.NeverTransfer, "sync.neverTransfer", problems);
+    }
+
     /// <summary>Checks the parts of a test section that can be wrong without being malformed.</summary>
     private static void ValidateTest(TestConfig? test, string owner, HarnessConfig config, List<string> problems)
     {
@@ -444,20 +650,6 @@ public static class HarnessConfigValidator
         foreach (var configName in test.Configs.Where(configName => !config.BuildConfigs.ContainsKey(configName)))
         {
             problems.Add($"{owner} test names config '{configName}', which is not declared");
-        }
-
-        foreach (var targetName in test.TestAgainstSshIfAvailable)
-        {
-            if (!config.Targets.TryGetValue(targetName, out var target))
-            {
-                problems.Add($"{owner} testAgainstSshIfAvailable names target '{targetName}', which is not declared");
-            }
-            else if (!string.Equals(target.Transport, "ssh", StringComparison.OrdinalIgnoreCase))
-            {
-                problems.Add(
-                    $"{owner} testAgainstSshIfAvailable names target '{targetName}', "
-                    + "which does not use the ssh transport");
-            }
         }
 
         RequireRelativePaths(test.Inputs, $"{owner} test.inputs", problems);
@@ -548,6 +740,76 @@ public static class HarnessConfigValidator
     }
 
     /// <summary>
+    /// Rejects an operating system the harness cannot measure a host as. A misspelt one would
+    /// otherwise never match any host, and the leg would be reported unavailable forever instead
+    /// of wrong once.
+    /// </summary>
+    private static void CheckOs(string value, string setting, List<string> problems)
+    {
+        if (!PlatformNames.OperatingSystems.Contains(value, StringComparer.OrdinalIgnoreCase))
+        {
+            problems.Add($"{setting} is '{value}'; expected one of {string.Join(", ", PlatformNames.OperatingSystems)}");
+        }
+    }
+
+    /// <summary>Rejects a processor the harness cannot measure a host as, for the reason <see cref="CheckOs"/> gives.</summary>
+    private static void CheckProcessor(string value, string setting, List<string> problems)
+    {
+        if (!PlatformNames.Processors.Contains(value, StringComparer.OrdinalIgnoreCase))
+        {
+            problems.Add($"{setting} is '{value}'; expected one of {string.Join(", ", PlatformNames.Processors)}");
+        }
+    }
+
+    /// <summary>
+    /// Rejects a host name that could be read as something other than a name. Names reach the ssh
+    /// and wsl.exe command lines, so they hold only letters, digits, dots, hyphens and underscores,
+    /// and cannot start with a hyphen, which either program would take for an option.
+    /// </summary>
+    private static void CheckHostName(string name, string owner, List<string> problems)
+    {
+        if (!Regex.IsMatch(name, "^[A-Za-z0-9_][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant))
+        {
+            problems.Add(
+                $"{owner} is not a usable name: use letters, digits, dots, hyphens and underscores, "
+                + "starting with a letter, a digit or an underscore");
+        }
+    }
+
+    /// <summary>
+    /// Checks where a host keeps its copy of the repository. It is named absolutely, or from the
+    /// home directory of the user the host is reached as: a relative path would resolve against
+    /// whatever directory a transport happens to start in. A home or root directory itself is
+    /// refused, because the copy is kept identical to the repository, and everything else in the
+    /// directory would have to go.
+    /// </summary>
+    private static void CheckRepositoryPath(string path, string owner, bool allowWindowsPaths, List<string> problems)
+    {
+        var trimmed = path.TrimEnd('/', '\\');
+        var isHome = trimmed == "~";
+        var isRoot = trimmed.Length == 0 || (trimmed.Length == 2 && trimmed[1] == ':');
+
+        var isAbsolute = path.StartsWith('/')
+            || path.StartsWith("~/", StringComparison.Ordinal)
+            || (allowWindowsPaths && IsWindowsAbsolute(path));
+
+        if (string.IsNullOrWhiteSpace(path) || (!isAbsolute && !isHome))
+        {
+            problems.Add(
+                $"{owner} repositoryPath '{path}' must be absolute, or start with ~/ for the home directory"
+                + (allowWindowsPaths ? string.Empty : " inside the distribution"));
+        }
+        else if (isHome || isRoot)
+        {
+            problems.Add($"{owner} repositoryPath '{path}' is a home or root directory; name a directory of its own for the copy");
+        }
+    }
+
+    private static bool IsWindowsAbsolute(string path)
+        => (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/')
+            || path.StartsWith(@"\\", StringComparison.Ordinal);
+
+    /// <summary>
     /// Rejects a path that is absolute or climbs out with "..". These paths are resolved
     /// against a leg's own tree or build directory, and one that escapes it would read, or
     /// demand, something that belongs to another leg. Decided the same way on every platform,
@@ -593,7 +855,11 @@ public static class HarnessConfigValidator
     }
 
     private static bool HasProject(HarnessConfig config, string name)
-        => config.Projects.Any(project => string.Equals(project.Name, name, StringComparison.OrdinalIgnoreCase));
+        => config.Projects.Any(project => SameName(project.Name, name));
+
+    /// <summary>Names in the file compare ignoring case, as its keys do.</summary>
+    private static bool SameName(string? first, string? second)
+        => string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
 
     private static void RequireAtLeastOne(int value, string setting, List<string> problems)
     {

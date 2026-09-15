@@ -4,6 +4,8 @@ using RepoHarness.Core.Commands;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
@@ -46,6 +48,14 @@ internal static class HarnessServices
             NamedMutexAnchorRegistryLock.DefaultTimeout));
         services.AddSingleton<IAnchorRegistryService, AnchorRegistryService>();
         services.AddSingleton<IAnchorBalanceService, AnchorBalanceService>();
+
+        services.AddSingleton<IToolIdentityProvider, EntryAssemblyToolIdentityProvider>();
+        services.AddSingleton<IHostCommandRunner, HostCommandRunner>();
+        services.AddSingleton<EmulatorProbe>();
+        services.AddSingleton<HostAgentService>();
+        services.AddSingleton<IHostInspector, HostInspector>();
+        services.AddSingleton<LegsService>();
+        services.AddSingleton<HostExecService>();
 
         services.AddSingleton<VerifyGitService>();
         services.AddSingleton<InitService>();

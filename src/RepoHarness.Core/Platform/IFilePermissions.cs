@@ -18,4 +18,16 @@ public interface IFilePermissions
     /// decided by extension, which the caller has already applied.
     /// </summary>
     bool IsExecutable(string path);
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a file no other user can open: the condition ssh sets for
+    /// a private key, which it ignores otherwise. A file that does not exist is not private.
+    /// </summary>
+    bool IsPrivate(string path);
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a file another user can change: the condition under which
+    /// ssh refuses to read a configuration file. A file that does not exist is not.
+    /// </summary>
+    bool IsWritableByOthers(string path);
 }

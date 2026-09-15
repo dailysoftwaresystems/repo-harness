@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace RepoHarness.Core.Platform;
 
 /// <inheritdoc cref="IHostPlatform"/>
@@ -15,13 +17,15 @@ public sealed class HostPlatform : IHostPlatform
 
     public string PlatformKey => Current switch
     {
-        PlatformId.Windows => "windows",
-        PlatformId.Linux => "linux",
-        PlatformId.MacOs => "macos",
+        PlatformId.Windows => PlatformNames.Windows,
+        PlatformId.Linux => PlatformNames.Linux,
+        PlatformId.MacOs => PlatformNames.MacOs,
         _ => throw new InvalidOperationException($"Unmapped platform '{Current}'."),
     };
 
-    public string HostName => Environment.MachineName;
+    public string Processor { get; } = PlatformNames.ForArchitecture(RuntimeInformation.OSArchitecture);
+
+    public string HomeDirectory => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
     public StringComparison PathComparison => Current == PlatformId.Windows
         ? StringComparison.OrdinalIgnoreCase

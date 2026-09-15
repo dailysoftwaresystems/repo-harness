@@ -2,6 +2,7 @@ using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
@@ -16,7 +17,8 @@ public sealed class InitService(
     IGitIgnoreManager gitIgnoreManager,
     IProjectDetector projectDetector,
     VerifyGitService verifyGitService,
-    IAnchorRegistryLocator anchorRegistryLocator)
+    IAnchorRegistryLocator anchorRegistryLocator,
+    IHostPlatform platform)
 {
     /// <summary>
     /// Ignore rules the harness owns. Contents of the worktrees and ssh directories
@@ -53,6 +55,7 @@ public sealed class InitService(
     private readonly IProjectDetector _projectDetector = projectDetector;
     private readonly VerifyGitService _verifyGitService = verifyGitService;
     private readonly IAnchorRegistryLocator _anchorRegistryLocator = anchorRegistryLocator;
+    private readonly IHostPlatform _platform = platform;
 
     /// <summary>
     /// Initialises the repository containing <paramref name="startDirectory"/>.
@@ -105,11 +108,11 @@ public sealed class InitService(
         else
         {
             var detected = _projectDetector.Detect(root);
-            _configStore.Save(configFile, DefaultConfigFactory.Create(detected));
+            _configStore.Save(configFile, DefaultConfigFactory.Create(detected, _platform.PlatformKey, _platform.Processor));
 
             actions.Add(detected.Count == 0
                 ? $"created {Describe(root, configFile)} (no project detected; declare one under \"projects\")"
-                : $"created {Describe(root, configFile)} (detected {string.Join(", ", detected.Select(d => d.Type))})");
+                : $"created {Describe(root, configFile)} (detected {string.Join(", ", detected.Select(d => d.Type))}; legs for {_platform.PlatformKey} {_platform.Processor})");
         }
 
         var gitIgnorePath = Path.Combine(root, ".gitignore");

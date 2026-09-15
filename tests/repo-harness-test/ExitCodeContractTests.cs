@@ -1,4 +1,6 @@
+using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -62,6 +64,9 @@ public sealed class ExitCodeContractTests
             var value = (int)status;
             Assert.True(value is >= 0 and <= 9, $"{status} = {value} is outside the per-command range");
         }
+
+        Assert.InRange(AnchorExit.Findings, 1, 9);
+        Assert.InRange(LegsExit.Unavailable, 1, 9);
     }
 
     [Fact]

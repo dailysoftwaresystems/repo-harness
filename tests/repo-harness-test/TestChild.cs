@@ -26,6 +26,7 @@ internal static class TestChild
         return mode switch
         {
             "echo-args" => EchoArguments(standardOutput, arguments),
+            "echo-stdin" => EchoStandardInput(standardOutput),
             "sleep" => Sleep(arguments),
             "stream" => Stream(standardOutput, standardError, arguments),
             "spawn-grandchild" => SpawnGrandchild(arguments),
@@ -43,6 +44,17 @@ internal static class TestChild
             output.Write("[" + argument + "]\n");
         }
 
+        return 0;
+    }
+
+    /// <summary>
+    /// Reads standard input to its end and writes it back between brackets. Read as UTF-8 bytes,
+    /// for the reason output is written that way.
+    /// </summary>
+    private static int EchoStandardInput(TextWriter output)
+    {
+        using var input = new StreamReader(Console.OpenStandardInput(), Utf8NoBom);
+        output.Write("[" + input.ReadToEnd() + "]\n");
         return 0;
     }
 
