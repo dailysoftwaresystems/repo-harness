@@ -242,6 +242,33 @@ public sealed partial class CliEndToEndTests
         Assert.Equal(HarnessExit.Refused, result.ExitCode);
     }
 
+    [Fact]
+    public async Task DeleteWorktree_WithUncommittedWork_IsRefused_UntilForced()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await PrepareRepositoryAsync(temp);
+        var path = HarnessFactory.WorktreePath(temp.Path, "wt");
+
+        var created = await CliRunner.RunAsync(["create-worktree", "wt", "-C", temp.Path], cancellationToken);
+        Assert.Equal(HarnessExit.Success, created.ExitCode);
+        File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
+
+        var refused = await CliRunner.RunAsync(["delete-worktree", "wt", "-C", temp.Path], cancellationToken);
+
+        // One line on standard error, naming what would be lost and the way past.
+        Assert.Equal(HarnessExit.Refused, refused.ExitCode);
+        Assert.Equal(
+            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
+            Assert.Single(refused.StandardError.ReplaceLineEndings("\n").Trim().Split('\n')));
+        Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
+
+        var forced = await CliRunner.RunAsync(["delete-worktree", "wt", "--force", "-C", temp.Path], cancellationToken);
+
+        Assert.Equal(HarnessExit.Success, forced.ExitCode);
+        Assert.False(Directory.Exists(path));
+    }
+
     /// <summary>An initialised repository whose path budget any temporary directory fits.</summary>
     private static Task PrepareRepositoryAsync(TempDirectory temp)
         => new HarnessFactory().InitializeHarnessAsync(

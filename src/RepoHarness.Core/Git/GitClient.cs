@@ -1,3 +1,4 @@
+using System.Globalization;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -96,35 +97,22 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         CancellationToken cancellationToken = default)
     {
         // -z keeps paths NUL separated so a path containing a space or a quote is
-        // never mangled by the textual quoting git would otherwise apply.
+        // never mangled by the textual quoting git would otherwise apply. Untracked
+        // files and submodules are asked for explicitly because configuration can hide
+        // both: under status.showUntrackedFiles=no a new file is not listed at all, and
+        // the tree reads as clean to a caller about to discard it. --no-optional-locks
+        // keeps the question from writing anything: status otherwise refreshes the index
+        // and writes it back whenever it can take the lock.
         var result = await RunAsync(
             directory,
-            ["status", "--porcelain", "-z"],
+            ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=normal", "--ignore-submodules=none"],
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // An empty list must mean "nothing changed", never "the question failed":
         // a caller reads it as a clean tree and proceeds over uncommitted work.
         Ensure(result, "read the repository status");
 
-        var fields = result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries);
-        var entries = new List<string>();
-
-        for (var index = 0; index < fields.Length; index++)
-        {
-            var entry = fields[index];
-            entries.Add(entry);
-
-            // A rename or copy is one change encoded as two NUL separated fields: the
-            // status with the new path, then the original path. Treating the second
-            // field as another entry would report one rename as two changes, and the
-            // second would have no status prefix at all.
-            if (entry[0] is 'R' or 'C')
-            {
-                index++;
-            }
-        }
-
-        return entries;
+        return ParseStatus(result.StandardOutput);
     }
 
     public async Task<IReadOnlyList<GitWorktree>> ListWorktreesAsync(
@@ -141,6 +129,203 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         Ensure(result, "list the worktrees");
 
         return ParseWorktrees(result.StandardOutput);
+    }
+
+    public async Task<GitLocation?> GetLocationAsync(
+        string directory,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunQueryAsync(
+            directory,
+            ["rev-parse", "--show-prefix", "--absolute-git-dir"],
+            cancellationToken).ConfigureAwait(false);
+
+        if (!result.Succeeded)
+        {
+            EnsureNotAnError(result, directory);
+            return null;
+        }
+
+        // Read by position: at the root of a work tree the prefix is an empty line, and
+        // dropping empty lines would take the git directory for the prefix.
+        var lines = result.StandardOutput.Split('\n');
+
+        if (lines.Length < 2 || lines[1].TrimEnd('\r').Length == 0)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git did not report where '{directory}' sits in its repository.");
+        }
+
+        return new GitLocation(lines[0].TrimEnd('\r'), NormalizeDirectory(lines[1].TrimEnd('\r')));
+    }
+
+    public async Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(
+        string directory,
+        CancellationToken cancellationToken = default)
+    {
+        // -v is what shows the flags that hide an edit from status, and -z keeps every path intact.
+        var result = await RunAsync(
+            directory,
+            ["ls-files", "--stage", "-v", "-z"],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        Ensure(result, "read the index");
+
+        var entries = new List<GitIndexEntry>();
+
+        foreach (var field in result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // The tag, mode, object and stage, separated by spaces, then a tab and the path.
+            var tab = field.IndexOf('\t');
+            string[] parts = tab < 0 ? [] : field[..tab].Split(' ');
+
+            if (parts.Length != 4
+                || parts[0].Length != 1
+                || !int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var stage))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git listed an index entry in a form this build cannot read: '{field}'");
+            }
+
+            entries.Add(new GitIndexEntry(parts[0][0], parts[1], parts[2], stage, field[(tab + 1)..]));
+        }
+
+        return entries;
+    }
+
+    public async Task<string> GetIndexFileAsync(string directory, CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(
+            directory,
+            ["rev-parse", "--git-path", "index"],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        Ensure(result, "find the index");
+
+        // git answers relative to the directory it ran in, where it can.
+        return Path.GetFullPath(Path.Combine(directory, result.StandardOutput.Trim()));
+    }
+
+    public async Task<IReadOnlyList<string>> FindEditedFilesAsync(
+        string directory,
+        string indexCopy,
+        IReadOnlyList<string> assumedUnchanged,
+        IReadOnlyList<string> skipWorktree,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(assumedUnchanged);
+        ArgumentNullException.ThrowIfNull(skipWorktree);
+
+        // Each mark is cleared by a call of its own: given both options, update-index clears only
+        // the first. The paths travel on standard input, so no list of them outgrows a command line.
+        foreach (var (option, paths) in new[] { ("--no-assume-unchanged", assumedUnchanged), ("--no-skip-worktree", skipWorktree) })
+        {
+            if (paths.Count == 0)
+            {
+                continue;
+            }
+
+            // --no-split-index writes the copy whole: a split index would otherwise be written as
+            // a new shared index file beside the real one, in the worktree's git directory.
+            var cleared = await RunWithIndexAsync(
+                directory,
+                indexCopy,
+                ["update-index", "--no-split-index", option, "-z", "--stdin"],
+                string.Join('\0', paths) + '\0',
+                cancellationToken).ConfigureAwait(false);
+
+            Ensure(cleared, "clear the marks in a copy of the index");
+        }
+
+        // Status compares the files the way it compares any other. Hashing one alone would skip
+        // git's rule that leaves line endings already stored in the index as they are, and report
+        // an untouched file as edited under core.autocrlf.
+        var status = await RunWithIndexAsync(
+            directory,
+            indexCopy,
+            ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all"],
+            standardInput: null,
+            cancellationToken).ConfigureAwait(false);
+
+        Ensure(status, "compare the files marked assume-unchanged or skip-worktree");
+
+        var marked = new HashSet<string>([.. assumedUnchanged, .. skipWorktree], StringComparer.Ordinal);
+
+        return [.. ParseStatus(status.StandardOutput).Select(entry => entry[3..]).Where(marked.Contains)];
+    }
+
+    public async Task<string?> ResolveGitDirectoryAsync(
+        string directory,
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunQueryAsync(
+            directory,
+            ["rev-parse", "--resolve-git-dir", path],
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.Succeeded)
+        {
+            return NormalizeDirectory(result.StandardOutput.Trim());
+        }
+
+        // "not a gitdir" is git's answer that the path is no repository; any other failure is git
+        // unable to look, which must not read as a directory holding nothing.
+        if (!result.TimedOut && result.StandardError.Contains("not a gitdir", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        throw new HarnessException(
+            HarnessExit.CommandFailed,
+            $"git could not tell whether '{path}' is a repository: {result.FailureMessage}");
+    }
+
+    public async Task<int> CountCommitsAsync(
+        string directory,
+        IReadOnlyList<string> revisions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(
+            directory,
+            ["rev-list", "--count", .. revisions],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ReadCount(result);
+    }
+
+    public async Task<int> CountRepositoryCommitsAsync(
+        string gitDirectory,
+        IReadOnlyList<string> revisions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(
+            gitDirectory,
+            [.. RepositoryOnly(gitDirectory), "rev-list", "--count", .. revisions],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        return ReadCount(result);
+    }
+
+    public async Task<bool> HasStashAsync(string gitDirectory, CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(
+            gitDirectory,
+            [.. RepositoryOnly(gitDirectory), "rev-parse", "--verify", "--quiet", "refs/stash^{commit}"],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // With --verify --quiet, git answers "no stash" with exit code 1 and nothing else; any other
+        // failure is git being unable to look.
+        return result.ExitCode switch
+        {
+            0 when !result.TimedOut => true,
+            1 when !result.TimedOut => false,
+            _ => throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Could not look for a stash in '{gitDirectory}': {result.FailureMessage}"),
+        };
     }
 
     public async Task<bool> IsIgnoredAsync(
@@ -244,8 +429,8 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
     /// untranslated.
     /// </summary>
     /// <remarks>
-    /// "not a git repository" is recognised by its text, and a translated git answers in
-    /// another language, so these queries run under <c>LC_ALL=C</c>. The override is kept
+    /// "not a git repository" and "not a gitdir" are recognised by their text, and a translated
+    /// git answers in another language, so these queries run under <c>LC_ALL=C</c>. The override is kept
     /// to them alone: every other git command, including those that run the user's hooks,
     /// keeps the user's locale, because forcing C onto a hook changes how it handles
     /// anything outside ASCII.
@@ -256,11 +441,33 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         CancellationToken cancellationToken)
         => RunCoreAsync(directory, arguments, echoOutput: false, untranslated: true, cancellationToken);
 
+    private Task<GitCommandResult> RunCoreAsync(
+        string directory,
+        IReadOnlyList<string> arguments,
+        bool echoOutput,
+        bool untranslated,
+        CancellationToken cancellationToken)
+        => RunCoreAsync(directory, arguments, echoOutput, untranslated, indexFile: null, standardInput: null, cancellationToken);
+
+    /// <summary>
+    /// Runs git against <paramref name="indexFile"/> instead of the work tree's own index: a copy
+    /// made to be changed, so the real index is never touched.
+    /// </summary>
+    private Task<GitCommandResult> RunWithIndexAsync(
+        string directory,
+        string indexFile,
+        IReadOnlyList<string> arguments,
+        string? standardInput,
+        CancellationToken cancellationToken)
+        => RunCoreAsync(directory, arguments, echoOutput: false, untranslated: false, indexFile, standardInput, cancellationToken);
+
     private async Task<GitCommandResult> RunCoreAsync(
         string directory,
         IReadOnlyList<string> arguments,
         bool echoOutput,
         bool untranslated,
+        string? indexFile,
+        string? standardInput,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(arguments);
@@ -278,6 +485,11 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             environment["LC_ALL"] = "C";
         }
 
+        if (indexFile is not null)
+        {
+            environment["GIT_INDEX_FILE"] = indexFile;
+        }
+
         var request = new ProcessRequest
         {
             FileName = GitExecutable,
@@ -286,6 +498,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             OnOutputLine = echoOutput ? _output.Raw : null,
             OnErrorLine = echoOutput ? _output.RawError : null,
             Environment = environment,
+            StandardInput = standardInput,
         };
 
         var result = await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false);
@@ -305,6 +518,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         string? commit = null;
         string? branch = null;
         var bare = false;
+        string? lockReason = null;
 
         void Flush()
         {
@@ -318,12 +532,16 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
                 commit,
                 branch,
                 IsMain: worktrees.Count == 0,
-                IsBare: bare));
+                IsBare: bare)
+            {
+                LockReason = lockReason,
+            });
 
             path = null;
             commit = null;
             branch = null;
             bare = false;
+            lockReason = null;
         }
 
         foreach (var line in output.Split('\n').Select(l => l.TrimEnd('\r')))
@@ -339,7 +557,10 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             }
             else if (line.StartsWith("HEAD ", StringComparison.Ordinal))
             {
-                commit = line["HEAD ".Length..];
+                // An unborn HEAD, as on an orphan branch, is listed as the null object id. It names no
+                // commit, and handed to git as one it fails every command it reaches.
+                var head = line["HEAD ".Length..];
+                commit = head.All(character => character == '0') ? null : head;
             }
             else if (line.StartsWith("branch ", StringComparison.Ordinal))
             {
@@ -350,10 +571,69 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             {
                 bare = true;
             }
+            else if (string.Equals(line, "locked", StringComparison.Ordinal))
+            {
+                lockReason = string.Empty;
+            }
+            else if (line.StartsWith("locked ", StringComparison.Ordinal))
+            {
+                lockReason = line["locked ".Length..];
+            }
         }
 
         Flush();
         return worktrees;
+    }
+
+    /// <summary>
+    /// Reads <c>git status --porcelain -z</c>: one entry per changed path, each two status
+    /// characters and a space, then the path.
+    /// </summary>
+    private static List<string> ParseStatus(string output)
+    {
+        var fields = output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        var entries = new List<string>();
+
+        for (var index = 0; index < fields.Length; index++)
+        {
+            var entry = fields[index];
+            entries.Add(entry);
+
+            // A rename or copy is one change encoded as two NUL separated fields: the
+            // status with the new path, then the original path. Treating the second
+            // field as another entry would report one rename as two changes, and the
+            // second would have no status prefix at all. Either status column can mark
+            // one: a staged rename is marked in the first, and a rename git finds in the
+            // work tree, such as that of an intent-to-add file, in the second.
+            if (entry is ['R' or 'C', ..] or [_, 'R' or 'C', ..])
+            {
+                index++;
+            }
+        }
+
+        return entries;
+    }
+
+    /// <summary>
+    /// Options that aim git at a git directory alone. The work tree is pointed at the git directory
+    /// as well, because a submodule's repository names its checkout in core.worktree, and git stops
+    /// when that checkout is gone, even for a question that never reads it.
+    /// </summary>
+    private static string[] RepositoryOnly(string gitDirectory)
+        => [$"--git-dir={gitDirectory}", $"--work-tree={gitDirectory}"];
+
+    /// <summary>Reads the count <c>git rev-list --count</c> printed, or throws when git failed.</summary>
+    private static int ReadCount(GitCommandResult result)
+    {
+        Ensure(result, "count commits");
+
+        var text = result.StandardOutput.Trim();
+
+        return int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var count)
+            ? count
+            : throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git counted commits in a form this build cannot read: '{text}'");
     }
 
     /// <summary>

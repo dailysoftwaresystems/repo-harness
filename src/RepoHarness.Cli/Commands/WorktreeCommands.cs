@@ -55,10 +55,16 @@ internal static class DeleteWorktreeCommand
         Description = "Worktree to remove.",
     };
 
+    private static readonly Option<bool> ForceOption = new("--force")
+    {
+        Description = "Delete the worktree without checking it, even when locked: uncommitted changes, commits on no branch, tag, remote-tracking ref, newest stash or other worktree's HEAD, and submodules' unpushed work are lost.",
+    };
+
     internal static Command Create()
     {
-        var command = new Command(Name, "Remove a worktree and everything under it.");
+        var command = new Command(Name, "Remove a worktree and everything under it; refuses one holding work that would be lost, or a locked one, without --force.");
         command.Arguments.Add(NameArgument);
+        command.Options.Add(ForceOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -67,6 +73,7 @@ internal static class DeleteWorktreeCommand
                 .DeleteAsync(
                     context.Directory,
                     context.ParseResult.GetRequiredValue(NameArgument),
+                    context.ParseResult.GetValue(ForceOption),
                     cancellationToken)
                 .ConfigureAwait(false);
 

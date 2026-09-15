@@ -597,6 +597,10 @@ public sealed class AnchorRegistryServiceTests
 
         public void DeleteFile(string path) => inner.DeleteFile(path);
 
+        public string ResolveLinks(string path) => inner.ResolveLinks(path);
+
+        public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
+
         public void DeleteDirectory(string path) => inner.DeleteDirectory(path);
 
         public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);

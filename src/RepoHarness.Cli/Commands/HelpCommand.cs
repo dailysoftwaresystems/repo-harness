@@ -96,7 +96,7 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness help exit-codes         What each exit code means");
         builder.AppendLine("  DssHarness help config             What config.json declares");
         builder.AppendLine("  DssHarness help legs               Hosts, emulators, and how a leg finds where it runs");
-        builder.AppendLine("  DssHarness help worktrees          Naming rules and the path budget");
+        builder.AppendLine("  DssHarness help worktrees          Naming rules, the path budget, and when deleting refuses");
         builder.AppendLine("  DssHarness help anchors            Anchor registries and the commands that change them");
         builder.AppendLine("  DssHarness help layout             What init creates, and what git tracks");
         builder.AppendLine();
@@ -249,6 +249,30 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("Worktrees always belong to the main checkout, so running create-worktree from");
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
+        builder.AppendLine();
+        builder.AppendLine("delete-worktree removes a worktree, everything under it, and git's record of it.");
+        builder.AppendLine($"Without --force it checks first, and deletes nothing and exits {HarnessExit.Refused} when the");
+        builder.AppendLine("worktree has uncommitted changes: a modified, staged or untracked file git does");
+        builder.AppendLine("not ignore, a changed submodule, or an edit hidden by assume-unchanged or");
+        builder.AppendLine("skip-worktree. It refuses too when commits on its HEAD are on no branch, tag,");
+        builder.AppendLine("remote-tracking ref, newest stash or other worktree's HEAD; when a submodule");
+        builder.AppendLine("repository deleted with it, checked out or not, holds a commit no");
+        builder.AppendLine("remote-tracking ref or tag contains, or a stash; when it is locked; when git's");
+        builder.AppendLine("record of it names another directory or none, as after moving it by hand; and");
+        builder.AppendLine("when git does not see it as a worktree of this repository. The refusal names");
+        builder.AppendLine("everything it found, on one line. A tag made inside a submodule counts as kept,");
+        builder.AppendLine("and is lost with the submodule's repository.");
+        builder.AppendLine();
+        builder.AppendLine("Without --force, when the check cannot be finished, because git cannot answer or");
+        builder.AppendLine("a record cannot be read or its directory found, nothing is deleted and it");
+        builder.AppendLine($"exits {HarnessExit.CommandFailed}.");
+        builder.AppendLine("Ignored files are deleted unchecked, even ones no build makes again, such as");
+        builder.AppendLine(".env, and so are ignored directories with everything in them, the history of a");
+        builder.AppendLine("repository nested inside one included. --force skips every check and overrides");
+        builder.AppendLine("a lock; whatever the worktree held is lost.");
+        builder.AppendLine();
+        builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
+        builder.AppendLine("running delete-worktree again with --force finishes it.");
 
         return builder.ToString();
     }

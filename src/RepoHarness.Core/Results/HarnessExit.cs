@@ -49,9 +49,10 @@ public static class HarnessExit
     public const int InternalError = 70;
 
     /// <summary>
-    /// The run was interrupted before it finished. Distinct from a failure: nothing
-    /// ran to completion, so a caller must not read this as a red verdict. The value
-    /// follows the shell convention for an interrupted process.
+    /// The run was interrupted before it finished, so it reached no verdict, and a caller
+    /// must not read this as a red one. A command stops having done nothing, except a
+    /// deletion already past the point where it can be undone, which says what it left
+    /// behind. The value follows the shell convention for an interrupted process.
     /// </summary>
     public const int Cancelled = 130;
 
@@ -80,7 +81,7 @@ public static class HarnessExit
             [nameof(HostUnavailable)] = "A host could not be reached, or DssHarness could not run there; nothing ran on it.",
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",
-            [nameof(Cancelled)] = "The run was interrupted before it finished; nothing ran to completion.",
+            [nameof(Cancelled)] = "The run was interrupted before it finished; a deletion already under way says what it left.",
         };
 
         return [.. typeof(HarnessExit)

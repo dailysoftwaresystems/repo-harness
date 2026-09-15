@@ -39,7 +39,7 @@ public sealed class HarnessFactory
 
         PathBudget = new PathBudget(Platform);
         ContextLoader = new HarnessContextLoader(RepositoryLocator, ConfigStore, GitClient, FileSystem);
-        WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform);
+        WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform, Output);
 
         AnchorRegistryLocator = new AnchorRegistryLocator(GitClient);
         AnchorRegistryLock = new NamedMutexAnchorRegistryLock(Platform, NamedMutexAnchorRegistryLock.DefaultTimeout);
