@@ -74,10 +74,10 @@ The only repository configuration required is one **variable** (not a secret):
    promote them, grant the deploy app `workflows` and add `permission-workflows: write`
    beside `permission-contents: write` in `deploy.yml`; a token cannot ask for a
    permission its app lacks, so it is not asked for before then. Until then, someone the
-   rulesets let bypass them first fast-forwards the release branch by hand, `release/beta`
-   to `main` or `release/stable` to `release/beta`, with credentials allowed to change
-   workflows. Moving a release branch publishes nothing, and Deploy then promotes from
-   there as usual.
+   rulesets let bypass them first fast-forwards the release branch by hand, once its last
+   publish has finished: `release/beta` to `main` or `release/stable` to `release/beta`,
+   with credentials allowed to change workflows. Moving a release branch publishes
+   nothing, and Deploy then promotes from there as usual.
 
 Until step 1 exists on nuget.org, the publish step fails closed: nothing reaches
 nuget.org, no tag is created and no credential is minted. Once the policy exists, start
@@ -164,9 +164,11 @@ shipped something that was never tested:
   promotes from wherever it was left.
 - **A publish that has not finished.** Deploy refuses while Package Pipeline has a run
   that has not finished for the release branch, or for stable, for `release/beta`. It also
-  refuses to move a release branch whose head is tagged for that channel but not released:
+  refuses to move a release branch whose newest tag for that channel was never released:
   moving on would leave that publish unable to finish. Start Package Pipeline again to
-  finish it; to abandon a publish nuget.org never received, delete its tag.
+  finish a publish from the branch's head. A tag the branch has already moved past is
+  released by hand, and a publish nuget.org never received is abandoned by deleting its
+  tag.
 - **Release branch diverged.** A release branch only ever fast-forwards to a tested
   commit. One holding commits the tested commit lacks is refused, because merging would
   put a tree on it that the matrix never tested; a person reconciles it. Every check

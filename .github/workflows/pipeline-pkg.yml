@@ -309,8 +309,9 @@ jobs:
 
             # nuget.org lists a version only minutes after accepting it. A run resumed within
             # those minutes finds the tag but no listed version, and pushes a package nuget.org
-            # already has, which it refuses as a conflict.
-            if [ "${TAG_EXISTS:-}" = "true" ] && [[ "$pushed" == *"409"* ]]; then
+            # already has, which it refuses as a conflict. The status is matched in the error
+            # line, since the push also prints timings in milliseconds, which can contain 409.
+            if [ "${TAG_EXISTS:-}" = "true" ] && [[ "$pushed" == *"does not indicate success: 409"* ]]; then
               echo "::error::nuget.org already has ${PACKAGE_VERSION} but has not listed it yet. Start Package Pipeline again in a few minutes; that run releases the package nuget.org has."
             else
               echo "::error::nuget.org did not accept ${PACKAGE_VERSION}. The tag stays, and starting Package Pipeline again resumes from it."

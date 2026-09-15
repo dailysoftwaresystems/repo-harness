@@ -204,12 +204,13 @@ jobs:
               exit 1
             fi
 
-            # A publish starts from the head of its release branch, and its release is the last
-            # thing it creates. This channel's tag at the head with no release is a publish that
-            # stopped part way, which moving the branch on would leave unable to finish.
-            head_tags=$(git tag --list --points-at "$target_head" 'v*')
+            # A publish's release is the last thing it creates, so the newest tag for this channel
+            # on the release branch with no release is a publish that stopped part way. Moving the
+            # branch on, whether here or by hand beforehand, would leave it unable to finish.
+            branch_tags=$(git tag --list --merged "$target_head" --sort=-version:refname 'v*')
+            latest=""
 
-            for tag in $head_tags; do
+            for tag in $branch_tags; do
               if [ "$CHANNEL" = "beta" ] && [[ "$tag" != *-beta ]]; then
                 continue
               fi
@@ -218,17 +219,20 @@ jobs:
                 continue
               fi
 
-              if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --silent 2>"$errors"; then
-                continue
-              fi
+              latest=$tag
+              break
+            done
 
-              if grep -q "HTTP 404" "$errors"; then
-                echo "::error::$tag names the head of $TARGET but was never released, so its publish stopped part way. Start Package Pipeline for $TARGET again to finish it; to abandon a publish nuget.org never received, delete the tag."
+            if [ -n "$latest" ] && ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest" --silent 2>"$errors"; then
+              if ! grep -q "HTTP 404" "$errors"; then
+                echo "::error::Could not tell whether $latest was released, so nothing was promoted: $(cat "$errors")"
+              elif [ "$(git rev-parse "refs/tags/$latest^{commit}")" = "$target_head" ]; then
+                echo "::error::$latest names the head of $TARGET but was never released, so its publish stopped part way. Start Package Pipeline for $TARGET again to finish it; to abandon a publish nuget.org never received, delete the tag."
               else
-                echo "::error::Could not tell whether $tag was released, so nothing was promoted: $(cat "$errors")"
+                echo "::error::$latest was never released, and $TARGET has moved past it, so Package Pipeline can no longer finish that publish. Release the tag by hand or, if nuget.org never received it, delete the tag to abandon it."
               fi
               exit 1
-            done
+            fi
           else
             echo "::notice::$TARGET does not exist yet; this promotion creates it."
           fi
