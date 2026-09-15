@@ -63,6 +63,6 @@ public sealed class HostPlatform : IHostPlatform
         }
 
         throw new PlatformNotSupportedException(
-            "repo-harness supports Windows, Linux and macOS only.");
+            "DssHarness supports Windows, Linux and macOS only.");
     }
 }

@@ -7,7 +7,7 @@ using RepoHarness.Core.Results;
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// Serves what another repo-harness asks of this machine: which build this is and what the machine
+/// Serves what another DssHarness asks of this machine: which build this is and what the machine
 /// is, or to run one of this build's own commands in a directory here. Reached only through
 /// <see cref="HostAgentProtocol.CommandName"/>, with the request on standard input.
 /// </summary>
@@ -30,7 +30,7 @@ public sealed class HostAgentService(
     /// <param name="output">Where an info answer is written.</param>
     /// <param name="error">Where a refused request is explained, and where a run request's completion line is written.</param>
     /// <param name="run">
-    /// Runs a repo-harness command line with the given directory as the current one, until it finishes or the
+    /// Runs a DssHarness command line with the given directory as the current one, until it finishes or the
     /// token is cancelled, and returns its exit code. Supplied by the program, which is the only place that
     /// holds the command line parser.
     /// </param>
@@ -67,7 +67,7 @@ public sealed class HostAgentService(
             return await RefuseAsync(
                 error,
                 HarnessExit.UsageError,
-                $"the request speaks protocol {protocol}, and repo-harness {_identity.Current.Version} on this host speaks {HostAgentProtocol.Version}").ConfigureAwait(false);
+                $"the request speaks protocol {protocol}, and {ToolPackage.Command} {_identity.Current.Version} on this host speaks {HostAgentProtocol.Version}").ConfigureAwait(false);
         }
 
         HostAgentRequest? request;

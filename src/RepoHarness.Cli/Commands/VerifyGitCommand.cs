@@ -5,7 +5,7 @@ using RepoHarness.Core.Results;
 
 namespace RepoHarness.Cli.Commands;
 
-/// <summary>Wires <c>repo-harness verify-git</c>.</summary>
+/// <summary>Wires <c>DssHarness verify-git</c>.</summary>
 internal static class VerifyGitCommand
 {
     internal const string Name = "verify-git";

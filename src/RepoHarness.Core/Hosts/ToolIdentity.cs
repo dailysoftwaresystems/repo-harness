@@ -7,10 +7,10 @@ namespace RepoHarness.Core.Hosts;
 public static class ToolPackage
 {
     /// <summary>The NuGet package ID, as the CLI project declares it.</summary>
-    public const string Id = "RepoHarness";
+    public const string Id = "DssHarness";
 
     /// <summary>The command the package installs, as the CLI project declares it.</summary>
-    public const string Command = "repo-harness";
+    public const string Command = "DssHarness";
 
     /// <summary>The oldest .NET SDK major version that can install and run the tool.</summary>
     public const int MinimumSdkMajor = 10;
@@ -33,7 +33,7 @@ public static class ToolPackage
     }
 }
 
-/// <summary>Which build of repo-harness a process is.</summary>
+/// <summary>Which build of DssHarness a process is.</summary>
 /// <param name="Version">The version it reports with <c>--version</c>.</param>
 /// <param name="AssemblySha256">
 /// The SHA-256 of its main assembly, in lower-case hex. The version alone cannot tell a build from
@@ -42,7 +42,7 @@ public static class ToolPackage
 /// </param>
 public sealed record ToolIdentity(string Version, string AssemblySha256);
 
-/// <summary>Identifies the build of repo-harness that is running.</summary>
+/// <summary>Identifies the build of DssHarness that is running.</summary>
 public interface IToolIdentityProvider
 {
     /// <summary>The running build.</summary>

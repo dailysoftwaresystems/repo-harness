@@ -54,7 +54,7 @@ concurrency:
 
 env:
   PROJECT: src/RepoHarness.Cli/RepoHarness.Cli.csproj
-  PACKAGE_ID: RepoHarness
+  PACKAGE_ID: DssHarness
   PACKAGE_DIRECTORY: build/package
 
 jobs:
@@ -260,7 +260,7 @@ jobs:
       - name: Build
         # The version is applied at build time as well as at pack time. Packing with
         # --no-build overrides only the package version, leaving the assembly with
-        # whatever was compiled in, so `repo-harness --version` would report the
+        # whatever was compiled in, so `DssHarness --version` would report the
         # repository's <Version> rather than the version actually published.
         #
         # Nothing is built for a version nuget.org already has: the run that published it built,
@@ -305,12 +305,14 @@ jobs:
           version: ${{ env.PACKAGE_VERSION }}
 
       - name: Hand the verified package to the jobs that publish it
-        # Only carries the package between jobs. The GitHub release is where it stays.
+        # Only carries the package between jobs; the GitHub release is where it stays. Overwrite,
+        # so "Re-run all jobs" replaces the copy an earlier attempt of this run uploaded.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: package
           path: ${{ env.PACKAGE_DIRECTORY }}/*.nupkg
           if-no-files-found: error
+          overwrite: true
 
   tag:
     needs: package
@@ -342,7 +344,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "repo-harness ${TAG}"
+          git tag -a "${TAG}" -m "DssHarness ${TAG}"
           git push origin "${TAG}"
 
   nuget:
@@ -464,6 +466,6 @@ jobs:
             "$PACKAGE_DIRECTORY"/*.nupkg \
             --repo "$GITHUB_REPOSITORY" \
             --target "${RELEASE_SHA}" \
-            --title "repo-harness ${TAG}" \
+            --title "DssHarness ${TAG}" \
             --generate-notes \
             ${prerelease}

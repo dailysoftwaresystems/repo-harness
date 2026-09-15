@@ -1,11 +1,12 @@
 using System.Reflection;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Tests;
 
 /// <summary>
-/// Runs the real <c>repo-harness</c> CLI. End-to-end tests exercise the built program
+/// Runs the real <c>DssHarness</c> CLI. End-to-end tests exercise the built program
 /// rather than calling services directly, so argument parsing, dependency wiring and exit
 /// codes are all covered by the same assertion.
 /// </summary>
@@ -16,14 +17,14 @@ public static class CliRunner
 
     private static readonly Lazy<string> CliAssembly = new(LocateCliAssembly, LazyThreadSafetyMode.PublicationOnly);
 
-    /// <summary>The CLI assembly the tests run: the build a host's repo-harness is compared with.</summary>
+    /// <summary>The CLI assembly the tests run: the build a host's DssHarness is compared with.</summary>
     public static string CliAssemblyPath => CliAssembly.Value;
 
     /// <summary>Runs the CLI and returns its result.</summary>
-    /// <param name="arguments">The command line after <c>repo-harness</c>.</param>
+    /// <param name="arguments">The command line after <c>DssHarness</c>.</param>
     /// <param name="cancellationToken">Stops the run.</param>
     /// <param name="workingDirectory">The directory the CLI starts in, or the test's own.</param>
-    /// <param name="standardInput">Text the CLI reads on standard input, as a host's repo-harness reads a request.</param>
+    /// <param name="standardInput">Text the CLI reads on standard input, as a host's DssHarness reads a request.</param>
     public static async Task<ProcessResult> RunAsync(
         string[] arguments,
         CancellationToken cancellationToken,
@@ -51,7 +52,7 @@ public static class CliRunner
         // wrong failure.
         Assert.False(
             result.TimedOut,
-            $"'repo-harness {string.Join(' ', arguments)}' did not finish within {Budget}.");
+            $"'{ToolPackage.Command} {string.Join(' ', arguments)}' did not finish within {Budget}.");
 
         return result;
     }

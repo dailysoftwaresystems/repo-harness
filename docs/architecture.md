@@ -1,10 +1,10 @@
-# repo-harness architecture
+# DssHarness architecture
 
 ## Why this exists
 
 A repository's build, test and cross-host work is usually a pile of paired
 `.sh`/`.ps1` scripts that drift apart, encode one repository's facts, and fail
-differently on each platform. `repo-harness` replaces that with one
+differently on each platform. `DssHarness` replaces that with one
 cross-platform .NET tool whose behaviour is driven entirely by `config.json`.
 
 **Nothing about any specific repository, language or toolchain is compiled in.**
@@ -247,7 +247,7 @@ that was never exercised.
 
 A whole virtual machine is not an emulator in this sense. It runs an operating system of
 its own, and is declared as the ssh host it is. A virtual machine with a different processor
-runs repo-harness under full emulation, where .NET is not supported, so repo-harness itself
+runs DssHarness under full emulation, where .NET is not supported, so DssHarness itself
 is not dependable on such a host.
 
 ### Reaching a host
@@ -279,11 +279,11 @@ is not dependable on such a host.
   measured once per connection, by whether `echo %COMSPEC%` comes back expanded, because cmd
   needs backslashes in the path of a program.
 
-### repo-harness on every host
+### DssHarness on every host
 
-Every WSL distribution and ssh host runs repo-harness itself, installed as a global .NET tool
+Every WSL distribution and ssh host runs DssHarness itself, installed as a global .NET tool
 from nuget.org, so it needs the .NET 10 SDK, with `dotnet` on the PATH of a command run
-without a login shell. repo-harness itself is started from `~/.dotnet/tools`, where global
+without a login shell. DssHarness itself is started from `~/.dotnet/tools`, where global
 tools are installed, since that directory is usually on no such PATH. Every install and
 update names nuget.org as its only source, so no feed configured on the host can supply a
 different package under the same name. Only stable versions are published there: a beta is
@@ -296,9 +296,9 @@ commands in the host's copy of the repository, which is what `host-exec` does.
 
 Both ends must be the same build, so before anything runs on a host:
 
-- A host without repo-harness has this machine's version installed.
+- A host without DssHarness has this machine's version installed.
 - A host that is behind is updated to this machine's version. It is never downgraded, and
-  not updated while repo-harness is running there: an update replaces a running tool's
+  not updated while DssHarness is running there: an update replaces a running tool's
   files underneath it on Linux and macOS, and fails part way on Windows.
 - A host that is ahead stops everything (exit 13) until this machine is updated, with the
   command that updates it. Moving the host down would undo somebody else's update.
@@ -324,7 +324,7 @@ build, or has no copy of the repository.
 
 `legs` and `host-exec` run what the configuration declares, without asking first: `legs`
 runs the witness of each emulator the selected legs use, on the hosts it measures, and both
-run repo-harness itself on WSL distributions and ssh hosts, which they install or update
+run DssHarness itself on WSL distributions and ssh hosts, which they install or update
 there. That is the trust building the repository already asks for, since a build runs the
 repository's own code.
 
@@ -508,7 +508,7 @@ while a gate ran turned a green suite red, with four test processes live at once
   `repositoryPath`: the commit being tested is pushed into it, and uncommitted changes are
   synced on top. It is never a clone from a remote, which would need credentials on the
   host and could not see commits nobody has pushed. It must be a git repository because the
-  host's repo-harness finds everything through git, and sync never writes into a directory it
+  host's DssHarness finds everything through git, and sync never writes into a directory it
   did not create, because it deletes whatever the source does not have.
 - A remote tree's identity is its content manifest, confirmed equal to the source after
   every sync. The ledger records the commit and manifest each leg built, and a build
@@ -549,7 +549,7 @@ Existing tooling forces a clean rebuild after every remote sync, because
 an existing object file makes Ninja skip the rebuild and report a stale binary
 as success.
 
-`repo-harness` syncs by **content hash**, writing only files whose content actually
+`DssHarness` syncs by **content hash**, writing only files whose content actually
 changed. An unchanged file is not touched, so its mtime does not move; a changed
 file is rewritten now, so its mtime advances. Ninja's incremental check is therefore
 correct after a sync, and incremental builds are preserved on every host.
@@ -565,7 +565,7 @@ invisible to each other). Gitignored.
 
 One entry per `(host, tree, variant)`, recording host, pid, process start
 time, run id, UTC timestamp and the command. A host's copy of the repository is locked
-by the repo-harness on that host, in that copy's own `.harness-config/lock.json`, so runs
+by the DssHarness on that host, in that copy's own `.harness-config/lock.json`, so runs
 started from two different machines against the same host see each other.
 
 Two granularities, because two kinds of work share a tree. Syncing a tree takes the
@@ -611,9 +611,9 @@ with "the harness could not run", because the remedies differ.
 | 10 | Usage error |
 | 11 | Not initialised |
 | 12 | Invalid configuration |
-| 13 | Refused: precondition not met (dirty tree, lock held, name taken, a host runs a newer repo-harness) |
+| 13 | Refused: precondition not met (dirty tree, lock held, name taken, a host runs a newer DssHarness) |
 | 14 | A required tool is missing, or could not be started |
-| 15 | A host could not be reached, repo-harness could not run there, or a command run there never reported how it finished |
+| 15 | A host could not be reached, DssHarness could not run there, or a command run there never reported how it finished |
 | 20 | The wrapped command ran and failed |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
 | 130 | The run was interrupted before it finished |
@@ -621,7 +621,7 @@ with "the harness could not run", because the remedies differ.
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,
 or when no selected leg can. `host-exec` returns the exit code of the command it ran on
-the host, unchanged, or 15 when that command never reported how it finished. `repo-harness help exit-codes` prints this table from the code
+the host, unchanged, or 15 when that command never reported how it finished. `DssHarness help exit-codes` prints this table from the code
 itself; this copy is maintained by hand.
 
 Commands that run legs (`build`, `run`, `test`) will use three codes from the range

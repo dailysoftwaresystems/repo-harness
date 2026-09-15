@@ -54,7 +54,7 @@ public sealed class HarnessConfig
     /// <summary>Multi-phase procedures such as a corpus build-and-test or a benchmark.</summary>
     public Dictionary<string, RunnerConfig> Runners { get; init; } = Map<RunnerConfig>();
 
-    /// <summary>Named commands invokable through <c>repo-harness exec</c>.</summary>
+    /// <summary>Named commands invokable through <c>DssHarness exec</c>.</summary>
     public Dictionary<string, ExecConfig> Exec { get; init; } = Map<ExecConfig>();
 
     /// <summary>Commit message templating and policy.</summary>

@@ -49,7 +49,7 @@ public static class LegsReports
                     host.Reason,
                     host.Os,
                     host.Processor,
-                    RepoHarness = host.ToolVersion,
+                    host.ToolVersion,
                     host.Actions,
                 }),
             };

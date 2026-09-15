@@ -43,7 +43,7 @@ public sealed record HostCommand
     /// <summary>
     /// Text written to the program's standard input, which is then closed unless
     /// <see cref="HoldStandardInputOpen"/> is set; empty by default. ssh forwards whatever input it is
-    /// given, so the program on the host reads exactly this, and nothing piped to repo-harness.
+    /// given, so the program on the host reads exactly this, and nothing piped to DssHarness.
     /// </summary>
     public string StandardInput { get; init; } = string.Empty;
 

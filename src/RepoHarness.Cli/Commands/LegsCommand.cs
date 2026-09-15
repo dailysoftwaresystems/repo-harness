@@ -3,7 +3,7 @@ using RepoHarness.Core.Legs;
 
 namespace RepoHarness.Cli.Commands;
 
-/// <summary>Wires <c>repo-harness legs</c>.</summary>
+/// <summary>Wires <c>DssHarness legs</c>.</summary>
 internal static class LegsCommand
 {
     internal const string Name = LegsService.CommandName;
@@ -23,7 +23,7 @@ internal static class LegsCommand
     {
         var command = new Command(
             Name,
-            "Measure the hosts and show where each leg can run, or why it cannot. Runs each emulator's witness, and installs or updates repo-harness on hosts that are behind.");
+            "Measure the hosts and show where each leg can run, or why it cannot. Runs each emulator's witness, and installs or updates DssHarness on hosts that are behind.");
 
         command.Options.Add(LegsOption);
         command.Options.Add(JsonOption);

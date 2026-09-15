@@ -164,7 +164,7 @@ internal static class HostResults
         => new($"The host was not expected to run '{command.Program} {string.Join(' ', command.Arguments)}'.");
 
     /// <summary>
-    /// What the repo-harness on a host does with a run request: passes on what the command wrote to standard
+    /// What the DssHarness on a host does with a run request: passes on what the command wrote to standard
     /// error, says it finished with <paramref name="exitCode"/>, and exits with that code.
     /// </summary>
     public static ProcessResult Finished(HostCommand command, int exitCode, string error = "")

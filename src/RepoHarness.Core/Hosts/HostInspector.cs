@@ -9,9 +9,9 @@ using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Hosts;
 
-/// <summary>How the harness reaches repo-harness on a host that passed inspection.</summary>
+/// <summary>How the harness reaches DssHarness on a host that passed inspection.</summary>
 /// <param name="Connection">How programs are started there.</param>
-/// <param name="ToolPath">Where repo-harness is there, from the home directory programs start in.</param>
+/// <param name="ToolPath">Where DssHarness is there, from the home directory programs start in.</param>
 public sealed record HostSession(HostConnection Connection, string ToolPath);
 
 /// <summary>What inspecting one host found.</summary>
@@ -32,17 +32,17 @@ public sealed record HostReport
     /// <summary>The host's processor, when it was measured.</summary>
     public string? Processor { get; init; }
 
-    /// <summary>The version of repo-harness there, when it runs.</summary>
+    /// <summary>The version of DssHarness there, when it runs.</summary>
     public string? ToolVersion { get; init; }
 
     /// <summary>What checking each emulator found there, by name.</summary>
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>What inspection changed on the host, such as installing repo-harness.</summary>
+    /// <summary>What inspection changed on the host, such as installing DssHarness.</summary>
     public IReadOnlyList<string> Actions { get; init; } = [];
 
-    /// <summary>How to reach repo-harness there; <see langword="null"/> for this machine and for a host that is unavailable.</summary>
+    /// <summary>How to reach DssHarness there; <see langword="null"/> for this machine and for a host that is unavailable.</summary>
     public HostSession? Session { get; init; }
 }
 
@@ -52,10 +52,10 @@ public interface IHostInspector
     /// <summary>
     /// Measures <paramref name="host"/>: whether it can be reached, what it is, which of
     /// <paramref name="emulators"/> work there, and, for a WSL distribution or an ssh host, that
-    /// repo-harness there is this machine's build, installing or updating it when it is behind.
+    /// DssHarness there is this machine's build, installing or updating it when it is behind.
     /// </summary>
     /// <exception cref="HarnessException">
-    /// The host has a newer repo-harness than this machine. Versions only move up, so nothing runs until
+    /// The host has a newer DssHarness than this machine. Versions only move up, so nothing runs until
     /// this machine is updated.
     /// </exception>
     Task<HostReport> InspectAsync(
@@ -84,7 +84,7 @@ public sealed class HostInspector(
     /// <summary>Longest a probe of a connected host may take.</summary>
     private static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>Longest installing or updating repo-harness may take, which includes downloading it.</summary>
+    /// <summary>Longest installing or updating DssHarness may take, which includes downloading it.</summary>
     private static readonly TimeSpan InstallBudget = TimeSpan.FromMinutes(10);
 
     private readonly IHostPlatform _platform = platform;
@@ -262,7 +262,7 @@ public sealed class HostInspector(
         return null;
     }
 
-    /// <summary>Brings repo-harness on a reachable host to this machine's build, then asks it what the host is.</summary>
+    /// <summary>Brings DssHarness on a reachable host to this machine's build, then asks it what the host is.</summary>
     private async Task<HostReport> PrepareAsync(
         HostReport found,
         HostConnection connection,
@@ -292,10 +292,10 @@ public sealed class HostInspector(
         if (!listed.Any(sdk => sdk.Major >= ToolPackage.MinimumSdkMajor))
         {
             var present = listed.Count == 0 ? "none" : string.Join(", ", listed.Select(sdk => sdk.Version));
-            return found with { Reason = $"repo-harness needs the .NET {ToolPackage.MinimumSdkMajor} SDK there, and it has {present}" };
+            return found with { Reason = $"{ToolPackage.Command} needs the .NET {ToolPackage.MinimumSdkMajor} SDK there, and it has {present}" };
         }
 
-        // Where the SDK is installed is how a Windows host is told from any other before repo-harness
+        // Where the SDK is installed is how a Windows host is told from any other before DssHarness
         // runs there; the kind of shell alone cannot say, since PowerShell runs on both.
         var windowsHost = listed.Any(sdk => sdk.OnWindows);
 
@@ -311,12 +311,12 @@ public sealed class HostInspector(
     }
 
     /// <summary>
-    /// Installs repo-harness on the host at this machine's version, or updates it to that version, as needed.
+    /// Installs DssHarness on the host at this machine's version, or updates it to that version, as needed.
     /// Versions only move up: a host that is behind is updated, and a host that is ahead stops everything until
     /// this machine catches up, because moving the host down would undo an update somebody else made.
     /// </summary>
     /// <returns>Why the host cannot be brought to this build, or what bringing it there took, if anything.</returns>
-    /// <exception cref="HarnessException">The host has a newer repo-harness than this machine.</exception>
+    /// <exception cref="HarnessException">The host has a newer DssHarness than this machine.</exception>
     private async Task<(string? Reason, string? Action)> BringToThisBuildAsync(
         HostId host,
         HostConnection connection,
@@ -337,13 +337,13 @@ public sealed class HostInspector(
             var install = await RunToolCommandAsync(connection, "install", root.Version, cancellationToken).ConfigureAwait(false);
 
             return install.Succeeded
-                ? (null, $"installed repo-harness {root.Version}")
-                : (Failure($"installing repo-harness {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
+                ? (null, $"installed {ToolPackage.Command} {root.Version}")
+                : (Failure($"installing {ToolPackage.Command} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
         }
 
         if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
         {
-            return ($"repo-harness {installed} there cannot be compared with {root.Version} here", null);
+            return ($"{ToolPackage.Command} {installed} there cannot be compared with {root.Version} here", null);
         }
 
         var order = SemanticVersion.Compare(hostVersion, rootVersion);
@@ -352,7 +352,7 @@ public sealed class HostInspector(
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"{host} has repo-harness {installed}, newer than this machine's {root.Version}. Versions only move up, "
+                $"{host} has {ToolPackage.Command} {installed}, newer than this machine's {root.Version}. Versions only move up, "
                 + $"so update this machine first: dotnet tool update --global {ToolPackage.Id} --version {installed}");
         }
 
@@ -370,8 +370,8 @@ public sealed class HostInspector(
         var update = await RunToolCommandAsync(connection, "update", root.Version, cancellationToken).ConfigureAwait(false);
 
         return update.Succeeded
-            ? (null, $"updated repo-harness {installed} to {root.Version}")
-            : (Failure($"updating repo-harness {installed} to {root.Version} there failed", update), null);
+            ? (null, $"updated {ToolPackage.Command} {installed} to {root.Version}")
+            : (Failure($"updating {ToolPackage.Command} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
     }
 
     /// <summary>Runs <c>dotnet tool install</c> or <c>update</c> for exactly <paramref name="version"/>, from nuget.org alone.</summary>
@@ -383,7 +383,7 @@ public sealed class HostInspector(
             InstallBudget,
             cancellationToken);
 
-    /// <summary>Asks repo-harness on the host which build it is and what the host is, and checks the build is this machine's.</summary>
+    /// <summary>Asks DssHarness on the host which build it is and what the host is, and checks the build is this machine's.</summary>
     private async Task<HostReport> AskAsync(
         HostReport found,
         HostConnection connection,
@@ -415,14 +415,14 @@ public sealed class HostInspector(
 
         if (!answer.Succeeded)
         {
-            return found with { Reason = Failure($"repo-harness did not answer from {shownTool}, where global tools are installed", answer) };
+            return found with { Reason = Failure($"{ToolPackage.Command} did not answer from {shownTool}, where global tools are installed", answer) };
         }
 
         var start = answer.StandardOutput.IndexOf('{', StringComparison.Ordinal);
 
         if (start < 0)
         {
-            return found with { Reason = $"repo-harness at {shownTool} answered with no document: {HostProbes.Excerpt(answer.StandardOutput)}" };
+            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered with no document: {HostProbes.Excerpt(answer.StandardOutput)}" };
         }
 
         var document = answer.StandardOutput[start..];
@@ -431,19 +431,19 @@ public sealed class HostInspector(
         // shape is still reported as the build it is, with the remedy for that.
         if (!TryReadIdentity(document, out var version, out var assemblySha256, out var problem))
         {
-            return found with { Reason = $"repo-harness at {shownTool} answered in a form this build cannot read: {problem}" };
+            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered in a form this build cannot read: {problem}" };
         }
 
         if (!string.Equals(version, root.Version, StringComparison.Ordinal))
         {
-            return found with { Reason = $"repo-harness there reports {version}, and {root.Version} was expected" };
+            return found with { Reason = $"{ToolPackage.Command} there reports {version}, and {root.Version} was expected" };
         }
 
         if (!string.Equals(assemblySha256, root.AssemblySha256, StringComparison.OrdinalIgnoreCase))
         {
             return found with
             {
-                Reason = $"repo-harness {version} there is a different build from this machine's although the versions match, "
+                Reason = $"{ToolPackage.Command} {version} there is a different build from this machine's although the versions match, "
                     + "so one of the two is not the package published on nuget.org; on the machine that has a local build, run "
                     + $"dotnet tool uninstall --global {ToolPackage.Id}, then dotnet tool install --global {ToolPackage.Id} --version {version}",
             };
@@ -457,17 +457,17 @@ public sealed class HostInspector(
         }
         catch (JsonException ex)
         {
-            return found with { Reason = $"repo-harness at {shownTool} answered in a form this build cannot read: {ex.Message}" };
+            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered in a form this build cannot read: {ex.Message}" };
         }
 
         return info is null
-            ? found with { Reason = $"repo-harness at {shownTool} answered with an empty document" }
+            ? found with { Reason = $"{ToolPackage.Command} at {shownTool} answered with an empty document" }
             : Answered(found, info, new HostSession(connection, toolPath));
     }
 
     /// <summary>
-    /// Why repo-harness on the host must not be updated now, or <see langword="null"/> when nothing is
-    /// running it. An update replaces the files of a repo-harness that is running on Linux and macOS,
+    /// Why DssHarness on the host must not be updated now, or <see langword="null"/> when nothing is
+    /// running it. An update replaces the files of a DssHarness that is running on Linux and macOS,
     /// and fails part way on Windows; either way a run in progress there would be harmed.
     /// </summary>
     private async Task<string?> WhyNotUpdateAsync(HostConnection connection, bool windowsHost, CancellationToken cancellationToken)
@@ -478,11 +478,11 @@ public sealed class HostInspector(
 
         if (!listing.Succeeded)
         {
-            return Failure("its running processes could not be listed, so repo-harness there was not updated", listing);
+            return Failure("its running processes could not be listed, so DssHarness there was not updated", listing);
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
-            ? $"repo-harness is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
+            ? $"{ToolPackage.Command} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
             : null;
     }
 
@@ -506,7 +506,7 @@ public sealed class HostInspector(
             },
             cancellationToken);
 
-    /// <summary>What the repo-harness on a host said about it, recorded in the report.</summary>
+    /// <summary>What the DssHarness on a host said about it, recorded in the report.</summary>
     private static HostReport Answered(HostReport found, HostAgentInfo info, HostSession? session) => found with
     {
         Os = info.Os,

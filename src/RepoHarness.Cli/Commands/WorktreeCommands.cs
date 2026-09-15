@@ -5,7 +5,7 @@ using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Cli.Commands;
 
-/// <summary>Wires <c>repo-harness create-worktree</c>.</summary>
+/// <summary>Wires <c>DssHarness create-worktree</c>.</summary>
 internal static class CreateWorktreeCommand
 {
     internal const string Name = "create-worktree";
@@ -45,7 +45,7 @@ internal static class CreateWorktreeCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness delete-worktree</c>.</summary>
+/// <summary>Wires <c>DssHarness delete-worktree</c>.</summary>
 internal static class DeleteWorktreeCommand
 {
     internal const string Name = "delete-worktree";
@@ -77,7 +77,7 @@ internal static class DeleteWorktreeCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness list-worktree</c>.</summary>
+/// <summary>Wires <c>DssHarness list-worktree</c>.</summary>
 internal static class ListWorktreeCommand
 {
     internal const string Name = "list-worktree";

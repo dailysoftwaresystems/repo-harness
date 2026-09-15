@@ -34,7 +34,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         }
 
         // A WSL distribution runs Linux and nothing else. Measuring one for a leg on another operating system
-        // would install repo-harness there for a leg it can never run, or stop the check over its version.
+        // would install DssHarness there for a leg it can never run, or stop the check over its version.
         var distributions = Same(leg.Os, PlatformNames.Linux)
             ? config.Hosts.Wsl.Keys.Select(HostId.Wsl)
             : Enumerable.Empty<HostId>();

@@ -79,7 +79,7 @@ public sealed class HostInspectorTests
 
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
-        Assert.Equal("repo-harness needs the .NET 10 SDK there, and it has 8.0.414", report.Reason);
+        Assert.Equal("DssHarness needs the .NET 10 SDK there, and it has 8.0.414", report.Reason);
     }
 
     [Fact]
@@ -100,11 +100,11 @@ public sealed class HostInspectorTests
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
         Assert.True(report.Available, report.Reason);
-        Assert.Equal(["installed repo-harness 1.2.0"], report.Actions);
+        Assert.Equal(["installed DssHarness 1.2.0"], report.Actions);
         Assert.Equal(
-            ["tool", "install", "--global", "RepoHarness", "--version", "1.2.0", "--source", "https://api.nuget.org/v3/index.json"],
+            ["tool", "install", "--global", "DssHarness", "--version", "1.2.0", "--source", "https://api.nuget.org/v3/index.json"],
             fixture.Commands.Single("tool", "install").Arguments);
-        Assert.Equal(".dotnet/tools/repo-harness", report.Session?.ToolPath);
+        Assert.Equal(".dotnet/tools/DssHarness", report.Session?.ToolPath);
         Assert.Equal("linux", report.Os);
         Assert.Equal("x86_64", report.Processor);
     }
@@ -137,24 +137,24 @@ public sealed class HostInspectorTests
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
         Assert.True(report.Available, report.Reason);
-        Assert.Equal(["updated repo-harness 1.1.9 to 1.2.0"], report.Actions);
+        Assert.Equal(["updated DssHarness 1.1.9 to 1.2.0"], report.Actions);
 
         // nuget.org is named as the only source, so no feed configured on the host can supply another
         // package under the same name.
         Assert.Equal(
-            ["tool", "update", "--global", "RepoHarness", "--version", "1.2.0", "--source", "https://api.nuget.org/v3/index.json"],
+            ["tool", "update", "--global", "DssHarness", "--version", "1.2.0", "--source", "https://api.nuget.org/v3/index.json"],
             fixture.Commands.Single("tool", "update").Arguments);
         Assert.DoesNotContain(fixture.Commands.Calls, call => call.Command.Arguments.Contains("--allow-downgrade"));
     }
 
     [Fact]
-    public async Task AHostThatIsBehind_IsNotUpdated_WhileRepoHarnessRunsThere()
+    public async Task AHostThatIsBehind_IsNotUpdated_WhileDssHarnessRunsThere()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9", processes: "bash\nrepo-harness\n"));
+        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9", processes: "bash\nDssHarness\n"));
 
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
-        Assert.Contains("repo-harness is running there, so it was not updated", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("DssHarness is running there, so it was not updated", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
     }
 
@@ -191,14 +191,14 @@ public sealed class HostInspectorTests
 
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
-        Assert.Contains("repo-harness latest there cannot be compared with 1.2.0 here", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("DssHarness latest there cannot be compared with 1.2.0 here", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
     }
 
     [Fact]
-    public async Task AHostOnThisVersion_IsLeftAlone_EvenWhileRepoHarnessRunsThere()
+    public async Task AHostOnThisVersion_IsLeftAlone_EvenWhileDssHarnessRunsThere()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", processes: "repo-harness\n"));
+        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", processes: "DssHarness\n"));
 
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
@@ -216,7 +216,7 @@ public sealed class HostInspectorTests
         var exception = await Assert.ThrowsAsync<HarnessException>(() => fixture.InspectAsync(HostId.Wsl("Ubuntu")));
 
         Assert.Equal(HarnessExit.Refused, exception.ExitCode);
-        Assert.Contains("dotnet tool update --global RepoHarness --version 1.3.0", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("dotnet tool update --global DssHarness --version 1.3.0", exception.Message, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
     }
 
@@ -259,7 +259,7 @@ public sealed class HostInspectorTests
     }
 
     [Theory]
-    [InlineData("""{"version":"1.1.9","assemblySha256":"roothash","os":"linux","processor":"x86_64"}""", "repo-harness there reports 1.1.9, and 1.2.0 was expected")]
+    [InlineData("""{"version":"1.1.9","assemblySha256":"roothash","os":"linux","processor":"x86_64"}""", "DssHarness there reports 1.1.9, and 1.2.0 was expected")]
     [InlineData("Segmentation fault", "answered with no document")]
     public async Task AnAnswerThatIsNotFromThisBuild_LeavesTheHostUnavailable(string answer, string expected)
     {
@@ -310,12 +310,27 @@ public sealed class HostInspectorTests
     {
         var fixture = new Fixture(
             PlatformId.Windows,
-            respond: HostThat(installed: null, install: HostResults.Failed(1, "error NU1101: Unable to find package RepoHarness")));
+            respond: HostThat(installed: null, install: HostResults.Failed(1, "error NU1101: Unable to find package DssHarness")));
 
         var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
 
         Assert.Contains("a host runs only a version published on nuget.org", report.Reason, StringComparison.Ordinal);
         Assert.Contains("NU1101", report.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnUpdateThatFails_SaysAHostRunsOnlyPublishedVersions()
+    {
+        // A machine running a beta asks for a version nuget.org never had; an update says why, as an install does.
+        var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: HostThat(installed: "1.1.9", install: HostResults.Failed(1, "error NU1102: Unable to find package DssHarness with version (= 1.2.0)")));
+
+        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+
+        Assert.Contains("updating DssHarness 1.1.9 to 1.2.0 there failed", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("a host runs only a version published on nuget.org", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("NU1102", report.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -464,7 +479,7 @@ public sealed class HostInspectorTests
         var report = await fixture.InspectAsync(HostId.Ssh("vps"));
 
         Assert.True(report.Available, report.Reason);
-        Assert.Equal(@".dotnet\tools\repo-harness.exe", report.Session?.ToolPath);
+        Assert.Equal(@".dotnet\tools\DssHarness.exe", report.Session?.ToolPath);
         Assert.Equal(RemoteShell.Cmd, report.Session?.Connection.Shell);
         Assert.Equal("windows", report.Os);
     }
@@ -485,7 +500,7 @@ public sealed class HostInspectorTests
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(RemoteShell.Standard, report.Session?.Connection.Shell);
-        Assert.Equal(".dotnet/tools/repo-harness.exe", report.Session?.ToolPath);
+        Assert.Equal(".dotnet/tools/DssHarness.exe", report.Session?.ToolPath);
         Assert.Equal("tasklist", fixture.Commands.Single("/FO").Program);
     }
 
@@ -516,9 +531,9 @@ public sealed class HostInspectorTests
 
     private static string ToolList(string? installed) => installed is null
         ? """{"version":1,"data":[]}"""
-        : $$"""{"version":1,"data":[{"packageId":"repoharness","version":"{{installed}}","commands":["repo-harness"]}]}""";
+        : $$"""{"version":1,"data":[{"packageId":"dssharness","version":"{{installed}}","commands":["DssHarness"]}]}""";
 
-    /// <summary>Asserts that nothing installed or updated repo-harness on the host.</summary>
+    /// <summary>Asserts that nothing installed or updated DssHarness on the host.</summary>
     private static void AssertToolUntouched(Fixture fixture)
         => Assert.DoesNotContain(
             fixture.Commands.Calls,

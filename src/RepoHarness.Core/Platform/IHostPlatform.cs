@@ -20,7 +20,7 @@ public interface IHostPlatform
 
     /// <summary>
     /// This machine's processor, in configuration's words (<c>x86_64</c>, <c>arm64</c>). The
-    /// machine's own rather than this process's: repo-harness running as an x86_64 program under
+    /// machine's own rather than this process's: DssHarness running as an x86_64 program under
     /// emulation on an arm64 machine is still on an arm64 machine.
     /// </summary>
     string Processor { get; }

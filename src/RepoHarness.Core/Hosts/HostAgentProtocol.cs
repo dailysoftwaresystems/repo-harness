@@ -8,7 +8,7 @@ using RepoHarness.Core.Configuration;
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// What one repo-harness asks the repo-harness on a host, and what it answers. A request travels as one
+/// What one DssHarness asks the DssHarness on a host, and what it answers. A request travels as one
 /// line of JSON on the host's standard input, so no argument ever passes through a shell. The machine that
 /// asked then holds that input open until the host has finished: its end means the machine that asked has
 /// gone, and the host cancels whatever the request started.
@@ -88,11 +88,11 @@ public enum HostAgentRequestKind
     /// <summary>Which build answers, what the host is, and which emulators work there.</summary>
     Info,
 
-    /// <summary>Run one repo-harness command in a directory on the host.</summary>
+    /// <summary>Run one DssHarness command in a directory on the host.</summary>
     Run,
 }
 
-/// <summary>A request to the repo-harness on a host.</summary>
+/// <summary>A request to the DssHarness on a host.</summary>
 public sealed class HostAgentRequest
 {
     /// <summary>The protocol the request is written in.</summary>
@@ -107,7 +107,7 @@ public sealed class HostAgentRequest
     /// <summary>The host's copy of the repository, absolute or from the home directory. Run only.</summary>
     public string? Directory { get; init; }
 
-    /// <summary>The command and its arguments, exactly as they would be typed after <c>repo-harness</c>. Run only.</summary>
+    /// <summary>The command and its arguments, exactly as they would be typed after <c>DssHarness</c>. Run only.</summary>
     public List<string> Arguments { get; init; } = [];
 
     /// <summary>
@@ -120,7 +120,7 @@ public sealed class HostAgentRequest
 /// <summary>A host's answer to an info request.</summary>
 public sealed class HostAgentInfo
 {
-    /// <summary>The version of repo-harness that answered.</summary>
+    /// <summary>The version of DssHarness that answered.</summary>
     public required string Version { get; init; }
 
     /// <summary>The SHA-256 of the assembly that answered.</summary>

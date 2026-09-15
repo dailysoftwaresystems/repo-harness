@@ -7,7 +7,7 @@ using RepoHarness.Core.Output;
 namespace RepoHarness.Cli.Commands;
 
 /// <summary>
-/// Wires the hidden <c>repo-harness host-agent</c>, through which the repo-harness on another machine
+/// Wires the hidden <c>DssHarness host-agent</c>, through which the DssHarness on another machine
 /// asks this one what it is, or has it run a command. Hidden because nobody types it: <c>legs</c> and
 /// <c>host-exec</c> start it over wsl.exe or ssh, with the request on standard input.
 /// </summary>
@@ -22,7 +22,7 @@ internal static class HostAgentCommand
     {
         var command = new Command(
             HostAgentProtocol.CommandName,
-            "Serve one request from the repo-harness on another machine: a line of JSON on standard input, which stays open while it is served.")
+            "Serve one request from the DssHarness on another machine: a line of JSON on standard input, which stays open while it is served.")
         {
             Hidden = true,
         };

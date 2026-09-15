@@ -3,7 +3,7 @@ using RepoHarness.Core.Hosts;
 
 namespace RepoHarness.Cli.Commands;
 
-/// <summary>Wires <c>repo-harness host-exec</c>.</summary>
+/// <summary>Wires <c>DssHarness host-exec</c>.</summary>
 internal static class HostExecCommand
 {
     internal const string Name = HostExecService.CommandName;
@@ -21,7 +21,7 @@ internal static class HostExecCommand
 
     private static readonly Argument<string[]> CommandArgument = new("command")
     {
-        Description = "The repo-harness command to run there, with its arguments. Put -- before it, so its options stay its own.",
+        Description = "The DssHarness command to run there, with its arguments. Put -- before it, so its options stay its own.",
         Arity = ArgumentArity.OneOrMore,
     };
 
@@ -29,7 +29,7 @@ internal static class HostExecCommand
     {
         var command = new Command(
             Name,
-            "Run a repo-harness command on a WSL distribution or an ssh host, in that host's copy of the repository, installing or updating repo-harness there first when it is behind.");
+            "Run a DssHarness command on a WSL distribution or an ssh host, in that host's copy of the repository, installing or updating DssHarness there first when it is behind.");
 
         command.Options.Add(SshOption);
         command.Options.Add(WslOption);

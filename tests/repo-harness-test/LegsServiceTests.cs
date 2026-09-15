@@ -62,7 +62,7 @@ public sealed class LegsServiceTests
     [Fact]
     public async Task ALegThatIsNotLinux_NeverHasAWslDistributionMeasured()
     {
-        // A distribution runs Linux only, and measuring one installs repo-harness there, for a leg it can never run.
+        // A distribution runs Linux only, and measuring one installs DssHarness there, for a leg it can never run.
         var fixture = Create(new() { ["mac"] = HostDoubles.Leg("macos", "arm64") });
 
         await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
@@ -121,14 +121,14 @@ public sealed class LegsServiceTests
     public async Task AHostThatRefusesTheRun_StopsTheCheck_AfterWhatTheOtherHostsDidIsReported()
     {
         // Hosts are measured together, so one can be updated while another refuses; that update happened all the same.
-        var refusal = new HarnessException(HarnessExit.Refused, "ssh pi has repo-harness 1.3.0, newer than this machine's 1.2.0");
+        var refusal = new HarnessException(HarnessExit.Refused, "ssh pi has DssHarness 1.3.0, newer than this machine's 1.2.0");
 
         var fixture = Create(
             new() { ["arm"] = HostDoubles.Leg("linux", "arm64") },
             inspect: host => host.Kind switch
             {
                 HostKind.Ssh => throw refusal,
-                HostKind.Wsl => Measurements[host] with { Actions = ["updated repo-harness 1.1.9 to 1.2.0"] },
+                HostKind.Wsl => Measurements[host] with { Actions = ["updated DssHarness 1.1.9 to 1.2.0"] },
                 _ => Measurements[host],
             });
 
@@ -136,7 +136,7 @@ public sealed class LegsServiceTests
             () => fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken));
 
         Assert.Same(refusal, exception);
-        Assert.Contains("legs: wsl Ubuntu: updated repo-harness 1.1.9 to 1.2.0", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("legs: wsl Ubuntu: updated DssHarness 1.1.9 to 1.2.0", fixture.Output.ToString(), StringComparison.Ordinal);
     }
 
     private static EmulatorConfig Emulator() => new()

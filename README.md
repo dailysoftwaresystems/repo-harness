@@ -1,11 +1,11 @@
-# repo-harness
+# DssHarness
 
 One cross-platform CLI for a repository's worktrees, builds, tests and cross-host
 work — configured entirely from a file in the repository, not compiled into the tool.
 
 ```bash
-dotnet tool install --global RepoHarness
-repo-harness --help
+dotnet tool install --global DssHarness
+DssHarness --help
 ```
 
 ## Why
@@ -15,7 +15,7 @@ A repository's build and test work usually accumulates as a pile of paired
 fail differently on every platform — a Windows path limit here, a frozen macOS bash
 there, a missing `rsync` somewhere else.
 
-`repo-harness` replaces that with a single tool whose behaviour is declared in
+`DssHarness` replaces that with a single tool whose behaviour is declared in
 `.harness-config/config.json`. **Nothing about a specific repository, language or
 toolchain is built into the tool.** If a behaviour cannot be expressed in
 configuration, that is a defect.
@@ -23,10 +23,10 @@ configuration, that is a defect.
 ## Getting started
 
 ```bash
-repo-harness verify-git     # is git installed, and is this a repository?
-repo-harness init           # create .harness-config and seed config.json
-repo-harness legs           # where each leg can run, or why it cannot
-repo-harness help           # reference material: exit codes, config, legs, layout
+DssHarness verify-git     # is git installed, and is this a repository?
+DssHarness init           # create .harness-config and seed config.json
+DssHarness legs           # where each leg can run, or why it cannot
+DssHarness help           # reference material: exit codes, config, legs, layout
 ```
 
 `init` inspects the repository and seeds a configuration that already matches it —
@@ -49,7 +49,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `read-anchors` | List anchors, or check the registries with `--lint` |
 | `check-anchor-balance` | Fail a change that leaves more open anchors than it found |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
-| `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a repo-harness command on an ssh host or in a WSL distribution |
+| `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a DssHarness command on an ssh host or in a WSL distribution |
 | `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout |
 
 Every command takes `-C, --directory <dir>` and `-v, --verbose`.
@@ -60,7 +60,7 @@ Three principles the implementation actually holds to:
 
 **Fail loud.** Zero always means success, and "the thing you asked about failed"
 never shares an exit code with "the harness could not run" — the remedies differ.
-Run `repo-harness help exit-codes` for the full table, which is generated from the
+Run `DssHarness help exit-codes` for the full table, which is generated from the
 code rather than written by hand. A configuration file with an unknown key or a
 reference to something undeclared is rejected when it is read, with every problem
 listed at once.
@@ -121,23 +121,24 @@ Each leg runs on the first host that provides what it needs.
 ```
 
 ```bash
-repo-harness legs                                       # every leg: where it runs, or why it cannot
-repo-harness legs --legs linux-release,mac-x64-release
-repo-harness host-exec --ssh mac-mini -- verify-git
+DssHarness legs                                       # every leg: where it runs, or why it cannot
+DssHarness legs --legs linux-release,mac-x64-release
+DssHarness host-exec --ssh mac-mini -- verify-git
 ```
 
 An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores, spelt
 exactly as `hosts.ssh` declares it, case included; ssh runs in batch mode, so it never
-waits at a prompt. Every WSL distribution and ssh host runs repo-harness itself,
+waits at a prompt. Every WSL distribution and ssh host runs DssHarness itself,
 installed from nuget.org at this machine's exact version: a host that is behind is
 updated, never downgraded. Betas are released on GitHub rather than nuget.org, so only a
-stable build can bring a host to its version. `host-exec` runs in the host's copy of the repository at its
-`repositoryPath`, which, until sync can create it, has to be a checkout made by hand. An
-emulator counts only once its witness proves it runs programs for its processor.
+stable build can bring a host to its version. `host-exec` runs in the host's copy of the
+repository at its `repositoryPath`, which, until sync can create it, has to be a checkout
+made by hand. An emulator counts only once its witness proves it runs programs for its
+processor.
 
 `legs` runs the witness of each emulator the selected legs use, and both commands install
-or update repo-harness on the hosts they reach, as `config.json` declares. That is the
-trust building the repository already asks for. Run `repo-harness help legs` for the rules.
+or update DssHarness on the hosts they reach, as `config.json` declares. That is the
+trust building the repository already asks for. Run `DssHarness help legs` for the rules.
 
 ## Anchors
 
@@ -147,17 +148,17 @@ disclosed anchors, and done, the archive of closed ones. Their paths are set in
 `config.json` under `anchors`, and `init` creates each one that is missing.
 
 ```bash
-repo-harness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
-repo-harness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
-repo-harness read-anchor D-AUTH-TOKEN-REFRESH
-repo-harness read-anchors --open --band P0 P1
-repo-harness check-anchor-balance --base main
+DssHarness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
+DssHarness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
+DssHarness read-anchor D-AUTH-TOKEN-REFRESH
+DssHarness read-anchors --open --band P0 P1
+DssHarness check-anchor-balance --base main
 ```
 
 The Status cell (`🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED`, `✅ CLOSED`) is the only verdict a
 row carries. Closing an anchor moves its row to the done registry, and
 `check-anchor-balance` fails a change that leaves more open anchors than it found. Run
-`repo-harness help anchors` for the rules.
+`DssHarness help anchors` for the rules.
 
 ## Building from source
 

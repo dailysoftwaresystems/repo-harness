@@ -67,7 +67,7 @@ public static partial class AnchorCells
                 $"The {field} value contains a backslash immediately before a pipe. Pipes are escaped "
                 + "for you, so a pipe escaped by hand would be stored with two backslashes and show a "
                 + "stray one to every reader. If you escaped it yourself, write the plain pipe. If you "
-                + "copied the text from the raw table line, take it from 'repo-harness read-anchor "
+                + "copied the text from the raw table line, take it from 'DssHarness read-anchor "
                 + "--json' instead, whose fields come back unescaped. To show a backslash before a pipe "
                 + $"on purpose, write the pipe as [|]. At character {escaped}: ...{flat[from..to]}...");
         }

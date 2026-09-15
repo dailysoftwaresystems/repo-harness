@@ -269,6 +269,6 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}(?<name>\S+)(\s+<\S+>)?\s{2,}(?<description>.+)$")]
     private static partial Regex CommandLinePattern();
 
-    [GeneratedRegex(@"repo-harness help (?<topic>[a-z-]+)")]
+    [GeneratedRegex(@"DssHarness help (?<topic>[a-z-]+)")]
     private static partial Regex TopicPattern();
 }

@@ -9,7 +9,7 @@ using RepoHarness.Core.Results;
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// Runs one repo-harness command on a WSL distribution or an ssh host, in that host's copy of the
+/// Runs one DssHarness command on a WSL distribution or an ssh host, in that host's copy of the
 /// repository, with its output streamed here as it is written.
 /// </summary>
 public sealed class HostExecService(
@@ -31,18 +31,18 @@ public sealed class HostExecService(
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
-    /// <summary>Runs <paramref name="arguments"/> with repo-harness on the host.</summary>
+    /// <summary>Runs <paramref name="arguments"/> with DssHarness on the host.</summary>
     /// <param name="directory">A directory in the repository whose configuration declares the host.</param>
     /// <param name="ssh">The ssh host, or <see langword="null"/> when the host is a WSL distribution.</param>
     /// <param name="wsl">
     /// The WSL distribution, the empty string for WSL's default distribution, or <see langword="null"/>
     /// when the host is an ssh host.
     /// </param>
-    /// <param name="arguments">The command and its arguments, exactly as they would be typed after <c>repo-harness</c>.</param>
+    /// <param name="arguments">The command and its arguments, exactly as they would be typed after <c>DssHarness</c>.</param>
     /// <param name="cancellationToken">Stops the command, on the host as well as here.</param>
     /// <returns>
     /// An outcome carrying the command's own exit code, unchanged, or <see cref="HarnessExit.HostUnavailable"/>
-    /// when the host cannot run repo-harness, or the command never reported how it finished.
+    /// when the host cannot run DssHarness, or the command never reported how it finished.
     /// </returns>
     public async Task<CommandOutcome> RunAsync(
         string directory,
@@ -61,7 +61,7 @@ public sealed class HostExecService(
 
         if (arguments.Count == 0)
         {
-            throw new HarnessException(HarnessExit.UsageError, "name the repo-harness command to run there, after --");
+            throw new HarnessException(HarnessExit.UsageError, "name the DssHarness command to run there, after --");
         }
 
         if (HostAgentProtocol.IsNotForwardable(arguments[0]))
@@ -99,7 +99,7 @@ public sealed class HostExecService(
 
         if (report.Session is not { } session)
         {
-            return CommandOutcome.Failed(HarnessExit.HostUnavailable, $"{host} cannot run repo-harness: {report.Reason}");
+            return CommandOutcome.Failed(HarnessExit.HostUnavailable, $"{host} cannot run {ToolPackage.Command}: {report.Reason}");
         }
 
         var nonce = HostAgentProtocol.NewNonce();

@@ -12,12 +12,12 @@ public sealed class RemoteCommandLineTests
     public void Join_PassesWords_EveryShellReadsLiterally()
     {
         Assert.Equal(
-            "dotnet tool update --global RepoHarness --version 1.2.3-beta+abc.1",
-            RemoteCommandLine.Join(["dotnet", "tool", "update", "--global", "RepoHarness", "--version", "1.2.3-beta+abc.1"], RemoteShell.Standard));
+            "dotnet tool update --global DssHarness --version 1.2.3-beta+abc.1",
+            RemoteCommandLine.Join(["dotnet", "tool", "update", "--global", "DssHarness", "--version", "1.2.3-beta+abc.1"], RemoteShell.Standard));
 
         Assert.Equal(
-            ".dotnet/tools/repo-harness host-agent",
-            RemoteCommandLine.Join([".dotnet/tools/repo-harness", "host-agent"], RemoteShell.Standard));
+            ".dotnet/tools/DssHarness host-agent",
+            RemoteCommandLine.Join([".dotnet/tools/DssHarness", "host-agent"], RemoteShell.Standard));
 
         Assert.Equal("ps -A -o comm=", RemoteCommandLine.Join(["ps", "-A", "-o", "comm="], RemoteShell.Standard));
     }
@@ -40,17 +40,17 @@ public sealed class RemoteCommandLineTests
     [InlineData("")]
     public void Join_RefusesAWord_AShellCouldReinterpret(string word)
     {
-        Assert.Throws<ArgumentException>(() => RemoteCommandLine.Join(["repo-harness", word], RemoteShell.Standard));
+        Assert.Throws<ArgumentException>(() => RemoteCommandLine.Join(["DssHarness", word], RemoteShell.Standard));
     }
 
     [Fact]
     public void Join_AcceptsABackslash_OnlyForCmd_WhichNeedsItInAPath()
     {
         Assert.Equal(
-            @".dotnet\tools\repo-harness.exe host-agent",
-            RemoteCommandLine.Join([@".dotnet\tools\repo-harness.exe", "host-agent"], RemoteShell.Cmd));
+            @".dotnet\tools\DssHarness.exe host-agent",
+            RemoteCommandLine.Join([@".dotnet\tools\DssHarness.exe", "host-agent"], RemoteShell.Cmd));
 
-        Assert.Throws<ArgumentException>(() => RemoteCommandLine.Join([@".dotnet\tools\repo-harness.exe"], RemoteShell.Standard));
+        Assert.Throws<ArgumentException>(() => RemoteCommandLine.Join([@".dotnet\tools\DssHarness.exe"], RemoteShell.Standard));
     }
 
     [Theory]

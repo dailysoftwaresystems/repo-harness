@@ -68,21 +68,21 @@ public sealed class HostExecServiceTests
     }
 
     [Fact]
-    public async Task AHostThatCannotRunRepoHarness_ReportsWhy_AsUnavailable()
+    public async Task AHostThatCannotRunDssHarness_ReportsWhy_AsUnavailable()
     {
         var fixture = Create(report: host => new HostReport { Host = host, Reason = "ssh could not connect: Connection refused" });
 
         var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["verify-git"], TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
-        Assert.Equal("ssh vps cannot run repo-harness: ssh could not connect: Connection refused", outcome.Message);
+        Assert.Equal("ssh vps cannot run DssHarness: ssh could not connect: Connection refused", outcome.Message);
         Assert.Empty(fixture.Commands.Calls);
     }
 
     [Fact]
     public async Task ARefusalWhileTheHostIsInspected_StopsEverything_BeforeAnythingRuns()
     {
-        var refusal = new HarnessException(HarnessExit.Refused, "ssh vps has repo-harness 1.3.0, newer than this machine's 1.2.0");
+        var refusal = new HarnessException(HarnessExit.Refused, "ssh vps has DssHarness 1.3.0, newer than this machine's 1.2.0");
         var fixture = Create(report: _ => throw refusal);
 
         var exception = await Assert.ThrowsAsync<HarnessException>(
@@ -105,7 +105,7 @@ public sealed class HostExecServiceTests
         Assert.Equal("vps", Assert.Single(fixture.Inspector.Inspected).Name);
 
         var (_, command) = Assert.Single(fixture.Commands.Calls);
-        Assert.Equal(".dotnet/tools/repo-harness", command.Program);
+        Assert.Equal(".dotnet/tools/DssHarness", command.Program);
         Assert.Equal([HostAgentProtocol.CommandName], command.Arguments);
 
         // One line, with the input held open: stopping this process ends it on the host, which cancels the command.
@@ -215,7 +215,7 @@ public sealed class HostExecServiceTests
             Host = host,
             Os = "linux",
             Processor = "x86_64",
-            Session = new HostSession(new HostConnection { Host = host, SshConfigFile = "config" }, ".dotnet/tools/repo-harness"),
+            Session = new HostSession(new HostConnection { Host = host, SshConfigFile = "config" }, ".dotnet/tools/DssHarness"),
         }));
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));

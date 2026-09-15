@@ -1,6 +1,6 @@
 name: Verify tool package
 description: >
-  Installs the repo-harness package from one local directory and nowhere else, then
+  Installs the DssHarness package from one local directory and nowhere else, then
   proves the installed tool runs and reports exactly the version it was packed as.
 
 inputs:
@@ -40,7 +40,7 @@ runs:
         </configuration>
         EOF
 
-        dotnet tool install RepoHarness \
+        dotnet tool install DssHarness \
           --tool-path "$work/tool" \
           --configfile "$work/nuget.config" \
           --version "$PACKAGE_VERSION"
@@ -51,7 +51,7 @@ runs:
         PACKAGE_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        tool="$RUNNER_TEMP/verify-tool-package/tool/repo-harness"
+        tool="$RUNNER_TEMP/verify-tool-package/tool/DssHarness"
 
         # Output is compared, not just the exit code: a tool that printed an error and
         # exited 0 would otherwise pass.
@@ -65,6 +65,6 @@ runs:
         # by a closed pipe once grep has its match, and pipefail then fails a good package.
         codes=$("$tool" help exit-codes)
         if ! grep -q 'CommandFailed' <<< "$codes"; then
-          echo "::error::'repo-harness help exit-codes' did not list the exit codes."
+          echo "::error::'DssHarness help exit-codes' did not list the exit codes."
           exit 1
         fi

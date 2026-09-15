@@ -54,26 +54,26 @@ public sealed class HostProbesTests
     public void TryReadToolVersion_FindsTheTool_WhateverTheCaseOfItsId()
     {
         const string Output = """
-            {"version":1,"data":[{"packageId":"dotnet-dump","version":"9.0.1","commands":["dotnet-dump"]},{"packageId":"repoharness","version":"0.2.0-beta","commands":["repo-harness"]}]}
+            {"version":1,"data":[{"packageId":"dotnet-dump","version":"9.0.1","commands":["dotnet-dump"]},{"packageId":"dssharness","version":"0.2.0-beta","commands":["DssHarness"]}]}
             """;
 
-        Assert.True(HostProbes.TryReadToolVersion(Output, "RepoHarness", out var version));
+        Assert.True(HostProbes.TryReadToolVersion(Output, "DssHarness", out var version));
         Assert.Equal("0.2.0-beta", version);
     }
 
     [Fact]
     public void TryReadToolVersion_ReadsATool_ThatIsNotInstalled()
     {
-        Assert.True(HostProbes.TryReadToolVersion("""{"version":1,"data":[]}""", "RepoHarness", out var version));
+        Assert.True(HostProbes.TryReadToolVersion("""{"version":1,"data":[]}""", "DssHarness", out var version));
         Assert.Null(version);
     }
 
     [Fact]
     public void TryReadToolVersion_FindsTheDocument_AfterABanner()
     {
-        const string Output = "Welcome to .NET!\n{\"version\":1,\"data\":[{\"packageId\":\"repoharness\",\"version\":\"1.0.0\"}]}";
+        const string Output = "Welcome to .NET!\n{\"version\":1,\"data\":[{\"packageId\":\"dssharness\",\"version\":\"1.0.0\"}]}";
 
-        Assert.True(HostProbes.TryReadToolVersion(Output, "RepoHarness", out var version));
+        Assert.True(HostProbes.TryReadToolVersion(Output, "DssHarness", out var version));
         Assert.Equal("1.0.0", version);
     }
 
@@ -84,7 +84,7 @@ public sealed class HostProbesTests
     [InlineData("""{"version":1}""")]
     public void TryReadToolVersion_RefusesTextThatIsNotTheListing(string output)
     {
-        Assert.False(HostProbes.TryReadToolVersion(output, "RepoHarness", out _));
+        Assert.False(HostProbes.TryReadToolVersion(output, "DssHarness", out _));
     }
 
     [Fact]
@@ -107,14 +107,14 @@ public sealed class HostProbesTests
     }
 
     [Theory]
-    [InlineData("bash\nsshd\nrepo-harness\n", true)]
-    [InlineData("/Users/dev/.dotnet/tools/repo-harness\n", true)]
-    [InlineData("\"svchost.exe\",\"1234\",\"Services\",\"0\",\"10,000 K\"\r\n\"repo-harness.exe\",\"4321\",\"Console\",\"1\",\"50,000 K\"\r\n", true)]
-    [InlineData("bash\nrepo-harness-helper\nsshd\n", false)]
+    [InlineData("bash\nsshd\nDssHarness\n", true)]
+    [InlineData("/Users/dev/.dotnet/tools/DssHarness\n", true)]
+    [InlineData("\"svchost.exe\",\"1234\",\"Services\",\"0\",\"10,000 K\"\r\n\"DssHarness.exe\",\"4321\",\"Console\",\"1\",\"50,000 K\"\r\n", true)]
+    [InlineData("bash\nDssHarness-helper\nsshd\n", false)]
     [InlineData("\"svchost.exe\",\"1234\",\"Services\",\"0\",\"10,000 K\"\r\n", false)]
     public void ListsProcess_FindsTheTool_InEitherKindOfListing(string listing, bool expected)
     {
-        Assert.Equal(expected, HostProbes.ListsProcess(listing, "repo-harness"));
+        Assert.Equal(expected, HostProbes.ListsProcess(listing, "DssHarness"));
     }
 
     [Fact]

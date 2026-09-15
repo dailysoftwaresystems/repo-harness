@@ -41,7 +41,7 @@ public sealed class LegPlacementTests
     [Fact]
     public void Candidates_LeaveOutTheWslDistributions_ForALegThatIsNotLinux()
     {
-        // A distribution runs Linux only; measuring one for this leg would install repo-harness there for nothing.
+        // A distribution runs Linux only; measuring one for this leg would install DssHarness there for nothing.
         Assert.Equal(
             ["local", "ssh mac", "ssh pi"],
             LegPlacement.Candidates(Config, HostDoubles.Leg("macos", "arm64")).Select(host => host.ToString()));
@@ -173,13 +173,13 @@ public sealed class LegPlacementTests
     public void Render_NamesTheHostAndTheEmulator_EachRunnableLegUses_AndWhatWasInstalled()
     {
         var emulated = new SelectedLeg("arm", new LegConfig { Os = "linux", Processor = "arm64", Emulator = "qemu-arm64", Config = "debug" });
-        var host = Ubuntu with { Actions = ["installed repo-harness 1.2.0"] };
+        var host = Ubuntu with { Actions = ["installed DssHarness 1.2.0"] };
 
         var outcome = LegsReports.Render(new LegsReport([new LegPlacement(emulated, host, null)], [host], Named: false), json: false);
 
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.Contains("arm  runs on wsl Ubuntu (linux x86_64) through qemu-arm64", outcome.Details!);
-        Assert.Contains("wsl Ubuntu: installed repo-harness 1.2.0", outcome.Details!);
+        Assert.Contains("wsl Ubuntu: installed DssHarness 1.2.0", outcome.Details!);
     }
 
     [Fact]

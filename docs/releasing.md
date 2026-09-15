@@ -1,9 +1,9 @@
-# Releasing repo-harness
+# Releasing DssHarness
 
-`repo-harness` ships as a public .NET tool on nuget.org, under the Apache License 2.0:
+`DssHarness` ships as a public .NET tool on nuget.org, under the Apache License 2.0:
 
 ```bash
-dotnet tool install --global RepoHarness
+dotnet tool install --global DssHarness
 ```
 
 ## Security posture
@@ -60,9 +60,10 @@ repository or inherited from the organisation:
 ## One-time setup
 
 1. **On nuget.org**, add a trusted publishing policy, owned by the account or organisation
-   that is to own the `RepoHarness` package:
+   that is to own the `DssHarness` package; the first publish creates the package under
+   the policy's owner:
    - Scopes: push new packages and package versions, since the first publish creates the
-     package; the glob can be `RepoHarness` alone
+     package; the glob can be `DssHarness` alone
    - Repository owner and name: this repository
    - Workflow file: `pipeline-pkg.yml`
    - Environment: `nuget`
@@ -85,7 +86,7 @@ Pipeline again for `release/stable`, and it resumes from that tag.
 
 ## Channels
 
-`repo-harness` ships as an **app**: people install the released tool rather than build on
+`DssHarness` ships as an **app**: people install the released tool rather than build on
 it, so it uses two channels.
 
 ```
@@ -105,10 +106,10 @@ To try a beta, download its `.nupkg` from the prerelease into a folder, then ins
 from there:
 
 ```bash
-dotnet tool install --global RepoHarness --version 0.2.0-beta --add-source ./folder
+dotnet tool install --global DssHarness --version 0.2.0-beta --add-source ./folder
 ```
 
-WSL distributions and ssh hosts install repo-harness from nuget.org alone, so a beta build
+WSL distributions and ssh hosts install DssHarness from nuget.org alone, so a beta build
 cannot bring a host to its version: legs on other hosts need a stable build.
 
 A beta needs no build number to be new. Every beta deploy bumps `<Version>` first, and a

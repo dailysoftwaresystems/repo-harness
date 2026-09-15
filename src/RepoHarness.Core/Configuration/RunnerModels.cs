@@ -52,7 +52,7 @@ public sealed class RunnerPhase
     public bool ContinueOnError { get; init; }
 }
 
-/// <summary>A named command invokable through <c>repo-harness exec</c>.</summary>
+/// <summary>A named command invokable through <c>DssHarness exec</c>.</summary>
 public sealed class ExecConfig
 {
     /// <summary>Executable to run.</summary>

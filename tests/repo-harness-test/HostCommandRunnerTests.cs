@@ -91,7 +91,7 @@ public sealed class HostCommandRunnerTests
 
         Assert.Throws<ArgumentException>(() => HostCommandRunner.BuildRequest(
             connection,
-            new HostCommand { Program = "repo-harness", Arguments = ["-C", "/path with space"] }));
+            new HostCommand { Program = "DssHarness", Arguments = ["-C", "/path with space"] }));
     }
 
     [Fact]
@@ -101,9 +101,9 @@ public sealed class HostCommandRunnerTests
 
         var request = HostCommandRunner.BuildRequest(
             connection,
-            new HostCommand { Program = @".dotnet\tools\repo-harness.exe", Arguments = ["host-agent"] });
+            new HostCommand { Program = @".dotnet\tools\DssHarness.exe", Arguments = ["host-agent"] });
 
-        Assert.Equal(@".dotnet\tools\repo-harness.exe host-agent", request.Arguments[^1]);
+        Assert.Equal(@".dotnet\tools\DssHarness.exe host-agent", request.Arguments[^1]);
     }
 
     [Fact]
@@ -123,7 +123,7 @@ public sealed class HostCommandRunnerTests
     {
         var request = HostCommandRunner.BuildRequest(
             new HostConnection { Host = HostId.Wsl("Ubuntu") },
-            new HostCommand { Program = "repo-harness", Arguments = ["host-agent"], StandardInput = "{}\n", HoldStandardInputOpen = true });
+            new HostCommand { Program = "DssHarness", Arguments = ["host-agent"], StandardInput = "{}\n", HoldStandardInputOpen = true });
 
         Assert.Equal("{}\n", request.StandardInput);
         Assert.True(request.HoldStandardInputOpen);

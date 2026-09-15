@@ -8,7 +8,7 @@ using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
-/// <summary>What the repo-harness on a host answers, what it agrees to run, and how it says a run ended.</summary>
+/// <summary>What the DssHarness on a host answers, what it agrees to run, and how it says a run ended.</summary>
 public sealed class HostAgentServiceTests
 {
     private const string Nonce = "0123456789abcdef0123456789abcdef";
@@ -239,7 +239,7 @@ public sealed class HostAgentServiceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.UsageError, exitCode);
-        Assert.Contains("speaks protocol 2, and repo-harness 1.2.3 on this host speaks 1", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("speaks protocol 2, and DssHarness 1.2.3 on this host speaks 1", error.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

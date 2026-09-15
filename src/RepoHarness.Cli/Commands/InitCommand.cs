@@ -3,7 +3,7 @@ using RepoHarness.Core.Commands;
 
 namespace RepoHarness.Cli.Commands;
 
-/// <summary>Wires <c>repo-harness init</c>. Orchestration only; the work is in the service.</summary>
+/// <summary>Wires <c>DssHarness init</c>. Orchestration only; the work is in the service.</summary>
 internal static class InitCommand
 {
     internal const string Name = "init";

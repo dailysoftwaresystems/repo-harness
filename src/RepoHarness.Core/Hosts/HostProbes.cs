@@ -17,7 +17,7 @@ public sealed record SdkListing(string Version, string Location)
 
     /// <summary>
     /// Whether it is installed at a Windows path, which is how a Windows host is told from any other
-    /// before repo-harness runs there.
+    /// before DssHarness runs there.
     /// </summary>
     public bool OnWindows => (Location.Length >= 2 && Location[1] == ':') || Location.StartsWith(@"\\", StringComparison.Ordinal);
 }

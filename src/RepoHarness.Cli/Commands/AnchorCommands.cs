@@ -27,7 +27,7 @@ internal static class AnchorScopeOptions
     }
 }
 
-/// <summary>Wires <c>repo-harness write-anchor</c>.</summary>
+/// <summary>Wires <c>DssHarness write-anchor</c>.</summary>
 internal static class WriteAnchorCommand
 {
     internal const string Name = "write-anchor";
@@ -110,7 +110,7 @@ internal static class WriteAnchorCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness set-anchor</c>.</summary>
+/// <summary>Wires <c>DssHarness set-anchor</c>.</summary>
 internal static class SetAnchorCommand
 {
     internal const string Name = "set-anchor";
@@ -196,7 +196,7 @@ internal static class SetAnchorCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness read-anchor</c>.</summary>
+/// <summary>Wires <c>DssHarness read-anchor</c>.</summary>
 internal static class ReadAnchorCommand
 {
     internal const string Name = "read-anchor";
@@ -247,7 +247,7 @@ internal static class ReadAnchorCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness read-anchors</c>.</summary>
+/// <summary>Wires <c>DssHarness read-anchors</c>.</summary>
 internal static class ReadAnchorsCommand
 {
     internal const string Name = "read-anchors";
@@ -349,7 +349,7 @@ internal static class ReadAnchorsCommand
     }
 }
 
-/// <summary>Wires <c>repo-harness check-anchor-balance</c>.</summary>
+/// <summary>Wires <c>DssHarness check-anchor-balance</c>.</summary>
 internal static class CheckAnchorBalanceCommand
 {
     internal const string Name = "check-anchor-balance";

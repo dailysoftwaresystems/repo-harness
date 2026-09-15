@@ -1,11 +1,12 @@
 using System.Security.Cryptography;
 using System.Text;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Anchors;
 
-/// <summary>Serialises changes to one pair of registries across every repo-harness process on the machine.</summary>
+/// <summary>Serialises changes to one pair of registries across every DssHarness process on the machine.</summary>
 public interface IAnchorRegistryLock
 {
     /// <summary>
@@ -46,7 +47,7 @@ public sealed class NamedMutexAnchorRegistryLock(IHostPlatform platform, TimeSpa
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"Another repo-harness process has held the anchor registries for {_timeout.TotalSeconds:0} seconds, "
+                $"Another {ToolPackage.Command} process has held the anchor registries for {_timeout.TotalSeconds:0} seconds, "
                 + "so nothing was changed. Run the command again once it has finished.");
         }
 

@@ -10,7 +10,7 @@ name: Deploy
 # cannot slip an untested commit into a release. stable promotes the tested commit itself;
 # beta promotes the version bump on top of it, which changes nothing but <Version>.
 #
-# repo-harness ships as an app: people install the released tool rather than build on
+# DssHarness ships as an app: people install the released tool rather than build on
 # it, so it uses two channels, main -> release/beta -> release/stable. beta releases each
 # new version on GitHub alone, as a prerelease with its package attached; stable publishes
 # the commit beta released, under the bare version, to nuget.org and as a GitHub release.

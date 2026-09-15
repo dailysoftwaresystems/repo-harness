@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 
 namespace RepoHarness.Core.Configuration;
 
@@ -16,7 +17,7 @@ public sealed class JsonConfigStore(IFileSystem fileSystem) : IConfigStore
 
         if (!_fileSystem.FileExists(path))
         {
-            throw new ConfigException($"No configuration at '{path}'. Run 'repo-harness init' first.");
+            throw new ConfigException($"No configuration at '{path}'. Run '{ToolPackage.Command} init' first.");
         }
 
         var json = _fileSystem.ReadAllText(path);
