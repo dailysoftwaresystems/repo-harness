@@ -57,12 +57,12 @@ internal static class DeleteWorktreeCommand
 
     private static readonly Option<bool> ForceOption = new("--force")
     {
-        Description = "Delete the worktree even if it has uncommitted changes, which are then lost.",
+        Description = "Delete the worktree without checking it, even when locked: uncommitted changes, commits no ref contains and submodules' unpushed work are lost.",
     };
 
     internal static Command Create()
     {
-        var command = new Command(Name, "Remove a worktree and everything under it; refuses uncommitted changes without --force.");
+        var command = new Command(Name, "Remove a worktree and everything under it; refuses one holding work that would be lost, or a locked one, without --force.");
         command.Arguments.Add(NameArgument);
         command.Options.Add(ForceOption);
         GlobalOptions.AddTo(command);

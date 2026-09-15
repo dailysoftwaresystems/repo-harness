@@ -8,4 +8,11 @@ namespace RepoHarness.Core.Git;
 /// <param name="Branch">Branch name, or <see langword="null"/> when detached.</param>
 /// <param name="IsMain">Whether this is the main worktree rather than a linked one.</param>
 /// <param name="IsBare">Whether this entry is a bare repository, which has no checkout at all.</param>
-public sealed record GitWorktree(string Path, string? Commit, string? Branch, bool IsMain, bool IsBare);
+public sealed record GitWorktree(string Path, string? Commit, string? Branch, bool IsMain, bool IsBare)
+{
+    /// <summary>
+    /// Why the worktree is locked: empty when it was locked without a reason, and
+    /// <see langword="null"/> when it is not locked.
+    /// </summary>
+    public string? LockReason { get; init; }
+}

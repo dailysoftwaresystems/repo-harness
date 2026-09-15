@@ -233,7 +233,7 @@ public sealed class WorktreeServiceTests
         var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "many", force: false, cancellationToken);
 
         Assert.Equal(
-            "Worktree 'many' has 5 uncommitted change(s) that would be lost: a.txt, b.txt, c.txt and 2 more. Commit or stash them, or pass --force to delete it anyway.",
+            "Worktree 'many' was not deleted, because it has 5 uncommitted change(s) that would be lost: a.txt, b.txt, c.txt and 2 more (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
             outcome.Outcome.Message);
     }
 
@@ -277,10 +277,11 @@ public sealed class WorktreeServiceTests
     }
 
     [Fact]
-    public async Task DeleteAsync_RefusesAWorktreeWhoseStatusGitCannotRead_UntilForced()
+    public async Task DeleteAsync_FailsForAWorktreeWhoseStatusGitCannotRead_DeletingNothing_UntilForced()
     {
-        // git cannot read this worktree's index, so nothing is known about what it holds, and
-        // not knowing is not clean. --force must still get past it, or it could never be deleted.
+        // git cannot read this worktree's index, so nothing is known about what it holds. That is
+        // git failing to answer rather than a precondition, and --force must still get past it, or
+        // the worktree could never be deleted.
         using var temp = new TempDirectory();
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp);
@@ -289,11 +290,11 @@ public sealed class WorktreeServiceTests
         var gitDirectory = await harness.RunGitAsync(path, ["rev-parse", "--absolute-git-dir"], cancellationToken);
         File.WriteAllText(Path.Combine(gitDirectory.StandardOutput.Trim(), "index"), "not an index");
 
-        var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "broken", force: false, cancellationToken);
+        var failed = await harness.WorktreeService.DeleteAsync(temp.Path, "broken", force: false, cancellationToken);
 
-        Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
-        Assert.Contains("Could not tell", refused.Outcome.Message, StringComparison.Ordinal);
-        Assert.Contains("--force", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Equal(HarnessExit.CommandFailed, failed.Outcome.ExitCode);
+        Assert.StartsWith("Could not read the repository status", failed.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("Nothing was deleted", failed.Outcome.Message, StringComparison.Ordinal);
         Assert.True(Directory.Exists(path));
 
         var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "broken", force: true, cancellationToken);
@@ -320,7 +321,9 @@ public sealed class WorktreeServiceTests
         var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "orphan", force: false, cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
-        Assert.Contains("Could not tell", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("is not a worktree git can find", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("git worktree repair ", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.EndsWith("or pass --force to delete it anyway.", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
 
         var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "orphan", force: true, cancellationToken);

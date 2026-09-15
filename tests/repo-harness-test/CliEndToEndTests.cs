@@ -259,7 +259,7 @@ public sealed partial class CliEndToEndTests
         // One line on standard error, naming what would be lost and the way past.
         Assert.Equal(HarnessExit.Refused, refused.ExitCode);
         Assert.Equal(
-            "delete-worktree: FAIL - Worktree 'wt' has 1 uncommitted change(s) that would be lost: notes.txt. Commit or stash them, or pass --force to delete it anyway.",
+            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
             Assert.Single(refused.StandardError.ReplaceLineEndings("\n").Trim().Split('\n')));
         Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
 

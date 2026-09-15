@@ -113,7 +113,7 @@ public sealed partial class HelpTests
     {
         var result = await CliRunner.RunAsync(["help", "worktrees"], TestContext.Current.CancellationToken);
 
-        foreach (var text in new[] { "delete-worktree", "uncommitted changes", "--force", $"exits {HarnessExit.Refused}" })
+        foreach (var text in new[] { "delete-worktree", "uncommitted changes", "skip-worktree", "locked", "--force", $"exits {HarnessExit.Refused}", $"exits {HarnessExit.CommandFailed}" })
         {
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
         }

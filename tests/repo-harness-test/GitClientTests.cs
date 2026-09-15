@@ -396,15 +396,48 @@ public sealed class GitClientProtocolTests
     }
 
     [Fact]
-    public async Task GetStatusAsync_CountsARenameOnce_WhicheverColumnMarksIt()
+    public async Task GetStatusAsync_CountsARenameOrCopyOnce_WhicheverColumnMarksIt()
     {
-        // A staged rename is marked in the first status column and one found in the work tree in
-        // the second; both are followed by the original path.
-        var (git, _) = Scripted(Exited(0, "R  new.txt\0old.txt\0 R moved.txt\0was.txt\0?? untracked.txt\0"));
+        // A rename or copy is followed by its original path, whether the first status column marks
+        // it, as for a staged one, or the second, as for one git finds in the work tree. No other
+        // entry is followed by one, an unmerged one included.
+        var (git, _) = Scripted(Exited(
+            0,
+            "R  new.txt\0old.txt\0 R moved.txt\0was.txt\0C  copy.txt\0big.txt\0UU f.txt\0?? untracked.txt\0"));
 
         var entries = await git.GetStatusAsync("/repo", TestContext.Current.CancellationToken);
 
-        Assert.Equal(["R  new.txt", " R moved.txt", "?? untracked.txt"], entries);
+        Assert.Equal(["R  new.txt", " R moved.txt", "C  copy.txt", "UU f.txt", "?? untracked.txt"], entries);
+    }
+
+    [Fact]
+    public async Task ListWorktreesAsync_ReadsALock_WithOrWithoutAReason()
+    {
+        const string Head = "HEAD 0123456789abcdef0123456789abcdef01234567\n";
+        var (git, _) = Scripted(Exited(
+            0,
+            $"worktree /repo\n{Head}branch refs/heads/main\n\n"
+            + $"worktree /repo/a\n{Head}detached\nlocked on a USB disk\n\n"
+            + $"worktree /repo/b\n{Head}detached\nlocked\n\n"));
+
+        var worktrees = await git.ListWorktreesAsync("/repo", TestContext.Current.CancellationToken);
+
+        Assert.Equal(new string?[] { null, "on a USB disk", string.Empty }, worktrees.Select(worktree => worktree.LockReason));
+    }
+
+    [Fact]
+    public async Task ListIndexAsync_ReadsTheFlagsThatHideAnEdit_AndSubmodules()
+    {
+        var (git, _) = Scripted(Exited(
+            0,
+            "H 100644 aaaa 0\tplain.txt\0h 100644 bbbb 0\tassumed.txt\0S 100755 cccc 0\tsparse dir/tool\0H 160000 dddd 0\tlib\0"));
+
+        var entries = await git.ListIndexAsync("/repo", TestContext.Current.CancellationToken);
+
+        Assert.Equal(["plain.txt", "assumed.txt", "sparse dir/tool", "lib"], entries.Select(entry => entry.Path));
+        Assert.Equal([false, true, false, false], entries.Select(entry => entry.IsAssumedUnchanged));
+        Assert.Equal([false, false, true, false], entries.Select(entry => entry.IsSkipWorktree));
+        Assert.Equal([false, false, false, true], entries.Select(entry => entry.IsSubmodule));
     }
 
     [Fact]

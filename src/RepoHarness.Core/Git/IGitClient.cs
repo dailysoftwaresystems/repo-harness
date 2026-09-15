@@ -45,15 +45,44 @@ public interface IGitClient
     Task<bool> IsDirtyAsync(string directory, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Porcelain status entries, one per changed path: two status letters and a space, then the
-    /// path. Untracked files and changed submodules are listed even where configuration would hide
-    /// them; an untracked directory is one entry, and an ignored file is none.
+    /// Porcelain status entries, one per changed path: two status characters and a space, then the
+    /// path; a rename or copy is one entry, with its new path. Untracked files and changed submodules
+    /// are listed even where configuration would hide them; an untracked directory is one entry, and
+    /// an ignored file is none.
     /// </summary>
     /// <exception cref="HarnessException">git could not read the status.</exception>
     Task<IReadOnlyList<string>> GetStatusAsync(string directory, CancellationToken cancellationToken = default);
 
     /// <summary>Lists every worktree attached to the repository, the main worktree first.</summary>
     Task<IReadOnlyList<GitWorktree>> ListWorktreesAsync(string directory, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Where <paramref name="directory"/> sits in its repository, or <see langword="null"/> when it is
+    /// not inside one.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not inspect the directory.</exception>
+    Task<GitLocation?> GetLocationAsync(string directory, CancellationToken cancellationToken = default);
+
+    /// <summary>Every entry of the work tree's index, with the flags that can hide an edit from status.</summary>
+    /// <exception cref="HarnessException">git could not read the index.</exception>
+    Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(string directory, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The object ids git would store for <paramref name="paths"/>, which are relative to
+    /// <paramref name="directory"/>, in the same order, with the filters <c>git add</c> applies.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not hash a file.</exception>
+    Task<IReadOnlyList<string>> HashFilesAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>How many commits <c>git rev-list</c> selects from <paramref name="revisions"/>.</summary>
+    /// <exception cref="HarnessException">git could not walk the history.</exception>
+    Task<int> CountCommitsAsync(
+        string directory,
+        IReadOnlyList<string> revisions,
+        CancellationToken cancellationToken = default);
 
     /// <summary>Whether a path is ignored by git's ignore rules.</summary>
     Task<bool> IsIgnoredAsync(string directory, string path, CancellationToken cancellationToken = default);

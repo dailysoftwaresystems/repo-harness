@@ -1,3 +1,4 @@
+using System.Globalization;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -146,6 +147,148 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         Ensure(result, "list the worktrees");
 
         return ParseWorktrees(result.StandardOutput);
+    }
+
+    public async Task<GitLocation?> GetLocationAsync(
+        string directory,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunQueryAsync(
+            directory,
+            ["rev-parse", "--show-prefix", "--absolute-git-dir"],
+            cancellationToken).ConfigureAwait(false);
+
+        if (!result.Succeeded)
+        {
+            EnsureNotAnError(result, directory);
+            return null;
+        }
+
+        // Read by position: at the root of a work tree the prefix is an empty line, and
+        // dropping empty lines would take the git directory for the prefix.
+        var lines = result.StandardOutput.Split('\n');
+
+        if (lines.Length < 2 || lines[1].TrimEnd('\r').Length == 0)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git did not report where '{directory}' sits in its repository.");
+        }
+
+        return new GitLocation(lines[0].TrimEnd('\r'), NormalizeDirectory(lines[1].TrimEnd('\r')));
+    }
+
+    public async Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(
+        string directory,
+        CancellationToken cancellationToken = default)
+    {
+        // -v is what shows the flags that hide an edit from status, and -z keeps every path intact.
+        var result = await RunAsync(
+            directory,
+            ["ls-files", "--stage", "-v", "-z"],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        Ensure(result, "read the index");
+
+        var entries = new List<GitIndexEntry>();
+
+        foreach (var field in result.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // The tag, mode, object and stage, separated by spaces, then a tab and the path.
+            var tab = field.IndexOf('\t');
+            string[] parts = tab < 0 ? [] : field[..tab].Split(' ');
+
+            if (parts.Length != 4
+                || parts[0].Length != 1
+                || !int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var stage))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git listed an index entry in a form this build cannot read: '{field}'");
+            }
+
+            entries.Add(new GitIndexEntry(parts[0][0], parts[1], parts[2], stage, field[(tab + 1)..]));
+        }
+
+        return entries;
+    }
+
+    public async Task<IReadOnlyList<string>> HashFilesAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        // Batched, so a long list never exceeds the command line an operating system accepts.
+        const int BatchCharacters = 8000;
+
+        var hashes = new List<string>(paths.Count);
+        var batch = new List<string>();
+        var batchLength = 0;
+
+        foreach (var path in paths)
+        {
+            if (batch.Count > 0 && batchLength + path.Length > BatchCharacters)
+            {
+                await HashBatchAsync().ConfigureAwait(false);
+            }
+
+            batch.Add(path);
+            batchLength += path.Length + 1;
+        }
+
+        if (batch.Count > 0)
+        {
+            await HashBatchAsync().ConfigureAwait(false);
+        }
+
+        return hashes;
+
+        async Task HashBatchAsync()
+        {
+            // Given paths, git applies the filters git add would, so an unchanged file hashes to
+            // the object the index already holds.
+            var result = await RunAsync(
+                directory,
+                ["hash-object", "--", .. batch],
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Ensure(result, "hash the files");
+
+            var lines = result.OutputLines;
+            if (lines.Count != batch.Count)
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git hashed {lines.Count} of {batch.Count} files.");
+            }
+
+            hashes.AddRange(lines);
+            batch.Clear();
+            batchLength = 0;
+        }
+    }
+
+    public async Task<int> CountCommitsAsync(
+        string directory,
+        IReadOnlyList<string> revisions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunAsync(
+            directory,
+            ["rev-list", "--count", .. revisions],
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        Ensure(result, "count commits");
+
+        var text = result.StandardOutput.Trim();
+
+        return int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var count)
+            ? count
+            : throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git counted commits in a form this build cannot read: '{text}'");
     }
 
     public async Task<bool> IsIgnoredAsync(
@@ -310,6 +453,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         string? commit = null;
         string? branch = null;
         var bare = false;
+        string? lockReason = null;
 
         void Flush()
         {
@@ -323,12 +467,16 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
                 commit,
                 branch,
                 IsMain: worktrees.Count == 0,
-                IsBare: bare));
+                IsBare: bare)
+            {
+                LockReason = lockReason,
+            });
 
             path = null;
             commit = null;
             branch = null;
             bare = false;
+            lockReason = null;
         }
 
         foreach (var line in output.Split('\n').Select(l => l.TrimEnd('\r')))
@@ -354,6 +502,14 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             else if (string.Equals(line, "bare", StringComparison.Ordinal))
             {
                 bare = true;
+            }
+            else if (string.Equals(line, "locked", StringComparison.Ordinal))
+            {
+                lockReason = string.Empty;
+            }
+            else if (line.StartsWith("locked ", StringComparison.Ordinal))
+            {
+                lockReason = line["locked ".Length..];
             }
         }
 

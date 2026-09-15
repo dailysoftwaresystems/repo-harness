@@ -250,12 +250,20 @@ internal static class HelpCommand
         builder.AppendLine("Worktrees always belong to the main checkout, so running create-worktree from");
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
         builder.AppendLine();
-        builder.AppendLine("delete-worktree removes a worktree and everything under it, but refuses one with");
-        builder.AppendLine("uncommitted changes: a modified or staged file, or an untracked file git does");
-        builder.AppendLine("not ignore. Ignored files, such as build output, do not count. When git cannot");
-        builder.AppendLine("say whether there are any, delete-worktree refuses as well: not knowing is not");
-        builder.AppendLine($"clean. A refusal deletes nothing and exits {HarnessExit.Refused}. --force deletes the worktree");
-        builder.AppendLine("anyway, and its uncommitted changes with it.");
+        builder.AppendLine("delete-worktree removes a worktree, everything under it, and git's record of it.");
+        builder.AppendLine($"Without --force it checks first, and when any of these hold it deletes nothing and exits {HarnessExit.Refused}:");
+        builder.AppendLine("  - it has uncommitted changes: a modified, staged or untracked file git does not");
+        builder.AppendLine("    ignore, a changed submodule, or an edit hidden by assume-unchanged or");
+        builder.AppendLine("    skip-worktree");
+        builder.AppendLine("  - commits on its HEAD are on no branch, tag, remote-tracking ref or stash");
+        builder.AppendLine("  - a submodule's repository, deleted with it, holds unpushed commits or a stash");
+        builder.AppendLine("  - it is locked");
+        builder.AppendLine("  - git does not see it as a worktree of this repository");
+        builder.AppendLine("The refusal names everything it found, on one line. When git cannot answer,");
+        builder.AppendLine($"nothing is deleted, and it exits {HarnessExit.CommandFailed}. Ignored files are deleted unchecked,");
+        builder.AppendLine("even ones no build makes again, such as .env, and so are ignored directories with");
+        builder.AppendLine("everything in them, the history of a repository nested inside one included.");
+        builder.AppendLine("--force skips every check and overrides a lock; whatever the worktree held is lost.");
 
         return builder.ToString();
     }
