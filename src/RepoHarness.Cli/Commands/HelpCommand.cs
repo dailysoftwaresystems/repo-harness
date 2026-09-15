@@ -257,9 +257,11 @@ internal static class HelpCommand
         builder.AppendLine("skip-worktree. It refuses too when commits on its HEAD are on no branch, tag,");
         builder.AppendLine("remote-tracking ref, newest stash or other worktree's HEAD; when a submodule");
         builder.AppendLine("repository deleted with it, checked out or not, holds a commit no");
-        builder.AppendLine("remote-tracking ref or tag contains, or a stash; when it is locked; and when git");
+        builder.AppendLine("remote-tracking ref or tag contains, or a stash; when it is locked; when git's");
+        builder.AppendLine("record of it names another directory, as after moving it by hand; and when git");
         builder.AppendLine("does not see it as a worktree of this repository. The refusal names everything");
-        builder.AppendLine("it found, on one line.");
+        builder.AppendLine("it found, on one line. A tag made inside a submodule counts as kept, and is lost");
+        builder.AppendLine("with the submodule's repository.");
         builder.AppendLine();
         builder.AppendLine($"Without --force, when git cannot answer, nothing is deleted and it exits {HarnessExit.CommandFailed}.");
         builder.AppendLine("Ignored files are deleted unchecked, even ones no build makes again, such as");

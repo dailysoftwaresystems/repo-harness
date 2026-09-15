@@ -1,7 +1,9 @@
 using System.CommandLine;
 using RepoHarness.Cli;
 using RepoHarness.Cli.Commands;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Worktrees;
 
 // Command selection and dependency wiring only. Every behaviour lives in a service
 // in RepoHarness.Core, which is a library precisely so that nothing can accumulate here.
@@ -48,13 +50,14 @@ async Task<int> RunAsync(string[] arguments, CancellationToken cancellationToken
         return HarnessExit.UsageError;
     }
 
-    // Only a deletion, which past its point of no return goes on after Ctrl+C to finish, waits longer
-    // than the default for its action to end, so no other command is any slower to stop.
+    // A deletion past its point of no return goes on after Ctrl+C, and a host agent can be running
+    // one for another machine, so those two wait for their action as long as the deletion expects.
+    // No other command is any slower to stop.
     var invocation = new InvocationConfiguration();
 
-    if (parseResult.CommandResult.Command.Name == DeleteWorktreeCommand.Name)
+    if (parseResult.CommandResult.Command.Name is DeleteWorktreeCommand.Name or HostAgentProtocol.CommandName)
     {
-        invocation.ProcessTerminationTimeout = DeleteWorktreeCommand.InterruptionGrace;
+        invocation.ProcessTerminationTimeout = WorktreeService.DefaultInterruptionGrace;
     }
 
     return await parseResult.InvokeAsync(invocation, cancellationToken).ConfigureAwait(false);

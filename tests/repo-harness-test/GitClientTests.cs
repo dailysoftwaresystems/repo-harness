@@ -426,6 +426,23 @@ public sealed class GitClientProtocolTests
     }
 
     [Fact]
+    public async Task ListWorktreesAsync_ReadsAnUnbornHead_AsNoCommit()
+    {
+        // git lists the HEAD of an orphan branch, which names no commit yet, as the null object id.
+        // Handed back to git as a commit, it fails every command it reaches.
+        var (git, _) = Scripted(Exited(
+            0,
+            "worktree /repo\nHEAD 0123456789abcdef0123456789abcdef01234567\nbranch refs/heads/main\n\n"
+            + "worktree /repo/a\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/unborn\n\n"));
+
+        var worktrees = await git.ListWorktreesAsync("/repo", TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            new string?[] { "0123456789abcdef0123456789abcdef01234567", null },
+            worktrees.Select(worktree => worktree.Commit));
+    }
+
+    [Fact]
     public async Task ListIndexAsync_ReadsTheFlagsThatHideAnEdit_AndSubmodules()
     {
         var (git, _) = Scripted(Exited(

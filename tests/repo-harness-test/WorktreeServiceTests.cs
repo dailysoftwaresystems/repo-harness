@@ -322,7 +322,8 @@ public sealed class WorktreeServiceTests
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.Contains("is not a worktree git can find", refused.Outcome.Message, StringComparison.Ordinal);
-        Assert.Contains("git worktree repair ", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("'git -C ", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains(" worktree repair'", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.EndsWith("or pass --force to delete it anyway.", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
 

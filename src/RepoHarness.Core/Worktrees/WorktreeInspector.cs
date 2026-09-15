@@ -1,5 +1,6 @@
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -44,16 +45,22 @@ internal sealed record SubmoduleLoss(string Path, int Commits, bool HasStash);
 /// <param name="Submodules">Submodule repositories that hold work found nowhere else.</param>
 /// <param name="LockReason">Why the worktree is locked, or <see langword="null"/> when it is not.</param>
 /// <param name="HoldsSubmodules">Whether git counts the worktree as holding submodules, which plain removal refuses.</param>
+/// <param name="MovedFrom">
+/// The directory git's record of the worktree names when it is not this one, as after moving the
+/// worktree by hand; empty when the record names none; <see langword="null"/> when it names this one.
+/// </param>
 internal sealed record WorktreeFindings(
     IReadOnlyList<string> Changes,
     int Commits,
     string? Head,
     IReadOnlyList<SubmoduleLoss> Submodules,
     string? LockReason,
-    bool HoldsSubmodules)
+    bool HoldsSubmodules,
+    string? MovedFrom = null)
 {
     /// <summary>Whether anything was found that deleting without --force must not override.</summary>
-    public bool StopsDeletion => Changes.Count > 0 || Commits > 0 || Submodules.Count > 0 || LockReason is not null;
+    public bool StopsDeletion
+        => Changes.Count > 0 || Commits > 0 || Submodules.Count > 0 || LockReason is not null || MovedFrom is not null;
 }
 
 /// <summary>
@@ -61,11 +68,14 @@ internal sealed record WorktreeFindings(
 /// <see cref="HarnessException"/> with <see cref="HarnessExit.CommandFailed"/>, because a question
 /// git could not answer is not a worktree with nothing to lose.
 /// </summary>
-internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSystem, IHostPlatform platform)
+internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSystem, IHostPlatform platform, IHarnessOutput output)
 {
+    private const int CleanupAttempts = 5;
+
     private readonly IGitClient _gitClient = gitClient;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHostPlatform _platform = platform;
+    private readonly IHarnessOutput _output = output;
 
     /// <summary>What git makes of <paramref name="path"/>, compared with the main checkout's repository.</summary>
     public async Task<WorktreeIdentity> IdentifyAsync(
@@ -116,7 +126,7 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         var head = await _gitClient.ResolveCommitAsync(path, "HEAD", cancellationToken).ConfigureAwait(false);
         var commits = head is null
             ? 0
-            : await CountUnreferencedCommitsAsync(path, head, ResolveLinks(path), cancellationToken).ConfigureAwait(false);
+            : await CountUnreferencedCommitsAsync(path, mainCheckoutRoot, head, administrativeDirectory, cancellationToken).ConfigureAwait(false);
 
         var repositories = new List<SubmoduleRepository>();
         var populated = await CollectCheckedOutSubmodulesAsync(mainCheckoutRoot, path, string.Empty, index, repositories, cancellationToken)
@@ -129,13 +139,19 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         var holdsSubmodules = populated
             || _fileSystem.DirectoryExists(Path.Combine(administrativeDirectory, "modules"));
 
+        // git removes, and lists, the directory its record names. When that is not this one, as
+        // after moving the worktree by hand, git's removal would fail once every check had passed.
+        var recorded = ReadRecordedWorktree(administrativeDirectory);
+        var movedFrom = recorded is not null && PathsEqual(recorded, ResolveLinks(path)) ? null : recorded ?? string.Empty;
+
         return new WorktreeFindings(
             changes,
             commits,
             head,
             await FindSubmoduleLossesAsync(repositories, cancellationToken).ConfigureAwait(false),
             ReadLockReason(administrativeDirectory),
-            holdsSubmodules);
+            holdsSubmodules,
+            movedFrom);
     }
 
     /// <summary>
@@ -148,18 +164,21 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         GitWorktree record,
         CancellationToken cancellationToken)
     {
+        // Without the record's own directory, neither which HEAD is this worktree's nor which
+        // submodule repositories clearing it deletes can be known, and passing over that would
+        // lose them.
+        var administrativeDirectory = await FindAdministrativeDirectoryAsync(mainCheckoutRoot, record.Path, cancellationToken).ConfigureAwait(false)
+            ?? throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git lists a worktree at '{record.Path}', but the directory holding its record could not be found, so what clearing it would delete cannot be checked.");
+
         var commits = record.Commit is null
             ? 0
-            : await CountUnreferencedCommitsAsync(mainCheckoutRoot, record.Commit, record.Path, cancellationToken).ConfigureAwait(false);
+            : await CountUnreferencedCommitsAsync(mainCheckoutRoot, mainCheckoutRoot, record.Commit, administrativeDirectory, cancellationToken).ConfigureAwait(false);
 
         var repositories = new List<SubmoduleRepository>();
-
-        if (await FindAdministrativeDirectoryAsync(mainCheckoutRoot, record.Path, cancellationToken).ConfigureAwait(false)
-            is { } administrativeDirectory)
-        {
-            await CollectModuleRepositoriesAsync(mainCheckoutRoot, Path.Combine(administrativeDirectory, "modules"), string.Empty, repositories, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        await CollectModuleRepositoriesAsync(mainCheckoutRoot, Path.Combine(administrativeDirectory, "modules"), string.Empty, repositories, cancellationToken)
+            .ConfigureAwait(false);
 
         return new WorktreeFindings(
             [],
@@ -184,7 +203,7 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         {
             throw new HarnessException(
                 HarnessExit.CommandFailed,
-                $"Could not follow the links along '{path}': {ex.Message}");
+                $"Could not follow the links in the worktree's path: {ex.Message}");
         }
     }
 
@@ -204,20 +223,16 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
     /// </summary>
     private async Task<int> CountUnreferencedCommitsAsync(
         string directory,
+        string mainCheckoutRoot,
         string head,
-        string worktreePath,
+        string administrativeDirectory,
         CancellationToken cancellationToken)
     {
         var stash = await _gitClient.ResolveCommitAsync(directory, "refs/stash", cancellationToken).ConfigureAwait(false);
-        var worktrees = await _gitClient.ListWorktreesAsync(directory, cancellationToken).ConfigureAwait(false);
 
         // Not --all: it includes the HEAD of this worktree too.
         List<string> revisions = [head, "--not", "--branches", "--tags", "--remotes"];
-
-        revisions.AddRange(worktrees
-            .Where(worktree => worktree.Commit is not null && !PathsEqual(worktree.Path, worktreePath))
-            .Select(worktree => worktree.Commit!)
-            .Distinct(StringComparer.Ordinal));
+        revisions.AddRange(await OtherWorktreeHeadsAsync(directory, mainCheckoutRoot, administrativeDirectory, cancellationToken).ConfigureAwait(false));
 
         if (stash is not null)
         {
@@ -225,6 +240,41 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         }
 
         return await _gitClient.CountCommitsAsync(directory, revisions, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The HEAD commit of every worktree but this one, the main checkout's included, each named by its
+    /// record rather than its path. A worktree moved by hand is still listed at its old path, where
+    /// matching by path would take this worktree's own HEAD for another's. An unborn HEAD names no commit.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> OtherWorktreeHeadsAsync(
+        string directory,
+        string mainCheckoutRoot,
+        string administrativeDirectory,
+        CancellationToken cancellationToken)
+    {
+        var heads = new List<string>();
+
+        if (await _gitClient.ResolveCommitAsync(directory, "main-worktree/HEAD", cancellationToken).ConfigureAwait(false) is { } mainHead)
+        {
+            heads.Add(mainHead);
+        }
+
+        foreach (var record in EnumerateRecords(await MainGitDirectoryAsync(mainCheckoutRoot, cancellationToken).ConfigureAwait(false)))
+        {
+            if (PathsEqual(record, administrativeDirectory))
+            {
+                continue;
+            }
+
+            if (await _gitClient.ResolveCommitAsync(directory, $"worktrees/{Path.GetFileName(record)}/HEAD", cancellationToken).ConfigureAwait(false)
+                is { } head)
+            {
+                heads.Add(head);
+            }
+        }
+
+        return [.. heads.Distinct(StringComparer.Ordinal)];
     }
 
     /// <summary>
@@ -274,7 +324,7 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         }
         finally
         {
-            DeleteTemporaryFile(copy);
+            await DeleteTemporaryCopyAsync(copy).ConfigureAwait(false);
         }
     }
 
@@ -365,6 +415,17 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
                 await CollectModuleRepositoriesAsync(mainCheckoutRoot, Path.Combine(gitDirectory, "modules"), shown + "/", repositories, cancellationToken)
                     .ConfigureAwait(false);
             }
+            else if (_fileSystem.FileExists(Path.Combine(full, "HEAD"))
+                || _fileSystem.DirectoryExists(Path.Combine(full, "objects"))
+                || _fileSystem.DirectoryExists(Path.Combine(full, "refs")))
+            {
+                // A repository git cannot read, such as one whose HEAD a crash emptied, still holds
+                // its branches on disk. Taken for part of a submodule's name, it would be walked
+                // through, and deleted without a word.
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git does not read '{full}' as a repository, though it looks like a submodule's, so the work it may hold cannot be checked.");
+            }
             else
             {
                 await CollectModuleRepositoriesAsync(mainCheckoutRoot, full, shown + "/", repositories, cancellationToken)
@@ -385,8 +446,8 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
     /// <summary>
     /// The repositories holding commits on their HEAD or branches that no remote-tracking ref or tag
     /// contains, or a stash. Only that much exists anywhere else once the worktree's git directory is
-    /// deleted. A tag counts as kept, since tags usually come from upstream; a tag made only in the
-    /// submodule is not protected.
+    /// deleted. Tags count as kept, since they usually come from upstream, so commits held only by a
+    /// tag made inside the submodule are deleted with it, without a refusal.
     /// </summary>
     private async Task<IReadOnlyList<SubmoduleLoss>> FindSubmoduleLossesAsync(
         IReadOnlyList<SubmoduleRepository> repositories,
@@ -420,42 +481,61 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
         string worktreePath,
         CancellationToken cancellationToken)
     {
-        var records = Path.Combine(await MainGitDirectoryAsync(mainCheckoutRoot, cancellationToken).ConfigureAwait(false), "worktrees");
+        foreach (var record in EnumerateRecords(await MainGitDirectoryAsync(mainCheckoutRoot, cancellationToken).ConfigureAwait(false)))
+        {
+            if (ReadRecordedWorktree(record) is { } recorded && PathsEqual(recorded, worktreePath))
+            {
+                return record;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The directories holding git's worktree records, one for each linked worktree.</summary>
+    private List<string> EnumerateRecords(string mainGitDirectory)
+    {
+        var records = Path.Combine(mainGitDirectory, "worktrees");
 
         try
         {
-            if (!_fileSystem.DirectoryExists(records))
-            {
-                return null;
-            }
-
-            foreach (var directory in _fileSystem.EnumerateDirectories(records))
-            {
-                var gitdirFile = Path.Combine(directory, "gitdir");
-
-                if (!_fileSystem.FileExists(gitdirFile))
-                {
-                    continue;
-                }
-
-                // The record holds the path of the worktree's .git file: absolute, or relative to
-                // the record's own directory when worktree.useRelativePaths is set.
-                var dotGit = Path.GetFullPath(Path.Combine(directory, _fileSystem.ReadAllText(gitdirFile).Trim()));
-                var recorded = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(dotGit));
-
-                if (recorded is not null && PathsEqual(recorded, worktreePath))
-                {
-                    return Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
-                }
-            }
-
-            return null;
+            return _fileSystem.DirectoryExists(records)
+                ? [.. _fileSystem.EnumerateDirectories(records).Select(record => Path.TrimEndingDirectorySeparator(Path.GetFullPath(record)))]
+                : [];
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             throw new HarnessException(
                 HarnessExit.CommandFailed,
                 $"Could not read git's worktree records in '{records}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The worktree directory git's record in <paramref name="administrativeDirectory"/> names, or
+    /// <see langword="null"/> when the record names none.
+    /// </summary>
+    private string? ReadRecordedWorktree(string administrativeDirectory)
+    {
+        var gitdirFile = Path.Combine(administrativeDirectory, "gitdir");
+
+        try
+        {
+            if (!_fileSystem.FileExists(gitdirFile))
+            {
+                return null;
+            }
+
+            // The record holds the path of the worktree's .git file: absolute, or relative to the
+            // record's own directory when worktree.useRelativePaths is set.
+            var dotGit = Path.GetFullPath(Path.Combine(administrativeDirectory, _fileSystem.ReadAllText(gitdirFile).Trim()));
+            return Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(dotGit));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Could not read git's worktree record '{gitdirFile}': {ex.Message}");
         }
     }
 
@@ -478,17 +558,36 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
     }
 
     /// <summary>
-    /// Deletes a temporary copy. A failure to clean up must not replace the answer, or the failure,
-    /// the copy was made for.
+    /// Deletes the temporary copy of the index, and the lock file a git killed while writing it leaves
+    /// beside it. A scanner can hold a file it has just seen appear, so each is retried briefly. What
+    /// still cannot be deleted is reported under --verbose, and never fails the command or replaces
+    /// the answer the copy was made for.
     /// </summary>
-    private void DeleteTemporaryFile(string path)
+    private async Task DeleteTemporaryCopyAsync(string copy)
     {
-        try
+        foreach (var file in new[] { copy, copy + ".lock" })
         {
-            _fileSystem.DeleteFile(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
+            string? problem = null;
+
+            for (var attempt = 1; attempt <= CleanupAttempts; attempt++)
+            {
+                try
+                {
+                    _fileSystem.DeleteFile(file);
+                    problem = null;
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    problem = ex.Message;
+                    await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt), CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+
+            if (problem is not null)
+            {
+                _output.Detail(WorktreeService.DeleteCommand, $"Could not delete the temporary index copy '{file}': {problem}");
+            }
         }
     }
 

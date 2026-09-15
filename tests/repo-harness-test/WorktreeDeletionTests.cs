@@ -526,6 +526,136 @@ public sealed class WorktreeDeletionTests
         return (harness, path);
     }
 
+    [Fact]
+    public async Task AnUnbornWorktreeBesideIt_DoesNotStopADelete()
+    {
+        // git lists an unborn HEAD as the null object id. Handed to git as a commit, it failed
+        // every check that asked about other worktrees' HEADs.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var unborn = await CreateAsync(harness, temp, "orphan");
+        await harness.RunGitAsync(unborn, ["checkout", "--quiet", "--orphan", "never-committed"], cancellationToken);
+        var path = await CreateAsync(harness, temp, "beside");
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "beside", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task AnUnbornRecordWhoseDirectoryIsGone_IsCleared()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "unborn");
+        await harness.RunGitAsync(path, ["checkout", "--quiet", "--orphan", "never-committed"], cancellationToken);
+        harness.FileSystem.DeleteDirectory(path);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "unborn", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        await AssertNotRegisteredAsync(harness, temp, path);
+    }
+
+    [Fact]
+    public async Task ASubmoduleRepositoryGitCannotRead_FailsAndDeletesNothing()
+    {
+        // With its HEAD emptied, as a crash can leave it, git no longer reads the repository, while
+        // its branch, with a commit found nowhere else, is still on disk.
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "corrupt");
+        var submodule = Path.Combine(path, "lib");
+        await harness.RunGitAsync(submodule, ["switch", "--quiet", "-c", "feature"], cancellationToken);
+        await CommitInSubmoduleAsync(harness, submodule);
+        var repository = (await harness.RunGitAsync(submodule, ["rev-parse", "--absolute-git-dir"], cancellationToken)).StandardOutput.Trim();
+        await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
+        File.WriteAllText(Path.Combine(repository, "HEAD"), string.Empty);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "corrupt", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.CommandFailed, outcome.Outcome.ExitCode);
+        Assert.Contains("git does not read", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("Nothing was deleted", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(path));
+        Assert.True(File.Exists(Path.Combine(repository, "refs", "heads", "feature")));
+    }
+
+    [Fact]
+    public async Task AHiddenEditUnderASplitIndex_IsRefused_AndTheIndexFilesAreUntouched()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "split");
+        await harness.RunGitAsync(path, ["update-index", "--split-index"], cancellationToken);
+        await harness.RunGitAsync(path, ["update-index", "--assume-unchanged", "README.md"], cancellationToken);
+        File.WriteAllText(Path.Combine(path, "README.md"), "edited where status does not look");
+        var gitDirectory = (await harness.RunGitAsync(path, ["rev-parse", "--absolute-git-dir"], cancellationToken)).StandardOutput.Trim();
+        var before = IndexFiles(gitDirectory);
+        Assert.Contains(before.Keys, file => file.StartsWith("sharedindex.", StringComparison.Ordinal));
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "split", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("that would be lost: README.md", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Equal(before, IndexFiles(gitDirectory));
+    }
+
+    [Fact]
+    public async Task AnEditedFileOutsideASparseIndexCone_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        temp.WriteFile(Path.Combine("outside", "file.txt"), "outside the cone");
+        await harness.CommitAllAsync(temp.Path, "a directory outside the cone", cancellationToken);
+        var path = await CreateAsync(harness, temp, "cone");
+        await harness.RunGitAsync(path, ["sparse-checkout", "init", "--cone", "--sparse-index"], cancellationToken);
+        Assert.False(File.Exists(Path.Combine(path, "outside", "file.txt")));
+        Directory.CreateDirectory(Path.Combine(path, "outside"));
+        File.WriteAllText(Path.Combine(path, "outside", "file.txt"), "edited outside the cone");
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "cone", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("outside/file.txt", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AWorktreeMovedByHand_IsRefused_AndItsCommitIsStillCounted()
+    {
+        // git still lists the record at the old path, with this worktree's HEAD. Told apart from the
+        // other worktrees by path, that HEAD would pass for another's and hide the commit.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var original = await CreateAsync(harness, temp, "before");
+        File.WriteAllText(Path.Combine(original, "work.txt"), "committed here only");
+        await harness.CommitAllAsync(original, "work", cancellationToken);
+        var head = (await harness.GitClient.ResolveCommitAsync(original, "HEAD", cancellationToken))![..12];
+        var moved = HarnessFactory.WorktreePath(temp.Path, "after");
+        Directory.Move(original, moved);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "after", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains($"1 commit(s) up to {head}", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("as after moving it by hand", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains(" worktree repair ", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(moved));
+    }
+
+    /// <summary>The index and every shared index file in a worktree's git directory, by name, with their bytes.</summary>
+    private static Dictionary<string, string> IndexFiles(string gitDirectory)
+        => Directory.EnumerateFiles(gitDirectory)
+            .Where(file => Path.GetFileName(file) is "index" || Path.GetFileName(file).StartsWith("sharedindex.", StringComparison.Ordinal))
+            .ToDictionary(file => Path.GetFileName(file), file => Convert.ToBase64String(File.ReadAllBytes(file)), StringComparer.Ordinal);
+
     /// <summary>Adds <paramref name="library"/> to <paramref name="superproject"/> as the submodule <paramref name="name"/>.</summary>
     private static Task AddSubmoduleAsync(HarnessFactory harness, string superproject, TempDirectory library, string name)
         => harness.RunGitAsync(

@@ -61,7 +61,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             pending = Path.GetFullPath(restart);
         }
 
-        throw new IOException($"Too many links along '{path}'.");
+        throw new IOException($"More than {MaxLinks} links along '{path}', which may form a cycle.");
     }
 
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
@@ -77,7 +77,18 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
     public string CopyToTemporaryFile(string path)
     {
         var copy = Path.Combine(Path.GetTempPath(), "dssharness-" + Guid.NewGuid().ToString("N"));
-        File.Copy(path, copy);
+
+        try
+        {
+            File.Copy(path, copy);
+        }
+        catch
+        {
+            // A copy that failed part way must not stay behind as a partial file.
+            TryDelete(copy);
+            throw;
+        }
+
         return copy;
     }
 

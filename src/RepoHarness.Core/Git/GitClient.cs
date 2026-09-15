@@ -100,10 +100,12 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         // never mangled by the textual quoting git would otherwise apply. Untracked
         // files and submodules are asked for explicitly because configuration can hide
         // both: under status.showUntrackedFiles=no a new file is not listed at all, and
-        // the tree reads as clean to a caller about to discard it.
+        // the tree reads as clean to a caller about to discard it. --no-optional-locks
+        // keeps the question from writing anything: status otherwise refreshes the index
+        // and writes it back whenever it can take the lock.
         var result = await RunAsync(
             directory,
-            ["status", "--porcelain", "-z", "--untracked-files=normal", "--ignore-submodules=none"],
+            ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=normal", "--ignore-submodules=none"],
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // An empty list must mean "nothing changed", never "the question failed":
@@ -225,10 +227,12 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
                 continue;
             }
 
+            // --no-split-index writes the copy whole: a split index would otherwise be written as
+            // a new shared index file beside the real one, in the worktree's git directory.
             var cleared = await RunWithIndexAsync(
                 directory,
                 indexCopy,
-                ["update-index", option, "-z", "--stdin"],
+                ["update-index", "--no-split-index", option, "-z", "--stdin"],
                 string.Join('\0', paths) + '\0',
                 cancellationToken).ConfigureAwait(false);
 
@@ -241,7 +245,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         var status = await RunWithIndexAsync(
             directory,
             indexCopy,
-            ["status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all"],
+            ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=all"],
             standardInput: null,
             cancellationToken).ConfigureAwait(false);
 
@@ -425,8 +429,8 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
     /// untranslated.
     /// </summary>
     /// <remarks>
-    /// "not a git repository" is recognised by its text, and a translated git answers in
-    /// another language, so these queries run under <c>LC_ALL=C</c>. The override is kept
+    /// "not a git repository" and "not a gitdir" are recognised by their text, and a translated
+    /// git answers in another language, so these queries run under <c>LC_ALL=C</c>. The override is kept
     /// to them alone: every other git command, including those that run the user's hooks,
     /// keeps the user's locale, because forcing C onto a hook changes how it handles
     /// anything outside ASCII.
@@ -553,7 +557,10 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             }
             else if (line.StartsWith("HEAD ", StringComparison.Ordinal))
             {
-                commit = line["HEAD ".Length..];
+                // An unborn HEAD, as on an orphan branch, is listed as the null object id. It names no
+                // commit, and handed to git as one it fails every command it reaches.
+                var head = line["HEAD ".Length..];
+                commit = head.All(character => character == '0') ? null : head;
             }
             else if (line.StartsWith("branch ", StringComparison.Ordinal))
             {
