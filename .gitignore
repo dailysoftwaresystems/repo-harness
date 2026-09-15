@@ -26,3 +26,6 @@ Thumbs.db
 !/.harness-config/worktrees/.gitkeep
 /.harness-config/ssh/*
 !/.harness-config/ssh/.gitkeep
+
+# Claude Code local state (per-user settings, agent worktrees)
+.claude/
