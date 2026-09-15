@@ -18,6 +18,7 @@ name: Package Pipeline
 #
 # Self-contained by design: no reusable workflow from the private DevOps
 # repository is called, and no organisation secret is available to this repository.
+# Every action is pinned to a full commit SHA; see docs/releasing.md.
 
 on:
   workflow_dispatch:
@@ -53,12 +54,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
@@ -81,35 +82,47 @@ jobs:
       - name: Resolve channel and version
         env:
           REF_NAME: ${{ github.ref_name }}
-          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
 
           case "$REF_NAME" in
-            release/beta) channel=beta ;;
-            release/rc)   channel=rc ;;
-            release/lts)  channel=lts ;;
-            *) echo "::error::'$REF_NAME' is not a release branch; only release branches publish."; exit 1 ;;
+            release/beta)   channel=beta ;;
+            release/stable) channel=stable ;;
+            *) echo "::error::'$REF_NAME' is not a release branch; only release/beta and release/stable publish."; exit 1 ;;
           esac
 
           base=$(dotnet run .github/scripts/version.cs read "$PROJECT")
-          package=$(dotnet run .github/scripts/version.cs suffix "$base" "$channel" "$RUN_NUMBER")
+          package=$(dotnet run .github/scripts/version.cs suffix "$base" "$channel")
 
           {
             echo "CHANNEL=$channel"
             echo "BASE_VERSION=$base"
             echo "PACKAGE_VERSION=$package"
-            echo "TAG=$package"
+            echo "TAG=v$package"
+            echo "RELEASE_SHA=$(git rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
           echo "Publishing $package from $REF_NAME"
 
-      - name: Refuse to republish an existing tag
+      - name: Refuse to republish an existing version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "::error::Tag ${TAG} already exists; a published version is never rewritten."
+            exit 1
+          fi
+
+          # The release is checked as well as the tag, because one can exist without the
+          # other: a release drafted by hand has no tag until it is published. A check that
+          # gets no clear answer refuses too, since "could not tell" is not "does not exist".
+          if out=$(gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" 2>&1); then
+            echo "::error::Release ${TAG} already exists; a published version is never rewritten."
+            exit 1
+          elif [[ "$out" != *"release not found"* ]]; then
+            echo "::error::Could not tell whether release ${TAG} exists, so nothing was published: $out"
             exit 1
           fi
 
@@ -124,7 +137,7 @@ jobs:
 
       - name: Test
         # The package is only worth publishing if the suite passes on the commit being
-        # published. This run is Linux only: the three-OS matrix already passed for this
+        # published. This run is Linux x86_64 only: the full matrix already passed for this
         # commit in Deploy before it was promoted.
         run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build
 
@@ -142,7 +155,7 @@ jobs:
       - name: Create the tag
         # Created before publishing, not after. If tagging fails after a publish, the
         # package is permanently on nuget.org with no tag, the "refuse to republish an
-        # existing tag" guard does not fire on a re-run, and the re-run then dies
+        # existing version" guard does not fire on a re-run, and the re-run then dies
         # against an immutable published version. A tag is cheap to delete; a
         # published version is not.
         run: |
@@ -156,7 +169,7 @@ jobs:
         # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
         # a trusted publishing policy on nuget.org naming this repository, workflow
         # and environment. No stored key is involved.
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget-login
         with:
           user: ${{ vars.NUGET_USER }}
@@ -170,25 +183,24 @@ jobs:
           --source https://api.nuget.org/v3/index.json
 
       - name: Create the GitHub release
+        # The package is attached here, so the release is where a published version's
+        # package stays available. No separate workflow artifact is uploaded: it would only
+        # expire after the repository's retention period.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           prerelease=""
-          if [ "${CHANNEL}" != "lts" ]; then
+          if [ "${CHANNEL}" != "stable" ]; then
             prerelease="--prerelease"
           fi
 
+          # --target names the promoted commit. The tag already points there; naming it
+          # again means the release can never be cut from the default branch instead.
           gh release create "${TAG}" \
             "$PACKAGE_DIRECTORY"/*.nupkg \
+            --target "${RELEASE_SHA}" \
             --title "repo-harness ${TAG}" \
             --generate-notes \
             ${prerelease}
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-harness-${{ env.PACKAGE_VERSION }}
-          path: ${{ env.PACKAGE_DIRECTORY }}/*.nupkg
-          retention-days: 90

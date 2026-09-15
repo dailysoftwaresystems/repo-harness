@@ -6,7 +6,8 @@ name: Pipeline
 # Self-contained by design. This repository is PUBLIC, so it deliberately does not
 # call the reusable workflows in the private DevOps repository and never uses
 # `secrets: inherit`. Nothing here needs a secret, which is what makes it safe to
-# run on pull requests from forks.
+# run on pull requests from forks. Every action is pinned to a full commit SHA; see
+# docs/releasing.md.
 
 on:
   pull_request:
@@ -35,12 +36,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
@@ -64,8 +65,11 @@ jobs:
           version: ${{ env.PACKED_VERSION }}
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        # Kept for as long as the repository's artifact retention allows. There is no
+        # retention-days here: a value above the maximum the repository allows is cut down
+        # to it with a warning on every run, so the repository setting is the one place that
+        # decides.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nupkg-pr
           path: build/package/*.nupkg
-          retention-days: 7

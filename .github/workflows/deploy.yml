@@ -5,19 +5,21 @@ name: Deploy
 # packing, publishing, tagging and the GitHub release. Keeping that boundary means
 # re-running one phase never half-performs the other.
 #
-# Nothing moves until the commit has passed the three-OS test matrix, and the commit that
-# passed is the commit promoted: it is pinned before testing, so a push to the source
-# branch while the matrix runs cannot slip an untested commit into a release.
+# Nothing moves until the commit has passed the test matrix, and the commit that passed is
+# the commit promoted: it is pinned before testing, so a push to the source branch while
+# the matrix runs cannot slip an untested commit into a release.
 #
-# repo-harness is a LIB: it ships a NuGet package other people consume, so it uses
-# the three-channel chain main -> release/beta -> release/rc -> release/lts. The rc
-# stage exists so a consumer can integration-test before lts is cut.
+# repo-harness ships as an app: people install the released tool rather than build on
+# it, so it uses two channels, main -> release/beta -> release/stable. beta publishes each
+# new version as a prerelease; stable publishes a version beta has already published,
+# unchanged.
 #
 # Credentials: this workflow uses only the GITHUB_TOKEN it is handed, scoped to this
 # repository. The one publishing credential in the release path is minted inside
 # pipeline-pkg at publish time, through OIDC, and is never stored. This repository is
 # PUBLIC, so it deliberately does not call the reusable workflows in the private
-# DevOps repository and never uses `secrets: inherit`.
+# DevOps repository and never uses `secrets: inherit`. Every action is pinned to a full
+# commit SHA; see docs/releasing.md.
 
 on:
   workflow_dispatch:
@@ -28,25 +30,9 @@ on:
         type: choice
         options:
           - beta
-          - rc
-          - lts
+          - stable
       version:
         description: "New version, beta channel only (default: bump the patch)"
-        required: false
-        type: string
-      # DBAS.Publisher sends these four alongside channel/version. GitHub's
-      # dispatch API rejects unknown inputs with 422, so they are declared even
-      # though nothing here reads them.
-      project_path:
-        required: false
-        type: string
-      project_name:
-        required: false
-        type: string
-      language:
-        required: false
-        type: string
-      triggered_by:
         required: false
         type: string
 
@@ -84,10 +70,9 @@ jobs:
           set -euo pipefail
 
           case "$CHANNEL" in
-            beta) source=main;         target=release/beta ;;
-            rc)   source=release/beta; target=release/rc ;;
-            lts)  source=release/rc;   target=release/lts ;;
-            *)    echo "::error::Unknown channel '$CHANNEL'."; exit 1 ;;
+            beta)   source=main;         target=release/beta ;;
+            stable) source=release/beta; target=release/stable ;;
+            *)      echo "::error::Unknown channel '$CHANNEL'."; exit 1 ;;
           esac
 
           if [ "$CHANNEL" = "beta" ] && [ "$REF_NAME" != "main" ]; then
@@ -97,12 +82,12 @@ jobs:
 
           if [ "$CHANNEL" != "beta" ] && [ -n "$REQUESTED_VERSION" ]; then
             echo "::error::An explicit version is only accepted on the beta channel."
-            echo "::error::rc and lts promote exactly what beta already published."
+            echo "::error::stable promotes exactly what beta already published."
             exit 1
           fi
 
           if ! sha=$(gh api "repos/$REPOSITORY/branches/$source" --jq '.commit.sha' 2>/dev/null); then
-            echo "::error::Source branch '$source' does not exist; cut the previous channel first."
+            echo "::error::Source branch '$source' does not exist; cut a beta first."
             exit 1
           fi
 
@@ -139,7 +124,7 @@ jobs:
 
     steps:
       - name: Checkout the tested commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
@@ -148,7 +133,7 @@ jobs:
         # The version script is a C# file-based app, so the release path needs no
         # language this repository does not already depend on.
         if: inputs.channel == 'beta'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
@@ -172,7 +157,7 @@ jobs:
           fi
 
           git add "$PROJECT"
-          git commit -m "chore: release $version"
+          git commit -m "v$version"
 
           # A fast-forward of the tested commit. If main moved while the matrix ran, git
           # rejects this push, and nothing untested reaches main or a release branch.
@@ -183,8 +168,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # For beta this is the bump on top of the tested commit; for rc and lts it is
-          # the tested commit itself.
+          # For beta this is the bump on top of the tested commit; for stable it is the
+          # tested commit itself.
           promoted=$(git rev-parse HEAD)
 
           if git ls-remote --exit-code --heads origin "$TARGET" >/dev/null 2>&1; then
@@ -204,6 +189,10 @@ jobs:
               echo "::error::$TARGET has commits that $SOURCE does not; it only ever moves forward to tested commits. Reconcile it before promoting."
               exit 1
             fi
+          else
+            # The first release on this channel. The branch is created at the tested
+            # commit; a push without force still refuses to replace one that does exist.
+            echo "::notice::$TARGET does not exist yet; creating it at $promoted."
           fi
 
           git push origin "$promoted:refs/heads/$TARGET"

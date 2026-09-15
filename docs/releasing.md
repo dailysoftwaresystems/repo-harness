@@ -30,6 +30,11 @@ nuget.org key minted through OIDC at publish time.
 - **Publishing is gated.** The package job runs in the `nuget` environment, so
   approval and branch restrictions apply to the one job that can change what the
   public installs.
+- **Actions are pinned to commits.** Every action a workflow uses is pinned to a full
+  commit SHA, with its version in a comment. A tag can be moved to different code after
+  the fact, and the package job can mint a key that publishes to nuget.org, so what runs
+  there must be exactly what was reviewed. Dependabot (`.github/dependabot.yml`) proposes
+  updates, the new SHA and version together.
 
 The only repository configuration required is one **variable** (not a secret):
 
@@ -58,19 +63,22 @@ published and no credential is created.
 
 ## Channels
 
-`repo-harness` is a **LIB** — other people consume it as a package — so it uses the
-three-channel chain. `rc` exists so a consumer can integration-test before `lts`.
+`repo-harness` ships as an **app**: people install the released tool rather than build on
+it, so it uses two channels.
 
 ```
-main  ──deploy beta──▶  release/beta  ──deploy rc──▶  release/rc  ──deploy lts──▶  release/lts
-                             │                            │                            │
-                        0.2.0-beta.N                 0.2.0-rc.N                      0.2.0
+main  ──deploy beta──▶  release/beta  ──deploy stable──▶  release/stable
+                             │                                  │
+                        0.2.0-beta                            0.2.0
 ```
 
-`beta` and `rc` publish prereleases; `lts` publishes the bare version. The run
-number is part of a prerelease so repeating a channel produces a new, ordered
-version rather than colliding with what is already published — a collision would
-otherwise be skipped as a duplicate and report success while publishing nothing.
+`beta` publishes each new version as a prerelease, `<version>-beta`. `stable` publishes a
+version `beta` has already published, as the bare version. Tags and GitHub releases carry
+a `v` prefix: `v0.2.0-beta`, `v0.2.0`.
+
+A beta needs no build number to be new. Every beta deploy bumps `<Version>` first, and a
+version whose tag or release already exists is refused, so the same version is never
+published twice.
 
 ## Cutting a release
 
@@ -78,27 +86,27 @@ Run the **Deploy** workflow from the Actions tab.
 
 | Channel | Run from | What it does |
 |---|---|---|
-| `beta` | `main` | Tests `main`, bumps `<Version>` on the tested commit, moves `main` and `release/beta` to it |
-| `rc` | anywhere | Tests `release/beta`, moves `release/rc` to it |
-| `lts` | anywhere | Tests `release/rc`, moves `release/lts` to it |
+| `beta` | `main` | Tests `main`, bumps `<Version>` on the tested commit (committed as `v<version>`), moves `main` and `release/beta` to it |
+| `stable` | anywhere | Tests `release/beta`, moves `release/stable` to it |
 
 `beta` accepts an optional explicit version; without one it bumps the patch. A
 major or minor change is always a deliberate decision, so it must be passed
-explicitly. `rc` and `lts` refuse an explicit version: they promote exactly what
-`beta` already published.
+explicitly. `stable` refuses an explicit version: it promotes exactly what `beta`
+already published.
 
 Deploy runs as three jobs:
 
 1. **plan** validates the request and pins the source branch's current commit.
-2. **test** runs the three-OS matrix — `test.yml`, the same gate every pull request
-   passes — on that pinned commit.
-3. **promote** fast-forwards the release branch to the tested commit, then starts
-   **Package Pipeline** for that branch, naming the exact commit it promoted.
+2. **test** runs `test.yml`, the same gate every pull request passes: Linux, Windows and
+   macOS, each on x86_64 and arm64, on that pinned commit.
+3. **promote** fast-forwards the release branch to the tested commit, creating it on a
+   channel's first release, then starts **Package Pipeline** for that branch, naming the
+   exact commit it promoted.
 
 Package Pipeline builds, runs the suite on the commit being published, packs, verifies
 that the packed tool installs from the local package alone and reports the version it
 was packed as, creates the immutable tag, publishes to nuget.org, and creates the
-GitHub release with the `.nupkg` attached.
+GitHub release at the promoted commit with the `.nupkg` attached.
 
 Deploy starts Package Pipeline explicitly rather than relying on the push to the
 release branch. GitHub starts no workflow from a push made with the `GITHUB_TOKEN`, so
@@ -108,7 +116,7 @@ Package Pipeline can also be started by hand for a release branch, for example t
 a publish after fixing the trusted publishing policy.
 
 The tag is created **before** publishing: a tag is cheap to delete, a published
-NuGet version is permanent. Package Pipeline tests on Linux only; the three-OS matrix
+NuGet version is permanent. Package Pipeline tests on Linux x86_64 only; the full matrix
 has already passed for that commit in Deploy.
 
 ## Refusals worth knowing
@@ -125,9 +133,11 @@ shipped something that was never tested:
   fast-forward of the tested commit, so if `main` moved while the matrix ran, git
   rejects the push and nothing is promoted. For every channel, Package Pipeline refuses
   to publish a release branch that no longer points at the commit Deploy promoted.
-- **Not a release branch.** Package Pipeline publishes from `release/beta`,
-  `release/rc` and `release/lts` only.
-- **Tag already exists.** A published version is never rewritten.
+- **Not a release branch.** Package Pipeline publishes from `release/beta` and
+  `release/stable` only.
+- **Version already published.** A published version is never rewritten. The tag and the
+  GitHub release are both checked, and a check that gets no clear answer refuses too:
+  "could not tell" is not "does not exist".
 - **Version unchanged.** A bump that changes nothing is refused before it commits.
 - **Wrong branch.** `beta` is cut from `main` only.
 - **Version moves backwards.** A lower version publishes successfully but sorts below
@@ -140,8 +150,8 @@ shipped something that was never tested:
 
 | Workflow | Fires on | Does |
 |---|---|---|
-| `pipeline-pr.yml` | pull request, push to `main` | Runs `test.yml`; packs, installs and runs the tool |
-| `test.yml` | called by `pipeline-pr.yml` and `deploy.yml` | Builds and tests on Ubuntu, Windows and macOS |
+| `pipeline-pr.yml` | pull request, push to `main` | Runs `test.yml`; packs, installs and runs the tool; uploads the package, kept for the repository's artifact retention period |
+| `test.yml` | called by `pipeline-pr.yml` and `deploy.yml` | Builds and tests on Linux, Windows and macOS, each on x86_64 and arm64 |
 | `deploy.yml` | manual | Tests, bumps the version, promotes, starts `pipeline-pkg.yml` |
 | `pipeline-pkg.yml` | dispatched by `deploy.yml`, or manual | Tests, packs, verifies, tags, publishes, releases |
 | `cleanup-cache.yml` | pull request closed | Evicts that pull request's caches |

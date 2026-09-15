@@ -4,9 +4,13 @@ name: Test
 # acting on it: pull requests, and Deploy before it promotes anything. One definition,
 # so the gate a release passes cannot drift from the gate a pull request passes.
 #
-# All three operating systems, always. Behaving identically on Windows, Linux and macOS
-# is this tool's central claim, so a change that passes on one runner and fails on
-# another is a real defect, not a CI quirk.
+# Linux, Windows and macOS, each on x86_64 and on arm64, always. Behaving identically
+# everywhere is this tool's central claim, so a change that passes on one runner and fails
+# on another is a real defect, not a CI quirk. Every leg runs on a native runner rather
+# than under emulation: .NET is not supported under QEMU, so an emulated leg could fail,
+# or pass, for reasons that have nothing to do with the code.
+#
+# Every action is pinned to a full commit SHA; see docs/releasing.md.
 
 on:
   workflow_call:
@@ -32,11 +36,17 @@ jobs:
       # matrix exists to answer.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os:
+          - ubuntu-latest      # Linux x86_64
+          - ubuntu-24.04-arm   # Linux arm64
+          - windows-latest     # Windows x86_64
+          - windows-11-arm     # Windows arm64
+          - macos-26-intel     # macOS x86_64
+          - macos-latest       # macOS arm64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           # Nothing here pushes, so no credential is left in the working copy for the
@@ -44,7 +54,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
