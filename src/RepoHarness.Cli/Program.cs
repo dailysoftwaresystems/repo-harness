@@ -28,9 +28,9 @@ root.Subcommands.Add(HelpCommand.Create());
 // through this same parser, in the host's copy of the repository, which is why it is wired here.
 root.Subcommands.Add(HostAgentCommand.Create(RunInAsync));
 
-return await RunAsync(args).ConfigureAwait(false);
+return await RunAsync(args, CancellationToken.None).ConfigureAwait(false);
 
-async Task<int> RunAsync(string[] arguments)
+async Task<int> RunAsync(string[] arguments, CancellationToken cancellationToken)
 {
     var parseResult = root.Parse(arguments);
 
@@ -48,13 +48,13 @@ async Task<int> RunAsync(string[] arguments)
         return HarnessExit.UsageError;
     }
 
-    return await parseResult.InvokeAsync().ConfigureAwait(false);
+    return await parseResult.InvokeAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
 }
 
 // A command acts on the current directory when it is given no --directory, so a host runs a request
 // in its copy of the repository by starting there, without its arguments being rewritten.
-Task<int> RunInAsync(string directory, string[] arguments)
+Task<int> RunInAsync(string directory, string[] arguments, CancellationToken cancellationToken)
 {
     Directory.SetCurrentDirectory(directory);
-    return RunAsync(arguments);
+    return RunAsync(arguments, cancellationToken);
 }

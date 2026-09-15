@@ -6,8 +6,11 @@ namespace RepoHarness.Core.Processes;
 /// report "the instrument could not run" rather than "the command failed".
 /// </summary>
 public sealed class ExecutableNotFoundException(string fileName, Exception? innerException = null)
-    : Exception($"Executable '{fileName}' was not found on PATH.", innerException)
+    : ProgramStartException(fileName, Describe(fileName), innerException)
 {
-    /// <summary>The executable that could not be found.</summary>
-    public string FileName { get; } = fileName;
+    /// <summary>A name is looked up on PATH; a path is not, so for a path the file itself is what is missing.</summary>
+    private static string Describe(string fileName)
+        => fileName.Contains('/', StringComparison.Ordinal) || fileName.Contains('\\', StringComparison.Ordinal)
+            ? $"Executable '{fileName}' does not exist."
+            : $"Executable '{fileName}' was not found on PATH.";
 }

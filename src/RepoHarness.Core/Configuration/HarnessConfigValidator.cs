@@ -278,7 +278,7 @@ public static class HarnessConfigValidator
             RequireAtLeastOne(testCores, $"{owner} testCores", problems);
         }
 
-        if (host.KeepAwake is { } keepAwake && (keepAwake.Count == 0 || string.IsNullOrWhiteSpace(keepAwake[0])))
+        if (host.KeepAwake is { } keepAwake && IsBlankCommand(keepAwake))
         {
             problems.Add($"{owner} keepAwake has an empty command");
         }
@@ -304,7 +304,7 @@ public static class HarnessConfigValidator
             // host ran them natively: exactly what an emulator entry exists to rule out.
             if (emulator.Launcher is { } launcher)
             {
-                if (launcher.Count == 0 || string.IsNullOrWhiteSpace(launcher[0]))
+                if (IsBlankCommand(launcher))
                 {
                     problems.Add($"{owner} launcher is empty; leave it out when the operating system runs the programs itself");
                 }
@@ -334,9 +334,15 @@ public static class HarnessConfigValidator
                 problems.Add($"{owner} phases names '{phase}'; expected one of {string.Join(", ", LegPhases)}");
             }
 
-            if (emulator.Witness.Command.Count == 0 || string.IsNullOrWhiteSpace(emulator.Witness.Command[0]))
+            if (IsBlankCommand(emulator.Witness.Command))
             {
                 problems.Add($"{owner} witness has an empty command");
+            }
+            else if (emulator.Launcher is not null)
+            {
+                // Behind a launcher the witness is only an argument. The launcher finds it, not the PATH
+                // lookup, and qemu's user mode, for one, opens a bare name in the directory it starts in.
+                CheckAbsolute(emulator.Witness.Command[0], $"{owner} witness", problems);
             }
             else
             {
@@ -362,9 +368,35 @@ public static class HarnessConfigValidator
     {
         var isPath = program.Contains('/', StringComparison.Ordinal) || program.Contains('\\', StringComparison.Ordinal);
 
-        if (isPath && !program.StartsWith('/') && !IsWindowsAbsolute(program))
+        if (isPath && !IsAbsolute(program))
         {
             problems.Add($"{setting} '{program}' must be a program name, looked up on the PATH, or an absolute path");
+        }
+    }
+
+    /// <summary>Rejects a program that must be named by an absolute path, for the reason its caller gives.</summary>
+    private static void CheckAbsolute(string program, string setting, List<string> problems)
+    {
+        if (!IsAbsolute(program))
+        {
+            problems.Add($"{setting} '{program}' must be an absolute path: behind a launcher it is found by the launcher, which may not search the PATH");
+        }
+    }
+
+    private static bool IsAbsolute(string program) => program.StartsWith('/') || IsWindowsAbsolute(program);
+
+    /// <summary>Whether a command names no program: it is empty, or its first word is blank.</summary>
+    private static bool IsBlankCommand(IReadOnlyList<string> command) => command.Count == 0 || string.IsNullOrWhiteSpace(command[0]);
+
+    /// <summary>
+    /// Rejects a leg or leg set name that <c>--legs</c> could never select. Its value is split at commas,
+    /// and the command line at spaces, so a name holding either, or no name at all, is unreachable.
+    /// </summary>
+    private static void CheckSelectableName(string name, string owner, List<string> problems)
+    {
+        if (name.Length == 0 || name.Any(character => character == ',' || char.IsWhiteSpace(character)))
+        {
+            problems.Add($"{owner} cannot be selected with --legs; use a name with no commas or spaces");
         }
     }
 
@@ -374,6 +406,7 @@ public static class HarnessConfigValidator
         {
             var owner = $"leg '{name}'";
 
+            CheckSelectableName(name, owner, problems);
             CheckOs(leg.Os, $"{owner} os", problems);
             CheckProcessor(leg.Processor, $"{owner} processor", problems);
             ValidateLegHost(config, owner, leg, problems);
@@ -410,6 +443,8 @@ public static class HarnessConfigValidator
 
         foreach (var (setName, legs) in config.LegSets)
         {
+            CheckSelectableName(setName, $"legSet '{setName}'", problems);
+
             // --legs accepts both kinds of name, so one that is both would select either depending
             // on which the harness happened to look up first.
             if (config.Legs.ContainsKey(setName))
@@ -549,7 +584,7 @@ public static class HarnessConfigValidator
             {
                 // `required` guarantees the property is present, never that it holds
                 // anything: an empty command fails later as an empty file name.
-                if (phase.Command.Count == 0 || string.IsNullOrWhiteSpace(phase.Command[0]))
+                if (IsBlankCommand(phase.Command))
                 {
                     problems.Add($"runner '{name}' phase '{phase.Name}' has an empty command");
                 }
@@ -798,6 +833,12 @@ public static class HarnessConfigValidator
             problems.Add(
                 $"{owner} repositoryPath '{path}' must be absolute, or start with ~/ for the home directory"
                 + (allowWindowsPaths ? string.Empty : " inside the distribution"));
+        }
+        else if (path.Split('/', '\\').Any(segment => segment is "." or ".."))
+        {
+            // Compared as written, a path that steps back up, such as ~/src/.., could still name the home
+            // or root directory the next check refuses.
+            problems.Add($"{owner} repositoryPath '{path}' has a '.' or '..' segment; name the directory directly");
         }
         else if (isHome || isRoot)
         {

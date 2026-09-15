@@ -31,7 +31,8 @@ repo-harness help           # reference material: exit codes, config, legs, layo
 
 `init` inspects the repository and seeds a configuration that already matches it —
 a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test` — with
-legs for the operating system and processor of the machine it ran on.
+legs for the operating system and processor of the machine it ran on. With no project
+detected it seeds no legs, and `legs` fails until some are declared.
 
 ## Commands
 
@@ -94,9 +95,10 @@ lock resolve back to the originating checkout.
 ## Legs and hosts
 
 A leg says what it needs, never where it runs: an operating system, a processor, and
-optionally the emulator allowed to stand in for that processor. This machine, WSL
-distributions and ssh hosts are measured before anything starts, and each leg runs on
-the first host that provides what it needs.
+optionally the emulator it runs through, which rules out running it natively. Hosts are
+measured before anything starts: this machine first, then WSL distributions and ssh hosts
+only for the legs this machine cannot run, and a WSL distribution only for a Linux leg.
+Each leg runs on the first host that provides what it needs.
 
 ```json
 {
@@ -108,7 +110,7 @@ the first host that provides what it needs.
     "rosetta": {
       "hostOs": "macos", "hostProcessor": "arm64", "processor": "x86_64",
       "launcher": ["arch", "-x86_64"],
-      "witness": { "command": ["uname", "-m"], "pattern": "^x86_64$" }
+      "witness": { "command": ["/usr/bin/uname", "-m"], "pattern": "^x86_64$" }
     }
   },
   "legs": {
@@ -124,15 +126,17 @@ repo-harness legs --legs linux-release,mac-x64-release
 repo-harness host-exec --ssh mac-mini -- verify-git
 ```
 
-An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores; ssh
-runs in batch mode, so it never waits at a prompt. Every WSL distribution and ssh host
-runs repo-harness itself, installed from nuget.org at this machine's exact version: a
-host that is behind is updated, never downgraded. An emulator counts only once its
-witness proves it runs programs for its processor.
+An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores, spelt
+exactly as `hosts.ssh` declares it, case included; ssh runs in batch mode, so it never
+waits at a prompt. Every WSL distribution and ssh host runs repo-harness itself,
+installed from nuget.org at this machine's exact version: a host that is behind is
+updated, never downgraded. `host-exec` runs in the host's copy of the repository at its
+`repositoryPath`, which, until sync can create it, has to be a checkout made by hand. An
+emulator counts only once its witness proves it runs programs for its processor.
 
-`legs` and `host-exec` run what `config.json` declares: each emulator's witness, and
-repo-harness on the hosts they reach. That is the trust building the repository already
-asks for. Run `repo-harness help legs` for the rules.
+`legs` runs the witness of each emulator the selected legs use, and both commands install
+or update repo-harness on the hosts they reach, as `config.json` declares. That is the
+trust building the repository already asks for. Run `repo-harness help legs` for the rules.
 
 ## Anchors
 

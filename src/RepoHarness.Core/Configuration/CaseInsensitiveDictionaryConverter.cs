@@ -8,7 +8,7 @@ namespace RepoHarness.Core.Configuration;
 /// case-insensitive comparer.
 /// </summary>
 /// <remarks>
-/// Configuration keys are names a person typed: toolchains, legs, targets, named
+/// Configuration keys are names a person typed: toolchains, hosts, emulators, legs, named
 /// commands. Looking up <c>Local-Debug</c> in a file that declares
 /// <c>local-debug</c> must not report the leg as unknown.
 /// <para>

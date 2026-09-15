@@ -16,24 +16,33 @@ public sealed record LegSelection(IReadOnlyList<SelectedLeg> Legs, bool Named)
     /// <summary>
     /// Resolves what <c>--legs</c> was given. A value may hold several names separated by commas, so
     /// <c>--legs a,b</c>, <c>--legs a, b</c> and <c>--legs a b</c> select the same two legs, and a leg
-    /// set's name selects its legs. Giving no names selects every declared leg.
+    /// set's name selects its legs. <c>--legs</c> left out, passed as <see langword="null"/>, selects every
+    /// declared leg.
     /// </summary>
     /// <exception cref="HarnessException">
-    /// A name is neither a leg nor a leg set. Raised before any host is measured, so a typo never
-    /// costs a connection attempt, let alone a run.
+    /// A name is neither a leg nor a leg set, or <c>--legs</c> was given no name at all. Raised before any
+    /// host is measured, so a typo never costs a connection attempt, let alone a run.
     /// </exception>
-    public static LegSelection Resolve(HarnessConfig config, IReadOnlyList<string> values)
+    public static LegSelection Resolve(HarnessConfig config, IReadOnlyList<string>? values)
     {
         ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(values);
+
+        if (values is null)
+        {
+            return new LegSelection([.. config.Legs.Select(pair => new SelectedLeg(pair.Key, pair.Value))], Named: false);
+        }
 
         var names = values
             .SelectMany(value => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
             .ToList();
 
+        // Given without a name, as --legs "$GATE" is when the variable was never set, it is not "every leg":
+        // that would check every leg under the rule for legs nobody asked for, and pass a gate meant to fail.
         if (names.Count == 0)
         {
-            return new LegSelection([.. config.Legs.Select(pair => new SelectedLeg(pair.Key, pair.Value))], Named: false);
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                "--legs was given no leg or leg set name; leave it out to select every leg");
         }
 
         var unknown = names
@@ -59,8 +68,10 @@ public sealed record LegSelection(IReadOnlyList<SelectedLeg> Legs, bool Named)
 
             foreach (var legName in legNames)
             {
-                // Reported under the name the configuration declares, whatever case it was typed in.
-                var declaredName = config.Legs.Keys.First(key => string.Equals(key, legName, StringComparison.OrdinalIgnoreCase));
+                // Reported under the name the configuration declares, whatever case it was typed in. A leg set
+                // naming a leg that is not declared is refused when the configuration is read.
+                var declaredName = DeclaredName.In(config.Legs.Keys, legName)
+                    ?? throw new InvalidOperationException($"'{name}' names leg '{legName}', which the configuration does not declare.");
 
                 if (seen.Add(declaredName))
                 {

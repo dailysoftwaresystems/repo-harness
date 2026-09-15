@@ -39,8 +39,11 @@ public sealed class HostExecService(
     /// when the host is an ssh host.
     /// </param>
     /// <param name="arguments">The command and its arguments, exactly as they would be typed after <c>repo-harness</c>.</param>
-    /// <param name="cancellationToken">Stops the command.</param>
-    /// <returns>An outcome carrying the command's own exit code, unchanged.</returns>
+    /// <param name="cancellationToken">Stops the command, on the host as well as here.</param>
+    /// <returns>
+    /// An outcome carrying the command's own exit code, unchanged, or <see cref="HarnessExit.HostUnavailable"/>
+    /// when the host cannot run repo-harness, or the command never reported how it finished.
+    /// </returns>
     public async Task<CommandOutcome> RunAsync(
         string directory,
         string? ssh,
@@ -61,7 +64,7 @@ public sealed class HostExecService(
             throw new HarnessException(HarnessExit.UsageError, "name the repo-harness command to run there, after --");
         }
 
-        if (arguments[0] is CommandName or HostAgentProtocol.CommandName)
+        if (HostAgentProtocol.IsNotForwardable(arguments[0]))
         {
             throw new HarnessException(
                 HarnessExit.UsageError,
@@ -69,10 +72,21 @@ public sealed class HostExecService(
         }
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
+        var hosts = context.Config.Hosts;
 
-        var (host, repositoryPath) = ssh is not null
-            ? ResolveSsh(context.Config, ssh)
-            : await ResolveWslAsync(context.Config, wsl!, cancellationToken).ConfigureAwait(false);
+        (HostId Host, string RepositoryPath) target;
+
+        if (ssh is not null)
+        {
+            target = Resolve(hosts.Ssh, "ssh", ssh, HostId.Ssh);
+        }
+        else
+        {
+            var distribution = wsl!.Length > 0 ? wsl : await DefaultDistributionAsync(cancellationToken).ConfigureAwait(false);
+            target = Resolve(hosts.Wsl, "wsl", distribution, HostId.Wsl);
+        }
+
+        var host = target.Host;
 
         var report = await _inspector
             .InspectAsync(context, host, new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase), cancellationToken)
@@ -88,59 +102,84 @@ public sealed class HostExecService(
             return CommandOutcome.Failed(HarnessExit.HostUnavailable, $"{host} cannot run repo-harness: {report.Reason}");
         }
 
+        var nonce = HostAgentProtocol.NewNonce();
+
         var request = JsonSerializer.Serialize(
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Run,
-                Directory = repositoryPath,
+                Directory = target.RepositoryPath,
                 Arguments = [.. arguments],
+                Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
+
+        int? finished = null;
 
         var result = await _hostCommands.RunAsync(
             session.Connection,
             new HostCommand
             {
                 Program = session.ToolPath,
-                Arguments = [HostAgentProtocol.CommandName],
-                StandardInput = request,
+                Arguments = _output.IsVerbose
+                    ? [HostAgentProtocol.CommandName, HostAgentProtocol.VerboseOption]
+                    : [HostAgentProtocol.CommandName],
+
+                // One line, with the input then held open while the command runs: stopping this process ends the
+                // input on the host, which cancels the command there instead of leaving it running.
+                StandardInput = request + "\n",
+                HoldStandardInputOpen = true,
                 OnOutputLine = _output.Raw,
-                OnErrorLine = _output.RawError,
+                OnErrorLine = line =>
+                {
+                    if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
+                    {
+                        finished = code;
+                    }
+                    else
+                    {
+                        _output.RawError(line);
+                    }
+                },
             },
             cancellationToken).ConfigureAwait(false);
 
         var shown = string.Join(' ', arguments);
 
-        return result.ExitCode == HarnessExit.Success
+        // The command's exit code comes from its completion line, never from the transport: ssh exits 255, and
+        // wsl.exe with codes of its own, when the connection fails, and neither is the command's result.
+        if (finished is not { } exitCode)
+        {
+            var said = HostProbes.Excerpt(result.StandardError);
+
+            return CommandOutcome.Failed(
+                HarnessExit.HostUnavailable,
+                $"{host}: '{shown}' never reported how it finished, so it may not have run, or run only in part; "
+                + $"the connection ended with exit {result.ExitCode}{(said.Length == 0 ? string.Empty : ": " + said)}");
+        }
+
+        return exitCode == HarnessExit.Success
             ? CommandOutcome.Ok($"{host}: '{shown}' succeeded") with { Quiet = true }
-            : CommandOutcome.Failed(result.ExitCode, $"{host}: '{shown}' exited {result.ExitCode}");
+            : CommandOutcome.Failed(exitCode, $"{host}: '{shown}' exited {exitCode}");
     }
 
-    private static (HostId Host, string RepositoryPath) ResolveSsh(HarnessConfig config, string name)
+    /// <summary>
+    /// The host <paramref name="name"/> selects among <paramref name="hosts"/>, named as the configuration
+    /// declares it: ssh applies a Host entry only to the name spelt as the entry spells it.
+    /// </summary>
+    private static (HostId Host, string RepositoryPath) Resolve<THost>(
+        Dictionary<string, THost> hosts,
+        string kind,
+        string name,
+        Func<string, HostId> toHost)
+        where THost : RemoteHostConfig
     {
-        if (!config.Hosts.Ssh.TryGetValue(name, out var declared))
+        if (DeclaredName.In(hosts.Keys, name) is not { } declared)
         {
-            throw new HarnessException(HarnessExit.UsageError, $"--ssh {name} is not declared under hosts.ssh{Declared(config.Hosts.Ssh.Keys)}");
+            throw new HarnessException(HarnessExit.UsageError, $"--{kind} {name} is not declared under hosts.{kind}{Declared(hosts.Keys)}");
         }
 
-        return (HostId.Ssh(DeclaredName(config.Hosts.Ssh.Keys, name)), declared.RepositoryPath);
-    }
-
-    private async Task<(HostId Host, string RepositoryPath)> ResolveWslAsync(
-        HarnessConfig config,
-        string distribution,
-        CancellationToken cancellationToken)
-    {
-        var name = distribution.Length > 0
-            ? distribution
-            : await DefaultDistributionAsync(cancellationToken).ConfigureAwait(false);
-
-        if (!config.Hosts.Wsl.TryGetValue(name, out var declared))
-        {
-            throw new HarnessException(HarnessExit.UsageError, $"--wsl {name} is not declared under hosts.wsl{Declared(config.Hosts.Wsl.Keys)}");
-        }
-
-        return (HostId.Wsl(DeclaredName(config.Hosts.Wsl.Keys, name)), declared.RepositoryPath);
+        return (toHost(declared), hosts[declared].RepositoryPath);
     }
 
     /// <summary>WSL's default distribution, as that distribution itself reports it.</summary>
@@ -164,6 +203,13 @@ public sealed class HostExecService(
             throw new HarnessException(HarnessExit.HostUnavailable, "wsl.exe was not found, so WSL is not installed on this machine");
         }
 
+        if (result.TimedOut)
+        {
+            throw new HarnessException(
+                HarnessExit.HostUnavailable,
+                $"WSL did not name its default distribution within {DefaultDistributionBudget.TotalSeconds:0} seconds");
+        }
+
         var name = result.TrimmedOutput;
 
         if (!result.Succeeded || name.Length == 0)
@@ -175,9 +221,6 @@ public sealed class HostExecService(
 
         return name;
     }
-
-    private static string DeclaredName(IEnumerable<string> names, string typed)
-        => names.First(name => string.Equals(name, typed, StringComparison.OrdinalIgnoreCase));
 
     private static string Declared(IEnumerable<string> names)
     {

@@ -29,7 +29,7 @@ public static class HarnessExit
     /// <summary>A precondition refused the request: dirty tree, name taken, lock held.</summary>
     public const int Refused = 13;
 
-    /// <summary>A required external tool is not installed.</summary>
+    /// <summary>A required external tool is not installed, or could not be started.</summary>
     public const int ToolMissing = 14;
 
     /// <summary>
@@ -76,7 +76,7 @@ public static class HarnessExit
             [nameof(NotInitialized)] = "No harness configuration found; run 'repo-harness init'.",
             [nameof(ConfigInvalid)] = "config.json is missing, unparseable, or failed validation.",
             [nameof(Refused)] = "A precondition refused the request (dirty tree, name taken, lock held).",
-            [nameof(ToolMissing)] = "A required external tool is not installed.",
+            [nameof(ToolMissing)] = "A required external tool is not installed, or could not be started.",
             [nameof(HostUnavailable)] = "A host could not be reached, or repo-harness could not run there; nothing ran on it.",
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",

@@ -1,7 +1,10 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.ExceptionServices;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Legs;
 
@@ -45,14 +48,16 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
     private readonly IHostInspector _inspector = inspector;
     private readonly IHarnessOutput _output = output;
 
-    /// <summary>Checks the legs <paramref name="legNames"/> selects, or every leg when it is empty.</summary>
+    /// <summary>
+    /// Checks the legs <paramref name="legNames"/> selects, or every leg when <c>--legs</c> was left out and
+    /// <paramref name="legNames"/> is <see langword="null"/>.
+    /// </summary>
     public async Task<LegsReport> CheckAsync(
         string directory,
-        IReadOnlyList<string> legNames,
+        IReadOnlyList<string>? legNames,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
-        ArgumentNullException.ThrowIfNull(legNames);
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var config = context.Config;
@@ -75,10 +80,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
             .Distinct()
             .ToList();
 
-        var measured = await Task.WhenAll(
-            remote.Select(host => _inspector.InspectAsync(context, host, emulators, cancellationToken))).ConfigureAwait(false);
-
-        foreach (var report in measured)
+        foreach (var report in await InspectAllAsync(context, remote, emulators, cancellationToken).ConfigureAwait(false))
         {
             reports[report.Host] = report;
         }
@@ -92,6 +94,73 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         }
 
         return new LegsReport(placements, [.. reports.Values], selection.Named);
+    }
+
+    /// <summary>
+    /// Measures <paramref name="hosts"/> all at once. When any of them fails, what every other one changed is
+    /// still reported before a failure is raised: hosts are measured together, so one may be updated while
+    /// another refuses the run, and that update happened all the same.
+    /// </summary>
+    private async Task<HostReport[]> InspectAllAsync(
+        HarnessContext context,
+        List<HostId> hosts,
+        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        CancellationToken cancellationToken)
+    {
+        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, cancellationToken)).ToList();
+
+        try
+        {
+            return await Task.WhenAll(inspections).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            ReportThenThrow(hosts, inspections, cancellationToken);
+            throw;
+        }
+    }
+
+    /// <summary>Measures one host, keeping whatever it throws in the task instead of throwing it at the caller.</summary>
+    private async Task<HostReport> InspectOneAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        CancellationToken cancellationToken)
+        => await _inspector.InspectAsync(context, host, emulators, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Reports what the measurements that finished changed, warns about every failure but one, and raises that
+    /// one. A refusal carries its remedy, such as the command that updates this machine, so it is the one raised.
+    /// </summary>
+    [DoesNotReturn]
+    private void ReportThenThrow(List<HostId> hosts, List<Task<HostReport>> inspections, CancellationToken cancellationToken)
+    {
+        foreach (var report in inspections.Where(inspection => inspection.IsCompletedSuccessfully).Select(inspection => inspection.Result))
+        {
+            foreach (var action in report.Actions)
+            {
+                _output.Info(CommandName, $"{report.Host}: {action}");
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var failures = hosts
+            .Zip(inspections)
+            .Where(pair => !pair.Second.IsCompletedSuccessfully)
+            .Select(pair => (Host: pair.First, Exception: pair.Second.Exception?.InnerException
+                ?? new OperationCanceledException($"measuring {pair.First} was cancelled")))
+            .ToList();
+
+        var refusal = failures.FindIndex(failure => failure.Exception is HarnessException);
+        var raised = failures[refusal < 0 ? 0 : refusal];
+
+        foreach (var failure in failures.Where(failure => !ReferenceEquals(failure.Exception, raised.Exception)))
+        {
+            _output.Warn(CommandName, $"{failure.Host} could not be measured: {failure.Exception.Message}");
+        }
+
+        ExceptionDispatchInfo.Capture(raised.Exception).Throw();
     }
 
     /// <summary>The emulators the selected legs use: the only ones worth running a witness for.</summary>

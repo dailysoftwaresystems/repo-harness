@@ -1,5 +1,6 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Platform;
 
 namespace RepoHarness.Core.Legs;
 
@@ -14,8 +15,8 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
     /// <summary>
     /// The hosts that may run <paramref name="leg"/>, in the order they are tried: the one host it names,
-    /// or else this machine, then the WSL distributions, then the ssh hosts, each in the order the
-    /// configuration declares them.
+    /// or else this machine, then the WSL distributions when the leg runs on Linux, then the ssh hosts, each
+    /// in the order the configuration declares them, and each named as the configuration declares it.
     /// </summary>
     public static IReadOnlyList<HostId> Candidates(HarnessConfig config, LegConfig leg)
     {
@@ -24,15 +25,21 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
         if (leg.Wsl is { } wsl)
         {
-            return [HostId.Wsl(wsl)];
+            return [HostId.Wsl(DeclaredName.In(config.Hosts.Wsl.Keys, wsl) ?? wsl)];
         }
 
         if (leg.Ssh is { } ssh)
         {
-            return [HostId.Ssh(ssh)];
+            return [HostId.Ssh(DeclaredName.In(config.Hosts.Ssh.Keys, ssh) ?? ssh)];
         }
 
-        return [HostId.Local, .. config.Hosts.Wsl.Keys.Select(HostId.Wsl), .. config.Hosts.Ssh.Keys.Select(HostId.Ssh)];
+        // A WSL distribution runs Linux and nothing else. Measuring one for a leg on another operating system
+        // would install repo-harness there for a leg it can never run, or stop the check over its version.
+        var distributions = Same(leg.Os, PlatformNames.Linux)
+            ? config.Hosts.Wsl.Keys.Select(HostId.Wsl)
+            : Enumerable.Empty<HostId>();
+
+        return [HostId.Local, .. distributions, .. config.Hosts.Ssh.Keys.Select(HostId.Ssh)];
     }
 
     /// <summary>

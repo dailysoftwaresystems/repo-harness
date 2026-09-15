@@ -16,7 +16,7 @@ public sealed class PosixFilePermissions : IFilePermissions
         UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
         | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
 
-    /// <summary>Write access for the group or for others: what makes ssh refuse a configuration file.</summary>
+    /// <summary>Write access for the group or for others: what lets another user rewrite a configuration file.</summary>
     private const UnixFileMode GroupOrOtherWrite = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
 
     public void ProtectSecret(string path)

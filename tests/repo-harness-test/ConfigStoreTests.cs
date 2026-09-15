@@ -8,7 +8,7 @@ public sealed class ConfigStoreTests
 {
     /// <summary>An emulator declaration every leg test below can refer to.</summary>
     private const string QemuArm64 = """
-        { "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["uname", "-m"], "pattern": "^aarch64$" } }
+        { "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["/opt/arm64/uname", "-m"], "pattern": "^aarch64$" } }
         """;
 
     [Fact]
@@ -376,6 +376,19 @@ public sealed class ConfigStoreTests
     }
 
     [Theory]
+    [InlineData("""{ "legs": { "a,b": { "os": "linux", "processor": "x86_64", "config": "debug" } } }""", "leg 'a,b' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "a b": { "os": "linux", "processor": "x86_64", "config": "debug" } } }""", "leg 'a b' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "gate": { "os": "linux", "processor": "x86_64", "config": "debug" } }, "legSets": { "x,y": ["gate"] } }""", "legSet 'x,y' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "gate": { "os": "linux", "processor": "x86_64", "config": "debug" } }, "legSets": { "set": ["missing"] } }""", "legSet 'set' names leg 'missing', which is not declared")]
+    public void Load_RejectsALegOrLegSet_ThatLegsCouldNeverSelect(string json, string expected)
+    {
+        // --legs splits its value at commas and the command line at spaces, so such a name is unreachable.
+        var exception = LoadInvalid(json.Replace("{ \"legs\"", "{ \"buildConfigs\": { \"debug\": {} }, \"legs\"", StringComparison.Ordinal));
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "repo" } } } }""", "repositoryPath 'repo' must be absolute")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~" } } } }""", "is a home or root directory")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~/" } } } }""", "is a home or root directory")]
@@ -384,6 +397,8 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "C:\\src\\repo" } } } }""", "start with ~/ for the home directory inside the distribution")]
     [InlineData("""{ "hosts": { "ssh": { "-oProxyCommand=x": { "repositoryPath": "/r" } } } }""", "is not a usable name")]
     [InlineData("""{ "hosts": { "wsl": { "my distro": { "repositoryPath": "/r" } } } }""", "is not a usable name")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~/src/.." } } } }""", "has a '.' or '..' segment")]
+    [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/./repo" } } } }""", "has a '.' or '..' segment")]
     public void Load_RejectsAHostThatCannotBeUsed(string json, string expected)
     {
         var exception = LoadInvalid(json);
@@ -417,6 +432,7 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64", "launcher": ["tools\\prism.exe"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher 'tools\\prism.exe' must be a program name")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": ["bin/uname"], "pattern": "x" } }""", "witness 'bin/uname' must be a program name")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "requires": ["~/sysroot"], "witness": { "command": ["w"], "pattern": "x" } }""", "requires '~/sysroot' must be a program name")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["uname", "-m"], "pattern": "x" } }""", "witness 'uname' must be an absolute path: behind a launcher it is found by the launcher")]
     public void Load_RejectsAnEmulatorThatCannotWork(string emulator, string expected)
     {
         var exception = LoadInvalid($$"""{ "emulators": { "e": {{emulator}} } }""");
@@ -435,10 +451,23 @@ public sealed class ConfigStoreTests
             { "emulators": { "e": {
                 "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64",
                 "launcher": ["{{program}}"], "requires": ["{{program}}"],
-                "witness": { "command": ["{{program}}"], "pattern": "x" } } } }
+                "witness": { "command": ["/opt/arm64/uname"], "pattern": "x" } } } }
             """);
 
         Assert.True(config.Emulators.ContainsKey("e"));
+    }
+
+    [Fact]
+    public void Load_AcceptsAWitnessNamedWithoutAPath_WhenNoLauncherStandsBeforeIt()
+    {
+        // With no launcher the witness is started like any program, so it is looked up on the PATH.
+        var config = LoadValid("""
+            { "emulators": { "prism": {
+                "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64",
+                "witness": { "command": ["x64-witness"], "pattern": "x" } } } }
+            """);
+
+        Assert.Null(config.Emulators["prism"].Launcher);
     }
 
     [Theory]

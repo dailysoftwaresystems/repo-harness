@@ -8,8 +8,9 @@ public sealed record SshHostEntry(IReadOnlyList<string> IdentityFiles);
 
 /// <summary>
 /// Reads the parts of an ssh configuration file the harness checks before it connects. A host counts as
-/// declared only when a <c>Host</c> line names it exactly: a wildcard entry alone would let a misspelt
-/// name in config.json connect to whatever machine the pattern happened to match. What applies to the
+/// declared only when a <c>Host</c> line names it exactly, case included, as ssh compares names: a wildcard
+/// entry alone would let a misspelt name in config.json connect to whatever machine the pattern happened
+/// to match, and ssh applies <c>Host VPS</c> to <c>VPS</c> and never to <c>vps</c>. What applies to the
 /// host is gathered the way ssh gathers it: from the lines before the first block, and from every
 /// <c>Host</c> block whose patterns select it, <c>Host *</c> included.
 /// </summary>
@@ -49,7 +50,7 @@ public static class SshConfigFile
                     .Select(Unquote)
                     .ToList();
 
-                declared |= patterns.Any(pattern => pattern.Equals(name, StringComparison.OrdinalIgnoreCase));
+                declared |= patterns.Any(pattern => pattern.Equals(name, StringComparison.Ordinal));
                 applies = Selects(patterns, name);
             }
             else if (keyword.Equals("Match", StringComparison.OrdinalIgnoreCase))
@@ -94,12 +95,12 @@ public static class SshConfigFile
         return selected;
     }
 
-    /// <summary>ssh's wildcards: <c>*</c> for any run of characters and <c>?</c> for exactly one, ignoring case.</summary>
+    /// <summary>ssh's wildcards: <c>*</c> for any run of characters and <c>?</c> for exactly one, matched case included, as ssh matches them.</summary>
     private static bool Matches(string pattern, string name)
         => Regex.IsMatch(
             name,
             "^" + Regex.Escape(pattern).Replace(@"\*", ".*", StringComparison.Ordinal).Replace(@"\?", ".", StringComparison.Ordinal) + "$",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            RegexOptions.CultureInvariant,
             TimeSpan.FromSeconds(1));
 
     /// <summary>Splits a line into its keyword and its value, which ssh separates with spaces or an equals sign.</summary>

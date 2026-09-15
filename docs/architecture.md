@@ -203,21 +203,26 @@ these apart is what lets one code path serve `build`, `build --worktree wt-a` an
 
 A leg names what it needs, never where it runs: an operating system (`windows`, `linux`,
 `macos`), a processor (`x86_64`, `arm64` and the other processors .NET reports), and
-optionally the emulator allowed to run its programs on a host with another processor. A
-misspelt value is refused when the file is read, since it could never match a host.
+optionally the emulator it runs through on a host with another processor, which rules out
+running it natively. A misspelt value is refused when the file is read, since it could
+never match a host.
 
 Where it runs is measured before anything starts, never declared:
 
-- A leg's candidates are this machine, then the WSL distributions under `hosts.wsl`, then
-  the ssh hosts under `hosts.ssh`, each in the order the configuration declares them. A leg
-  that sets `wsl` or `ssh` has that one host as its only candidate.
+- A leg's candidates are this machine, then the WSL distributions under `hosts.wsl` when the
+  leg runs on Linux, since a distribution runs nothing else, then the ssh hosts under
+  `hosts.ssh`, each in the order the configuration declares them and named as it declares
+  them. A leg that sets `wsl` or `ssh` has that one host as its only candidate.
 - This machine is measured first, because it costs nothing to reach. Other hosts are
   measured only for the legs it cannot run, and all at once, so an unreachable host costs
   its connect timeout once.
 - A leg runs on the first candidate whose measured operating system matches and whose
   processor matches, or, for an emulated leg, where that emulator's check passed.
 - `--legs` takes leg names and leg set names, separated by commas or spaces. A name that is
-  neither is a usage error before any host is measured. No `--legs` selects every leg.
+  neither is a usage error before any host is measured. No `--legs` selects every leg, and
+  `--legs` given without a name is a usage error rather than every leg, so an empty
+  variable cannot pass a gate. A leg or leg set name holding a comma or a space could never
+  be selected, so the file refuses one.
 - A leg no host can run is a warning naming the leg and each candidate's reason, and the
   other legs still go ahead. The check fails, and `legs` exits 1, when a leg named with
   `--legs` cannot run, or when no selected leg can: a declared leg on a machine that is
@@ -255,12 +260,15 @@ is not dependable on such a host.
   `WSL_E_DISTRO_NOT_FOUND`, never by their sentence, which is translated. `--wsl` with no
   name is WSL's default distribution, as the distribution itself reports it.
 - **ssh.** A host is a `Host` entry in `.harness-config/ssh/config`, passed with `-F`, and
-  only an entry that names the host exactly counts: a wildcard alone would let a misspelt
-  name connect somewhere. ssh runs in batch mode, so an untrusted host key or a password
-  prompt fails with ssh's own reason instead of waiting, and `connectTimeoutSeconds` and
-  `keepAliveSeconds` bound a dead link. ssh refuses a configuration file other users can
-  change and ignores a key they can read, both with messages that point nowhere near the
-  file, so both are checked first and reported with the command that fixes them. The keys
+  only an entry that names the host exactly, case included, counts: a wildcard alone would
+  let a misspelt name connect somewhere, and ssh applies `Host VPS` to `VPS` and never to
+  `vps`. ssh is always given the name `hosts.ssh` declares. ssh runs in batch mode, so an
+  untrusted host key or a password prompt fails with ssh's own reason instead of waiting,
+  and `connectTimeoutSeconds` and `keepAliveSeconds` bound a dead link. A configuration file
+  other users can change is refused, because ssh reads one passed with `-F` whatever its
+  permissions, and whoever can change it can make ssh run any command; a key other users
+  can read, ssh ignores. Both are checked before connecting, and reported with the command
+  that fixes them. The keys
   checked are every key ssh would offer: those of each `Host` entry whose patterns select
   the host, `Host *` included. `Match` blocks and `Include` are not evaluated; a key named
   only there is still ignored by ssh itself when other users can read it.
@@ -274,10 +282,13 @@ is not dependable on such a host.
 ### repo-harness on every host
 
 Every WSL distribution and ssh host runs repo-harness itself, installed as a global .NET tool
-from nuget.org, so it needs the .NET 10 SDK. Every install and update names nuget.org as its
-only source, so no feed configured on the host can supply a different package under the same
-name. The machine that reaches it asks it questions
-through a hidden `host-agent` command, with the request as JSON on standard input: which build
+from nuget.org, so it needs the .NET 10 SDK, with `dotnet` on the PATH of a command run
+without a login shell. repo-harness itself is started from `~/.dotnet/tools`, where global
+tools are installed, since that directory is usually on no such PATH. Every install and
+update names nuget.org as its only source, so no feed configured on the host can supply a
+different package under the same name. The machine that reaches it asks it questions
+through a hidden `host-agent` command, with the request as one line of JSON on standard
+input, which it holds open until the host has finished: which build
 it is, what the host is, and whether each emulator works there; or to run one of its own
 commands in the host's copy of the repository, which is what `host-exec` does.
 
@@ -297,20 +308,33 @@ Both ends must be the same build, so before anything runs on a host:
 nothing could run there: the host is unreachable, has no SDK, could not be brought to this
 build, or has no copy of the repository.
 
+- The exit code is the one the host reports in its last line, which carries a value only
+  that request knows, never the transport's. ssh exits 255, and wsl.exe with codes of its
+  own, when a connection fails, so a line that never arrives is 15 too: the command may not
+  have run, or run only in part.
+- Interrupting `host-exec` stops ssh or wsl.exe, which ends the host's input, and the host
+  cancels the command instead of leaving it running there.
+- Until sync exists, nothing creates a host's copy: `host-exec` runs in a checkout made by
+  hand at `repositoryPath`. Sync will not adopt that checkout, since it never writes into a
+  directory it did not create.
+
 ### What legs and host-exec run
 
-`legs` and `host-exec` run what the configuration declares, without asking first: each
-emulator's witness, on every host they measure, and repo-harness itself on WSL distributions
-and ssh hosts, which they install or update there. That is the trust building the repository
-already asks for, since a build runs the repository's own code.
+`legs` and `host-exec` run what the configuration declares, without asking first: `legs`
+runs the witness of each emulator the selected legs use, on the hosts it measures, and both
+run repo-harness itself on WSL distributions and ssh hosts, which they install or update
+there. That is the trust building the repository already asks for, since a build runs the
+repository's own code.
 
-- An ssh host is reached only when this checkout's own `.harness-config/ssh/config`, which
+- An ssh host is reached only when the main checkout's `.harness-config/ssh/config`, which
   git ignores, declares it, and ssh reads no other configuration. A `config.json` that
   arrives through git cannot point the harness at a machine nobody set up here.
-- A launcher, a witness and a required file are each a program name, looked up on the
-  host's `PATH`, or an absolute path. A relative path would resolve against whichever
-  directory a host starts programs in, and would let a file shipped in the repository stand
-  in for the tool it is named after.
+- A launcher and a required file are each a program name, looked up on the host's `PATH`,
+  or an absolute path. A relative path would resolve against whichever directory a host
+  starts programs in, and would let a file shipped in the repository stand in for the tool
+  it is named after. A witness with no launcher is named the same way. Behind a launcher it
+  is an absolute path: the launcher finds it, not the `PATH`, and qemu's user mode opens a
+  bare name in the directory it starts in.
 
 ### Verdict vocabulary (closed)
 
@@ -586,8 +610,8 @@ with "the harness could not run", because the remedies differ.
 | 11 | Not initialised |
 | 12 | Invalid configuration |
 | 13 | Refused: precondition not met (dirty tree, lock held, name taken, a host runs a newer repo-harness) |
-| 14 | A required tool is missing |
-| 15 | A host could not be reached, or repo-harness could not run there |
+| 14 | A required tool is missing, or could not be started |
+| 15 | A host could not be reached, repo-harness could not run there, or a command run there never reported how it finished |
 | 20 | The wrapped command ran and failed |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
 | 130 | The run was interrupted before it finished |
@@ -595,7 +619,7 @@ with "the harness could not run", because the remedies differ.
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,
 or when no selected leg can. `host-exec` returns the exit code of the command it ran on
-the host, unchanged. `repo-harness help exit-codes` prints this table from the code
+the host, unchanged, or 15 when that command never reported how it finished. `repo-harness help exit-codes` prints this table from the code
 itself; this copy is maintained by hand.
 
 Commands that run legs (`build`, `run`, `test`) will use three codes from the range

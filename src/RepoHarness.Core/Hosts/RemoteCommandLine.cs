@@ -33,12 +33,12 @@ public static class RemoteCommandLine
     public const string ShellProbe = "echo %COMSPEC%";
 
     /// <summary>Letters, digits, and punctuation no supported shell gives a meaning inside a word.</summary>
-    private static readonly SearchValues<char> Literal =
-        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/=:+");
+    private const string LiteralCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/=:+";
+
+    private static readonly SearchValues<char> Literal = SearchValues.Create(LiteralCharacters);
 
     /// <summary>The same, and the backslash cmd needs in a path, which a POSIX shell would consume.</summary>
-    private static readonly SearchValues<char> CmdLiteral =
-        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/=:+\\");
+    private static readonly SearchValues<char> CmdLiteral = SearchValues.Create(LiteralCharacters + "\\");
 
     /// <summary>Joins <paramref name="tokens"/> into a command line for <paramref name="shell"/>.</summary>
     /// <exception cref="ArgumentException">A token is empty, or holds a character a shell could reinterpret.</exception>

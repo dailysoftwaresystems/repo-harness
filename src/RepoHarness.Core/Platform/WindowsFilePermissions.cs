@@ -30,16 +30,12 @@ public sealed class WindowsFilePermissions : IFilePermissions
             throw new FileNotFoundException("Cannot protect a file that does not exist.", path);
         }
 
-        using var identity = WindowsIdentity.GetCurrent();
-        var user = identity.User
-            ?? throw new InvalidOperationException("The current Windows identity has no security identifier.");
-
         var security = new FileSecurity();
 
         // Inherited entries are discarded rather than copied in: copying them would keep
         // exactly the access this method exists to remove.
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(CurrentUser(), FileSystemRights.FullControl, AccessControlType.Allow));
 
         file.SetAccessControl(security);
     }
@@ -68,15 +64,13 @@ public sealed class WindowsFilePermissions : IFilePermissions
     /// <summary>
     /// Whether any access rule, explicit or inherited, allows <paramref name="rights"/> to someone
     /// other than the current user, SYSTEM or the Administrators group: the identities OpenSSH for
-    /// Windows itself accepts on a key or a configuration file.
+    /// Windows itself accepts on a private key.
     /// </summary>
     private static bool GrantsOthers(string path, FileSystemRights rights)
     {
-        using var identity = WindowsIdentity.GetCurrent();
-
         var accepted = new HashSet<SecurityIdentifier>
         {
-            identity.User ?? throw new InvalidOperationException("The current Windows identity has no security identifier."),
+            CurrentUser(),
             new(WellKnownSidType.LocalSystemSid, null),
             new(WellKnownSidType.BuiltinAdministratorsSid, null),
         };
@@ -97,5 +91,14 @@ public sealed class WindowsFilePermissions : IFilePermissions
         }
 
         return false;
+    }
+
+    /// <summary>The current user's security identifier, which outlives the identity it was read from.</summary>
+    private static SecurityIdentifier CurrentUser()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+
+        return identity.User
+            ?? throw new InvalidOperationException("The current Windows identity has no security identifier.");
     }
 }

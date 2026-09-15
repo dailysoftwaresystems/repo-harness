@@ -66,6 +66,12 @@ public static class LegsReports
         foreach (var host in report.Hosts)
         {
             details.AddRange(host.Actions.Select(action => $"{host.Host}: {action}"));
+
+            // A leg placed on a host further down its candidates says nothing of the hosts it passed over.
+            if (host.Reason is { } reason)
+            {
+                details.Add($"{host.Host}: cannot run legs: {reason}");
+            }
         }
 
         var width = report.Placements.Count == 0 ? 0 : report.Placements.Max(placement => placement.Leg.Name.Length);

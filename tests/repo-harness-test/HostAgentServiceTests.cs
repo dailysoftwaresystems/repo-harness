@@ -8,22 +8,23 @@ using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
-/// <summary>What the repo-harness on a host answers, and what it agrees to run.</summary>
+/// <summary>What the repo-harness on a host answers, what it agrees to run, and how it says a run ended.</summary>
 public sealed class HostAgentServiceTests
 {
-    private static readonly Func<string, string[], Task<int>> NothingRuns
-        = (_, _) => throw new InvalidOperationException("Nothing should have run.");
+    private const string Nonce = "0123456789abcdef0123456789abcdef";
+
+    private static readonly Func<string, string[], CancellationToken, Task<int>> NothingRuns
+        = (_, _, _) => throw new InvalidOperationException("Nothing should have run.");
 
     [Fact]
     public async Task Info_AnswersWithThisBuild_AndThisMachine()
     {
         using var output = new StringWriter();
-        using var error = new StringWriter();
 
         var exitCode = await Service().ServeAsync(
             new StringReader("""{"kind":"info"}"""),
             output,
-            error,
+            new StringWriter(),
             NothingRuns,
             TestContext.Current.CancellationToken);
 
@@ -38,17 +39,18 @@ public sealed class HostAgentServiceTests
     }
 
     [Fact]
-    public async Task Run_RunsTheCommand_InTheHostsCopy_WithItsArgumentsUnchanged()
+    public async Task Run_RunsTheCommand_InTheHostsCopy_WithItsArgumentsUnchanged_AndSaysHowItFinished()
     {
         using var copy = new TempDirectory();
+        using var error = new StringWriter();
         string? ranIn = null;
         string[]? ranWith = null;
 
         var exitCode = await Service().ServeAsync(
             new StringReader(RunRequest(copy.Path, "read-anchor", "D-A B", "--json")),
             new StringWriter(),
-            new StringWriter(),
-            (directory, arguments) =>
+            error,
+            (directory, arguments, _) =>
             {
                 ranIn = directory;
                 ranWith = arguments;
@@ -61,6 +63,9 @@ public sealed class HostAgentServiceTests
         Assert.Equal(copy.Path, ranIn);
         Assert.NotNull(ranWith);
         Assert.Equal(["read-anchor", "D-A B", "--json"], ranWith);
+
+        // And the last line says so, where the machine that asked reads it instead of from ssh's exit code.
+        Assert.Equal(HostAgentProtocol.CompletionLine(Nonce, 4), error.ToString().TrimEnd());
     }
 
     [Fact]
@@ -74,7 +79,7 @@ public sealed class HostAgentServiceTests
             new StringReader(RunRequest("~/src/repo", "verify-git")),
             new StringWriter(),
             new StringWriter(),
-            (directory, _) =>
+            (directory, _, _) =>
             {
                 ranIn = directory;
                 return Task.FromResult(0);
@@ -86,7 +91,7 @@ public sealed class HostAgentServiceTests
     }
 
     [Fact]
-    public async Task Run_ReportsAHostWithNoCopyOfTheRepository_AsUnavailable()
+    public async Task Run_ReportsAHostWithNoCopyOfTheRepository_AsUnavailable_InItsCompletionLineToo()
     {
         using var temp = new TempDirectory();
         using var error = new StringWriter();
@@ -100,6 +105,85 @@ public sealed class HostAgentServiceTests
 
         Assert.Equal(HarnessExit.HostUnavailable, exitCode);
         Assert.Contains("no copy of the repository", error.ToString(), StringComparison.Ordinal);
+        Assert.EndsWith(
+            HostAgentProtocol.CompletionLine(Nonce, HarnessExit.HostUnavailable),
+            error.ToString().TrimEnd(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Run_ReportsACopyThatCannotBeEntered_AsUnavailable()
+    {
+        using var copy = new TempDirectory();
+        using var error = new StringWriter();
+
+        var exitCode = await Service().ServeAsync(
+            new StringReader(RunRequest(copy.Path, "verify-git")),
+            new StringWriter(),
+            error,
+            (_, _, _) => throw new UnauthorizedAccessException("Access to the path is denied."),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, exitCode);
+        Assert.Contains("could not be entered: Access to the path is denied.", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Run_CancelsTheCommand_WhenTheInputEnds_BecauseTheMachineThatAskedHasGone()
+    {
+        using var copy = new TempDirectory();
+        using var input = new HeldOpenReader(RunRequest(copy.Path, "verify-git"));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var serving = Service().ServeAsync(
+            input,
+            new StringWriter(),
+            new StringWriter(),
+            async (_, _, token) =>
+            {
+                started.SetResult();
+
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return HarnessExit.Success;
+                }
+                catch (OperationCanceledException)
+                {
+                    return HarnessExit.Cancelled;
+                }
+            },
+            cancellationToken);
+
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+        input.End();
+
+        Assert.Equal(HarnessExit.Cancelled, await serving.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken));
+    }
+
+    [Fact]
+    public async Task Run_LeavesTheCommandRunning_WhileTheInputStaysOpen()
+    {
+        using var copy = new TempDirectory();
+        using var input = new HeldOpenReader(RunRequest(copy.Path, "verify-git"));
+        var cancellationToken = TestContext.Current.CancellationToken;
+        bool? cancelled = null;
+
+        var exitCode = await Service().ServeAsync(
+            input,
+            new StringWriter(),
+            new StringWriter(),
+            async (_, _, token) =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken);
+                cancelled = token.IsCancellationRequested;
+                return HarnessExit.Success;
+            },
+            cancellationToken);
+
+        Assert.Equal(HarnessExit.Success, exitCode);
+        Assert.False(cancelled);
     }
 
     [Theory]
@@ -121,8 +205,10 @@ public sealed class HostAgentServiceTests
 
     [Theory]
     [InlineData("not json")]
+    [InlineData("[1, 2]")]
     [InlineData("""{"kind":"info","protocol":99}""")]
     [InlineData("""{"kind":"run","arguments":[]}""")]
+    [InlineData("""{"kind":"run","directory":"/r","arguments":["verify-git"]}""")]
     [InlineData("""{"kind":"info","unexpected":true}""")]
     [InlineData("""{"kind":"info","emulators":{"qemu":{"hostOs":"linux","hostProcessor":"x86_64","processor":"arm64","witness":{"command":["w"],"pattern":"x"}},"QEMU":{}}}""")]
     public async Task ARequestThatCannotBeServed_IsAUsageError_Explained(string request)
@@ -138,6 +224,22 @@ public sealed class HostAgentServiceTests
 
         Assert.Equal(HarnessExit.UsageError, exitCode);
         Assert.StartsWith("host-agent: FAIL - ", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARequestInAnotherProtocol_IsRefusedAsThat_ThoughItHasFieldsThisBuildDoesNotKnow()
+    {
+        using var error = new StringWriter();
+
+        var exitCode = await Service().ServeAsync(
+            new StringReader("""{"kind":"info","protocol":2,"addedLater":true}"""),
+            new StringWriter(),
+            error,
+            NothingRuns,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.UsageError, exitCode);
+        Assert.Contains("speaks protocol 2, and repo-harness 1.2.3 on this host speaks 1", error.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -160,15 +262,12 @@ public sealed class HostAgentServiceTests
 
     private static string RunRequest(string directory, params string[] arguments)
         => JsonSerializer.Serialize(
-            new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = directory, Arguments = [.. arguments] },
+            new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = directory, Arguments = [.. arguments], Nonce = Nonce },
             HostAgentProtocol.JsonOptions);
 
     private static HostAgentService Service(string? home = null)
     {
-        var platform = Substitute.For<IHostPlatform>();
-        platform.PlatformKey.Returns("linux");
-        platform.Processor.Returns("arm64");
-        platform.HomeDirectory.Returns(home ?? TestHost.TemporaryRoot);
+        var platform = HostDoubles.Platform(PlatformId.Linux, "arm64", home);
 
         var identity = Substitute.For<IToolIdentityProvider>();
         identity.Current.Returns(new ToolIdentity("1.2.3", "abc123"));

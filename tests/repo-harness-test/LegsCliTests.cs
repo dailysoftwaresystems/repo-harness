@@ -28,19 +28,36 @@ public sealed class LegsCliTests
         Assert.Contains("leg 'elsewhere' cannot run", result.StandardError, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Legs_Fails_WhenALegNamedWithLegsCannotRun()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legs_Fails_WhenALegNamedWithLegsCannotRun(bool separatedBySpace)
     {
         using var temp = new TempDirectory();
         await PrepareAsync(temp);
 
-        var result = await CliRunner.RunAsync(["legs", "--legs", "native,elsewhere", "-C", temp.Path], TestContext.Current.CancellationToken);
+        string[] names = separatedBySpace ? ["native", "elsewhere"] : ["native,elsewhere"];
+        var result = await CliRunner.RunAsync(["legs", "--legs", .. names, "-C", temp.Path], TestContext.Current.CancellationToken);
 
         Assert.Equal(LegsExit.Unavailable, result.ExitCode);
+        Assert.Contains("leg 'elsewhere' cannot run", result.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Legs_RefusesAnUnknownName_BeforeMeasuringAnyHost()
+    public async Task Legs_RefusesALegsValueThatNamesNothing()
+    {
+        // An unset variable in --legs "$GATE" must not quietly check every leg under the rule for unnamed ones.
+        using var temp = new TempDirectory();
+        await PrepareAsync(temp);
+
+        var result = await CliRunner.RunAsync(["legs", "--legs", "", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
+        Assert.Contains("--legs was given no leg or leg set name", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Legs_RefusesAnUnknownName()
     {
         using var temp = new TempDirectory();
         await PrepareAsync(temp);
@@ -94,12 +111,26 @@ public sealed class LegsCliTests
     }
 
     [Fact]
+    public async Task HostExec_ToWslsDefaultDistribution_OnAMachineThatIsNotWindows_IsUnavailable()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows may have WSL; no other operating system does.");
+
+        using var temp = new TempDirectory();
+        await PrepareAsync(temp);
+
+        var result = await CliRunner.RunAsync(["host-exec", "--wsl", "-C", temp.Path, "--", "verify-git"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, result.ExitCode);
+        Assert.Contains("WSL exists only on Windows", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HostAgent_AnswersAsThisBuild_OfThisMachine()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         var version = (await CliRunner.RunAsync(["--version"], cancellationToken)).TrimmedOutput;
 
-        var result = await CliRunner.RunAsync(["host-agent"], cancellationToken, standardInput: """{"kind":"info"}""");
+        var result = await CliRunner.RunAsync(["host-agent"], cancellationToken, standardInput: """{"kind":"info"}""" + "\n");
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
 
@@ -120,15 +151,25 @@ public sealed class LegsCliTests
         var cancellationToken = TestContext.Current.CancellationToken;
         await new HarnessFactory().InitializeGitRepositoryAsync(temp.Path, cancellationToken);
 
+        var nonce = HostAgentProtocol.NewNonce();
         var request = JsonSerializer.Serialize(
-            new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = temp.Path, Arguments = ["verify-git"] },
+            new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = temp.Path, Arguments = ["verify-git"], Nonce = nonce },
             HostAgentProtocol.JsonOptions);
 
-        var result = await CliRunner.RunAsync(["host-agent"], cancellationToken, standardInput: request);
+        var result = await CliRunner.RunAsync(
+            [HostAgentProtocol.CommandName, HostAgentProtocol.VerboseOption],
+            cancellationToken,
+            standardInput: request + "\n");
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
         Assert.Contains("verify-git: OK", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains(temp.Path, result.StandardOutput, StringComparison.OrdinalIgnoreCase);
+
+        // The last line says how the command finished; the machine that asked reads its exit code from there.
+        Assert.EndsWith(
+            HostAgentProtocol.CompletionLine(nonce, HarnessExit.Success),
+            result.StandardError.TrimEnd(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -157,7 +198,7 @@ public sealed class LegsCliTests
             },
             HostAgentProtocol.JsonOptions);
 
-        var result = await CliRunner.RunAsync([HostAgentProtocol.CommandName], TestContext.Current.CancellationToken, standardInput: request);
+        var result = await CliRunner.RunAsync([HostAgentProtocol.CommandName], TestContext.Current.CancellationToken, standardInput: request + "\n");
 
         Assert.Equal(HarnessExit.InternalError, result.ExitCode);
         Assert.StartsWith($"{HostAgentProtocol.CommandName}: FAIL - Unexpected ", result.StandardError, StringComparison.Ordinal);

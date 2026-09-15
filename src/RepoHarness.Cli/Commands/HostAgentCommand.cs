@@ -14,19 +14,25 @@ namespace RepoHarness.Cli.Commands;
 internal static class HostAgentCommand
 {
     /// <summary>Builds the command.</summary>
-    /// <param name="run">Runs a command line in a directory; supplied by the program, which holds the parser.</param>
-    internal static Command Create(Func<string, string[], Task<int>> run)
+    /// <param name="run">
+    /// Runs a command line in a directory until it finishes or the token is cancelled; supplied by the program,
+    /// which holds the parser.
+    /// </param>
+    internal static Command Create(Func<string, string[], CancellationToken, Task<int>> run)
     {
         var command = new Command(
             HostAgentProtocol.CommandName,
-            "Serve one request from the repo-harness on another machine, read as JSON from standard input.")
+            "Serve one request from the repo-harness on another machine: a line of JSON on standard input, which stays open while it is served.")
         {
             Hidden = true,
         };
 
-        command.SetAction(async (_, cancellationToken) =>
+        // The machine that asked passes its own --verbose, so a defect here can be reported with its stack trace.
+        command.Options.Add(GlobalOptions.Verbose);
+
+        command.SetAction(async (parseResult, cancellationToken) =>
         {
-            await using var services = HarnessServices.Build(verbose: false);
+            await using var services = HarnessServices.Build(parseResult.GetValue(GlobalOptions.Verbose));
 
             // The request was written as UTF-8, and is read as such whatever the console's own input
             // encoding happens to be.

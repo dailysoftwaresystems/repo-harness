@@ -30,9 +30,9 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                 $"it runs on {emulator.HostOs} {emulator.HostProcessor} hosts, and this one is {_platform.PlatformKey} {_platform.Processor}");
         }
 
-        foreach (var requirement in emulator.Requires.Where(requirement => !IsPresent(requirement)))
+        if (emulator.Requires.FirstOrDefault(requirement => !IsPresent(requirement)) is { } missing)
         {
-            return EmulatorCheck.Unavailable($"{requirement} is missing");
+            return EmulatorCheck.Unavailable($"{missing} is missing");
         }
 
         string[] command = [.. emulator.Launcher ?? [], .. emulator.Witness.Command];
@@ -53,6 +53,13 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
         catch (ExecutableNotFoundException ex)
         {
             return EmulatorCheck.Unavailable($"{ex.FileName} was not found");
+        }
+        catch (ProgramStartException ex)
+        {
+            // A witness that exists but cannot start is the expected result on a host where the emulation is
+            // not installed: a program for another processor with no handler registered for it. It says this
+            // emulator cannot serve the host, not that the host, or the check, is broken.
+            return EmulatorCheck.Unavailable($"its witness could not start: {ex.Message}");
         }
 
         if (result.TimedOut)

@@ -27,10 +27,19 @@ public sealed record ProcessRequest
 
     /// <summary>
     /// Text written to the child's standard input, which is then closed so the child sees its
-    /// end; or <see langword="null"/> to leave standard input connected to this process's own.
-    /// Written as UTF-8 on every platform, the encoding output is read with.
+    /// end; <see langword="null"/> gives it an input that ends at once. A child is never
+    /// connected to this process's own input. Written as UTF-8 on every platform, the encoding
+    /// output is read with.
     /// </summary>
     public string? StandardInput { get; init; }
+
+    /// <summary>
+    /// Keeps standard input open after <see cref="StandardInput"/> is written, until the child exits,
+    /// instead of closing it at once. A child that acts on what it read and then watches for the end of
+    /// its input learns from that end that this process has gone. A child that reads to the end before
+    /// acting would wait forever, so only a child that watches this way is started with it.
+    /// </summary>
+    public bool HoldStandardInputOpen { get; init; }
 
     /// <summary>
     /// Invoked for each stdout line as it arrives, in addition to capture.

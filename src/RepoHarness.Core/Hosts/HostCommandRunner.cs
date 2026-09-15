@@ -40,8 +40,18 @@ public sealed record HostCommand
     /// </summary>
     public IReadOnlyList<string> Arguments { get; init; } = [];
 
-    /// <summary>Text written to the program's standard input, which is then closed.</summary>
-    public string? StandardInput { get; init; }
+    /// <summary>
+    /// Text written to the program's standard input, which is then closed unless
+    /// <see cref="HoldStandardInputOpen"/> is set; empty by default. ssh forwards whatever input it is
+    /// given, so the program on the host reads exactly this, and nothing piped to repo-harness.
+    /// </summary>
+    public string StandardInput { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Keeps standard input open until the program exits, so that a program watching for its end learns when
+    /// this process has gone; see <see cref="ProcessRequest.HoldStandardInputOpen"/>.
+    /// </summary>
+    public bool HoldStandardInputOpen { get; init; }
 
     /// <summary>Wall clock budget, or <see langword="null"/> for none.</summary>
     public TimeSpan? Timeout { get; init; }
@@ -115,7 +125,9 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
             throw new ArgumentException("Only an ssh host hands commands to a shell.", nameof(connection));
         }
 
-        return _processRunner.RunAsync(SshRequest(connection, RemoteCommandLine.ShellProbe) with { Timeout = timeout }, cancellationToken);
+        return _processRunner.RunAsync(
+            SshRequest(connection, RemoteCommandLine.ShellProbe) with { Timeout = timeout, StandardInput = string.Empty },
+            cancellationToken);
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -131,6 +143,7 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         FileName = WslProgram,
         Arguments = ["--exec", "printenv", "WSL_DISTRO_NAME"],
         Environment = WslEnvironment,
+        StandardInput = string.Empty,
         Timeout = timeout,
     };
 
@@ -159,6 +172,7 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         return request with
         {
             StandardInput = command.StandardInput,
+            HoldStandardInputOpen = command.HoldStandardInputOpen,
             Timeout = command.Timeout,
             OnOutputLine = command.OnOutputLine,
             OnErrorLine = command.OnErrorLine,

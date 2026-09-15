@@ -1,4 +1,6 @@
+using NSubstitute;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Tests;
 
@@ -48,6 +50,7 @@ public sealed class HostCommandRunnerTests
         Assert.Equal(["--exec", "printenv", "WSL_DISTRO_NAME"], request.Arguments);
         Assert.Equal("1", request.Environment["WSL_UTF8"]);
         Assert.Equal(TimeSpan.FromSeconds(7), request.Timeout);
+        Assert.Equal(string.Empty, request.StandardInput);
     }
 
     [Fact]
@@ -101,5 +104,47 @@ public sealed class HostCommandRunnerTests
             new HostCommand { Program = @".dotnet\tools\repo-harness.exe", Arguments = ["host-agent"] });
 
         Assert.Equal(@".dotnet\tools\repo-harness.exe host-agent", request.Arguments[^1]);
+    }
+
+    [Fact]
+    public void AProgramOnAHost_IsGivenNoInput_UnlessItIsGivenSome()
+    {
+        var connection = new HostConnection { Host = HostId.Ssh("vps"), SshConfigFile = "config" };
+
+        var request = HostCommandRunner.BuildRequest(connection, new HostCommand { Program = "dotnet", Arguments = ["--list-sdks"] });
+
+        // ssh forwards whatever input it has, so input inherited from this process would go to whichever probe ran first.
+        Assert.Equal(string.Empty, request.StandardInput);
+        Assert.False(request.HoldStandardInputOpen);
+    }
+
+    [Fact]
+    public void InputHeldOpen_IsPassedOnHeldOpen()
+    {
+        var request = HostCommandRunner.BuildRequest(
+            new HostConnection { Host = HostId.Wsl("Ubuntu") },
+            new HostCommand { Program = "repo-harness", Arguments = ["host-agent"], StandardInput = "{}\n", HoldStandardInputOpen = true });
+
+        Assert.Equal("{}\n", request.StandardInput);
+        Assert.True(request.HoldStandardInputOpen);
+    }
+
+    [Fact]
+    public async Task TheProbes_AreGivenNoInput()
+    {
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(HostResults.Ok(string.Empty)));
+        var hosts = new HostCommandRunner(processRunner);
+
+        await hosts.ProbeShellAsync(
+            new HostConnection { Host = HostId.Ssh("vps"), SshConfigFile = "config" },
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        await hosts.ProbeDefaultWslDistributionAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        _ = processRunner.Received(2).RunAsync(
+            Arg.Is<ProcessRequest>(request => request.StandardInput == string.Empty && !request.HoldStandardInputOpen),
+            Arg.Any<CancellationToken>());
     }
 }

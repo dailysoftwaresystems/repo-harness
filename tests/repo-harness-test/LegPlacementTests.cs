@@ -35,7 +35,16 @@ public sealed class LegPlacementTests
     {
         Assert.Equal(
             ["local", "wsl Ubuntu", "ssh mac", "ssh pi"],
-            LegPlacement.Candidates(Config, Leg("linux", "arm64")).Select(host => host.ToString()));
+            LegPlacement.Candidates(Config, HostDoubles.Leg("linux", "arm64")).Select(host => host.ToString()));
+    }
+
+    [Fact]
+    public void Candidates_LeaveOutTheWslDistributions_ForALegThatIsNotLinux()
+    {
+        // A distribution runs Linux only; measuring one for this leg would install repo-harness there for nothing.
+        Assert.Equal(
+            ["local", "ssh mac", "ssh pi"],
+            LegPlacement.Candidates(Config, HostDoubles.Leg("macos", "arm64")).Select(host => host.ToString()));
     }
 
     [Fact]
@@ -47,9 +56,18 @@ public sealed class LegPlacementTests
     }
 
     [Fact]
+    public void Candidates_NameAPinnedHost_AsTheConfigurationDeclaresIt()
+    {
+        // ssh applies "Host mac" to "mac" and never to "MAC", so the leg's own spelling must not reach it.
+        var leg = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "MAC" };
+
+        Assert.Equal("mac", Assert.Single(LegPlacement.Candidates(Config, leg)).Name);
+    }
+
+    [Fact]
     public void Place_ChoosesTheFirstHost_ThatProvidesWhatTheLegNeeds()
     {
-        var placement = Place(Leg("linux", "arm64"), Windows, Ubuntu, Mac, Pi);
+        var placement = Place(HostDoubles.Leg("linux", "arm64"), Windows, Ubuntu, Mac, Pi);
 
         Assert.True(placement.Runnable);
         Assert.Equal(HostId.Ssh("pi"), placement.Host?.Host);
@@ -58,13 +76,30 @@ public sealed class LegPlacementTests
     [Fact]
     public void Place_PrefersThisMachine_WhenItCanRunTheLeg()
     {
-        Assert.Equal(HostId.Local, Place(Leg("windows", "x86_64"), Windows, Ubuntu).Host?.Host);
+        Assert.Equal(HostId.Local, Place(HostDoubles.Leg("windows", "x86_64"), Windows, Ubuntu).Host?.Host);
+    }
+
+    [Fact]
+    public void Place_ChoosesThisMachine_OverAWslDistributionThatFitsAsWell()
+    {
+        var linux = Measured(HostId.Local, "linux", "x86_64");
+
+        Assert.Equal(HostId.Local, Place(HostDoubles.Leg("linux", "x86_64"), linux, Ubuntu).Host?.Host);
+    }
+
+    [Fact]
+    public void Place_ChoosesTheSshHostDeclaredFirst_WhenTwoFit()
+    {
+        // The order the measurements arrive in says nothing; the order the configuration declares does.
+        var macRunningLinux = Measured(HostId.Ssh("mac"), "linux", "arm64");
+
+        Assert.Equal(HostId.Ssh("mac"), Place(HostDoubles.Leg("linux", "arm64"), Windows, Ubuntu, Pi, macRunningLinux).Host?.Host);
     }
 
     [Fact]
     public void Place_ExplainsEveryCandidate_WhenNoneFits()
     {
-        var placement = Place(Leg("macos", "x86_64"), Windows, Ubuntu, Mac, Pi);
+        var placement = Place(HostDoubles.Leg("macos", "x86_64"), Windows, Ubuntu, Mac, Pi);
 
         Assert.False(placement.Runnable);
         Assert.Contains("local: it runs windows, and the leg needs macos", placement.Reason, StringComparison.Ordinal);
@@ -76,7 +111,7 @@ public sealed class LegPlacementTests
     {
         var offline = new HostReport { Host = HostId.Ssh("pi"), Reason = "ssh could not connect: Connection timed out" };
 
-        var placement = Place(Leg("linux", "arm64"), Windows, Ubuntu, Mac, offline);
+        var placement = Place(HostDoubles.Leg("linux", "arm64"), Windows, Ubuntu, Mac, offline);
 
         Assert.Contains("ssh pi: ssh could not connect: Connection timed out", placement.Reason, StringComparison.Ordinal);
     }
@@ -99,7 +134,7 @@ public sealed class LegPlacementTests
     [Fact]
     public void Place_PassesOverAHost_ThatWasNotMeasured()
     {
-        Assert.Equal(HostId.Ssh("pi"), Place(Leg("linux", "arm64"), Windows, Pi).Host?.Host);
+        Assert.Equal(HostId.Ssh("pi"), Place(HostDoubles.Leg("linux", "arm64"), Windows, Pi).Host?.Host);
     }
 
     [Fact]
@@ -147,6 +182,19 @@ public sealed class LegPlacementTests
         Assert.Contains("wsl Ubuntu: installed repo-harness 1.2.0", outcome.Details!);
     }
 
+    [Fact]
+    public void Render_SaysWhyAMeasuredHostWasPassedOver()
+    {
+        // A leg placed further down its candidates would otherwise say nothing of the host it skipped.
+        var offline = new HostReport { Host = HostId.Ssh("pi"), Reason = "ssh could not connect: Connection timed out" };
+
+        var outcome = LegsReports.Render(
+            new LegsReport([new LegPlacement(Selected("a"), Windows, null)], [Windows, offline], Named: false),
+            json: false);
+
+        Assert.Contains("ssh pi: cannot run legs: ssh could not connect: Connection timed out", outcome.Details!);
+    }
+
     private static LegPlacement Place(LegConfig leg, params HostReport[] measured)
         => LegPlacement.Place(Config, new SelectedLeg("leg", leg), measured.ToDictionary(report => report.Host));
 
@@ -155,7 +203,5 @@ public sealed class LegPlacementTests
     private static Dictionary<string, EmulatorCheck> Checks(EmulatorCheck check)
         => new(StringComparer.OrdinalIgnoreCase) { ["qemu-arm64"] = check };
 
-    private static LegConfig Leg(string os, string processor) => new() { Os = os, Processor = processor, Config = "debug" };
-
-    private static SelectedLeg Selected(string name) => new(name, Leg("windows", "x86_64"));
+    private static SelectedLeg Selected(string name) => new(name, HostDoubles.Leg("windows", "x86_64"));
 }

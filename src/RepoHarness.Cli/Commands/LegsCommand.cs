@@ -33,8 +33,14 @@ internal static class LegsCommand
         {
             var arguments = context.ParseResult;
 
+            // Left out, --legs selects every leg; given, it must name one. Which of the two happened is told by
+            // whether the option appeared at all, never by what its value holds.
+            var legs = arguments.GetResult(LegsOption) is { Implicit: false }
+                ? arguments.GetValue(LegsOption) ?? []
+                : null;
+
             var report = await context.Get<LegsService>()
-                .CheckAsync(context.Directory, arguments.GetValue(LegsOption) ?? [], cancellationToken)
+                .CheckAsync(context.Directory, legs, cancellationToken)
                 .ConfigureAwait(false);
 
             return LegsReports.Render(report, arguments.GetValue(JsonOption));

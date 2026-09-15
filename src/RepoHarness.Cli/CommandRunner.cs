@@ -82,7 +82,8 @@ internal static class CommandRunner
                 output.Fail(commandName, exception.Message);
                 return HarnessExit.ConfigInvalid;
 
-            case ExecutableNotFoundException:
+            case ProgramStartException:
+                // Missing, or there and unable to start: either way the instrument never ran.
                 output.Fail(commandName, exception.Message);
                 return HarnessExit.ToolMissing;
 

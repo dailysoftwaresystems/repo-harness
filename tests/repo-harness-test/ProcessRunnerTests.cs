@@ -182,11 +182,77 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_GivesAChildAnInputThatEndsAtOnce_WhenTheRequestHasNone()
+    {
+        // Never this process's own input: a child reading it would take what was meant for the harness, and on
+        // Windows a child inheriting an input this process is reading at that moment can hang as it starts.
+        var result = await CreateRunner().RunAsync(
+            TestHost.ChildRequest("echo-stdin") with { Timeout = TimeSpan.FromSeconds(60) },
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.TimedOut, "The child was left reading an input that never ended.");
+        Assert.Equal("[]", result.StandardOutput.TrimEnd('\n'));
+    }
+
+    [Theory]
+    [InlineData(false, "ended")]
+    [InlineData(true, "held")]
+    public async Task RunAsync_ClosesStandardInputOnceWritten_UnlessAskedToHoldItOpen(bool hold, string expected)
+    {
+        // A child that watches for the end of its input learns from it that this process has gone, which
+        // only means something if the input stays open while this process is still there.
+        var result = await CreateRunner().RunAsync(
+            TestHost.ChildRequest("read-line-then-watch", "1500") with
+            {
+                StandardInput = "request\n",
+                HoldStandardInputOpen = hold,
+                Timeout = TimeSpan.FromSeconds(60),
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.TimedOut);
+        Assert.Equal(["[request]", expected], Lines(result.StandardOutput));
+    }
+
+    [Fact]
     public async Task RunAsync_ReportsAMissingExecutable_AsNotFound()
     {
         await Assert.ThrowsAsync<ExecutableNotFoundException>(() => CreateRunner().RunAsync(
             new ProcessRequest { FileName = "definitely-not-a-real-tool-xyzzy" },
             TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RunAsync_ReportsAFileThatIsNotAProgram_AsUnableToStart_RatherThanAsMissing()
+    {
+        using var temp = new TempDirectory();
+        var file = temp.WriteFile(OperatingSystem.IsWindows() ? "not-a-program.exe" : "not-a-program", "plain text\n");
+        MakeExecutable(file);
+
+        // Exactly this type: "not found" would send the reader after a file that is there.
+        var exception = await Assert.ThrowsAsync<ProgramStartException>(() => CreateRunner().RunAsync(
+            new ProcessRequest { FileName = file },
+            TestContext.Current.CancellationToken));
+
+        Assert.Contains("could not be started", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [UnsupportedOSPlatform("windows")]
+    public async Task RunAsync_ReportsAScriptWhoseInterpreterIsMissing_AsUnableToStart_OnLinuxAndMacOs()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows starts no script through the line naming its interpreter.");
+
+        using var temp = new TempDirectory();
+        var script = temp.WriteFile("script", "#!/definitely/not/an/interpreter\n");
+        MakeExecutable(script);
+
+        // The system reports the interpreter missing with the same error as a missing program.
+        var exception = await Assert.ThrowsAsync<ProgramStartException>(() => CreateRunner().RunAsync(
+            new ProcessRequest { FileName = script },
+            TestContext.Current.CancellationToken));
+
+        Assert.Contains("interpreter or loader", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -323,6 +389,15 @@ public sealed class ProcessRunnerTests
 
     private static List<string> Lines(string text)
         => [.. text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r'))];
+
+    /// <summary>Gives a file every execute bit on Linux and macOS; Windows decides by extension alone.</summary>
+    private static void MakeExecutable(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+        }
+    }
 
     private static Dictionary<string, string?> WithVariable(ProcessRequest request, string name, string? value)
         => new(request.Environment, StringComparer.Ordinal) { [name] = value };

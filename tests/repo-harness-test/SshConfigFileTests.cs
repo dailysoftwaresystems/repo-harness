@@ -21,7 +21,7 @@ public sealed class SshConfigFileTests
               IdentityFile "keys/with space"
             """;
 
-        var entry = SshConfigFile.Find(Text, "VPS");
+        var entry = SshConfigFile.Find(Text, "vps");
 
         Assert.NotNull(entry);
         Assert.Equal([".harness-config/ssh/vps_ed25519", "keys/with space"], entry.IdentityFiles);
@@ -33,6 +33,18 @@ public sealed class SshConfigFileTests
         // A misspelt name in config.json must not connect to whatever machine a pattern happens to match.
         Assert.Null(SshConfigFile.Find("Host *\n  User dev\n", "vps"));
         Assert.Null(SshConfigFile.Find("Host vps*\n", "vps"));
+    }
+
+    [Fact]
+    public void Find_MatchesNamesCaseIncluded_AsSshDoes()
+    {
+        // ssh applies Host VPS to "ssh VPS" and never to "ssh vps", so the file does not declare vps.
+        Assert.Null(SshConfigFile.Find("Host VPS\n  IdentityFile /upper/key\n", "vps"));
+
+        var entry = SshConfigFile.Find("Host vps\n  IdentityFile /vps/key\n\nHost V*\n  IdentityFile /upper/key\n", "vps");
+
+        Assert.NotNull(entry);
+        Assert.Equal(["/vps/key"], entry.IdentityFiles);
     }
 
     [Fact]
@@ -68,7 +80,7 @@ public sealed class SshConfigFileTests
               IdentityFile ~/.ssh/shared
             """;
 
-        var entry = SshConfigFile.Find(Text, "VPS");
+        var entry = SshConfigFile.Find(Text, "vps");
 
         Assert.NotNull(entry);
         Assert.Equal(["/vps/key", "/single-character/key", "~/.ssh/shared"], entry.IdentityFiles);

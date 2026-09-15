@@ -26,8 +26,10 @@ public interface IFilePermissions
     bool IsPrivate(string path);
 
     /// <summary>
-    /// Whether <paramref name="path"/> is a file another user can change: the condition under which
-    /// ssh refuses to read a configuration file. A file that does not exist is not.
+    /// Whether <paramref name="path"/> is a file another user can change. ssh checks this itself only for
+    /// its default configuration file, and reads one passed with <c>-F</c> whatever its permissions; such a
+    /// file is refused anyway, because whoever can change it can make ssh run any command as the current
+    /// user. A file that does not exist is not.
     /// </summary>
     bool IsWritableByOthers(string path);
 }

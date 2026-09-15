@@ -119,15 +119,7 @@ public sealed class HostInspector(
         CancellationToken cancellationToken)
     {
         var info = await _agent.DescribeAsync(emulators, cancellationToken).ConfigureAwait(false);
-
-        return new HostReport
-        {
-            Host = HostId.Local,
-            Os = info.Os,
-            Processor = info.Processor,
-            ToolVersion = info.Version,
-            Emulators = info.Emulators,
-        };
+        return Answered(new HostReport { Host = HostId.Local }, info, session: null);
     }
 
     private async Task<HostReport> InspectWslAsync(
@@ -185,26 +177,22 @@ public sealed class HostInspector(
             return Unavailable(host, $"{shownConfig} does not exist; declare 'Host {host.Name}' there, with its address, user and key");
         }
 
-        var entry = SshConfigFile.Find(_fileSystem.ReadAllText(configFile), host.Name);
+        string? problem;
 
-        if (entry is null)
+        try
         {
-            return Unavailable(host, $"{shownConfig} has no 'Host {host.Name}' entry");
+            problem = CheckSshFiles(context, host, configFile, shownConfig);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // This host's problem, not every host's: a file this user cannot read, or whose permissions cannot
+            // be read, stops only the hosts that depend on it.
+            problem = $"{shownConfig}, or a key it names, could not be read: {ex.Message}";
         }
 
-        // ssh refuses a configuration file other users can change, and ignores a key they can read,
-        // with messages that point nowhere near either file. Both are checked here instead.
-        if (_filePermissions.IsWritableByOthers(configFile))
+        if (problem is not null)
         {
-            return Unavailable(host, $"other users can change {shownConfig}, so ssh refuses to read it; {HowToProtect(configFile)}");
-        }
-
-        foreach (var key in entry.IdentityFiles.Select(file => ResolveKey(context, file)).OfType<string>())
-        {
-            if (_fileSystem.FileExists(key) && !_filePermissions.IsPrivate(key))
-            {
-                return Unavailable(host, $"other users can read the key {key}, so ssh ignores it; {HowToProtect(key)}");
-            }
+            return Unavailable(host, problem);
         }
 
         if (_processRunner.FindExecutable(HostCommandRunner.SshProgram) is null)
@@ -242,20 +230,46 @@ public sealed class HostInspector(
     }
 
     /// <summary>
-    /// Brings repo-harness on a reachable host to this machine's build, then asks it what the host is.
-    /// Versions only move up: a host that is behind is updated, and a host that is ahead stops
-    /// everything until this machine catches up, because moving the host down would undo an update
-    /// somebody else made.
+    /// What stops ssh from using <paramref name="configFile"/> for <paramref name="host"/> safely, or
+    /// <see langword="null"/> when nothing does. Checked before connecting, because what ssh itself says
+    /// about either file points nowhere near it.
     /// </summary>
+    private string? CheckSshFiles(HarnessContext context, HostId host, string configFile, string shownConfig)
+    {
+        var entry = SshConfigFile.Find(_fileSystem.ReadAllText(configFile), host.Name);
+
+        if (entry is null)
+        {
+            return $"{shownConfig} has no 'Host {host.Name}' entry; ssh matches the name exactly, case included";
+        }
+
+        // ssh reads a file passed with -F whatever its permissions, and whoever can change that file can make
+        // ssh run any command as this user, so a file other users can change is refused here instead.
+        if (_filePermissions.IsWritableByOthers(configFile))
+        {
+            return $"other users can change {shownConfig}, and whoever can change it can make ssh run any command as you; {HowToProtect(configFile)}";
+        }
+
+        // A key other users can read, ssh ignores, with a warning that does not say what that does to the connection.
+        foreach (var key in entry.IdentityFiles.Select(file => ResolveKey(context, file)).OfType<string>())
+        {
+            if (_fileSystem.FileExists(key) && !_filePermissions.IsPrivate(key))
+            {
+                return $"other users can read the key {key}, so ssh ignores it; {HowToProtect(key)}";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Brings repo-harness on a reachable host to this machine's build, then asks it what the host is.</summary>
     private async Task<HostReport> PrepareAsync(
         HostReport found,
         HostConnection connection,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         CancellationToken cancellationToken)
     {
-        var host = found.Host;
         var root = _identity.Current;
-        var actions = new List<string>();
 
         var sdks = await RunAsync(connection, "dotnet", ["--list-sdks"], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
@@ -265,6 +279,15 @@ public sealed class HostInspector(
         }
 
         var listed = HostProbes.ReadSdks(sdks.StandardOutput);
+
+        // Output that holds no SDK line is unreadable, not proof that no SDK is installed.
+        if (listed.Count == 0 && !string.IsNullOrWhiteSpace(sdks.StandardOutput))
+        {
+            return found with
+            {
+                Reason = $"dotnet --list-sdks printed nothing this build can read as an SDK: {HostProbes.Excerpt(sdks.StandardOutput)}",
+            };
+        }
 
         if (!listed.Any(sdk => sdk.Major >= ToolPackage.MinimumSdkMajor))
         {
@@ -276,79 +299,89 @@ public sealed class HostInspector(
         // runs there; the kind of shell alone cannot say, since PowerShell runs on both.
         var windowsHost = listed.Any(sdk => sdk.OnWindows);
 
+        var (reason, action) = await BringToThisBuildAsync(found.Host, connection, windowsHost, root, cancellationToken).ConfigureAwait(false);
+
+        if (reason is not null)
+        {
+            return found with { Reason = reason };
+        }
+
+        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, emulators, root, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Installs repo-harness on the host at this machine's version, or updates it to that version, as needed.
+    /// Versions only move up: a host that is behind is updated, and a host that is ahead stops everything until
+    /// this machine catches up, because moving the host down would undo an update somebody else made.
+    /// </summary>
+    /// <returns>Why the host cannot be brought to this build, or what bringing it there took, if anything.</returns>
+    /// <exception cref="HarnessException">The host has a newer repo-harness than this machine.</exception>
+    private async Task<(string? Reason, string? Action)> BringToThisBuildAsync(
+        HostId host,
+        HostConnection connection,
+        bool windowsHost,
+        ToolIdentity root,
+        CancellationToken cancellationToken)
+    {
         var tools = await RunAsync(connection, "dotnet", ["tool", "list", "--global", "--format", "json"], ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
         if (!tools.Succeeded || !HostProbes.TryReadToolVersion(tools.StandardOutput, ToolPackage.Id, out var installed))
         {
-            return found with { Reason = Failure("its global .NET tools could not be listed", tools) };
+            return (Failure("its global .NET tools could not be listed", tools), null);
         }
 
         if (installed is null)
         {
-            var install = await RunAsync(
-                connection,
-                "dotnet",
-                ["tool", "install", "--global", ToolPackage.Id, "--version", root.Version, "--source", ToolPackage.Source],
-                InstallBudget,
-                cancellationToken).ConfigureAwait(false);
+            var install = await RunToolCommandAsync(connection, "install", root.Version, cancellationToken).ConfigureAwait(false);
 
-            if (!install.Succeeded)
-            {
-                return found with
-                {
-                    Reason = Failure($"installing repo-harness {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install),
-                };
-            }
-
-            actions.Add($"installed repo-harness {root.Version}");
+            return install.Succeeded
+                ? (null, $"installed repo-harness {root.Version}")
+                : (Failure($"installing repo-harness {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
         }
-        else
+
+        if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
         {
-            if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
-            {
-                return found with { Reason = $"repo-harness {installed} there cannot be compared with {root.Version} here" };
-            }
-
-            var order = SemanticVersion.Compare(hostVersion, rootVersion);
-
-            if (order > 0)
-            {
-                throw new HarnessException(
-                    HarnessExit.Refused,
-                    $"{host} has repo-harness {installed}, newer than this machine's {root.Version}. Versions only move up, "
-                    + $"so update this machine first: dotnet tool update --global {ToolPackage.Id} --version {installed}");
-            }
-
-            if (order < 0)
-            {
-                var busy = await WhyNotUpdateAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false);
-
-                if (busy is not null)
-                {
-                    return found with { Reason = busy };
-                }
-
-                // No --allow-downgrade: the host is behind, so an update can only move it up.
-                var update = await RunAsync(
-                    connection,
-                    "dotnet",
-                    ["tool", "update", "--global", ToolPackage.Id, "--version", root.Version, "--source", ToolPackage.Source],
-                    InstallBudget,
-                    cancellationToken).ConfigureAwait(false);
-
-                if (!update.Succeeded)
-                {
-                    return found with { Reason = Failure($"updating repo-harness {installed} to {root.Version} there failed", update) };
-                }
-
-                actions.Add($"updated repo-harness {installed} to {root.Version}");
-            }
+            return ($"repo-harness {installed} there cannot be compared with {root.Version} here", null);
         }
 
-        return await AskAsync(found with { Actions = actions }, connection, windowsHost, emulators, root, cancellationToken)
-            .ConfigureAwait(false);
+        var order = SemanticVersion.Compare(hostVersion, rootVersion);
+
+        if (order > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"{host} has repo-harness {installed}, newer than this machine's {root.Version}. Versions only move up, "
+                + $"so update this machine first: dotnet tool update --global {ToolPackage.Id} --version {installed}");
+        }
+
+        if (order == 0)
+        {
+            return (null, null);
+        }
+
+        if (await WhyNotUpdateAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false) is { } busy)
+        {
+            return (busy, null);
+        }
+
+        // No --allow-downgrade: the host is behind, so an update can only move it up.
+        var update = await RunToolCommandAsync(connection, "update", root.Version, cancellationToken).ConfigureAwait(false);
+
+        return update.Succeeded
+            ? (null, $"updated repo-harness {installed} to {root.Version}")
+            : (Failure($"updating repo-harness {installed} to {root.Version} there failed", update), null);
     }
+
+    /// <summary>Runs <c>dotnet tool install</c> or <c>update</c> for exactly <paramref name="version"/>, from nuget.org alone.</summary>
+    private Task<ProcessResult> RunToolCommandAsync(HostConnection connection, string verb, string version, CancellationToken cancellationToken)
+        => RunAsync(
+            connection,
+            "dotnet",
+            ["tool", verb, "--global", ToolPackage.Id, "--version", version, "--source", ToolPackage.Source],
+            InstallBudget,
+            cancellationToken);
 
     /// <summary>Asks repo-harness on the host which build it is and what the host is, and checks the build is this machine's.</summary>
     private async Task<HostReport> AskAsync(
@@ -363,6 +396,7 @@ public sealed class HostInspector(
         // kind of host. They are usually not on the PATH of a command run over ssh or with wsl.exe
         // --exec, which reads no login profile, so the path is spelt out.
         var toolPath = ToolPackage.PathFromHome(windowsHost, connection.Shell);
+        var shownTool = $"~/{toolPath.Replace('\\', '/')}";
 
         var request = JsonSerializer.Serialize(
             new HostAgentRequest
@@ -373,40 +407,62 @@ public sealed class HostInspector(
             HostAgentProtocol.JsonOptions);
 
         var budget = ProbeBudget + (EmulatorProbe.WitnessBudget * emulators.Count);
-        var answer = await RunAsync(connection, toolPath, [HostAgentProtocol.CommandName], budget, cancellationToken, request)
+
+        // One line, held open until the host has answered: a budget that runs out stops ssh or wsl.exe here,
+        // which ends the input there and stops any witness still running.
+        var answer = await RunAsync(connection, toolPath, [HostAgentProtocol.CommandName], budget, cancellationToken, request + "\n", holdOpen: true)
             .ConfigureAwait(false);
 
-        if (!answer.Succeeded || !TryReadInfo(answer.StandardOutput, out var info))
+        if (!answer.Succeeded)
+        {
+            return found with { Reason = Failure($"repo-harness did not answer from {shownTool}, where global tools are installed", answer) };
+        }
+
+        var start = answer.StandardOutput.IndexOf('{', StringComparison.Ordinal);
+
+        if (start < 0)
+        {
+            return found with { Reason = $"repo-harness at {shownTool} answered with no document: {HostProbes.Excerpt(answer.StandardOutput)}" };
+        }
+
+        var document = answer.StandardOutput[start..];
+
+        // The build is identified before the rest of the answer is read, so a build that answers in another
+        // shape is still reported as the build it is, with the remedy for that.
+        if (!TryReadIdentity(document, out var version, out var assemblySha256, out var problem))
+        {
+            return found with { Reason = $"repo-harness at {shownTool} answered in a form this build cannot read: {problem}" };
+        }
+
+        if (!string.Equals(version, root.Version, StringComparison.Ordinal))
+        {
+            return found with { Reason = $"repo-harness there reports {version}, and {root.Version} was expected" };
+        }
+
+        if (!string.Equals(assemblySha256, root.AssemblySha256, StringComparison.OrdinalIgnoreCase))
         {
             return found with
             {
-                Reason = Failure($"repo-harness did not answer from ~/{toolPath.Replace('\\', '/')}, where global tools are installed", answer),
-            };
-        }
-
-        if (!string.Equals(info.Version, root.Version, StringComparison.Ordinal))
-        {
-            return found with { Reason = $"repo-harness there reports {info.Version}, and {root.Version} was expected" };
-        }
-
-        if (!string.Equals(info.AssemblySha256, root.AssemblySha256, StringComparison.OrdinalIgnoreCase))
-        {
-            return found with
-            {
-                Reason = $"repo-harness {info.Version} there is a different build from this machine's although the versions match, "
+                Reason = $"repo-harness {version} there is a different build from this machine's although the versions match, "
                     + "so one of the two is not the package published on nuget.org; on the machine that has a local build, run "
-                    + $"dotnet tool uninstall --global {ToolPackage.Id}, then dotnet tool install --global {ToolPackage.Id} --version {info.Version}",
+                    + $"dotnet tool uninstall --global {ToolPackage.Id}, then dotnet tool install --global {ToolPackage.Id} --version {version}",
             };
         }
 
-        return found with
+        HostAgentInfo? info;
+
+        try
         {
-            Os = info.Os,
-            Processor = info.Processor,
-            ToolVersion = info.Version,
-            Emulators = info.Emulators,
-            Session = new HostSession(connection, toolPath),
-        };
+            info = JsonSerializer.Deserialize<HostAgentInfo>(document, HostAgentProtocol.JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            return found with { Reason = $"repo-harness at {shownTool} answered in a form this build cannot read: {ex.Message}" };
+        }
+
+        return info is null
+            ? found with { Reason = $"repo-harness at {shownTool} answered with an empty document" }
+            : Answered(found, info, new HostSession(connection, toolPath));
     }
 
     /// <summary>
@@ -436,11 +492,66 @@ public sealed class HostInspector(
         IReadOnlyList<string> arguments,
         TimeSpan budget,
         CancellationToken cancellationToken,
-        string? input = null)
+        string input = "",
+        bool holdOpen = false)
         => _hostCommands.RunAsync(
             connection,
-            new HostCommand { Program = program, Arguments = arguments, Timeout = budget, StandardInput = input },
+            new HostCommand
+            {
+                Program = program,
+                Arguments = arguments,
+                Timeout = budget,
+                StandardInput = input,
+                HoldStandardInputOpen = holdOpen,
+            },
             cancellationToken);
+
+    /// <summary>What the repo-harness on a host said about it, recorded in the report.</summary>
+    private static HostReport Answered(HostReport found, HostAgentInfo info, HostSession? session) => found with
+    {
+        Os = info.Os,
+        Processor = info.Processor,
+        ToolVersion = info.Version,
+        Emulators = info.Emulators,
+        Session = session,
+    };
+
+    /// <summary>Reads which build an answer came from, and nothing else of it.</summary>
+    private static bool TryReadIdentity(
+        string document,
+        [NotNullWhen(true)] out string? version,
+        [NotNullWhen(true)] out string? assemblySha256,
+        out string problem)
+    {
+        version = null;
+        assemblySha256 = null;
+        problem = string.Empty;
+
+        try
+        {
+            using var parsed = JsonDocument.Parse(document);
+            var answer = parsed.RootElement;
+
+            if (answer.ValueKind == JsonValueKind.Object
+                && answer.TryGetProperty("version", out var versionValue)
+                && versionValue.ValueKind == JsonValueKind.String
+                && answer.TryGetProperty("assemblySha256", out var hashValue)
+                && hashValue.ValueKind == JsonValueKind.String)
+            {
+                version = versionValue.GetString()!;
+                assemblySha256 = hashValue.GetString()!;
+                return true;
+            }
+
+            problem = "it names no version and assembly hash";
+            return false;
+        }
+        catch (JsonException ex)
+        {
+            problem = ex.Message;
+            return false;
+        }
+    }
 
     /// <summary>
     /// Where a key the ssh configuration names is, resolved the way ssh resolves it when started from the
@@ -472,27 +583,6 @@ public sealed class HostInspector(
                 : Failure(
                     $"dotnet did not run there; install the .NET {ToolPackage.MinimumSdkMajor} SDK so that dotnet is on the PATH of commands run without a login shell",
                     result);
-
-    private static bool TryReadInfo(string output, [NotNullWhen(true)] out HostAgentInfo? info)
-    {
-        info = null;
-
-        var start = output.IndexOf('{', StringComparison.Ordinal);
-        if (start < 0)
-        {
-            return false;
-        }
-
-        try
-        {
-            info = JsonSerializer.Deserialize<HostAgentInfo>(output.AsSpan(start), HostAgentProtocol.JsonOptions);
-            return info is not null;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
 
     private static string Failure(string what, ProcessResult result)
     {

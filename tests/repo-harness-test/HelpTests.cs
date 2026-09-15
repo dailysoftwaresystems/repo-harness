@@ -132,7 +132,7 @@ public sealed partial class HelpTests
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
 
-        // Every name a leg can use, so the help can never offer a name the validator refuses.
+        // Every name the validator accepts for a leg is listed, so the help never leaves out a name a leg can use.
         foreach (var name in PlatformNames.OperatingSystems.Concat(PlatformNames.Processors))
         {
             Assert.Contains(name, result.StandardOutput, StringComparison.Ordinal);

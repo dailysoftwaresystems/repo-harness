@@ -1,11 +1,9 @@
 using System.Text.Json;
-using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
-using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -47,12 +45,16 @@ public sealed class HostExecServiceTests
     [Theory]
     [InlineData(HostExecService.CommandName)]
     [InlineData(HostAgentProtocol.CommandName)]
-    public async Task ACommandThatReachesHosts_IsNotRunOnOne(string command)
+    [InlineData("HOST-EXEC")]
+    public async Task ACommandThatReachesHosts_IsNotRunOnOne_NorIsAnyHostInspectedForIt(string command)
     {
+        var fixture = Create();
+
         var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => Create().Service.RunAsync(Root, "vps", null, [command], TestContext.Current.CancellationToken));
+            () => fixture.Service.RunAsync(Root, "vps", null, [command], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.UsageError, exception.ExitCode);
+        Assert.Empty(fixture.Inspector.Inspected);
     }
 
     [Fact]
@@ -78,31 +80,81 @@ public sealed class HostExecServiceTests
     }
 
     [Fact]
-    public async Task TheCommand_TravelsOnStandardInput_AndItsExitCodeComesBackUnchanged()
+    public async Task ARefusalWhileTheHostIsInspected_StopsEverything_BeforeAnythingRuns()
     {
-        var fixture = Create(respond: (_, _) => HostResults.Failed(3, "the anchor was not found"));
+        var refusal = new HarnessException(HarnessExit.Refused, "ssh vps has repo-harness 1.3.0, newer than this machine's 1.2.0");
+        var fixture = Create(report: _ => throw refusal);
+
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => fixture.Service.RunAsync(Root, "vps", null, ["verify-git"], TestContext.Current.CancellationToken));
+
+        Assert.Same(refusal, exception);
+        Assert.Empty(fixture.Commands.Calls);
+    }
+
+    [Fact]
+    public async Task TheCommand_TravelsAsOneLineHeldOpen_AndItsExitCodeComesFromItsCompletionLine()
+    {
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 3, "read-anchor: FAIL - the anchor was not found\n"));
 
         var outcome = await fixture.Service.RunAsync(Root, "VPS", null, ["read-anchor", "D-A B"], TestContext.Current.CancellationToken);
 
         Assert.Equal(3, outcome.ExitCode);
-        Assert.Equal([HostId.Ssh("vps")], fixture.Inspector.Inspected);
+
+        // Reached under the name the configuration declares: ssh applies a Host entry only to that spelling.
+        Assert.Equal("vps", Assert.Single(fixture.Inspector.Inspected).Name);
 
         var (_, command) = Assert.Single(fixture.Commands.Calls);
         Assert.Equal(".dotnet/tools/repo-harness", command.Program);
         Assert.Equal([HostAgentProtocol.CommandName], command.Arguments);
 
+        // One line, with the input held open: stopping this process ends it on the host, which cancels the command.
+        Assert.True(command.HoldStandardInputOpen);
+        Assert.Single(command.StandardInput, character => character == '\n');
+        Assert.EndsWith("\n", command.StandardInput, StringComparison.Ordinal);
+
         // The arguments, a space included, never reach a shell: they are inside the request.
-        var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput!, HostAgentProtocol.JsonOptions);
+        var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
         Assert.NotNull(request);
         Assert.Equal(HostAgentRequestKind.Run, request.Kind);
         Assert.Equal("/srv/repo", request.Directory);
         Assert.Equal(["read-anchor", "D-A B"], request.Arguments);
+        Assert.False(string.IsNullOrEmpty(request.Nonce));
+
+        // What the command wrote is passed on; the completion line is read, and not shown.
+        Assert.Contains("read-anchor: FAIL - the anchor was not found", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(": finished ", fixture.Error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ACommandThatNeverSaysHowItFinished_IsUnavailable_RatherThanTheConnectionsExitCode()
+    {
+        // ssh exits 255 when the connection fails, and 255 is not the command's result.
+        var fixture = Create(respond: (_, _) => HostResults.Failed(255, "Connection to vps.example closed by remote host.\n"));
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+        Assert.Contains("never reported how it finished, so it may not have run, or run only in part", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("exit 255: Connection to vps.example closed by remote host.", outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VerboseOutput_AsksTheHostToReportItsOwnDefectsInFull()
+    {
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 0), verbose: true);
+
+        await fixture.Service.RunAsync(Root, "vps", null, ["verify-git"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            [HostAgentProtocol.CommandName, HostAgentProtocol.VerboseOption],
+            Assert.Single(fixture.Commands.Calls).Command.Arguments);
     }
 
     [Fact]
     public async Task TheDefaultDistribution_IsTheOneWslItselfReports()
     {
-        var fixture = Create(platform: Windows(), respond: (_, _) => HostResults.Ok(string.Empty));
+        var fixture = Create(platform: HostDoubles.Platform(PlatformId.Windows), respond: (_, command) => HostResults.Finished(command, 0));
         fixture.Commands.DefaultWslDistribution = () => HostResults.Ok("Ubuntu\n");
 
         var outcome = await fixture.Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken);
@@ -110,14 +162,14 @@ public sealed class HostExecServiceTests
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.Equal([HostId.Wsl("Ubuntu")], fixture.Inspector.Inspected);
 
-        var request = JsonSerializer.Deserialize<HostAgentRequest>(fixture.Commands.Calls[0].Command.StandardInput!, HostAgentProtocol.JsonOptions);
+        var request = JsonSerializer.Deserialize<HostAgentRequest>(fixture.Commands.Calls[0].Command.StandardInput, HostAgentProtocol.JsonOptions);
         Assert.Equal("~/src/repo", request?.Directory);
     }
 
     [Fact]
     public async Task TheDefaultDistribution_WithoutWslInstalled_IsUnavailable()
     {
-        var fixture = Create(platform: Windows());
+        var fixture = Create(platform: HostDoubles.Platform(PlatformId.Windows));
         fixture.Commands.DefaultWslDistribution = () => throw new ExecutableNotFoundException(HostCommandRunner.WslProgram);
 
         var exception = await Assert.ThrowsAsync<HarnessException>(
@@ -128,35 +180,36 @@ public sealed class HostExecServiceTests
         Assert.Empty(fixture.Inspector.Inspected);
     }
 
+    [Theory]
+    [InlineData(true, "WSL did not name its default distribution within 120 seconds")]
+    [InlineData(false, "WSL did not name a default distribution (exit 0)")]
+    public async Task ADefaultDistributionThatIsNeverNamed_IsUnavailable_AndSaysWhy(bool timedOut, string expected)
+    {
+        var fixture = Create(platform: HostDoubles.Platform(PlatformId.Windows));
+        fixture.Commands.DefaultWslDistribution = () => new ProcessResult(timedOut ? -1 : 0, string.Empty, string.Empty, TimeSpan.Zero, timedOut);
+
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => fixture.Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheDefaultDistribution_OnAMachineThatIsNotWindows_IsUnavailable()
     {
-        var platform = Substitute.For<IHostPlatform>();
-        platform.Current.Returns(PlatformId.Linux);
-        platform.PlatformKey.Returns("linux");
-
         var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => Create(platform: platform).Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
+            () => Create(platform: HostDoubles.Platform(PlatformId.Linux)).Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
     }
 
-    private static IHostPlatform Windows()
-    {
-        var platform = Substitute.For<IHostPlatform>();
-        platform.Current.Returns(PlatformId.Windows);
-        return platform;
-    }
-
-    private static (HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands) Create(
+    private static Fixture Create(
         Func<HostId, HostReport>? report = null,
         Func<HostConnection, HostCommand, ProcessResult>? respond = null,
-        IHostPlatform? platform = null)
+        IHostPlatform? platform = null,
+        bool verbose = false)
     {
-        var loader = Substitute.For<IHarnessContextLoader>();
-        loader.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(Root, Root), Config)));
-
         var inspector = new RecordingInspector(report ?? (host => new HostReport
         {
             Host = host,
@@ -166,14 +219,17 @@ public sealed class HostExecServiceTests
         }));
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
+        var error = new StringWriter();
 
         var service = new HostExecService(
-            loader,
+            HostDoubles.Loader(Config, Root),
             inspector,
             commands,
-            platform ?? Substitute.For<IHostPlatform>(),
-            new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false));
+            platform ?? HostDoubles.Platform(),
+            new ConsoleHarnessOutput(new StringWriter(), error, verbose));
 
-        return (service, inspector, commands);
+        return new Fixture(service, inspector, commands, error);
     }
+
+    private sealed record Fixture(HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands, StringWriter Error);
 }

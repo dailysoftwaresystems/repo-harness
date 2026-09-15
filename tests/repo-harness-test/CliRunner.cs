@@ -39,6 +39,10 @@ public static class CliRunner
                 Arguments = ["exec", CliAssembly.Value, .. arguments],
                 WorkingDirectory = workingDirectory,
                 StandardInput = standardInput,
+
+                // Held open as the machine that reaches a host holds it: the end of a host's input is how the
+                // host learns that machine has gone, so input closed at once would cancel the request.
+                HoldStandardInputOpen = standardInput is not null,
                 Timeout = Budget,
             },
             cancellationToken);

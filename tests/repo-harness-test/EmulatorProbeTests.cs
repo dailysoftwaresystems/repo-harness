@@ -60,6 +60,33 @@ public sealed class EmulatorProbeTests
     }
 
     [Fact]
+    public async Task CheckAsync_ReportsAWitnessThatCannotStart_AsThisEmulatorBeingUnavailable()
+    {
+        // What a host without the emulation installed does with a program for another processor: the file
+        // is there, and the system refuses to run it. That rules out the emulator, not the whole host.
+        using var temp = new TempDirectory();
+        var witness = temp.WriteFile(OperatingSystem.IsWindows() ? "foreign.exe" : "foreign", "not a program for this machine\n");
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(witness, File.GetUnixFileMode(witness) | UnixFileMode.UserExecute);
+        }
+
+        var emulator = new EmulatorConfig
+        {
+            HostOs = "linux",
+            HostProcessor = "x86_64",
+            Processor = "arm64",
+            Witness = new EmulatorWitness { Command = [witness], Pattern = "x" },
+        };
+
+        var check = await Probe().CheckAsync(emulator, TestContext.Current.CancellationToken);
+
+        Assert.False(check.Available);
+        Assert.StartsWith("its witness could not start: ", check.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CheckAsync_ReportsAWitnessThatFails()
     {
         var emulator = new EmulatorConfig
