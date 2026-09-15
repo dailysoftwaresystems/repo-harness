@@ -23,7 +23,9 @@ nuget.org key minted through OIDC at publish time.
 - **Pull requests cannot reach a credential.** `pipeline-pr.yml`, and the `test.yml`
   matrix it calls, declare `permissions: contents: read`, use no secrets, and check out
   without leaving a credential in the working copy, so a pull request from a fork runs
-  the full test matrix with nothing to steal. `pull_request_target`, which would run
+  the full test matrix with nothing to steal. The one job with more is `ci-check`, which
+  asks for `statuses: write` to post the status merging requires; it checks out nothing
+  and runs none of the repository's code. `pull_request_target`, which would run
   fork code with repository permissions, is not used anywhere. The only other
   pull-request-triggered workflow, `cleanup-cache.yml`, asks for `actions: write` and is
   skipped outright for forks, which GitHub would issue a read-only token for regardless.
@@ -146,11 +148,29 @@ shipped something that was never tested:
 - **Nothing was cleaned.** A cache cleanup where every deletion failed fails the job
   rather than reporting a successful cleanup of nothing.
 
+## The required check
+
+Merging into `main` waits for one result: the `Pipeline / ci-check result` commit status,
+which the organisation's ruleset requires on every pull request. A status, unlike a job's
+check, exists only once something posts it. The `ci-check` job in `pipeline-pr.yml` posts
+it once the test matrix and the package check have finished: `success` when both
+succeeded, and `failure` otherwise, including when either was skipped or cancelled.
+
+- **The job agrees with the status.** `ci-check` fails whenever the status it posts is a
+  failure. Ending on the successful post would show a green job beside a red status, and
+  people read the job first.
+- **A pull request from a fork cannot post it.** GitHub gives a fork's pull request a
+  read-only token whatever the workflow asks for, so `ci-check` fails there and says why.
+  A maintainer runs the change from a branch in this repository.
+- **Read required checks from rulesets.** The requirement is defined in a ruleset, so
+  `branches/main/protection` answers that `main` is not protected at all. Ask
+  `gh api repos/<owner>/<repo>/rules/branches/main` instead.
+
 ## Pipelines
 
 | Workflow | Fires on | Does |
 |---|---|---|
-| `pipeline-pr.yml` | pull request, push to `main` | Runs `test.yml`; packs, installs and runs the tool; uploads the package, kept for the repository's artifact retention period |
+| `pipeline-pr.yml` | pull request, push to `main` | Runs `test.yml`; packs, installs and runs the tool; uploads the package, kept for the repository's artifact retention period; posts the `Pipeline / ci-check result` status |
 | `test.yml` | called by `pipeline-pr.yml` and `deploy.yml` | Builds and tests on Linux, Windows and macOS, each on x86_64 and arm64 |
 | `deploy.yml` | manual | Tests, bumps the version, promotes, starts `pipeline-pkg.yml` |
 | `pipeline-pkg.yml` | dispatched by `deploy.yml`, or manual | Tests, packs, verifies, tags, publishes, releases |
