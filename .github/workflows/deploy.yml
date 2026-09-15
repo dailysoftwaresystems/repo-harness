@@ -11,17 +11,18 @@ name: Deploy
 # beta promotes the version bump on top of it, which changes nothing but <Version>.
 #
 # repo-harness ships as an app: people install the released tool rather than build on
-# it, so it uses two channels, main -> release/beta -> release/stable. beta publishes each
-# new version as a prerelease; stable publishes, under the bare version, the commit beta
-# already published.
+# it, so it uses two channels, main -> release/beta -> release/stable. beta releases each
+# new version on GitHub alone, as a prerelease with its package attached; stable publishes
+# the commit beta released, under the bare version, to nuget.org and as a GitHub release.
 #
 # Credentials: the organisation's rulesets protect main and the release branches and let its
 # deploy GitHub App push to them, and the organisation provides that app's credentials to
 # every repository. The push alone uses a short-lived token minted from them, for this
-# repository alone and for its contents alone; everything else runs with the GITHUB_TOKEN
-# it is handed. Nothing is stored in this repository, which is PUBLIC: it deliberately
-# does not call the reusable workflows in the private DevOps repository and never uses
-# `secrets: inherit`. Every action is pinned to a full commit SHA; see docs/releasing.md.
+# repository alone and for its contents and workflow files alone; everything else runs with
+# the GITHUB_TOKEN it is handed. Nothing is stored in this repository, which is PUBLIC: it
+# deliberately does not call the reusable workflows in the private DevOps repository and
+# never uses `secrets: inherit`. Every action is pinned to a full commit SHA; see
+# docs/releasing.md.
 
 on:
   workflow_dispatch:
@@ -317,9 +318,11 @@ jobs:
           client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
           private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
           # With no owner or repositories, the token reaches this repository alone. It asks for
-          # contents alone: a promotion that changes workflow files needs the workflows
-          # permission too, which docs/releasing.md covers under One-time setup.
+          # contents, and for workflows: a promotion carries every change to workflow files since
+          # the last one, which GitHub lets an app push only with that permission. An app that
+          # lacks either cannot mint this token, so nothing moves.
           permission-contents: write
+          permission-workflows: write
 
       - name: Promote
         env:
@@ -344,24 +347,14 @@ jobs:
           basic=$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 -w0)
           echo "::add-mask::$basic"
 
-          if ! pushed=$(GIT_CONFIG_COUNT=1 \
+          if ! GIT_CONFIG_COUNT=1 \
               GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
               GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
-              git push --atomic origin "${refs[@]}" 2>&1); then
-            echo "$pushed"
-
-            # GitHub lets an app change workflow files only with the workflows permission, and a
-            # promotion carries every workflow change made since the last one.
-            if [[ "$pushed" == *"workflows"*"permission"* ]]; then
-              echo "::error::GitHub refused the push because it changes workflow files, which the deploy app's token may do only with the workflows permission. Nothing was promoted; see docs/releasing.md, One-time setup."
-            else
-              echo "::error::The push failed. It was atomic: GitHub moves every branch in it or none."
-            fi
-
+              git push --atomic origin "${refs[@]}"; then
+            echo "::error::The push failed. It was atomic: GitHub moves every branch in it or none."
             exit 1
           fi
 
-          echo "$pushed"
           echo "PROMOTED_SHA=$promoted" >> "$GITHUB_ENV"
           echo "Promoted $SOURCE ($TESTED_SHA) to $TARGET as $promoted."
 

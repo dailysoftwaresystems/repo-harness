@@ -4,16 +4,25 @@ name: Package Pipeline
 # tag, publishing to nuget.org, and the GitHub release. Started by Deploy once it has
 # promoted a release branch, or by hand from the Actions tab for a release branch.
 #
+# beta releases on GitHub alone, as a prerelease with the package attached. stable publishes
+# to nuget.org, then releases on GitHub with the package attached too. However a run started,
+# stable publishes only the commit beta released under the same version.
+#
 # Started by dispatch rather than by a push to the release branch. Deploy's dispatch names
 # the exact commit it promoted, which this refuses to substitute, and a push to a release
-# branch publishes nothing by itself, so a stray push can never ship. However it started,
-# stable publishes only the commit beta published under the same version.
+# branch publishes nothing by itself, so a stray push can never ship.
+#
+# Four jobs, so each holds only what it needs. package builds, tests and verifies with
+# read-only permissions, so repository code never runs with a credential that can write.
+# tag creates the tag. nuget, for stable only, is the one job in the nuget environment and
+# the one that can ask GitHub for the OIDC token nuget.org trusts. release creates the GitHub
+# release last, which is what marks a version published.
 #
 # A run that stops part way resumes when it is started again for the same commit: a tag that
 # already names the commit is reused, a version already on nuget.org is neither rebuilt nor
-# pushed again, and the GitHub release, created last, is what marks a version published.
+# pushed again, and the release carries the package nuget.org has.
 #
-# Publishing uses nuget.org TRUSTED PUBLISHING: the job exchanges this workflow's
+# Publishing to nuget.org uses TRUSTED PUBLISHING: the nuget job exchanges this workflow's
 # short-lived OIDC token for a temporary API key at publish time. There is no
 # long-lived NuGet key in this repository, in its secrets, or on a developer
 # machine, so there is nothing to leak or rotate. This matters more than usual
@@ -32,16 +41,14 @@ on:
         type: string
         default: ""
 
-# contents: write creates the tag and the release. id-token: write is what lets
-# nuget.org verify this workflow's identity; it grants nothing else.
+# Read-only by default; each job that writes asks for exactly that.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   # One publish per release branch at a time. Runs started meanwhile wait in the order they
-  # started; by default a newer waiting run would cancel an older one, such as one waiting for
-  # the nuget environment's approval, and leave a promoted version unpublished.
+  # started; by default a newer waiting run would cancel an older one, and leave a promoted
+  # version unpublished.
   group: pkg-${{ github.ref }}
   queue: max
 
@@ -55,15 +62,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # Gate publishing behind an environment so approval and branch rules apply to
-    # the one job that can change what the public consumes.
-    environment: nuget
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      package_version: ${{ steps.resolve.outputs.package_version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      release_sha: ${{ steps.resolve.outputs.release_sha }}
+      tag_exists: ${{ steps.resume.outputs.tag_exists }}
+      on_nuget: ${{ steps.resume.outputs.on_nuget }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # Nothing this job runs writes to the repository, so no credential is left behind.
+          persist-credentials: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -88,6 +101,7 @@ jobs:
           fi
 
       - name: Resolve channel and version
+        id: resolve
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -101,18 +115,26 @@ jobs:
 
           base=$(dotnet run .github/scripts/version.cs read "$PROJECT")
           package=$(dotnet run .github/scripts/version.cs suffix "$base" "$channel")
+          sha=$(git rev-parse HEAD)
 
           {
             echo "CHANNEL=$channel"
             echo "BASE_VERSION=$base"
             echo "PACKAGE_VERSION=$package"
             echo "TAG=v$package"
-            echo "RELEASE_SHA=$(git rev-parse HEAD)"
+            echo "RELEASE_SHA=$sha"
           } >> "$GITHUB_ENV"
+
+          {
+            echo "channel=$channel"
+            echo "package_version=$package"
+            echo "tag=v$package"
+            echo "release_sha=$sha"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Publishing $package from $REF_NAME"
 
-      - name: Refuse a stable version beta has not published
+      - name: Refuse a stable version beta has not released
         # Deploy checks this before it promotes. It is checked again here, so the rule holds
         # however this run was started, including by hand after a release branch was moved.
         if: env.CHANNEL == 'stable'
@@ -124,21 +146,21 @@ jobs:
           beta_tag="v${BASE_VERSION}-beta"
 
           if ! tagged=$(git rev-parse -q --verify "refs/tags/${beta_tag}^{commit}"); then
-            echo "::error::${beta_tag} does not exist, so beta has not published ${BASE_VERSION}. Nothing was published."
+            echo "::error::${beta_tag} does not exist, so beta has not released ${BASE_VERSION}. Nothing was published."
             exit 1
           fi
 
           if [ "$tagged" != "${RELEASE_SHA}" ]; then
-            echo "::error::${beta_tag} names ${tagged}, not ${RELEASE_SHA}; stable publishes only the commit beta published. Nothing was published."
+            echo "::error::${beta_tag} names ${tagged}, not ${RELEASE_SHA}; stable publishes only the commit beta released. Nothing was published."
             exit 1
           fi
 
-          # This endpoint answers for published releases only, and the release is the last thing a
-          # publish creates.
+          # This endpoint answers for published releases only, prereleases included, and the
+          # release is the last thing a run creates.
           errors="$RUNNER_TEMP/beta-release.err"
           if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/${beta_tag}" --silent 2>"$errors"; then
             if grep -q "HTTP 404" "$errors"; then
-              echo "::error::${beta_tag} is tagged but not released, so beta's publish of ${BASE_VERSION} has not finished. Nothing was published."
+              echo "::error::${beta_tag} is tagged but not released, so beta's run for ${BASE_VERSION} has not finished. Nothing was published."
             else
               echo "::error::Could not tell whether ${beta_tag} was released, so nothing was published: $(cat "$errors")"
             fi
@@ -146,6 +168,7 @@ jobs:
           fi
 
       - name: Resume, or refuse to republish
+        id: resume
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -174,54 +197,63 @@ jobs:
             tag_exists=true
           fi
 
-          # nuget.org is the record of what is published. A version an earlier run pushed before
-          # it stopped is not pushed again, which nuget.org would refuse.
+          # Only stable goes to nuget.org, which is the record of what is published there. A
+          # version an earlier run pushed before it stopped is not pushed again, which nuget.org
+          # would refuse.
           on_nuget=false
-          versions="$RUNNER_TEMP/nuget-versions.json"
 
-          if ! status=$(curl -sS -o "$versions" -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/${PACKAGE_ID,,}/index.json"); then
-            echo "::error::Could not reach nuget.org, so whether ${PACKAGE_VERSION} is published could not be told."
-            exit 1
-          fi
+          if [ "$CHANNEL" = "stable" ]; then
+            versions="$RUNNER_TEMP/nuget-versions.json"
 
-          case "$status" in
-            404)
-              ;;
-            200)
-              set +e
-              jq -e --arg version "${PACKAGE_VERSION,,}" '.versions | index($version) != null' "$versions" >/dev/null
-              listed=$?
-              set -e
-
-              case "$listed" in
-                0) on_nuget=true ;;
-                1) ;;
-                *)
-                  echo "::error::nuget.org's version list could not be read, so whether ${PACKAGE_VERSION} is published could not be told."
-                  exit 1
-                  ;;
-              esac
-              ;;
-            *)
-              echo "::error::nuget.org answered HTTP ${status}, so whether ${PACKAGE_VERSION} is published could not be told."
+            if ! status=$(curl -sS -o "$versions" -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/${PACKAGE_ID,,}/index.json"); then
+              echo "::error::Could not reach nuget.org, so whether ${PACKAGE_VERSION} is published could not be told."
               exit 1
-              ;;
-          esac
+            fi
 
-          # This pipeline tags a version before it publishes it, so a version on nuget.org that no
-          # tag names at this commit was published some other way, from code this run cannot vouch for.
-          if [ "$on_nuget" = true ] && [ "$tag_exists" != true ]; then
-            echo "::error::${PACKAGE_VERSION} is already on nuget.org, but no tag ${TAG} names ${RELEASE_SHA}, so it was not published from this commit by this pipeline."
-            exit 1
+            case "$status" in
+              404)
+                ;;
+              200)
+                set +e
+                jq -e --arg version "${PACKAGE_VERSION,,}" '.versions | index($version) != null' "$versions" >/dev/null
+                listed=$?
+                set -e
+
+                case "$listed" in
+                  0) on_nuget=true ;;
+                  1) ;;
+                  *)
+                    echo "::error::nuget.org's version list could not be read, so whether ${PACKAGE_VERSION} is published could not be told."
+                    exit 1
+                    ;;
+                esac
+                ;;
+              *)
+                echo "::error::nuget.org answered HTTP ${status}, so whether ${PACKAGE_VERSION} is published could not be told."
+                exit 1
+                ;;
+            esac
+
+            # This pipeline tags a version before it publishes it, so a version on nuget.org that
+            # no tag names at this commit was published some other way, from code this run cannot
+            # vouch for.
+            if [ "$on_nuget" = true ] && [ "$tag_exists" != true ]; then
+              echo "::error::${PACKAGE_VERSION} is already on nuget.org, but no tag ${TAG} names ${RELEASE_SHA}, so it was not published from this commit by this pipeline."
+              exit 1
+            fi
           fi
+
+          {
+            echo "tag_exists=$tag_exists"
+            echo "on_nuget=$on_nuget"
+          } >> "$GITHUB_OUTPUT"
+          echo "ON_NUGET=$on_nuget" >> "$GITHUB_ENV"
 
           if [ "$tag_exists" = true ]; then
-            echo "TAG_EXISTS=true" >> "$GITHUB_ENV"
             echo "::notice::Tag ${TAG} already names this commit; resuming an earlier run."
           fi
 
           if [ "$on_nuget" = true ]; then
-            echo "ON_NUGET=true" >> "$GITHUB_ENV"
             echo "::notice::${PACKAGE_VERSION} is already on nuget.org; it is neither rebuilt nor pushed again, and the release carries the package nuget.org has."
           fi
 
@@ -272,16 +304,34 @@ jobs:
           package-directory: ${{ env.PACKAGE_DIRECTORY }}
           version: ${{ env.PACKAGE_VERSION }}
 
-      - name: Authenticate to nuget.org
-        # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
-        # a trusted publishing policy on nuget.org naming this repository, workflow
-        # and environment. No stored key is involved. It runs before the tag is created,
-        # so a run nuget.org does not trust leaves no tag behind.
-        if: env.ON_NUGET != 'true'
-        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
-        id: nuget-login
+      - name: Hand the verified package to the jobs that publish it
+        # Only carries the package between jobs. The GitHub release is where it stays.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          user: ${{ vars.NUGET_USER }}
+          name: package
+          path: ${{ env.PACKAGE_DIRECTORY }}/*.nupkg
+          if-no-files-found: error
+
+  tag:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Pushes the tag, and runs no repository code.
+    permissions:
+      contents: write
+
+    env:
+      TAG: ${{ needs.package.outputs.tag }}
+      TAG_EXISTS: ${{ needs.package.outputs.tag_exists }}
+
+    steps:
+      - name: Checkout the release commit
+        if: env.TAG_EXISTS != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.package.outputs.release_sha }}
+          fetch-depth: 1
 
       - name: Create the tag
         # Created before publishing, not after. If tagging failed after a publish, the package
@@ -294,6 +344,50 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${TAG}" -m "repo-harness ${TAG}"
           git push origin "${TAG}"
+
+  nuget:
+    # Only stable goes to nuget.org; beta releases on GitHub alone.
+    if: needs.package.outputs.channel == 'stable'
+    needs: [package, tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # The one job in the nuget environment, which admits release/stable alone, and the one
+    # that can ask for the OIDC token nuget.org trusts; id-token: write grants nothing else.
+    # It checks out nothing and runs no repository code.
+    environment: nuget
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PACKAGE_VERSION: ${{ needs.package.outputs.package_version }}
+      TAG_EXISTS: ${{ needs.package.outputs.tag_exists }}
+      ON_NUGET: ${{ needs.package.outputs.on_nuget }}
+
+    steps:
+      - name: Download the verified package
+        if: env.ON_NUGET != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ env.PACKAGE_DIRECTORY }}
+
+      - name: Setup .NET
+        if: env.ON_NUGET != 'true'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Authenticate to nuget.org
+        # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
+        # a trusted publishing policy on nuget.org naming this repository, workflow
+        # and environment. No stored key is involved.
+        if: env.ON_NUGET != 'true'
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
 
       - name: Publish to nuget.org
         if: env.ON_NUGET != 'true'
@@ -322,10 +416,38 @@ jobs:
 
           echo "$pushed"
 
+  release:
+    needs: [package, tag, nuget]
+    # nuget is skipped for beta alone. A stable release is created only once nuget.org has the
+    # version, so it can never mark as published a version nuget.org did not get.
+    if: >-
+      ${{ !cancelled()
+      && needs.package.result == 'success'
+      && needs.tag.result == 'success'
+      && (needs.nuget.result == 'success'
+      || (needs.nuget.result == 'skipped' && needs.package.outputs.channel == 'beta')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Creates the release, and runs no repository code.
+    permissions:
+      contents: write
+
+    env:
+      CHANNEL: ${{ needs.package.outputs.channel }}
+      TAG: ${{ needs.package.outputs.tag }}
+      RELEASE_SHA: ${{ needs.package.outputs.release_sha }}
+
+    steps:
+      - name: Download the verified package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ env.PACKAGE_DIRECTORY }}
+
       - name: Create the GitHub release
         # The package is attached here, so the release is where a published version's
-        # package stays available. No separate workflow artifact is uploaded: it would only
-        # expire after the repository's retention period.
+        # package stays available: the artifact that carried it between jobs expires.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -340,6 +462,7 @@ jobs:
           # again means the release can never be cut from the default branch instead.
           gh release create "${TAG}" \
             "$PACKAGE_DIRECTORY"/*.nupkg \
+            --repo "$GITHUB_REPOSITORY" \
             --target "${RELEASE_SHA}" \
             --title "repo-harness ${TAG}" \
             --generate-notes \

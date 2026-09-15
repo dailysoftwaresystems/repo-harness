@@ -286,7 +286,9 @@ from nuget.org, so it needs the .NET 10 SDK, with `dotnet` on the PATH of a comm
 without a login shell. repo-harness itself is started from `~/.dotnet/tools`, where global
 tools are installed, since that directory is usually on no such PATH. Every install and
 update names nuget.org as its only source, so no feed configured on the host can supply a
-different package under the same name. The machine that reaches it asks it questions
+different package under the same name. Only stable versions are published there: a beta is
+released on GitHub alone, so a machine running one cannot bring a host to its build, and
+is told so. The machine that reaches it asks it questions
 through a hidden `host-agent` command, with the request as one line of JSON on standard
 input, which it holds open until the host has finished: which build
 it is, what the host is, and whether each emulator works there; or to run one of its own

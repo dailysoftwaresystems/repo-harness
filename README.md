@@ -130,7 +130,8 @@ An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores
 exactly as `hosts.ssh` declares it, case included; ssh runs in batch mode, so it never
 waits at a prompt. Every WSL distribution and ssh host runs repo-harness itself,
 installed from nuget.org at this machine's exact version: a host that is behind is
-updated, never downgraded. `host-exec` runs in the host's copy of the repository at its
+updated, never downgraded. Betas are released on GitHub rather than nuget.org, so only a
+stable build can bring a host to its version. `host-exec` runs in the host's copy of the repository at its
 `repositoryPath`, which, until sync can create it, has to be a checkout made by hand. An
 emulator counts only once its witness proves it runs programs for its processor.
 
