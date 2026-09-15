@@ -13,11 +13,22 @@ public interface IFileSystem
     /// <summary>Whether a directory exists at <paramref name="path"/>.</summary>
     bool DirectoryExists(string path);
 
+    /// <summary>
+    /// <paramref name="path"/> as an absolute path with every symbolic link and junction along it
+    /// followed, the form git reports paths in. The part of the path that does not exist is kept
+    /// as spelled.
+    /// </summary>
+    /// <exception cref="IOException">A link could not be read, or the links form a cycle.</exception>
+    string ResolveLinks(string path);
+
     /// <summary>Creates a directory and any missing parents. No-op when it exists.</summary>
     void CreateDirectory(string path);
 
     /// <summary>Deletes a file. No-op when it is already absent.</summary>
     void DeleteFile(string path);
+
+    /// <summary>Copies a file to a new file in the temporary directory, and returns the copy's path.</summary>
+    string CopyToTemporaryFile(string path);
 
     /// <summary>
     /// Deletes a directory and everything under it, including files git has marked

@@ -251,19 +251,24 @@ internal static class HelpCommand
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
         builder.AppendLine();
         builder.AppendLine("delete-worktree removes a worktree, everything under it, and git's record of it.");
-        builder.AppendLine($"Without --force it checks first, and when any of these hold it deletes nothing and exits {HarnessExit.Refused}:");
-        builder.AppendLine("  - it has uncommitted changes: a modified, staged or untracked file git does not");
-        builder.AppendLine("    ignore, a changed submodule, or an edit hidden by assume-unchanged or");
-        builder.AppendLine("    skip-worktree");
-        builder.AppendLine("  - commits on its HEAD are on no branch, tag, remote-tracking ref or stash");
-        builder.AppendLine("  - a submodule's repository, deleted with it, holds unpushed commits or a stash");
-        builder.AppendLine("  - it is locked");
-        builder.AppendLine("  - git does not see it as a worktree of this repository");
-        builder.AppendLine("The refusal names everything it found, on one line. When git cannot answer,");
-        builder.AppendLine($"nothing is deleted, and it exits {HarnessExit.CommandFailed}. Ignored files are deleted unchecked,");
-        builder.AppendLine("even ones no build makes again, such as .env, and so are ignored directories with");
-        builder.AppendLine("everything in them, the history of a repository nested inside one included.");
-        builder.AppendLine("--force skips every check and overrides a lock; whatever the worktree held is lost.");
+        builder.AppendLine($"Without --force it checks first, and deletes nothing and exits {HarnessExit.Refused} when the");
+        builder.AppendLine("worktree has uncommitted changes: a modified, staged or untracked file git does");
+        builder.AppendLine("not ignore, a changed submodule, or an edit hidden by assume-unchanged or");
+        builder.AppendLine("skip-worktree. It refuses too when commits on its HEAD are on no branch, tag,");
+        builder.AppendLine("remote-tracking ref, newest stash or other worktree's HEAD; when a submodule");
+        builder.AppendLine("repository deleted with it, checked out or not, holds a commit no");
+        builder.AppendLine("remote-tracking ref or tag contains, or a stash; when it is locked; and when git");
+        builder.AppendLine("does not see it as a worktree of this repository. The refusal names everything");
+        builder.AppendLine("it found, on one line.");
+        builder.AppendLine();
+        builder.AppendLine($"Without --force, when git cannot answer, nothing is deleted and it exits {HarnessExit.CommandFailed}.");
+        builder.AppendLine("Ignored files are deleted unchecked, even ones no build makes again, such as");
+        builder.AppendLine(".env, and so are ignored directories with everything in them, the history of a");
+        builder.AppendLine("repository nested inside one included. --force skips every check and overrides");
+        builder.AppendLine("a lock; whatever the worktree held is lost.");
+        builder.AppendLine();
+        builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
+        builder.AppendLine("running delete-worktree again with --force finishes it.");
 
         return builder.ToString();
     }

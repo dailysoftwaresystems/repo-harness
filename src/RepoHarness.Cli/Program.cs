@@ -48,7 +48,16 @@ async Task<int> RunAsync(string[] arguments, CancellationToken cancellationToken
         return HarnessExit.UsageError;
     }
 
-    return await parseResult.InvokeAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+    // Only a deletion, which past its point of no return goes on after Ctrl+C to finish, waits longer
+    // than the default for its action to end, so no other command is any slower to stop.
+    var invocation = new InvocationConfiguration();
+
+    if (parseResult.CommandResult.Command.Name == DeleteWorktreeCommand.Name)
+    {
+        invocation.ProcessTerminationTimeout = DeleteWorktreeCommand.InterruptionGrace;
+    }
+
+    return await parseResult.InvokeAsync(invocation, cancellationToken).ConfigureAwait(false);
 }
 
 // A command acts on the current directory when it is given no --directory, so a host runs a request

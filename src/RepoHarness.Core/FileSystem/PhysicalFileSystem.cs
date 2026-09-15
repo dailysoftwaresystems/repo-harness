@@ -17,6 +17,53 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
 
     public bool DirectoryExists(string path) => Directory.Exists(path);
 
+    public string ResolveLinks(string path)
+    {
+        // Followed as realpath follows them: after each link the walk starts again from the root,
+        // so a link within a link's target is followed too, and a cycle of links ends the walk.
+        const int MaxLinks = 40;
+        var pending = Path.GetFullPath(path);
+
+        for (var links = 0; links <= MaxLinks; links++)
+        {
+            var root = Path.GetPathRoot(pending) ?? string.Empty;
+            var segments = pending[root.Length..].Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            var resolved = root;
+            string? restart = null;
+
+            for (var index = 0; index < segments.Length && restart is null; index++)
+            {
+                var next = Path.Combine(resolved, segments[index]);
+                var directory = new DirectoryInfo(next);
+
+                if (directory.LinkTarget is { } target)
+                {
+                    restart = Path.Combine([Path.Combine(resolved, target), .. segments[(index + 1)..]]);
+                }
+                else if (!directory.Exists)
+                {
+                    // Nothing below a directory that does not exist can be a link.
+                    return Path.TrimEndingDirectorySeparator(Path.Combine([next, .. segments[(index + 1)..]]));
+                }
+                else
+                {
+                    resolved = next;
+                }
+            }
+
+            if (restart is null)
+            {
+                return Path.TrimEndingDirectorySeparator(resolved);
+            }
+
+            pending = Path.GetFullPath(restart);
+        }
+
+        throw new IOException($"Too many links along '{path}'.");
+    }
+
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
 
     public void DeleteFile(string path)
@@ -25,6 +72,13 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         {
             File.Delete(path);
         }
+    }
+
+    public string CopyToTemporaryFile(string path)
+    {
+        var copy = Path.Combine(Path.GetTempPath(), "dssharness-" + Guid.NewGuid().ToString("N"));
+        File.Copy(path, copy);
+        return copy;
     }
 
     public void DeleteDirectory(string path)

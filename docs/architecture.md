@@ -86,9 +86,10 @@ directory behaves the same way.
 `--directory` is resolved to an absolute path, and confirmed to exist, once, before any
 command runs.
 
-git's messages are matched in one place only: telling "not a repository" apart from
-"git could not look". Those read-only queries run with `LC_ALL=C`, so a translated git
-still answers in the words being matched. Every other git command, including those that
+git's messages are matched in two places only: telling "not a repository" apart from
+"git could not look", and "not a gitdir" apart from the same when a directory among a
+worktree's submodule repositories is examined. Those read-only queries run with `LC_ALL=C`,
+so a translated git still answers in the words being matched. Every other git command, including those that
 run the user's hooks, keeps the user's locale.
 
 ### Reading config.json
@@ -121,27 +122,34 @@ names everything it found on one line, each with its remedy, and exits 13:
 - **Uncommitted changes.** A modified, staged or untracked file git does not ignore, or a
   changed submodule. Status runs with `--untracked-files=normal` and
   `--ignore-submodules=none`, so configuration can hide neither. Status never compares a file
-  marked assume-unchanged or skip-worktree, so each such file on disk is hashed and compared
-  with the index; a skip-worktree file absent from disk, as a sparse checkout leaves it, is not
+  marked assume-unchanged or skip-worktree, so those present on disk are compared on a copy of
+  the index with the marks cleared, which applies git's own line-ending rules and never touches
+  the real index. A skip-worktree file absent from disk, as a sparse checkout leaves it, is not
   a change.
-- **Commits no ref contains.** A detached worktree's HEAD can be the only name for the commits
-  made there. They are counted when no branch, tag, remote-tracking ref or stash reaches them,
-  so a worktree on a branch, or whose commits were pushed, is not refused.
+- **Commits nothing else names.** A detached worktree's HEAD can be the only name for the
+  commits made there. They are counted when no branch, tag, remote-tracking ref, the newest
+  stash, or the HEAD of another worktree reaches them, so a worktree on a branch, or whose
+  commits were pushed, is not refused. A commit held only by an older stash entry is refused.
 - **Submodule work.** A linked worktree keeps its submodules' repositories in its own git
-  directory, so their branches, tags and stash are deleted with it. A populated submodule,
-  nested ones included, stops the deletion when commits on its HEAD, branches or tags are on no
-  remote-tracking ref, or when it holds a stash.
+  directory, so their branches and stash are deleted with it, whether the submodule is checked
+  out or was deinitialised. Every repository there is checked, nested ones included, and so is
+  a checked-out submodule whose `.git` is a directory of its own. One stops the deletion when
+  commits on its HEAD or branches are on no remote-tracking ref or tag, or when it holds a
+  stash. A tag counts as kept, since tags usually come from upstream; a tag made only inside the
+  submodule does not protect its commits.
 - **A lock**, reported with its reason and `git worktree unlock`.
 - **Not a worktree of this repository.** The directory must be the root of a work tree whose
   git directory sits in the `worktrees` directory of the main checkout's git directory. In a
   directory whose `.git` file is gone, git answers for the main checkout around it, whose
-  status reports none of the directory's files; the refusal points to `git worktree repair`.
-  A clone at the path would pass a status check and take its whole history with it.
+  status reports none of the directory's files. The refusal points to `git worktree repair`,
+  which helps only while git still has the worktree's record: when it was moved or its `.git`
+  file was lost. A clone at the path would pass a status check and take its whole history with
+  it.
 
-When git cannot answer, nothing is deleted and the command exits 20, with git's reason first.
-Which worktree a directory is, and whether its record is gone, is decided from paths git
-reports, never from the path the harness spelled, so a linked `.harness-config` or worktrees
-directory changes nothing.
+Without `--force`, when git cannot answer, nothing is deleted and the command exits 20, with
+git's reason first. Which worktree a directory is, and whether its record is gone, is decided
+from paths git reports. A path the harness spelled is compared with one only after every link
+along it is followed, so a linked `.harness-config` or worktrees directory changes nothing.
 
 Ignored files are deleted without a check, including ones no build makes again, such as
 `.env`, and so are ignored directories with everything in them, the history of a repository
@@ -149,20 +157,26 @@ nested inside one included.
 
 ### Removal
 
-An interruption stops the command only up to its first destructive step. From there, removal,
-the fallback delete and verification run to the end: git stopped halfway would leave files and
-its record partly gone, under an exit code that says nothing ran.
-
-- Checked, removal is plain `git worktree remove`, so git's own checks catch anything that
-  changed after ours, and when git refuses, nothing more is deleted and the command exits 20.
-  git refuses every worktree holding submodules, so for those alone it runs with `--force`.
+- Checked, removal is plain `git worktree remove`. git's own check still catches a file changed
+  or added since ours, or a lock; a worktree holding submodules is removed with `--force`, which
+  git requires for one, and that skips even this check. When git fails part way, as on a file
+  another program holds open, its record and some files may already be gone: the command deletes
+  nothing more, exits 20 and says what is left, and `delete-worktree <name> --force` finishes
+  it, which is safe because every check passed before removal began.
 - Forced, it is `git worktree remove --force --force`, which overrides a lock. A directory git
   leaves behind is deleted, and git is then asked again to clear its record, which it can once
-  the directory is gone. A file that cannot be deleted, such as one another program holds open,
-  is reported with exit 20 and what to do next.
-- The record is confirmed gone by its administrative directory, found before removal. A record
-  whose directory is already gone, as an interrupted delete leaves it, is cleared once its lock
-  and unreferenced commits are checked, so the name can be used again.
+  the directory is gone. A file that cannot be deleted is reported with exit 20 and what to do
+  next.
+- The record is confirmed gone by its administrative directory, found before removal, or, where
+  git could not name that directory, by git's list. A record whose directory is already gone,
+  as an interrupted delete or a directory removed by hand leaves it, is cleared once its lock,
+  unreferenced commits and submodule repositories are checked, so the name can be used again.
+
+An interruption stops the command cleanly only before its first destructive step. After that
+the deletion goes on, the command says at once that it is under way, and it waits up to two
+minutes for the deletion to finish. It can still be left partly done, on any platform: on Linux
+and macOS the interruption reaches git itself, and the command stops waiting after two minutes.
+Running `delete-worktree <name> --force` then finishes it.
 
 ## Anchor registries
 

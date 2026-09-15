@@ -162,8 +162,203 @@ public sealed class WorktreeDeletionTests
         var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subcommit", force: false, cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
-        Assert.Contains("submodule 'lib' holds 1 commit(s) no remote-tracking ref contains", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("submodule 'lib' holds 1 commit(s) no remote-tracking ref or tag contains", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.True(File.Exists(Path.Combine(submodule, "feature.txt")));
+    }
+
+    [Fact]
+    public async Task ADeinitialisedSubmoduleWithAnUnpushedCommit_IsRefused()
+    {
+        // Deinitialising empties the checkout, and status then reports nothing, but the repository,
+        // commit and all, stays in the worktree's git directory and is deleted with it.
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "deinit");
+        await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib"));
+        await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinit", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("submodule 'lib' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADeinitialisedSubmoduleWithNothingUnpushed_IsDeletedWithoutForce()
+    {
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "deinitok");
+        await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinitok", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task ARecordWhoseDirectoryIsGone_IsRefused_WhenItsSubmoduleRepositoryHoldsAnUnpushedCommit()
+    {
+        // Clearing the record deletes its git directory, where the submodule's repository lives,
+        // and git's own removal checks nothing once the worktree's directory is gone.
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "subgone");
+        await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib"));
+        harness.FileSystem.DeleteDirectory(path);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subgone", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("submodule 'lib' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ANestedSubmoduleWithAnUnpushedCommit_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        using var inner = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.InitializeGitRepositoryAsync(inner.Path, cancellationToken);
+        await harness.InitializeGitRepositoryAsync(library.Path, cancellationToken);
+        await AddSubmoduleAsync(harness, library.Path, inner, "inner");
+        await harness.CommitAllAsync(library.Path, "add inner", cancellationToken);
+        await AddSubmoduleAsync(harness, temp.Path, library, "lib");
+        await harness.CommitAllAsync(temp.Path, "add lib", cancellationToken);
+        var path = await CreateAsync(harness, temp, "nested");
+        await harness.RunGitAsync(
+            path,
+            ["-c", "protocol.file.allow=always", "submodule", "--quiet", "update", "--init", "--recursive"],
+            cancellationToken);
+        await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib", "inner"));
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "nested", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("submodule 'lib/inner' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ASubmoduleHoldingAStash_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "substash");
+        var submodule = Path.Combine(path, "lib");
+        File.WriteAllText(Path.Combine(submodule, "README.md"), "stashed inside the submodule");
+        await harness.RunGitAsync(
+            submodule,
+            ["-c", "user.email=harness@test.invalid", "-c", "user.name=Harness Test", "stash", "--quiet"],
+            cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "substash", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("submodule 'lib' holds a stash", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnUpstreamTagOnACommitNoRemoteBranchHolds_DoesNotRefuseASubmodule()
+    {
+        // A release tag whose branch was deleted names a commit only tags reach. Counting tags
+        // among what is at risk would refuse every worktree holding the submodule.
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.InitializeGitRepositoryAsync(library.Path, cancellationToken);
+        await harness.RunGitAsync(library.Path, ["switch", "--quiet", "-c", "release"], cancellationToken);
+        await harness.CommitAllAsync(library.Path, "release", cancellationToken);
+        await harness.RunGitAsync(library.Path, ["tag", "v1"], cancellationToken);
+        await harness.RunGitAsync(library.Path, ["switch", "--quiet", "-"], cancellationToken);
+        await harness.RunGitAsync(library.Path, ["branch", "--quiet", "-D", "release"], cancellationToken);
+        await AddSubmoduleAsync(harness, temp.Path, library, "lib");
+        await harness.CommitAllAsync(temp.Path, "add lib", cancellationToken);
+        var path = await CreateAsync(harness, temp, "tagged");
+        await harness.RunGitAsync(path, ["-c", "protocol.file.allow=always", "submodule", "--quiet", "update", "--init"], cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "tagged", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+    }
+
+    [Fact]
+    public async Task AFreshWorktreeOfADetachedMainCheckout_IsDeletedWithoutForce()
+    {
+        // The main checkout's HEAD names the commit, so a worktree created there loses nothing,
+        // though no branch, tag or remote-tracking ref contains it.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.RunGitAsync(temp.Path, ["switch", "--quiet", "--detach"], cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "on a detached HEAD", cancellationToken);
+        var path = await CreateAsync(harness, temp, "offmain");
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "offmain", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task ACommitTheNewestStashContains_IsNotRefused()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "stashed");
+        File.WriteAllText(Path.Combine(path, "work.txt"), "committed on a detached HEAD");
+        await harness.CommitAllAsync(path, "work", cancellationToken);
+        File.WriteAllText(Path.Combine(path, "work.txt"), "then changed and stashed");
+        await harness.RunGitAsync(path, ["stash", "--quiet"], cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "stashed", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.NotNull(await harness.GitClient.ResolveCommitAsync(temp.Path, "refs/stash", cancellationToken));
+    }
+
+    [Theory]
+    [InlineData("--assume-unchanged")]
+    [InlineData("--skip-worktree")]
+    public async Task AnUntouchedMarkedFileStoredWithCrlf_IsNotAChange_UnderAutocrlf(string flag)
+    {
+        // core.autocrlf=true is the Git for Windows installer's default. A file whose stored copy
+        // already has CRLF endings hashes differently on its own, but status leaves such endings alone.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareWithCrlfFileAsync(temp);
+        var path = await CreateAsync(harness, temp, "crlf");
+        await harness.RunGitAsync(path, ["update-index", flag, "crlf.txt"], cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+    }
+
+    [Theory]
+    [InlineData("--assume-unchanged")]
+    [InlineData("--skip-worktree")]
+    public async Task AnEditedMarkedFileStoredWithCrlf_IsRefused_UnderAutocrlf(string flag)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareWithCrlfFileAsync(temp);
+        var path = await CreateAsync(harness, temp, "crlf");
+        await harness.RunGitAsync(path, ["update-index", flag, "crlf.txt"], cancellationToken);
+        File.WriteAllText(Path.Combine(path, "crlf.txt"), "edited\r\nwhere status does not look\r\n");
+
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains("1 uncommitted change(s) that would be lost: crlf.txt", outcome.Outcome.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -329,6 +524,43 @@ public sealed class WorktreeDeletionTests
             cancellationToken);
 
         return (harness, path);
+    }
+
+    /// <summary>Adds <paramref name="library"/> to <paramref name="superproject"/> as the submodule <paramref name="name"/>.</summary>
+    private static Task AddSubmoduleAsync(HarnessFactory harness, string superproject, TempDirectory library, string name)
+        => harness.RunGitAsync(
+            superproject,
+            ["-c", "protocol.file.allow=always", "submodule", "--quiet", "add", library.Path.Replace('\\', '/'), name],
+            TestContext.Current.CancellationToken);
+
+    /// <summary>Commits a new file inside a checked-out submodule, where no remote-tracking ref has it.</summary>
+    private static async Task CommitInSubmoduleAsync(HarnessFactory harness, string submodule)
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        File.WriteAllText(Path.Combine(submodule, "feature.txt"), "only in this worktree");
+
+        await harness.RunGitAsync(submodule, ["add", "feature.txt"], cancellationToken);
+        await harness.RunGitAsync(
+            submodule,
+            ["-c", "user.email=harness@test.invalid", "-c", "user.name=Harness Test", "commit", "--quiet", "-m", "feature"],
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// A repository whose commit stores crlf.txt with CRLF endings as they are, set to
+    /// core.autocrlf=true afterwards, as the Git for Windows installer sets it.
+    /// </summary>
+    private static async Task<HarnessFactory> PrepareWithCrlfFileAsync(TempDirectory temp)
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        temp.WriteFile("crlf.txt", "stored\r\nwith crlf\r\n");
+
+        await harness.RunGitAsync(temp.Path, ["-c", "core.autocrlf=false", "add", "crlf.txt"], cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["-c", "core.autocrlf=false", "commit", "--quiet", "-m", "crlf"], cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["config", "core.autocrlf", "true"], cancellationToken);
+
+        return harness;
     }
 
     private static async Task AssertNotRegisteredAsync(HarnessFactory harness, TempDirectory temp, string path)

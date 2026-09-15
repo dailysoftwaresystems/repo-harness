@@ -63,19 +63,37 @@ public interface IGitClient
     /// <exception cref="HarnessException">git could not inspect the directory.</exception>
     Task<GitLocation?> GetLocationAsync(string directory, CancellationToken cancellationToken = default);
 
-    /// <summary>Every entry of the work tree's index, with the flags that can hide an edit from status.</summary>
+    /// <summary>
+    /// The index entries below <paramref name="directory"/>, with paths relative to it, and the flags
+    /// that can hide an edit from status.
+    /// </summary>
     /// <exception cref="HarnessException">git could not read the index.</exception>
     Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(string directory, CancellationToken cancellationToken = default);
 
+    /// <summary>The index file git uses for the work tree at <paramref name="directory"/>, as an absolute path.</summary>
+    /// <exception cref="HarnessException">git could not say.</exception>
+    Task<string> GetIndexFileAsync(string directory, CancellationToken cancellationToken = default);
+
     /// <summary>
-    /// The object ids git would store for <paramref name="paths"/>, which are relative to
-    /// <paramref name="directory"/>, in the same order, with the filters <c>git add</c> applies.
+    /// Which files marked assume-unchanged or skip-worktree differ from the index, as status would
+    /// see them without the marks, line-ending rules included. The marks are cleared in
+    /// <paramref name="indexCopy"/>, a copy of the work tree's index that git may change, never in the
+    /// index itself. The paths are relative to <paramref name="directory"/>, and must exist on disk.
     /// </summary>
-    /// <exception cref="HarnessException">git could not hash a file.</exception>
-    Task<IReadOnlyList<string>> HashFilesAsync(
+    /// <exception cref="HarnessException">git could not answer.</exception>
+    Task<IReadOnlyList<string>> FindEditedFilesAsync(
         string directory,
-        IReadOnlyList<string> paths,
+        string indexCopy,
+        IReadOnlyList<string> assumedUnchanged,
+        IReadOnlyList<string> skipWorktree,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The git directory of the repository at <paramref name="path"/>, or of the one a .git file there
+    /// points to, or <see langword="null"/> when <paramref name="path"/> is neither.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not look.</exception>
+    Task<string?> ResolveGitDirectoryAsync(string directory, string path, CancellationToken cancellationToken = default);
 
     /// <summary>How many commits <c>git rev-list</c> selects from <paramref name="revisions"/>.</summary>
     /// <exception cref="HarnessException">git could not walk the history.</exception>
@@ -83,6 +101,21 @@ public interface IGitClient
         string directory,
         IReadOnlyList<string> revisions,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// What <see cref="CountCommitsAsync"/> answers, asked of the repository whose git directory is
+    /// <paramref name="gitDirectory"/>, without its work tree, which may be gone: a submodule's
+    /// repository after its checkout was removed, for one.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not walk the history.</exception>
+    Task<int> CountRepositoryCommitsAsync(
+        string gitDirectory,
+        IReadOnlyList<string> revisions,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Whether the repository whose git directory is <paramref name="gitDirectory"/> holds a stash.</summary>
+    /// <exception cref="HarnessException">git could not look.</exception>
+    Task<bool> HasStashAsync(string gitDirectory, CancellationToken cancellationToken = default);
 
     /// <summary>Whether a path is ignored by git's ignore rules.</summary>
     Task<bool> IsIgnoredAsync(string directory, string path, CancellationToken cancellationToken = default);

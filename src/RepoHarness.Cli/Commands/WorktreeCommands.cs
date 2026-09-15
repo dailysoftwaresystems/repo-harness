@@ -50,6 +50,14 @@ internal static class DeleteWorktreeCommand
 {
     internal const string Name = "delete-worktree";
 
+    /// <summary>
+    /// How long an interrupted delete-worktree may still run before the process ends. Past its point
+    /// of no return a deletion runs to the end rather than leave a worktree half deleted, and git
+    /// removing a large tree on Windows can take far longer than the two seconds System.CommandLine
+    /// otherwise waits. Two minutes lets that finish, and still ends a command that has hung.
+    /// </summary>
+    internal static readonly TimeSpan InterruptionGrace = TimeSpan.FromMinutes(2);
+
     private static readonly Argument<string> NameArgument = new("name")
     {
         Description = "Worktree to remove.",
@@ -57,7 +65,7 @@ internal static class DeleteWorktreeCommand
 
     private static readonly Option<bool> ForceOption = new("--force")
     {
-        Description = "Delete the worktree without checking it, even when locked: uncommitted changes, commits no ref contains and submodules' unpushed work are lost.",
+        Description = "Delete the worktree without checking it, even when locked: uncommitted changes, commits on no branch, tag, remote-tracking ref or newest stash, and submodules' unpushed work are lost.",
     };
 
     internal static Command Create()

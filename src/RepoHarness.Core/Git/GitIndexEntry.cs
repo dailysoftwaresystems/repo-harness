@@ -8,7 +8,9 @@ namespace RepoHarness.Core.Git;
 /// <param name="Mode">The octal mode, such as 100644 for a file or 160000 for a submodule.</param>
 /// <param name="ObjectId">The object the index holds for the path.</param>
 /// <param name="Stage">0 for a merged entry; 1 to 3 for the sides of an unresolved conflict.</param>
-/// <param name="Path">The path, relative to the root of the work tree.</param>
+/// <param name="Path">
+/// The path, relative to the directory git ran in; git lists only the entries below that directory.
+/// </param>
 public sealed record GitIndexEntry(char Tag, string Mode, string ObjectId, int Stage, string Path)
 {
     /// <summary>Whether status skips the file, because it is marked assume-unchanged.</summary>
