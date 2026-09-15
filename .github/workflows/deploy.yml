@@ -172,15 +172,63 @@ jobs:
           # refusal leaves main and both release branches exactly as they were. Branches and
           # tags are read as they are now, not as the checkout found them.
           git fetch --quiet --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          errors="$RUNNER_TEMP/check.err"
+
+          # A publish that has not finished, or still waits for approval, would be overtaken:
+          # moving its branch on can leave its version tagged, or on nuget.org, with nothing left
+          # to release it. stable also waits for a beta publish it may be about to promote.
+          branches=("$TARGET")
+          if [ "$CHANNEL" = "stable" ]; then
+            branches+=("$SOURCE")
+          fi
+
+          for branch in "${branches[@]}"; do
+            if ! running=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pipeline-pkg.yml --branch "$branch" \
+                --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length' 2>"$errors"); then
+              echo "::error::Could not tell whether Package Pipeline is running for $branch, so nothing was promoted: $(cat "$errors")"
+              exit 1
+            fi
+
+            if [ "$running" != "0" ]; then
+              echo "::error::Package Pipeline has a run for $branch that has not finished. Let it finish, or cancel it, before deploying."
+              exit 1
+            fi
+          done
 
           # Fast-forward only. A merge would put a tree on the release branch that the matrix
           # never tested; a release branch that cannot fast-forward holds commits that did not
           # come through this gate, and must be reconciled by a person.
-          if git rev-parse -q --verify "refs/remotes/origin/$TARGET" >/dev/null; then
-            if ! git merge-base --is-ancestor "refs/remotes/origin/$TARGET" "$TESTED_SHA"; then
+          if target_head=$(git rev-parse -q --verify "refs/remotes/origin/$TARGET"); then
+            if ! git merge-base --is-ancestor "$target_head" "$TESTED_SHA"; then
               echo "::error::$TARGET has commits that $TESTED_SHA does not; it only ever moves forward to tested commits. Reconcile it before promoting."
               exit 1
             fi
+
+            # A publish starts from the head of its release branch, and its release is the last
+            # thing it creates. This channel's tag at the head with no release is a publish that
+            # stopped part way, which moving the branch on would leave unable to finish.
+            head_tags=$(git tag --list --points-at "$target_head" 'v*')
+
+            for tag in $head_tags; do
+              if [ "$CHANNEL" = "beta" ] && [[ "$tag" != *-beta ]]; then
+                continue
+              fi
+
+              if [ "$CHANNEL" = "stable" ] && [[ "$tag" == *-beta ]]; then
+                continue
+              fi
+
+              if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --silent 2>"$errors"; then
+                continue
+              fi
+
+              if grep -q "HTTP 404" "$errors"; then
+                echo "::error::$tag names the head of $TARGET but was never released, so its publish stopped part way. Start Package Pipeline for $TARGET again to finish it; to abandon a publish nuget.org never received, delete the tag."
+              else
+                echo "::error::Could not tell whether $tag was released, so nothing was promoted: $(cat "$errors")"
+              fi
+              exit 1
+            done
           else
             echo "::notice::$TARGET does not exist yet; this promotion creates it."
           fi
@@ -210,7 +258,7 @@ jobs:
           fi
 
           if ! tagged=$(git rev-parse -q --verify "refs/tags/${beta_tag}^{commit}"); then
-            echo "::error::${beta_tag} does not exist, so beta never published ${version}. Deploy beta first."
+            echo "::error::${beta_tag} does not exist, so beta has not published ${version}. Deploy beta first; if its publish stopped before tagging, start Package Pipeline for ${SOURCE} again instead."
             exit 1
           fi
 
@@ -221,7 +269,6 @@ jobs:
 
           # This endpoint answers for published releases only, and the release is the last thing a
           # publish creates.
-          errors="$RUNNER_TEMP/release-lookup.err"
           if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/${beta_tag}" --silent 2>"$errors"; then
             if grep -q "HTTP 404" "$errors"; then
               echo "::error::${beta_tag} is tagged but not released, so its publish did not finish. Start Package Pipeline for ${SOURCE} again first."

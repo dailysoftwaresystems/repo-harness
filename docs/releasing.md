@@ -17,15 +17,17 @@ the one push that promotes a release.
   package job exchanges the workflow's short-lived GitHub OIDC token for a
   temporary API key at publish time. There is no long-lived credential to leak,
   rotate, or accidentally commit.
-- **One organisation credential, for one push.** The organisation's rulesets protect
-  `main` and the release branches and let its deploy GitHub App push to them, and the
-  organisation provides that app's credentials to every repository. Deploy mints a token
-  from them only once every check has passed, for this repository alone and for its
-  contents alone, and hands it to the one `git push` that promotes: it is never written to
-  the working copy, and it is revoked when the job ends. The workflows are otherwise
-  self-contained: they do not call the reusable workflows in the private DevOps
-  repository, and never use `secrets: inherit`, which would expose every organisation
-  secret to every workflow run.
+- **The deploy app's token is minted for one push.** The organisation's rulesets protect
+  `main` and the release branches and let its deploy GitHub App push to them. Deploy mints
+  a token from that app only once every check has passed, for this repository alone and
+  for its contents alone, and hands it to the one `git push` that promotes: it is never
+  written to the working copy, and it is revoked when the job ends. The app's private key
+  is an organisation secret, not stored here. GitHub gives it to workflow runs from this
+  repository's own branches, never to runs for a fork's pull request or for Dependabot, so
+  who can push branches here decides who can reach it. The workflows are otherwise
+  self-contained: they do not call the reusable workflows in the private DevOps repository,
+  and never use `secrets: inherit`, which would hand every secret this repository can read
+  to the workflow it calls.
 - **Pull requests cannot reach a credential.** `pipeline-pr.yml`, and the `test.yml`
   matrix it calls, declare `permissions: contents: read`, use no secrets, and check out
   without leaving a credential in the working copy, so a pull request from a fork runs
@@ -93,8 +95,8 @@ main  ──deploy beta──▶  release/beta  ──deploy stable──▶  re
 ```
 
 `beta` publishes each new version as a prerelease, `<version>-beta`. `stable` publishes a
-version `beta` has already published, as the bare version: Deploy refuses unless that
-version's beta tag names exactly the commit being promoted and its release is published.
+version `beta` has already published, as the bare version: it is refused unless that
+version's beta tag names exactly the commit being published and its release is published.
 Tags and GitHub releases carry a `v` prefix: `v0.2.0-beta`, `v0.2.0`.
 
 A beta needs no build number to be new. Every beta deploy bumps `<Version>` first, and a
@@ -120,16 +122,19 @@ Deploy runs as three jobs:
 1. **plan** validates the request and pins the source branch's current commit.
 2. **test** runs `test.yml`, the same gate every pull request passes: Linux, Windows and
    macOS, each on x86_64 and arm64, on that pinned commit.
-3. **promote** first runs every check that can refuse the release: that the release branch
-   can fast-forward to the tested commit, for beta that no release tag already contains
-   it, and for stable that beta published it. Only then does it commit the beta bump, mint
-   the deploy app's token and push, `main` and `release/beta` together for beta, and start
-   **Package Pipeline** for that branch, naming the exact commit it promoted.
+3. **promote** first runs every check that can refuse the release: that no publish of the
+   release branch, or for stable of `release/beta`, is still running; that the release
+   branch can fast-forward to the tested commit and its last publish finished; for beta,
+   that no release tag already contains the tested commit; and for stable, that beta
+   published it. Only then does it commit the beta bump, mint the deploy app's token and
+   push, `main` and `release/beta` together for beta, and start **Package Pipeline** for
+   that branch, naming the exact commit it promoted.
 
-Package Pipeline builds, runs the suite on the commit being published, packs, verifies
-that the packed tool installs from the local package alone and reports the version it
-was packed as, creates the immutable tag, publishes to nuget.org, and creates the
-GitHub release at the promoted commit with the `.nupkg` attached.
+Package Pipeline checks, for stable, that beta published the commit; then it builds, runs
+the suite on the commit being published, packs, verifies that the packed tool installs
+from the local package alone and reports the version it was packed as, creates the
+immutable tag, publishes to nuget.org, and creates the GitHub release at the promoted
+commit with the `.nupkg` attached.
 
 Deploy starts Package Pipeline by dispatch, naming the commit it promoted, which Package
 Pipeline refuses to substitute. A release branch moving publishes nothing by itself, so a
@@ -139,12 +144,14 @@ release branch, for example to finish a publish that stopped.
 The nuget.org login comes before the tag, so a run nuget.org does not trust leaves nothing
 behind. The tag is created **before** publishing: a tag is cheap to delete, a published
 NuGet version is permanent. A run that stops part way resumes when it is started again for
-the same commit: a tag already naming that commit is reused, a version already on nuget.org
-is not pushed again, and the GitHub release, created last and carrying the package
-nuget.org has, is what marks a version published. Package Pipeline tests on Linux x86_64
-only; the full matrix has already passed in Deploy, for that commit on stable, and on beta
-for its parent, which differs only in `<Version>`. Runs of either workflow wait in the
-order they started rather than cancelling a run that waits.
+the same commit: a tag already naming that commit is reused, a version nuget.org already
+has is neither rebuilt nor pushed again, and the GitHub release, created last and carrying
+the package nuget.org has, is what marks a version published. nuget.org lists a version
+only minutes after accepting it, so a run started again within those minutes stops and
+says so; start it again a little later. Package Pipeline tests on Linux x86_64 only; the
+full matrix has already passed in Deploy, for that commit on stable, and on beta for its
+parent, which differs only in `<Version>`. Runs of either workflow wait in the order they
+started rather than cancelling a run that waits.
 
 ## Refusals worth knowing
 
@@ -155,16 +162,23 @@ shipped something that was never tested:
   and `stable` a version that is already tagged. Tags record what was published, not where
   the branches point: a release branch moved by hand publishes nothing, and Deploy
   promotes from wherever it was left.
+- **A publish that has not finished.** Deploy refuses while Package Pipeline has a run
+  that has not finished for the release branch, or for stable, for `release/beta`. It also
+  refuses to move a release branch whose head is tagged for that channel but not released:
+  moving on would leave that publish unable to finish. Start Package Pipeline again to
+  finish it; to abandon a publish nuget.org never received, delete its tag.
 - **Release branch diverged.** A release branch only ever fast-forwards to a tested
   commit. One holding commits the tested commit lacks is refused, because merging would
   put a tree on it that the matrix never tested; a person reconciles it. Every check
   runs before the beta bump is committed, so a refusal leaves `main` as it was.
 - **The branch moved during the release.** Nothing is force-pushed, and beta pushes `main`
   and `release/beta` atomically, so if `main` moved while the matrix ran, git rejects the
-  whole push and nothing is promoted. For every channel, Package Pipeline refuses to
-  publish a release branch that no longer points at the commit Deploy promoted.
+  whole push and nothing is promoted. A Package Pipeline run publishes the commit its
+  branch held when the run started, and refuses one that is not the commit Deploy promoted.
 - **Beta never published.** `stable` refuses a version whose beta tag is missing, names a
-  commit other than the one being promoted, or has no published release.
+  commit other than the one being published, or has no published release. Deploy checks
+  this before it promotes, and Package Pipeline again before it publishes, however it was
+  started.
 - **Workflow files without the permission.** GitHub refuses a push that changes workflow
   files unless the deploy app's token has the `workflows` permission. Deploy stops with
   nothing moved and says so; see One-time setup.
@@ -207,7 +221,7 @@ succeeded, and `failure` otherwise, including when either was skipped or cancell
 | `pipeline-pr.yml` | pull request, push to `main` | Runs `test.yml`; packs, installs and runs the tool; uploads the package, kept for the repository's artifact retention period; posts the `Pipeline / ci-check result` status |
 | `test.yml` | called by `pipeline-pr.yml` and `deploy.yml` | Builds and tests on Linux, Windows and macOS, each on x86_64 and arm64 |
 | `deploy.yml` | manual | Tests, checks, bumps the version, promotes with the deploy app's token, starts `pipeline-pkg.yml` |
-| `pipeline-pkg.yml` | dispatched by `deploy.yml`, or manual | Tests, packs, verifies, tags, publishes, releases; resumes a run that stopped part way |
+| `pipeline-pkg.yml` | dispatched by `deploy.yml`, or manual | Checks, tests, packs, verifies, tags, publishes, releases; resumes a run that stopped part way |
 | `cleanup-cache.yml` | pull request closed | Evicts that pull request's caches |
 
 Both pipelines verify a package through one composite action,

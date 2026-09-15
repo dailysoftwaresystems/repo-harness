@@ -6,11 +6,12 @@ name: Package Pipeline
 #
 # Started by dispatch rather than by a push to the release branch. Deploy's dispatch names
 # the exact commit it promoted, which this refuses to substitute, and a push to a release
-# branch publishes nothing by itself, so a stray push can never ship.
+# branch publishes nothing by itself, so a stray push can never ship. However it started,
+# stable publishes only the commit beta published under the same version.
 #
 # A run that stops part way resumes when it is started again for the same commit: a tag that
-# already names the commit is reused, a version already on nuget.org is not pushed again, and
-# the GitHub release, created last, is what marks a version published.
+# already names the commit is reused, a version already on nuget.org is neither rebuilt nor
+# pushed again, and the GitHub release, created last, is what marks a version published.
 #
 # Publishing uses nuget.org TRUSTED PUBLISHING: the job exchanges this workflow's
 # short-lived OIDC token for a temporary API key at publish time. There is no
@@ -77,11 +78,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The branch can move between Deploy's push and this run starting. Publishing
-          # whatever is there by then would ship a commit that never passed Deploy's gate.
+          # A run publishes the commit its branch held when the run was started. Deploy starts
+          # it right after its push, and a branch that moved in between holds a commit Deploy
+          # never promoted.
           actual=$(git rev-parse HEAD)
           if [ "$actual" != "$EXPECTED_SHA" ]; then
-            echo "::error::$REF_NAME is at $actual, not the promoted commit $EXPECTED_SHA. Nothing was published."
+            echo "::error::$REF_NAME held $actual when this run started, not the promoted commit $EXPECTED_SHA. Nothing was published."
             exit 1
           fi
 
@@ -109,6 +111,39 @@ jobs:
           } >> "$GITHUB_ENV"
 
           echo "Publishing $package from $REF_NAME"
+
+      - name: Refuse a stable version beta has not published
+        # Deploy checks this before it promotes. It is checked again here, so the rule holds
+        # however this run was started, including by hand after a release branch was moved.
+        if: env.CHANNEL == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          beta_tag="v${BASE_VERSION}-beta"
+
+          if ! tagged=$(git rev-parse -q --verify "refs/tags/${beta_tag}^{commit}"); then
+            echo "::error::${beta_tag} does not exist, so beta has not published ${BASE_VERSION}. Nothing was published."
+            exit 1
+          fi
+
+          if [ "$tagged" != "${RELEASE_SHA}" ]; then
+            echo "::error::${beta_tag} names ${tagged}, not ${RELEASE_SHA}; stable publishes only the commit beta published. Nothing was published."
+            exit 1
+          fi
+
+          # This endpoint answers for published releases only, and the release is the last thing a
+          # publish creates.
+          errors="$RUNNER_TEMP/beta-release.err"
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/${beta_tag}" --silent 2>"$errors"; then
+            if grep -q "HTTP 404" "$errors"; then
+              echo "::error::${beta_tag} is tagged but not released, so beta's publish of ${BASE_VERSION} has not finished. Nothing was published."
+            else
+              echo "::error::Could not tell whether ${beta_tag} was released, so nothing was published: $(cat "$errors")"
+            fi
+            exit 1
+          fi
 
       - name: Resume, or refuse to republish
         env:
@@ -187,7 +222,7 @@ jobs:
 
           if [ "$on_nuget" = true ]; then
             echo "ON_NUGET=true" >> "$GITHUB_ENV"
-            echo "::notice::${PACKAGE_VERSION} is already on nuget.org; it is not pushed again, and the release carries the package nuget.org has."
+            echo "::notice::${PACKAGE_VERSION} is already on nuget.org; it is neither rebuilt nor pushed again, and the release carries the package nuget.org has."
           fi
 
       - name: Build
@@ -195,6 +230,11 @@ jobs:
         # --no-build overrides only the package version, leaving the assembly with
         # whatever was compiled in, so `repo-harness --version` would report the
         # repository's <Version> rather than the version actually published.
+        #
+        # Nothing is built for a version nuget.org already has: the run that published it built,
+        # tested and packed this commit, and a rebuild now could fail on something that changed
+        # since, such as a new advisory, and leave the release unable to finish.
+        if: env.ON_NUGET != 'true'
         run: >
           dotnet build RepoHarness.slnx --configuration Release
           -p:Version=${{ env.PACKAGE_VERSION }}
@@ -203,16 +243,18 @@ jobs:
         # The package is only worth publishing if the suite passes on the commit being
         # published. This run is Linux x86_64 only. The full matrix already passed in Deploy:
         # for this commit on stable, and on beta for its parent, which differs only in
-        # <Version>. Started by hand, it may have only this run behind it.
+        # <Version>. A beta run started by hand may have only this run behind it.
+        if: env.ON_NUGET != 'true'
         run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build
 
       - name: Pack
+        if: env.ON_NUGET != 'true'
         run: >
           dotnet pack "$PROJECT" --configuration Release --no-build
           -p:Version=${{ env.PACKAGE_VERSION }} --output "$PACKAGE_DIRECTORY"
 
       - name: Use the package nuget.org already has
-        # A resumed run verifies and releases exactly what is published, not a rebuild of it.
+        # A resumed run verifies and releases exactly what is published.
         if: env.ON_NUGET == 'true'
         run: |
           set -euo pipefail
@@ -220,7 +262,7 @@ jobs:
           id="${PACKAGE_ID,,}"
           version="${PACKAGE_VERSION,,}"
 
-          rm -f "$PACKAGE_DIRECTORY"/*.nupkg
+          mkdir -p "$PACKAGE_DIRECTORY"
           curl -sSf -o "$PACKAGE_DIRECTORY/${PACKAGE_ID}.${PACKAGE_VERSION}.nupkg" \
             "https://api.nuget.org/v3-flatcontainer/${id}/${version}/${id}.${version}.nupkg"
 
@@ -257,10 +299,27 @@ jobs:
         if: env.ON_NUGET != 'true'
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
-        run: >
-          dotnet nuget push "$PACKAGE_DIRECTORY/*.nupkg"
-          --api-key "$NUGET_API_KEY"
-          --source https://api.nuget.org/v3/index.json
+        run: |
+          set -euo pipefail
+
+          if ! pushed=$(dotnet nuget push "$PACKAGE_DIRECTORY/*.nupkg" \
+              --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json 2>&1); then
+            echo "$pushed"
+
+            # nuget.org lists a version only minutes after accepting it. A run resumed within
+            # those minutes finds the tag but no listed version, and pushes a package nuget.org
+            # already has, which it refuses as a conflict.
+            if [ "${TAG_EXISTS:-}" = "true" ] && [[ "$pushed" == *"409"* ]]; then
+              echo "::error::nuget.org already has ${PACKAGE_VERSION} but has not listed it yet. Start Package Pipeline again in a few minutes; that run releases the package nuget.org has."
+            else
+              echo "::error::nuget.org did not accept ${PACKAGE_VERSION}. The tag stays, and starting Package Pipeline again resumes from it."
+            fi
+
+            exit 1
+          fi
+
+          echo "$pushed"
 
       - name: Create the GitHub release
         # The package is attached here, so the release is where a published version's
