@@ -529,7 +529,13 @@ internal sealed class WorktreeInspector(IGitClient gitClient, IFileSystem fileSy
             // The record holds the path of the worktree's .git file: absolute, or relative to the
             // record's own directory when worktree.useRelativePaths is set.
             var dotGit = Path.GetFullPath(Path.Combine(administrativeDirectory, _fileSystem.ReadAllText(gitdirFile).Trim()));
-            return Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(dotGit));
+            var recorded = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(dotGit));
+
+            // Resolved, because every path this is compared with comes from git resolved. A record
+            // written relative to its own directory, as git 2.48 and later can, otherwise leads back
+            // through the link a worktrees directory may be reached by, and a healthy worktree would
+            // read as one moved by hand.
+            return recorded is null ? null : ResolveLinks(recorded);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {

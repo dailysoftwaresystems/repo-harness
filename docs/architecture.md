@@ -152,8 +152,9 @@ names everything it found on one line, each with its remedy, and exits 13:
   record: when it was moved or its `.git` file was lost. A clone at the path would pass a status
   check and take its whole history with it.
 
-Without `--force`, when git cannot answer, nothing is deleted and the command exits 20, with
-git's reason first. Which worktree a directory is, and whether its record is gone, is decided
+Without `--force`, when the check cannot be finished, because git cannot answer or a record
+cannot be read or its directory found, nothing is deleted and the command exits 20, with the
+reason first. Which worktree a directory is, and whether its record is gone, is decided
 from paths git reports. A path the harness spelled is compared with one only after every link
 along it is followed, so a linked `.harness-config` or worktrees directory changes nothing.
 
@@ -694,7 +695,7 @@ with "the harness could not run", because the remedies differ.
 | 15 | A host could not be reached, DssHarness could not run there, or a command run there never reported how it finished |
 | 20 | The wrapped command ran and failed |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
-| 130 | The run was interrupted before it finished |
+| 130 | The run was interrupted before it finished; a deletion already under way says what it left |
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,

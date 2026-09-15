@@ -97,7 +97,10 @@ public sealed class WorktreeService(
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
-    /// <summary>How long the command line waits for a deletion after an interruption; tests shorten it.</summary>
+    /// <summary>
+    /// How long a deletion may run after an interruption before git is stopped, just before the
+    /// command line stops waiting; tests shorten it.
+    /// </summary>
     internal TimeSpan InterruptionGrace { get; init; } = DefaultInterruptionGrace;
 
     public async Task<WorktreeOutcome> CreateAsync(
@@ -311,7 +314,7 @@ public sealed class WorktreeService(
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
-            return Stopped(worktreeName, path, identity.AdministrativeDirectory);
+            return Stopped(worktreeName, path, identity.AdministrativeDirectory, checksRan: !force);
         }
     }
 
@@ -377,11 +380,21 @@ public sealed class WorktreeService(
         });
 
     /// <summary>A deletion stopped because the command line was about to stop waiting for it.</summary>
-    private WorktreeOutcome Stopped(string name, string path, string? administrativeDirectory)
+    private WorktreeOutcome Stopped(string name, string path, string? administrativeDirectory, bool checksRan)
         => WorktreeOutcome.Failed(CommandOutcome.Failed(
             HarnessExit.Cancelled,
             $"Deleting worktree '{name}' was stopped part way, before the interruption ended the command. "
-            + DescribeWhatRemains(name, path, administrativeDirectory)));
+            + DescribeWhatRemains(name, path, administrativeDirectory, checksRan)));
+
+    /// <summary>
+    /// Clearing a record stopped the same way. Its worktree's directory was already gone before the
+    /// command began, so nothing of it was lost; only git's record may still be there.
+    /// </summary>
+    private static WorktreeOutcome StoppedClearing(string name)
+        => WorktreeOutcome.Failed(CommandOutcome.Failed(
+            HarnessExit.Cancelled,
+            $"Clearing git's record of worktree '{name}', whose directory was already gone, was stopped before the interruption "
+            + $"ended the command; run '{ToolPackage.Command} {DeleteCommand} {name}' again to finish clearing it."));
 
     /// <summary>
     /// Removes a worktree whose checks passed. Plain removal runs git's own check as well, which still
@@ -411,7 +424,7 @@ public sealed class WorktreeService(
         {
             return Failed(
                 $"git could not remove worktree '{name}': {removal.FailureMessage.TrimEnd('.')}. "
-                + DescribeWhatRemains(name, path, administrativeDirectory));
+                + DescribeWhatRemains(name, path, administrativeDirectory, checksRan: true));
         }
 
         if (_fileSystem.DirectoryExists(path))
@@ -426,10 +439,10 @@ public sealed class WorktreeService(
     /// What a removal git gave up on, or that was stopped, left behind, and how to finish. git deletes
     /// a worktree's .git file and its record even when it fails to delete a file under it, after which
     /// no check can run again, and it can delete files before failing at all, so a removal once
-    /// started is never reported as having deleted nothing. Finishing with --force is safe, because
-    /// every check passed before removal began.
+    /// started is never reported as having deleted nothing. Finishing with --force is only called safe
+    /// where the checks ran, since a forced removal never made any.
     /// </summary>
-    private string DescribeWhatRemains(string name, string path, string? administrativeDirectory)
+    private string DescribeWhatRemains(string name, string path, string? administrativeDirectory, bool checksRan)
     {
         var finish = $"'{ToolPackage.Command} {DeleteCommand} {name} --force'";
         var dotGit = Path.Combine(path, ".git");
@@ -451,8 +464,10 @@ public sealed class WorktreeService(
 
         if (gone.Count > 0)
         {
+            var safe = checksRan ? "Every check passed before removal began, so run" : "Run";
+
             return $"It stopped part way: {string.Join(" and ", gone)} {(gone.Count == 1 ? "is" : "are")} already gone. "
-                + $"Every check passed before removal began, so run {finish} to finish deleting it.";
+                + $"{safe} {finish} to finish deleting it.";
         }
 
         var remaining = administrativeDirectory is null
@@ -517,7 +532,7 @@ public sealed class WorktreeService(
         }
 
         return administrativeDirectory is null
-            ? await VerifiedByListAsync(layout, name, path, clearingFailure, inspector, stopping).ConfigureAwait(false)
+            ? await VerifiedByListAsync(layout, name, path, clearingFailure, inspector).ConfigureAwait(false)
             : Verified(name, path, administrativeDirectory, clearingFailure);
     }
 
@@ -587,11 +602,11 @@ public sealed class WorktreeService(
                 return Failed($"git could not clear its record of worktree '{name}', whose directory is gone: {removal.FailureMessage}");
             }
 
-            return await VerifiedByListAsync(layout, name, path, gitFailure: null, inspector, stopping.Token).ConfigureAwait(false);
+            return await VerifiedByListAsync(layout, name, path, gitFailure: null, inspector).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
-            return Stopped(name, path, administrativeDirectory: null);
+            return StoppedClearing(name);
         }
     }
 
@@ -605,13 +620,16 @@ public sealed class WorktreeService(
     /// Confirms git's record is gone by looking for it in git's list. Used only where git could not
     /// name the record's directory beforehand.
     /// </summary>
+    /// <remarks>
+    /// This runs whatever the interruption did: it deletes nothing and takes a moment, and stopping
+    /// it would report a deletion that finished as one left half done.
+    /// </remarks>
     private async Task<WorktreeOutcome> VerifiedByListAsync(
         HarnessLayout layout,
         string name,
         string path,
         string? gitFailure,
-        WorktreeInspector inspector,
-        CancellationToken stopping)
+        WorktreeInspector inspector)
     {
         IReadOnlyList<GitWorktree> remaining;
         string resolved;
@@ -621,7 +639,7 @@ public sealed class WorktreeService(
             // git lists a worktree by the path it resolved, links followed, so the path is resolved
             // the same way before the two are compared.
             resolved = inspector.ResolveLinks(path);
-            remaining = await _gitClient.ListWorktreesAsync(layout.MainCheckoutRoot, stopping).ConfigureAwait(false);
+            remaining = await _gitClient.ListWorktreesAsync(layout.MainCheckoutRoot, CancellationToken.None).ConfigureAwait(false);
         }
         catch (HarnessException ex) when (ex.ExitCode == HarnessExit.CommandFailed)
         {

@@ -228,6 +228,9 @@ public sealed class WorktreeRemovalTests
         Assert.Equal(HarnessExit.CommandFailed, failed.Outcome.ExitCode);
         Assert.StartsWith("git could not remove worktree 'partial': error: failed to delete 'build.log'", failed.Outcome.Message, StringComparison.Ordinal);
         Assert.Contains("its .git file and git's record of it are already gone", failed.Outcome.Message, StringComparison.Ordinal);
+
+        // Here the checks did run, so finishing with --force is safe, and says so.
+        Assert.Contains("Every check passed before removal began", failed.Outcome.Message, StringComparison.Ordinal);
         Assert.Contains("delete-worktree partial --force", failed.Outcome.Message, StringComparison.Ordinal);
 
         var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "partial", force: true, cancellationToken);
@@ -477,6 +480,93 @@ public sealed class WorktreeRemovalTests
         Assert.Equal(HarnessExit.CommandFailed, outcome.Outcome.ExitCode);
         Assert.StartsWith("Could not follow the links in the worktree's path", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.Contains("Nothing was deleted", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnInterruptedForcedRemoval_ClaimsNothingAboutChecks()
+    {
+        // A forced deletion made no check, so telling the reader every check passed would read as
+        // reassurance that nothing valuable was at risk.
+        using var temp = new TempDirectory();
+        using var interruption = new CancellationTokenSource();
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "forced");
+
+        // Without its .git file git leaves the directory, so the stop finds part of it gone.
+        File.Delete(Path.Combine(path, ".git"));
+        var git = new InterceptingGitClient(harness.GitClient)
+        {
+            BeforeRun = arguments =>
+            {
+                if (arguments is ["worktree", "remove", ..])
+                {
+                    interruption.Cancel();
+                }
+            },
+            RunInstead = async (arguments, token) =>
+            {
+                if (arguments is not ["worktree", "remove", ..])
+                {
+                    return null;
+                }
+
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return null;
+            },
+        };
+        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output)
+        {
+            InterruptionGrace = TimeSpan.FromMilliseconds(400),
+        };
+
+        var outcome = await service.DeleteAsync(temp.Path, "forced", force: true, interruption.Token);
+
+        Assert.Equal(HarnessExit.Cancelled, outcome.Outcome.ExitCode);
+        Assert.Contains("already gone", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Every check passed", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("delete-worktree forced --force", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AStopWhileTheRecordIsVerified_ReportsTheDeletionAsDone()
+    {
+        // Verification deletes nothing. Stopping it would report a deletion that finished as one
+        // left half done, and the rerun it advises would answer that there is no such worktree.
+        using var temp = new TempDirectory();
+        using var interruption = new CancellationTokenSource();
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "verified");
+
+        // Without its .git file git cannot name the record's directory, so git's list is asked.
+        File.Delete(Path.Combine(path, ".git"));
+        var removals = 0;
+        var git = new InterceptingGitClient(harness.GitClient)
+        {
+            AfterRun = (arguments, result) =>
+            {
+                if (arguments is ["worktree", "remove", ..] && ++removals == 2)
+                {
+                    // The interruption arrives once the record is cleared, just before verification.
+                    interruption.Cancel();
+                    Thread.Sleep(100);
+                }
+
+                return result;
+            },
+        };
+        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output)
+        {
+            InterruptionGrace = TimeSpan.Zero,
+        };
+
+        var outcome = await service.DeleteAsync(temp.Path, "verified", force: true, interruption.Token);
+
+        // The warning proves the interruption was delivered, which is what arms the stop, so
+        // verification ran with the stop already fired rather than before it.
+        Assert.Contains("is under way", harness.StandardError.ToString(), StringComparison.Ordinal);
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+        Assert.Single(await harness.GitClient.ListWorktreesAsync(temp.Path, TestContext.Current.CancellationToken));
     }
 
     /// <summary>The real file system, except that git's worktree records cannot be listed.</summary>
