@@ -1,0 +1,228 @@
+name: Deploy
+
+# Version bump, branch promotion, and the start of publishing. Nothing published is built
+# here: once a release branch has moved, this starts pipeline-pkg for it, which owns
+# packing, publishing, tagging and the GitHub release. Keeping that boundary means
+# re-running one phase never half-performs the other.
+#
+# Nothing moves until the commit has passed the three-OS test matrix, and the commit that
+# passed is the commit promoted: it is pinned before testing, so a push to the source
+# branch while the matrix runs cannot slip an untested commit into a release.
+#
+# repo-harness is a LIB: it ships a NuGet package other people consume, so it uses
+# the three-channel chain main -> release/beta -> release/rc -> release/lts. The rc
+# stage exists so a consumer can integration-test before lts is cut.
+#
+# Credentials: this workflow uses only the GITHUB_TOKEN it is handed, scoped to this
+# repository. The one publishing credential in the release path is minted inside
+# pipeline-pkg at publish time, through OIDC, and is never stored. This repository is
+# PUBLIC, so it deliberately does not call the reusable workflows in the private
+# DevOps repository and never uses `secrets: inherit`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Deploy channel"
+        required: true
+        type: choice
+        options:
+          - beta
+          - rc
+          - lts
+      version:
+        description: "New version, beta channel only (default: bump the patch)"
+        required: false
+        type: string
+      # DBAS.Publisher sends these four alongside channel/version. GitHub's
+      # dispatch API rejects unknown inputs with 422, so they are declared even
+      # though nothing here reads them.
+      project_path:
+        required: false
+        type: string
+      project_name:
+        required: false
+        type: string
+      language:
+        required: false
+        type: string
+      triggered_by:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One promotion at a time; two concurrent runs would race on the same branches.
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  PROJECT: src/RepoHarness.Cli/RepoHarness.Cli.csproj
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source: ${{ steps.plan.outputs.source }}
+      target: ${{ steps.plan.outputs.target }}
+      sha: ${{ steps.plan.outputs.sha }}
+
+    steps:
+      - name: Validate the request and pin the commit to promote
+        id: plan
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          case "$CHANNEL" in
+            beta) source=main;         target=release/beta ;;
+            rc)   source=release/beta; target=release/rc ;;
+            lts)  source=release/rc;   target=release/lts ;;
+            *)    echo "::error::Unknown channel '$CHANNEL'."; exit 1 ;;
+          esac
+
+          if [ "$CHANNEL" = "beta" ] && [ "$REF_NAME" != "main" ]; then
+            echo "::error::The beta channel is cut from main, not $REF_NAME."
+            exit 1
+          fi
+
+          if [ "$CHANNEL" != "beta" ] && [ -n "$REQUESTED_VERSION" ]; then
+            echo "::error::An explicit version is only accepted on the beta channel."
+            echo "::error::rc and lts promote exactly what beta already published."
+            exit 1
+          fi
+
+          if ! sha=$(gh api "repos/$REPOSITORY/branches/$source" --jq '.commit.sha' 2>/dev/null); then
+            echo "::error::Source branch '$source' does not exist; cut the previous channel first."
+            exit 1
+          fi
+
+          {
+            echo "source=$source"
+            echo "target=$target"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Will promote $source at $sha to $target once it passes the test matrix."
+
+  test:
+    needs: plan
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+
+  promote:
+    name: promote
+    needs: [plan, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Writing branches, and starting pipeline-pkg.
+    permissions:
+      contents: write
+      actions: write
+
+    env:
+      CHANNEL: ${{ inputs.channel }}
+      SOURCE: ${{ needs.plan.outputs.source }}
+      TARGET: ${{ needs.plan.outputs.target }}
+      TESTED_SHA: ${{ needs.plan.outputs.sha }}
+
+    steps:
+      - name: Checkout the tested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Setup .NET
+        # The version script is a C# file-based app, so the release path needs no
+        # language this repository does not already depend on.
+        if: inputs.channel == 'beta'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump the version on top of the tested commit
+        if: inputs.channel == 'beta'
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          version=$(dotnet run .github/scripts/version.cs bump "$PROJECT" "$REQUESTED_VERSION")
+
+          if git diff --quiet -- "$PROJECT"; then
+            echo "::error::The bump changed nothing; refusing a release that publishes nothing new."
+            exit 1
+          fi
+
+          git add "$PROJECT"
+          git commit -m "chore: release $version"
+
+          # A fast-forward of the tested commit. If main moved while the matrix ran, git
+          # rejects this push, and nothing untested reaches main or a release branch.
+          git push origin "HEAD:refs/heads/main"
+          echo "Version is now $version"
+
+      - name: Promote
+        run: |
+          set -euo pipefail
+
+          # For beta this is the bump on top of the tested commit; for rc and lts it is
+          # the tested commit itself.
+          promoted=$(git rev-parse HEAD)
+
+          if git ls-remote --exit-code --heads origin "$TARGET" >/dev/null 2>&1; then
+            git fetch origin "$TARGET"
+
+            # A promotion that brings nothing across pushes nothing and publishes
+            # nothing, while the run reports green. Refuse instead of reporting that.
+            if git merge-base --is-ancestor "$promoted" "origin/$TARGET"; then
+              echo "::error::$TARGET already contains $promoted; nothing to promote."
+              exit 1
+            fi
+
+            # Fast-forward only. A merge would put a tree on the release branch that the
+            # matrix never tested; a release branch that cannot fast-forward holds commits
+            # that did not come through this gate, and must be reconciled by a person.
+            if ! git merge-base --is-ancestor "origin/$TARGET" "$promoted"; then
+              echo "::error::$TARGET has commits that $SOURCE does not; it only ever moves forward to tested commits. Reconcile it before promoting."
+              exit 1
+            fi
+          fi
+
+          git push origin "$promoted:refs/heads/$TARGET"
+          echo "PROMOTED_SHA=$promoted" >> "$GITHUB_ENV"
+          echo "Promoted $SOURCE ($promoted) to $TARGET."
+
+      - name: Start the package pipeline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # A push made with the GITHUB_TOKEN starts no workflow, so the release branch
+          # moving is not enough to publish it. A dispatch is the one event this token
+          # may start, and it names the exact commit promoted, which pipeline-pkg
+          # refuses to substitute.
+          gh workflow run pipeline-pkg.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$TARGET" \
+            -f expected_sha="$PROMOTED_SHA"
+
+          echo "Started pipeline-pkg for $TARGET at $PROMOTED_SHA."

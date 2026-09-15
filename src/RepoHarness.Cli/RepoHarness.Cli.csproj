@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>RepoHarness.Cli</RootNamespace>
+    <AssemblyName>repo-harness</AssemblyName>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>repo-harness</ToolCommandName>
+    <PackageId>RepoHarness</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Cross-platform repository harness CLI: git worktree management with Windows path-budget checks, driven entirely by .harness-config/config.json.</Description>
+    <RollForward>latestMajor</RollForward>
+
+    <!-- The version option prints the informational version, to which the SDK appends
+         the commit by default ("0.1.0+3f2c9a1"). The tool would then never report the
+         version it was published as. The commit is still recorded, in the package's
+         repository metadata. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!-- Package metadata. This is published publicly, so what nuget.org shows is
+         the package's whole first impression. -->
+    <Authors>Daily Software Systems</Authors>
+    <Company>Daily Software Systems</Company>
+    <Product>repo-harness</Product>
+    <PackageTags>cli;tool;git;worktree;build;test;cross-platform;devops</PackageTags>
+    <PackageProjectUrl>https://github.com/dailysoftwaresystems/repo-harness</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dailysoftwaresystems/repo-harness</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Apache-2.0. An SPDX expression rather than a license file, so nuget.org and
+         license scanners recognise it without reading the text. -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Copyright>Copyright 2026-present Daily Software Systems LTDA.</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+
+    <!-- Apache-2.0 section 4(d): a distribution of a work that has a NOTICE file carries it. -->
+    <None Include="../../NOTICE" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
+    <PackageReference Include="System.CommandLine" Version="2.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../RepoHarness.Core/RepoHarness.Core.csproj" />
+  </ItemGroup>
+
+</Project>

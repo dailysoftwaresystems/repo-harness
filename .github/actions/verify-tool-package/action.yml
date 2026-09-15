@@ -1,0 +1,70 @@
+name: Verify tool package
+description: >
+  Installs the repo-harness package from one local directory and nowhere else, then
+  proves the installed tool runs and reports exactly the version it was packed as.
+
+inputs:
+  package-directory:
+    description: Directory holding the .nupkg to install.
+    required: true
+  version:
+    description: Version the package was packed as. The installed tool must report exactly this.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install from the local package only
+      shell: bash
+      env:
+        PACKAGE_DIRECTORY: ${{ inputs.package-directory }}
+        PACKAGE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        # A source given on the command line is added to nuget.org, not substituted for
+        # it, and `dotnet tool install` takes the matching version from whichever source
+        # has it. Clearing every other source is what guarantees the package tested is
+        # the package just built, rather than one already published under that version.
+        feed=$(cd "$PACKAGE_DIRECTORY" && pwd)
+        work="$RUNNER_TEMP/verify-tool-package"
+        mkdir -p "$work"
+
+        cat > "$work/nuget.config" <<EOF
+        <?xml version="1.0" encoding="utf-8"?>
+        <configuration>
+          <packageSources>
+            <clear />
+            <add key="local" value="$feed" />
+          </packageSources>
+        </configuration>
+        EOF
+
+        dotnet tool install RepoHarness \
+          --tool-path "$work/tool" \
+          --configfile "$work/nuget.config" \
+          --version "$PACKAGE_VERSION"
+
+    - name: Run the installed tool
+      shell: bash
+      env:
+        PACKAGE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        tool="$RUNNER_TEMP/verify-tool-package/tool/repo-harness"
+
+        # Output is compared, not just the exit code: a tool that printed an error and
+        # exited 0 would otherwise pass.
+        reported=$("$tool" --version)
+        if [ "$reported" != "$PACKAGE_VERSION" ]; then
+          echo "::error::The installed tool reports '$reported' but was packed as '$PACKAGE_VERSION'."
+          exit 1
+        fi
+
+        # Captured before searching. Piped straight into `grep -q`, the tool can be cut off
+        # by a closed pipe once grep has its match, and pipefail then fails a good package.
+        codes=$("$tool" help exit-codes)
+        if ! grep -q 'CommandFailed' <<< "$codes"; then
+          echo "::error::'repo-harness help exit-codes' did not list the exit codes."
+          exit 1
+        fi

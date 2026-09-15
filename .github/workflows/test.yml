@@ -1,0 +1,62 @@
+name: Test
+
+# The build and test matrix, shared by every workflow that must prove a commit before
+# acting on it: pull requests, and Deploy before it promotes anything. One definition,
+# so the gate a release passes cannot drift from the gate a pull request passes.
+#
+# All three operating systems, always. Behaving identically on Windows, Linux and macOS
+# is this tool's central claim, so a change that passes on one runner and fails on
+# another is a real defect, not a CI quirk.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to test. Defaults to the commit the calling workflow runs for."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      # Every platform's result is wanted. Cancelling the others on the first failure
+      # hides whether a break is platform specific, which is exactly the question this
+      # matrix exists to answer.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # Nothing here pushes, so no credential is left in the working copy for the
+          # code under test to find.
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore RepoHarness.slnx
+
+      - name: Build
+        # Warnings are errors and NuGet auditing is on, so a newly disclosed advisory
+        # against a pinned dependency fails here rather than shipping.
+        run: dotnet build RepoHarness.slnx --configuration Release --no-restore
+
+      - name: Test
+        # global.json selects Microsoft.Testing.Platform as the test runner, which is what
+        # xunit.v3 speaks. The exit code is non-zero when any test fails.
+        run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build

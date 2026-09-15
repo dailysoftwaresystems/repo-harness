@@ -1,0 +1,138 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Platform;
+using RepoHarness.Core.Projects;
+
+namespace RepoHarness.Tests;
+
+/// <summary>What <c>init</c> seeds, which is the starting point every user edits from.</summary>
+public sealed class DefaultConfigFactoryTests
+{
+    [Fact]
+    public void ACmakeProject_GetsToolchains_ASanitizer_AndLegsForBothConfigurations()
+    {
+        var config = DefaultConfigFactory.Create([new DetectedProject("cmake", ".", "CMakeLists.txt")]);
+
+        Assert.Equal(["clang", "gcc", "msvc"], config.Toolchains.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
+        Assert.Contains("asan", config.Sanitizers.Keys);
+
+        var project = Assert.Single(config.Projects);
+        Assert.Equal("cmake", project.Type);
+        Assert.Equal(project.Name, config.Defaults.Project);
+        Assert.Equal("msvc", project.DefaultToolchain["windows"]);
+        Assert.Equal("gcc", project.DefaultToolchain["linux"]);
+        Assert.Equal("clang", project.DefaultToolchain["macos"]);
+        Assert.Equal("ctest", project.Test?.All?.Runner);
+
+        Assert.Equal(["local-debug", "local-release"], config.Legs.Keys.Order(StringComparer.Ordinal));
+        Assert.All(config.Legs.Values, leg => Assert.Equal(project.Name, leg.Project));
+        Assert.Equal(["local-debug", "local-release"], config.LegSets["gate"]);
+    }
+
+    [Fact]
+    public void ADotnetProject_NeedsNoToolchain_AndPointsAtItsSolution()
+    {
+        // dotnet resolves its own compiler, so a toolchain axis would only be noise.
+        var config = DefaultConfigFactory.Create([new DetectedProject("dotnet", "App.slnx", "App.slnx")]);
+
+        Assert.Empty(config.Toolchains);
+        Assert.Empty(config.Sanitizers);
+
+        var project = Assert.Single(config.Projects);
+        Assert.Equal("App.slnx", project.Path);
+        Assert.Empty(project.DefaultToolchain);
+        Assert.Equal("dotnet", project.Test?.All?.Runner);
+        Assert.Equal("--filter", project.Test?.All?.FilterArg);
+    }
+
+    [Fact]
+    public void ADartProject_RunsDartTest()
+    {
+        var config = DefaultConfigFactory.Create([new DetectedProject("dart", ".", "pubspec.yaml")]);
+
+        Assert.Equal("dart", Assert.Single(config.Projects).Test?.All?.Runner);
+    }
+
+    [Theory]
+    [InlineData("100% tests passed, 0 tests failed out of 12", "cmake", 12)]
+    [InlineData("Test run summary: Passed!\n  total: 259\n  failed: 0\n  succeeded: 257", "dotnet", 259)]
+    [InlineData("Passed!  - Failed:     0, Passed:    42, Skipped:     0, Total:    42, Duration: 1 s", "dotnet", 42)]
+    [InlineData("00:02 +42 ~1: All tests passed!", "dart", 42)]
+    public void SeededPatterns_MatchTheirRunnersSummaries(string summary, string projectType, int total)
+    {
+        // A seeded pattern that never matches would report every healthy run as unwitnessed.
+        var invocation = Assert.Single(
+            DefaultConfigFactory.Create([new DetectedProject(projectType, ".", "marker")]).Projects).Test?.All;
+
+        Assert.NotNull(invocation);
+        Assert.Matches(invocation.SuccessPattern!, summary);
+
+        var count = Regex.Match(summary, invocation.CountPattern!);
+        Assert.True(count.Success, $"'{invocation.CountPattern}' found no count in: {summary}");
+        Assert.Equal(total.ToString(CultureInfo.InvariantCulture), count.Groups["total"].Value);
+    }
+
+    [Fact]
+    public void SeededTestRunners_ReceiveTheirCoreCount()
+    {
+        var ctest = DefaultConfigFactory.Create([new DetectedProject("cmake", ".", "CMakeLists.txt")]).Projects[0].Test?.All;
+        var dart = DefaultConfigFactory.Create([new DetectedProject("dart", ".", "pubspec.yaml")]).Projects[0].Test?.All;
+
+        Assert.Equal(["CTEST_PARALLEL_LEVEL"], ctest?.CoresEnv);
+        Assert.Equal(["--concurrency={cores}"], dart?.CoresArgs);
+    }
+
+    [Fact]
+    public void OnlyTheFirstDetectedProject_IsDeclared()
+    {
+        // Detection order is the priority order; the rest are for the user to add.
+        var config = DefaultConfigFactory.Create(
+        [
+            new DetectedProject("cmake", ".", "CMakeLists.txt"),
+            new DetectedProject("dotnet", "App.sln", "App.sln"),
+        ]);
+
+        Assert.Equal("cmake", Assert.Single(config.Projects).Type);
+    }
+
+    [Fact]
+    public void NothingDetected_StillYieldsATargetAndConfigurations_ButNoLegs()
+    {
+        var config = DefaultConfigFactory.Create([]);
+
+        Assert.Null(config.Defaults.Project);
+        Assert.Empty(config.Projects);
+        Assert.Empty(config.Legs);
+        Assert.Empty(config.LegSets);
+        Assert.Equal("local", config.Targets["root"].Transport);
+        Assert.Equal(["debug", "release"], config.BuildConfigs.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("cmake")]
+    [InlineData("dotnet")]
+    [InlineData("dart")]
+    [InlineData(null)]
+    public void TheSeed_PassesValidation_AndSurvivesTheFileUnchanged(string? projectType)
+    {
+        // init must never write a configuration the tool then refuses to read.
+        IReadOnlyList<DetectedProject> detected = projectType is null
+            ? []
+            : [new DetectedProject(projectType, ".", "marker")];
+
+        var config = DefaultConfigFactory.Create(detected);
+        Assert.Empty(HarnessConfigValidator.Validate(config));
+
+        using var temp = new TempDirectory();
+        var store = new JsonConfigStore(new PhysicalFileSystem(FilePermissionsFactory.Create()));
+        var path = temp.Combine("config.json");
+
+        store.Save(path, config);
+        var loaded = store.Load(path);
+
+        Assert.Equal(store.Serialize(config), store.Serialize(loaded));
+    }
+}

@@ -1,0 +1,30 @@
+<Solution>
+  <Folder Name="/Solution Items/" />
+  <Folder Name="/Solution Items/Config/">
+    <File Path=".gitattributes" />
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="global.json" />
+    <File Path="LICENSE" />
+    <File Path="NOTICE" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/Solution Items/Files/">
+    <File Path=".github/actions/verify-tool-package/action.yml" />
+    <File Path=".github/scripts/version.cs" />
+  </Folder>
+  <Folder Name="/Solution Items/Workflows/">
+    <File Path=".github/workflows/cleanup-cache.yml" />
+    <File Path=".github/workflows/deploy.yml" />
+    <File Path=".github/workflows/pipeline-pkg.yml" />
+    <File Path=".github/workflows/pipeline-pr.yml" />
+    <File Path=".github/workflows/test.yml" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/RepoHarness.Cli/RepoHarness.Cli.csproj" />
+    <Project Path="src/RepoHarness.Core/RepoHarness.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/repo-harness-test/repo-harness-test.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,71 @@
+name: Pipeline
+
+# Pull request and main-branch CI: the shared test matrix, then proof that the tool
+# packs, installs and runs.
+#
+# Self-contained by design. This repository is PUBLIC, so it deliberately does not
+# call the reusable workflows in the private DevOps repository and never uses
+# `secrets: inherit`. Nothing here needs a secret, which is what makes it safe to
+# run on pull requests from forks.
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+# Read-only. A pull request from a fork must never be able to reach a credential,
+# and the surest way to guarantee that is for the workflow to have none.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Pack
+        run: >
+          dotnet pack src/RepoHarness.Cli/RepoHarness.Cli.csproj
+          --configuration Release --output build/package
+
+      - name: Read the packed version
+        run: |
+          set -euo pipefail
+          version=$(dotnet run .github/scripts/version.cs read src/RepoHarness.Cli/RepoHarness.Cli.csproj)
+          echo "PACKED_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Verify the package
+        # Proves the artifact installs and runs, not merely that it built: a tool package
+        # can compile cleanly and still fail to install.
+        uses: ./.github/actions/verify-tool-package
+        with:
+          package-directory: build/package
+          version: ${{ env.PACKED_VERSION }}
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg-pr
+          path: build/package/*.nupkg
+          retention-days: 7

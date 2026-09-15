@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "repo-harness --help": {
+      "commandName": "Project",
+      "commandLineArgs": "--help"
+    },
+    "repo-harness verify-git": {
+      "commandName": "Project",
+      "commandLineArgs": "verify-git"
+    },
+    "repo-harness init": {
+      "commandName": "Project",
+      "commandLineArgs": "init"
+    }
+  }
+}

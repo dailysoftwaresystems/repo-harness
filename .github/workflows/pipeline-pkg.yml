@@ -1,0 +1,194 @@
+name: Package Pipeline
+
+# Owns everything that produces a published artifact: build, test, pack, the immutable
+# tag, publishing to nuget.org, and the GitHub release. Started by Deploy once it has
+# promoted a release branch, or by hand from the Actions tab for a release branch.
+#
+# Started by dispatch rather than by a push to the release branch. Deploy pushes with
+# the GITHUB_TOKEN, and GitHub deliberately starts no workflow from a push made with that
+# token, so a push trigger would never fire for the pushes that matter: every release
+# would promote and then publish nothing. A dispatch is the one event that token may
+# start. It also means a stray push to a release branch publishes nothing by itself.
+#
+# Publishing uses nuget.org TRUSTED PUBLISHING: the job exchanges this workflow's
+# short-lived OIDC token for a temporary API key at publish time. There is no
+# long-lived NuGet key in this repository, in its secrets, or on a developer
+# machine, so there is nothing to leak or rotate. This matters more than usual
+# here because the repository is public.
+#
+# Self-contained by design: no reusable workflow from the private DevOps
+# repository is called, and no organisation secret is available to this repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Commit Deploy promoted; nothing else is published. Leave empty when starting by hand."
+        required: false
+        type: string
+        default: ""
+
+# contents: write creates the tag and the release. id-token: write is what lets
+# nuget.org verify this workflow's identity; it grants nothing else.
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: pkg-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT: src/RepoHarness.Cli/RepoHarness.Cli.csproj
+  PACKAGE_DIRECTORY: build/package
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Gate publishing behind an environment so approval and branch rules apply to
+    # the one job that can change what the public consumes.
+    environment: nuget
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Confirm this is the promoted commit
+        if: inputs.expected_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # The branch can move between Deploy's push and this run starting. Publishing
+          # whatever is there by then would ship a commit that never passed Deploy's gate.
+          actual=$(git rev-parse HEAD)
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::$REF_NAME is at $actual, not the promoted commit $EXPECTED_SHA. Nothing was published."
+            exit 1
+          fi
+
+      - name: Resolve channel and version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          case "$REF_NAME" in
+            release/beta) channel=beta ;;
+            release/rc)   channel=rc ;;
+            release/lts)  channel=lts ;;
+            *) echo "::error::'$REF_NAME' is not a release branch; only release branches publish."; exit 1 ;;
+          esac
+
+          base=$(dotnet run .github/scripts/version.cs read "$PROJECT")
+          package=$(dotnet run .github/scripts/version.cs suffix "$base" "$channel" "$RUN_NUMBER")
+
+          {
+            echo "CHANNEL=$channel"
+            echo "BASE_VERSION=$base"
+            echo "PACKAGE_VERSION=$package"
+            echo "TAG=$package"
+          } >> "$GITHUB_ENV"
+
+          echo "Publishing $package from $REF_NAME"
+
+      - name: Refuse to republish an existing tag
+        run: |
+          set -euo pipefail
+
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists; a published version is never rewritten."
+            exit 1
+          fi
+
+      - name: Build
+        # The version is applied at build time as well as at pack time. Packing with
+        # --no-build overrides only the package version, leaving the assembly with
+        # whatever was compiled in, so `repo-harness --version` would report the
+        # repository's <Version> rather than the version actually published.
+        run: >
+          dotnet build RepoHarness.slnx --configuration Release
+          -p:Version=${{ env.PACKAGE_VERSION }}
+
+      - name: Test
+        # The package is only worth publishing if the suite passes on the commit being
+        # published. This run is Linux only: the three-OS matrix already passed for this
+        # commit in Deploy before it was promoted.
+        run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build
+
+      - name: Pack
+        run: >
+          dotnet pack "$PROJECT" --configuration Release --no-build
+          -p:Version=${{ env.PACKAGE_VERSION }} --output "$PACKAGE_DIRECTORY"
+
+      - name: Verify the package
+        uses: ./.github/actions/verify-tool-package
+        with:
+          package-directory: ${{ env.PACKAGE_DIRECTORY }}
+          version: ${{ env.PACKAGE_VERSION }}
+
+      - name: Create the tag
+        # Created before publishing, not after. If tagging fails after a publish, the
+        # package is permanently on nuget.org with no tag, the "refuse to republish an
+        # existing tag" guard does not fire on a re-run, and the re-run then dies
+        # against an immutable published version. A tag is cheap to delete; a
+        # published version is not.
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "repo-harness ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Authenticate to nuget.org
+        # Exchanges the workflow's OIDC identity for a short-lived API key. Requires
+        # a trusted publishing policy on nuget.org naming this repository, workflow
+        # and environment. No stored key is involved.
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Publish to nuget.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: >
+          dotnet nuget push "$PACKAGE_DIRECTORY/*.nupkg"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          prerelease=""
+          if [ "${CHANNEL}" != "lts" ]; then
+            prerelease="--prerelease"
+          fi
+
+          gh release create "${TAG}" \
+            "$PACKAGE_DIRECTORY"/*.nupkg \
+            --title "repo-harness ${TAG}" \
+            --generate-notes \
+            ${prerelease}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-harness-${{ env.PACKAGE_VERSION }}
+          path: ${{ env.PACKAGE_DIRECTORY }}/*.nupkg
+          retention-days: 90

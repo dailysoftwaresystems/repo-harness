@@ -1,0 +1,64 @@
+name: Cleanup Branch Cache
+
+# A merged or closed pull request's caches are dead weight against the repository's
+# shared cache quota, and evicting them keeps that quota available to branches that
+# are still being worked on.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cleanup-cache-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # A pull request from a fork is issued a read-only token whatever the permissions
+    # block says, so every delete would fail and be reported as a successful cleanup.
+    # Skipping is honest; pretending to clean is not.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Delete caches for the closed pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+
+          keys=$(gh cache list --repo "$REPOSITORY" --ref "$BRANCH" --limit 100 --json id --jq '.[].id')
+
+          if [ -z "$keys" ]; then
+            echo "No caches for $BRANCH."
+            exit 0
+          fi
+
+          attempted=0
+          failed=0
+
+          for id in $keys; do
+            attempted=$((attempted + 1))
+
+            # Another run may evict a cache first, which is not a failure of this
+            # workflow. A cleanup where *everything* failed is a different matter and
+            # must not report green while the quota it protects fills up.
+            if ! gh cache delete "$id" --repo "$REPOSITORY" 2>/dev/null; then
+              failed=$((failed + 1))
+              echo "Could not delete cache $id."
+            fi
+          done
+
+          echo "Deleted $((attempted - failed)) of $attempted cache(s)."
+
+          if [ "$attempted" -gt 0 ] && [ "$failed" -eq "$attempted" ]; then
+            echo "::error::Every cache deletion failed; the cleanup did nothing."
+            exit 1
+          fi

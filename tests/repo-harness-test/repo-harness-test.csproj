@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>repo-harness-test</AssemblyName>
+    <RootNamespace>RepoHarness.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+
+    <!-- xunit.v3 speaks the Microsoft.Testing.Platform protocol only when this is set,
+         and global.json selects that platform as the `dotnet test` runner. -->
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 4.0.1 or later. Under 4.0.0 the test host exits during startup when `dotnet test`
+         launches it, and `dotnet test` then reports zero tests instead of a failure. -->
+    <PackageReference Include="xunit.v3" Version="4.0.1" />
+    <PackageReference Include="NSubstitute" Version="6.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/RepoHarness.Core/RepoHarness.Core.csproj" />
+
+    <!-- Builds the CLI so end-to-end tests can run the real binary, without referencing
+         its assembly: RepoHarness.Cli is an Exe, and referencing it would put a second
+         entry point in this test application. -->
+    <ProjectReference Include="../../src/RepoHarness.Cli/RepoHarness.Cli.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- Hands the tests the path of the CLI assembly, as the CLI project itself reports it.
+       Guessing it from directory names breaks as soon as an output layout differs from
+       the default one. -->
+  <Target Name="EmbedCliPath" BeforeTargets="GetAssemblyAttributes">
+    <MSBuild Projects="../../src/RepoHarness.Cli/RepoHarness.Cli.csproj"
+             Targets="GetTargetPath"
+             Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="_RepoHarnessCli" />
+    </MSBuild>
+
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>RepoHarnessCliPath</_Parameter1>
+        <_Parameter2>@(_RepoHarnessCli->'%(FullPath)')</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
+
+</Project>

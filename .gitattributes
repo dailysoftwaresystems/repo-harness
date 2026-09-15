@@ -1,0 +1,41 @@
+# Line endings: LF for every text file, on every platform, in the repository and in
+# every checkout. The tool behaves the same everywhere, and so must the bytes it is
+# built from.
+#
+# Without a rule, git's `core.autocrlf` decides. `core.autocrlf=true` is the Git for
+# Windows installer default, and under it a Windows checkout rewrites text files to
+# CRLF; under `core.autocrlf=false`, a file that a tool saved with CRLF is committed
+# with CRLF. The rules below take that choice away from the machine: `text` stores LF
+# when a file is added, and `eol=lf` writes LF when it is checked out, whatever
+# `core.autocrlf` says.
+#
+# There is no `eol=crlf` exception, and there should not be one. For a `text` file git
+# always stores LF, and `eol=` only chooses what a checkout writes, so an exception
+# could never store a file with CRLF. It would only make checkouts differ from the
+# repository.
+
+# The catch-all comes first, so a file type nobody listed below is still covered: a
+# rule reaches exactly what it names, and a type it omits is left to `core.autocrlf`.
+# `text=auto` leaves alone anything git detects as binary.
+* text=auto eol=lf
+
+# Declared, not detected. Every type this repository holds is named, so none of them
+# depends on git guessing that it is text. Each is read by a tool (the compiler,
+# MSBuild, GitHub Actions, the tests) or packed into the published package.
+*.cs           text eol=lf
+*.csproj       text eol=lf
+*.props        text eol=lf
+*.slnx         text eol=lf
+*.json         text eol=lf
+*.yml          text eol=lf
+*.md           text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+/LICENSE       text eol=lf
+/NOTICE        text eol=lf
+
+# Binary types, declared so no text rule above can rewrite their bytes: a CR or LF
+# byte inside an image is data. These lines stay last, because the last matching line
+# wins.
+*.png binary
+*.ico binary

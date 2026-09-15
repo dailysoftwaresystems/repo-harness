@@ -1,0 +1,33 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Every build writes under build/ at the repository root instead of bin/ and obj/
+         inside each project: binaries, intermediates and packages sit in one ignored
+         directory, and deleting it is a complete clean. Conditional so a host that
+         chooses its own location, such as `dotnet run` for a file-based app, keeps it. -->
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == ''">$(MSBuildThisFileDirectory)build</ArtifactsPath>
+
+    <!-- Generated so the compiler checks XML docs against signatures: without it,
+         CS1572/CS1573/CS1574 never fire and a doc naming a parameter that no longer
+         exists is invisible to a build that otherwise fails on warnings.
+         CS1591 (missing doc on a public member) is not required. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- A known advisory against a pinned dependency must break the build, not warn.
+         NU1903/NU1904 become errors via TreatWarningsAsErrors above. -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>low</NuGetAuditLevel>
+  </PropertyGroup>
+
+</Project>
