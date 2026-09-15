@@ -53,7 +53,8 @@ public sealed class HarnessFactory
             GitIgnoreManager,
             ProjectDetector,
             VerifyGitService,
-            AnchorRegistryLocator);
+            AnchorRegistryLocator,
+            Platform);
     }
 
     public StringWriter StandardOutput { get; } = new();

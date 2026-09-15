@@ -14,8 +14,9 @@ public interface IProcessRunner
     Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Resolves an executable's full path, or <see langword="null"/> when it is not
-    /// installed. Used by tool verification rather than running the tool to find out.
+    /// The file <see cref="RunAsync"/> would start for <paramref name="command"/>, or <see langword="null"/>
+    /// when there is none: a name is looked up in the PATH directories and nowhere else, and a path is
+    /// used as given. Used by tool verification rather than running the tool to find out.
     /// </summary>
     string? FindExecutable(string command);
 }

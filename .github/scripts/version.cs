@@ -7,7 +7,7 @@
 //
 //     dotnet run .github/scripts/version.cs read   src/RepoHarness.Cli/RepoHarness.Cli.csproj
 //     dotnet run .github/scripts/version.cs bump   src/RepoHarness.Cli/RepoHarness.Cli.csproj [1.2.3]
-//     dotnet run .github/scripts/version.cs suffix 1.2.3 beta 42
+//     dotnet run .github/scripts/version.cs suffix 1.2.3 beta
 //
 // Inline shell was the alternative, and the quoting it needs is the kind that only
 // fails once it reaches CI.
@@ -16,7 +16,6 @@ using System.Text.RegularExpressions;
 
 var versionElement = new Regex("<Version>([^<]+)</Version>", RegexOptions.Compiled);
 var threePart = new Regex(@"^\d+\.\d+\.\d+$", RegexOptions.Compiled);
-var buildNumber = new Regex(@"^[1-9][0-9]*$", RegexOptions.Compiled);
 
 if (args.Length < 2)
 {
@@ -40,12 +39,12 @@ switch (args[0])
 
     case "suffix":
         {
-            if (args.Length < 4)
+            if (args.Length < 3)
             {
-                return Fail("suffix needs <base-version> <channel> <build>");
+                return Fail("suffix needs <base-version> <channel>");
             }
 
-            return Suffix(args[1], args[2], args[3]);
+            return Suffix(args[1], args[2]);
         }
 
     default:
@@ -138,37 +137,29 @@ int Bump(string projectPath, string requested)
     return 0;
 }
 
-int Suffix(string baseVersion, string channel, string build)
+int Suffix(string baseVersion, string channel)
 {
     if (!threePart.IsMatch(baseVersion))
     {
         return Fail($"'{baseVersion}' is not a three part version");
     }
 
-    // beta and rc publish prereleases; lts publishes the bare version. The build
-    // number is part of a prerelease so repeating a channel produces a new, ordered
-    // version rather than colliding with what is already published, which would be
-    // skipped as a duplicate and look like a successful release.
+    // stable publishes the bare version; beta publishes it as a prerelease. A beta needs
+    // no build number to be new: every beta deploy bumps <Version> first and refuses a
+    // version that is already tagged, and the package pipeline refuses a version whose
+    // release exists, so the same beta can never be published twice.
     switch (channel)
     {
-        case "lts":
+        case "stable":
             Console.WriteLine(baseVersion);
             return 0;
 
         case "beta":
-        case "rc":
-            // Without a positive build number the result is not valid SemVer
-            // ("1.2.3-beta.") and cannot sort after the prerelease before it.
-            if (!buildNumber.IsMatch(build))
-            {
-                return Fail($"'{build}' is not a build number; a {channel} prerelease needs a positive integer");
-            }
-
-            Console.WriteLine($"{baseVersion}-{channel}.{build}");
+            Console.WriteLine($"{baseVersion}-beta");
             return 0;
 
         default:
-            return Fail($"unknown channel '{channel}'");
+            return Fail($"unknown channel '{channel}'; expected beta or stable");
     }
 }
 

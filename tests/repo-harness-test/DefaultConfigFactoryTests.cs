@@ -10,10 +10,14 @@ namespace RepoHarness.Tests;
 /// <summary>What <c>init</c> seeds, which is the starting point every user edits from.</summary>
 public sealed class DefaultConfigFactoryTests
 {
+    private const string Os = "linux";
+
+    private const string Processor = "x86_64";
+
     [Fact]
     public void ACmakeProject_GetsToolchains_ASanitizer_AndLegsForBothConfigurations()
     {
-        var config = DefaultConfigFactory.Create([new DetectedProject("cmake", ".", "CMakeLists.txt")]);
+        var config = Create(new DetectedProject("cmake", ".", "CMakeLists.txt"));
 
         Assert.Equal(["clang", "gcc", "msvc"], config.Toolchains.Keys.Order(StringComparer.Ordinal));
         Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
@@ -27,16 +31,37 @@ public sealed class DefaultConfigFactoryTests
         Assert.Equal("clang", project.DefaultToolchain["macos"]);
         Assert.Equal("ctest", project.Test?.All?.Runner);
 
-        Assert.Equal(["local-debug", "local-release"], config.Legs.Keys.Order(StringComparer.Ordinal));
-        Assert.All(config.Legs.Values, leg => Assert.Equal(project.Name, leg.Project));
-        Assert.Equal(["local-debug", "local-release"], config.LegSets["gate"]);
+        Assert.Equal(["linux-x86_64-debug", "linux-x86_64-release"], config.Legs.Keys.Order(StringComparer.Ordinal));
+        Assert.All(config.Legs.Values, leg =>
+        {
+            Assert.Equal(project.Name, leg.Project);
+            Assert.Equal(Os, leg.Os);
+            Assert.Equal(Processor, leg.Processor);
+            Assert.Null(leg.Emulator);
+            Assert.Null(leg.Wsl);
+            Assert.Null(leg.Ssh);
+        });
+        Assert.Equal(["linux-x86_64-debug", "linux-x86_64-release"], config.LegSets["gate"]);
+    }
+
+    [Fact]
+    public void SeededLegs_AreForTheMachineInitRanOn()
+    {
+        var config = DefaultConfigFactory.Create([new DetectedProject("dotnet", "App.slnx", "App.slnx")], "windows", "arm64");
+
+        Assert.Equal(["windows-arm64-debug", "windows-arm64-release"], config.Legs.Keys.Order(StringComparer.Ordinal));
+        Assert.All(config.Legs.Values, leg =>
+        {
+            Assert.Equal("windows", leg.Os);
+            Assert.Equal("arm64", leg.Processor);
+        });
     }
 
     [Fact]
     public void ADotnetProject_NeedsNoToolchain_AndPointsAtItsSolution()
     {
         // dotnet resolves its own compiler, so a toolchain axis would only be noise.
-        var config = DefaultConfigFactory.Create([new DetectedProject("dotnet", "App.slnx", "App.slnx")]);
+        var config = Create(new DetectedProject("dotnet", "App.slnx", "App.slnx"));
 
         Assert.Empty(config.Toolchains);
         Assert.Empty(config.Sanitizers);
@@ -51,7 +76,7 @@ public sealed class DefaultConfigFactoryTests
     [Fact]
     public void ADartProject_RunsDartTest()
     {
-        var config = DefaultConfigFactory.Create([new DetectedProject("dart", ".", "pubspec.yaml")]);
+        var config = Create(new DetectedProject("dart", ".", "pubspec.yaml"));
 
         Assert.Equal("dart", Assert.Single(config.Projects).Test?.All?.Runner);
     }
@@ -64,8 +89,7 @@ public sealed class DefaultConfigFactoryTests
     public void SeededPatterns_MatchTheirRunnersSummaries(string summary, string projectType, int total)
     {
         // A seeded pattern that never matches would report every healthy run as unwitnessed.
-        var invocation = Assert.Single(
-            DefaultConfigFactory.Create([new DetectedProject(projectType, ".", "marker")]).Projects).Test?.All;
+        var invocation = Assert.Single(Create(new DetectedProject(projectType, ".", "marker")).Projects).Test?.All;
 
         Assert.NotNull(invocation);
         Assert.Matches(invocation.SuccessPattern!, summary);
@@ -78,8 +102,8 @@ public sealed class DefaultConfigFactoryTests
     [Fact]
     public void SeededTestRunners_ReceiveTheirCoreCount()
     {
-        var ctest = DefaultConfigFactory.Create([new DetectedProject("cmake", ".", "CMakeLists.txt")]).Projects[0].Test?.All;
-        var dart = DefaultConfigFactory.Create([new DetectedProject("dart", ".", "pubspec.yaml")]).Projects[0].Test?.All;
+        var ctest = Create(new DetectedProject("cmake", ".", "CMakeLists.txt")).Projects[0].Test?.All;
+        var dart = Create(new DetectedProject("dart", ".", "pubspec.yaml")).Projects[0].Test?.All;
 
         Assert.Equal(["CTEST_PARALLEL_LEVEL"], ctest?.CoresEnv);
         Assert.Equal(["--concurrency={cores}"], dart?.CoresArgs);
@@ -90,24 +114,27 @@ public sealed class DefaultConfigFactoryTests
     {
         // Detection order is the priority order; the rest are for the user to add.
         var config = DefaultConfigFactory.Create(
-        [
-            new DetectedProject("cmake", ".", "CMakeLists.txt"),
-            new DetectedProject("dotnet", "App.sln", "App.sln"),
-        ]);
+            [
+                new DetectedProject("cmake", ".", "CMakeLists.txt"),
+                new DetectedProject("dotnet", "App.sln", "App.sln"),
+            ],
+            Os,
+            Processor);
 
         Assert.Equal("cmake", Assert.Single(config.Projects).Type);
     }
 
     [Fact]
-    public void NothingDetected_StillYieldsATargetAndConfigurations_ButNoLegs()
+    public void NothingDetected_StillYieldsConfigurations_ButNoLegs()
     {
-        var config = DefaultConfigFactory.Create([]);
+        var config = DefaultConfigFactory.Create([], Os, Processor);
 
         Assert.Null(config.Defaults.Project);
         Assert.Empty(config.Projects);
         Assert.Empty(config.Legs);
         Assert.Empty(config.LegSets);
-        Assert.Equal("local", config.Targets["root"].Transport);
+        Assert.Empty(config.Hosts.Wsl);
+        Assert.Empty(config.Hosts.Ssh);
         Assert.Equal(["debug", "release"], config.BuildConfigs.Keys.Order(StringComparer.Ordinal));
     }
 
@@ -123,7 +150,7 @@ public sealed class DefaultConfigFactoryTests
             ? []
             : [new DetectedProject(projectType, ".", "marker")];
 
-        var config = DefaultConfigFactory.Create(detected);
+        var config = DefaultConfigFactory.Create(detected, Os, Processor);
         Assert.Empty(HarnessConfigValidator.Validate(config));
 
         using var temp = new TempDirectory();
@@ -135,4 +162,6 @@ public sealed class DefaultConfigFactoryTests
 
         Assert.Equal(store.Serialize(config), store.Serialize(loaded));
     }
+
+    private static HarnessConfig Create(DetectedProject project) => DefaultConfigFactory.Create([project], Os, Processor);
 }

@@ -20,7 +20,7 @@ public static class HarnessExit
     /// <summary>Arguments were missing, unknown, or mutually exclusive.</summary>
     public const int UsageError = 10;
 
-    /// <summary>No harness configuration was found. Run <c>repo-harness init</c>.</summary>
+    /// <summary>No harness configuration was found. Run <c>DssHarness init</c>.</summary>
     public const int NotInitialized = 11;
 
     /// <summary>config.json is missing, unparseable, or failed validation.</summary>
@@ -29,8 +29,15 @@ public static class HarnessExit
     /// <summary>A precondition refused the request: dirty tree, name taken, lock held.</summary>
     public const int Refused = 13;
 
-    /// <summary>A required external tool is not installed.</summary>
+    /// <summary>A required external tool is not installed, or could not be started.</summary>
     public const int ToolMissing = 14;
+
+    /// <summary>
+    /// A host the command was pointed at could not be used: it could not be reached, it has no
+    /// .NET SDK, DssHarness could not be brought to this machine's version there, or its copy of
+    /// the repository does not exist. Distinct from <see cref="CommandFailed"/>: nothing ran there.
+    /// </summary>
+    public const int HostUnavailable = 15;
 
     /// <summary>The wrapped command ran and reported failure.</summary>
     public const int CommandFailed = 20;
@@ -50,7 +57,7 @@ public static class HarnessExit
 
     /// <summary>
     /// Every shared code with its explanation, read from the constants themselves so
-    /// that <c>repo-harness help exit-codes</c> cannot drift away from the values commands
+    /// that <c>DssHarness help exit-codes</c> cannot drift away from the values commands
     /// actually return. The table in docs/architecture.md is maintained by hand and is
     /// not covered by this.
     /// </summary>
@@ -66,10 +73,11 @@ public static class HarnessExit
         {
             [nameof(Success)] = "The command did what was asked.",
             [nameof(UsageError)] = "Arguments were missing, unknown, or mutually exclusive.",
-            [nameof(NotInitialized)] = "No harness configuration found; run 'repo-harness init'.",
+            [nameof(NotInitialized)] = "No harness configuration found; run 'DssHarness init'.",
             [nameof(ConfigInvalid)] = "config.json is missing, unparseable, or failed validation.",
             [nameof(Refused)] = "A precondition refused the request (dirty tree, name taken, lock held).",
-            [nameof(ToolMissing)] = "A required external tool is not installed.",
+            [nameof(ToolMissing)] = "A required external tool is not installed, or could not be started.",
+            [nameof(HostUnavailable)] = "A host could not be reached, or DssHarness could not run there; nothing ran on it.",
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",
             [nameof(Cancelled)] = "The run was interrupted before it finished; nothing ran to completion.",

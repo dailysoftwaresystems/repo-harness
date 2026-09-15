@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -75,7 +77,7 @@ public sealed partial class HelpTests
     {
         var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
 
-        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer" })
+        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer", "hosts", "emulators" })
         {
             Assert.Contains(setting, result.StandardOutput, StringComparison.Ordinal);
         }
@@ -123,9 +125,43 @@ public sealed partial class HelpTests
         }
     }
 
+    [Fact]
+    public async Task LegsTopic_DocumentsTheNamesTheRulesAndTheExitCodes_FromTheCode()
+    {
+        var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        // Every name the validator accepts for a leg is listed, so the help never leaves out a name a leg can use.
+        foreach (var name in PlatformNames.OperatingSystems.Concat(PlatformNames.Processors))
+        {
+            Assert.Contains(name, result.StandardOutput, StringComparison.Ordinal);
+        }
+
+        var expected = new[]
+        {
+            "--legs",
+            "host-exec --ssh",
+            "--wsl",
+            ".harness-config/ssh/config",
+            $".NET {ToolPackage.MinimumSdkMajor} SDK",
+            "never downgraded",
+            "witness",
+        };
+
+        foreach (var text in expected)
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+
+        Assert.Contains($"{LegsExit.Unavailable,3}  legs:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains($"{HarnessExit.HostUnavailable,3}  host-exec:", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("exit-codes")]
     [InlineData("config")]
+    [InlineData("legs")]
     [InlineData("worktrees")]
     [InlineData("anchors")]
     [InlineData("layout")]
@@ -233,6 +269,6 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}(?<name>\S+)(\s+<\S+>)?\s{2,}(?<description>.+)$")]
     private static partial Regex CommandLinePattern();
 
-    [GeneratedRegex(@"repo-harness help (?<topic>[a-z-]+)")]
+    [GeneratedRegex(@"DssHarness help (?<topic>[a-z-]+)")]
     private static partial Regex TopicPattern();
 }

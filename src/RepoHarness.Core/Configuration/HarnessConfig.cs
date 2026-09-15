@@ -30,13 +30,22 @@ public sealed class HarnessConfig
     /// <summary>Buildable projects in this repository.</summary>
     public List<ProjectConfig> Projects { get; init; } = [];
 
-    /// <summary>Machines the harness can reach, keyed by name.</summary>
-    public Dictionary<string, TargetConfig> Targets { get; init; } = Map<TargetConfig>();
+    /// <summary>
+    /// The machines legs run on: this one, and the WSL distributions and ssh hosts declared under
+    /// the names the command line selects them by.
+    /// </summary>
+    public HostsConfig Hosts { get; init; } = new();
+
+    /// <summary>Ways to run programs built for another processor, keyed by name.</summary>
+    public Dictionary<string, EmulatorConfig> Emulators { get; init; } = Map<EmulatorConfig>();
 
     /// <summary>Units of work that each receive exactly one verdict, keyed by name.</summary>
     public Dictionary<string, LegConfig> Legs { get; init; } = Map<LegConfig>();
 
-    /// <summary>Named groups of legs, so a whole gate can be invoked by one name.</summary>
+    /// <summary>
+    /// Named groups of legs, selected with <c>--legs</c> alongside leg names, so a whole gate can be
+    /// invoked by one name.
+    /// </summary>
     public Dictionary<string, List<string>> LegSets { get; init; } = Map<List<string>>();
 
     /// <summary>External tools this repository needs, verified and installed by name.</summary>
@@ -45,7 +54,7 @@ public sealed class HarnessConfig
     /// <summary>Multi-phase procedures such as a corpus build-and-test or a benchmark.</summary>
     public Dictionary<string, RunnerConfig> Runners { get; init; } = Map<RunnerConfig>();
 
-    /// <summary>Named commands invokable through <c>repo-harness exec</c>.</summary>
+    /// <summary>Named commands invokable through <c>DssHarness exec</c>.</summary>
     public Dictionary<string, ExecConfig> Exec { get; init; } = Map<ExecConfig>();
 
     /// <summary>Commit message templating and policy.</summary>
@@ -74,13 +83,13 @@ public sealed class HarnessDefaults
 
     /// <summary>
     /// Cores a build uses. Deliberately not "every core": a machine entirely claimed by
-    /// a build cannot be used for anything else while it runs. A target with a different
+    /// a build cannot be used for anything else while it runs. A host with a different
     /// core count replaces this with its own <c>buildCores</c>.
     /// </summary>
     public int BuildCores { get; init; } = DefaultCores;
 
     /// <summary>
-    /// Cores a test run uses, for the same reason. Replaced by a target's
+    /// Cores a test run uses, for the same reason. Replaced by a host's
     /// <c>testCores</c>, and by a test invocation's own <c>cores</c>.
     /// </summary>
     public int TestCores { get; init; } = DefaultCores;
@@ -91,9 +100,6 @@ public sealed class HarnessDefaults
     /// never needed for correctness; this exists only to cap the load on a busy machine.
     /// </summary>
     public int? MaxParallelLegs { get; init; }
-
-    /// <summary>Leg set used when a command is given no explicit selection.</summary>
-    public string? LegSet { get; init; }
 
     /// <summary>Project used when a command names none.</summary>
     public string? Project { get; init; }

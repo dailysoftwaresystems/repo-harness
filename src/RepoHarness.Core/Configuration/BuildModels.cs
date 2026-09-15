@@ -24,7 +24,7 @@ public sealed class ToolchainConfig : VariantOverlay
 {
     /// <summary>
     /// Platforms this toolchain exists on (<c>windows</c>, <c>linux</c>, <c>macos</c>)
-    /// or <c>all</c>. A leg naming a toolchain absent from its target's platform is
+    /// or <c>all</c>. A leg naming a toolchain absent from its leg's operating system is
     /// skipped with a stated reason rather than failing obscurely much later.
     /// </summary>
     public List<string> Platforms { get; init; } = ["all"];

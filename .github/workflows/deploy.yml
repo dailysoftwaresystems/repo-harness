@@ -5,19 +5,24 @@ name: Deploy
 # packing, publishing, tagging and the GitHub release. Keeping that boundary means
 # re-running one phase never half-performs the other.
 #
-# Nothing moves until the commit has passed the three-OS test matrix, and the commit that
-# passed is the commit promoted: it is pinned before testing, so a push to the source
-# branch while the matrix runs cannot slip an untested commit into a release.
+# Nothing moves until the commit has passed the test matrix, and only what passed it moves:
+# the commit is pinned before testing, so a push to the source branch while the matrix runs
+# cannot slip an untested commit into a release. stable promotes the tested commit itself;
+# beta promotes the version bump on top of it, which changes nothing but <Version>.
 #
-# repo-harness is a LIB: it ships a NuGet package other people consume, so it uses
-# the three-channel chain main -> release/beta -> release/rc -> release/lts. The rc
-# stage exists so a consumer can integration-test before lts is cut.
+# DssHarness ships as an app: people install the released tool rather than build on
+# it, so it uses two channels, main -> release/beta -> release/stable. beta releases each
+# new version on GitHub alone, as a prerelease with its package attached; stable publishes
+# the commit beta released, under the bare version, to nuget.org and as a GitHub release.
 #
-# Credentials: this workflow uses only the GITHUB_TOKEN it is handed, scoped to this
-# repository. The one publishing credential in the release path is minted inside
-# pipeline-pkg at publish time, through OIDC, and is never stored. This repository is
-# PUBLIC, so it deliberately does not call the reusable workflows in the private
-# DevOps repository and never uses `secrets: inherit`.
+# Credentials: the organisation's rulesets protect main and the release branches and let its
+# deploy GitHub App push to them, and the organisation provides that app's credentials to
+# every repository. The push alone uses a short-lived token minted from them, for this
+# repository alone and for its contents and workflow files alone; everything else runs with
+# the GITHUB_TOKEN it is handed. Nothing is stored in this repository, which is PUBLIC: it
+# deliberately does not call the reusable workflows in the private DevOps repository and
+# never uses `secrets: inherit`. Every action is pinned to a full commit SHA; see
+# docs/releasing.md.
 
 on:
   workflow_dispatch:
@@ -28,25 +33,9 @@ on:
         type: choice
         options:
           - beta
-          - rc
-          - lts
+          - stable
       version:
         description: "New version, beta channel only (default: bump the patch)"
-        required: false
-        type: string
-      # DBAS.Publisher sends these four alongside channel/version. GitHub's
-      # dispatch API rejects unknown inputs with 422, so they are declared even
-      # though nothing here reads them.
-      project_path:
-        required: false
-        type: string
-      project_name:
-        required: false
-        type: string
-      language:
-        required: false
-        type: string
-      triggered_by:
         required: false
         type: string
 
@@ -54,9 +43,11 @@ permissions:
   contents: read
 
 concurrency:
-  # One promotion at a time; two concurrent runs would race on the same branches.
+  # One promotion at a time: two runs at once would race on the same branches. Runs started
+  # meanwhile wait in the order they started; by default a newer waiting run would cancel an
+  # older one instead.
   group: deploy
-  cancel-in-progress: false
+  queue: max
 
 env:
   PROJECT: src/RepoHarness.Cli/RepoHarness.Cli.csproj
@@ -84,10 +75,9 @@ jobs:
           set -euo pipefail
 
           case "$CHANNEL" in
-            beta) source=main;         target=release/beta ;;
-            rc)   source=release/beta; target=release/rc ;;
-            lts)  source=release/rc;   target=release/lts ;;
-            *)    echo "::error::Unknown channel '$CHANNEL'."; exit 1 ;;
+            beta)   source=main;         target=release/beta ;;
+            stable) source=release/beta; target=release/stable ;;
+            *)      echo "::error::Unknown channel '$CHANNEL'."; exit 1 ;;
           esac
 
           if [ "$CHANNEL" = "beta" ] && [ "$REF_NAME" != "main" ]; then
@@ -97,12 +87,26 @@ jobs:
 
           if [ "$CHANNEL" != "beta" ] && [ -n "$REQUESTED_VERSION" ]; then
             echo "::error::An explicit version is only accepted on the beta channel."
-            echo "::error::rc and lts promote exactly what beta already published."
+            echo "::error::stable promotes exactly what beta already published."
             exit 1
           fi
 
-          if ! sha=$(gh api "repos/$REPOSITORY/branches/$source" --jq '.commit.sha' 2>/dev/null); then
-            echo "::error::Source branch '$source' does not exist; cut the previous channel first."
+          # A branch that does not exist is told apart from a lookup that failed: "could not
+          # tell" is not "does not exist".
+          errors="$RUNNER_TEMP/branch-lookup.err"
+          if ! sha=$(gh api "repos/$REPOSITORY/branches/$source" --jq '.commit.sha' 2>"$errors"); then
+            if grep -q "HTTP 404" "$errors"; then
+              echo "::error::Source branch '$source' does not exist, so there is nothing to promote."
+            else
+              echo "::error::Could not read source branch '$source', so nothing was promoted: $(cat "$errors")"
+            fi
+            exit 1
+          fi
+
+          # The pinned commit is what gets tested and promoted; an empty one would let the
+          # checkout fall back to another commit.
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Reading source branch '$source' gave '$sha', not a commit."
             exit 1
           fi
 
@@ -126,9 +130,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    # Writing branches, and starting pipeline-pkg.
+    # The GITHUB_TOKEN reads, and starts pipeline-pkg. The push alone carries the deploy app's token.
     permissions:
-      contents: write
+      contents: read
       actions: write
 
     env:
@@ -139,16 +143,18 @@ jobs:
 
     steps:
       - name: Checkout the tested commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
+          # No credential is left in the working copy for the steps below. The repository is
+          # public, so the fetches they make need none.
+          persist-credentials: false
 
       - name: Setup .NET
         # The version script is a C# file-based app, so the release path needs no
         # language this repository does not already depend on.
-        if: inputs.channel == 'beta'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
@@ -156,6 +162,126 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check the promotion before anything is committed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Every check that can refuse the release runs before the bump is committed, so a
+          # refusal leaves main and both release branches exactly as they were. Branches and
+          # tags are read as they are now, not as the checkout found them.
+          git fetch --quiet --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          errors="$RUNNER_TEMP/check.err"
+
+          # A publish that has not finished, or still waits for approval, would be overtaken:
+          # moving its branch on can leave its version tagged, or on nuget.org, with nothing left
+          # to release it. stable also waits for a beta publish it may be about to promote.
+          branches=("$TARGET")
+          if [ "$CHANNEL" = "stable" ]; then
+            branches+=("$SOURCE")
+          fi
+
+          for branch in "${branches[@]}"; do
+            if ! running=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pipeline-pkg.yml --branch "$branch" \
+                --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length' 2>"$errors"); then
+              echo "::error::Could not tell whether Package Pipeline is running for $branch, so nothing was promoted: $(cat "$errors")"
+              exit 1
+            fi
+
+            if [ "$running" != "0" ]; then
+              echo "::error::Package Pipeline has a run for $branch that has not finished. Let it finish, or cancel it, before deploying."
+              exit 1
+            fi
+          done
+
+          # Fast-forward only. A merge would put a tree on the release branch that the matrix
+          # never tested; a release branch that cannot fast-forward holds commits that did not
+          # come through this gate, and must be reconciled by a person.
+          if target_head=$(git rev-parse -q --verify "refs/remotes/origin/$TARGET"); then
+            if ! git merge-base --is-ancestor "$target_head" "$TESTED_SHA"; then
+              echo "::error::$TARGET has commits that $TESTED_SHA does not; it only ever moves forward to tested commits. Reconcile it before promoting."
+              exit 1
+            fi
+
+            # A publish's release is the last thing it creates, so the newest tag for this channel
+            # on the release branch with no release is a publish that stopped part way. Moving the
+            # branch on, whether here or by hand beforehand, would leave it unable to finish.
+            branch_tags=$(git tag --list --merged "$target_head" --sort=-version:refname 'v*')
+            latest=""
+
+            for tag in $branch_tags; do
+              if [ "$CHANNEL" = "beta" ] && [[ "$tag" != *-beta ]]; then
+                continue
+              fi
+
+              if [ "$CHANNEL" = "stable" ] && [[ "$tag" == *-beta ]]; then
+                continue
+              fi
+
+              latest=$tag
+              break
+            done
+
+            if [ -n "$latest" ] && ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest" --silent 2>"$errors"; then
+              if ! grep -q "HTTP 404" "$errors"; then
+                echo "::error::Could not tell whether $latest was released, so nothing was promoted: $(cat "$errors")"
+              elif [ "$(git rev-parse "refs/tags/$latest^{commit}")" = "$target_head" ]; then
+                echo "::error::$latest names the head of $TARGET but was never released, so its publish stopped part way. Start Package Pipeline for $TARGET again to finish it; to abandon a publish nuget.org never received, delete the tag."
+              else
+                echo "::error::$latest was never released, and $TARGET has moved past it, so Package Pipeline can no longer finish that publish. Release the tag by hand or, if nuget.org never received it, delete the tag to abandon it."
+              fi
+              exit 1
+            fi
+          else
+            echo "::notice::$TARGET does not exist yet; this promotion creates it."
+          fi
+
+          # Tags, not where the branches point, record what was published: a release branch moved
+          # by hand publishes nothing, and Deploy promotes from wherever it was left.
+          if [ "$CHANNEL" = "beta" ]; then
+            released=$(git tag --list --contains "$TESTED_SHA" 'v*')
+
+            if [ -n "$released" ]; then
+              first=${released%%$'\n'*}
+              echo "::error::$TESTED_SHA is already tagged as $first, so there is nothing new to publish. To finish a publish that stopped, start Package Pipeline for $TARGET again."
+              exit 1
+            fi
+
+            exit 0
+          fi
+
+          # stable publishes only what beta already published: the beta tag of this version must
+          # name exactly the commit being promoted, and its release must be published.
+          version=$(dotnet run .github/scripts/version.cs read "$PROJECT")
+          beta_tag="v${version}-beta"
+
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "::error::v${version} is already tagged, so stable ${version} was published or its publish started. To finish a publish that stopped, start Package Pipeline for $TARGET again."
+            exit 1
+          fi
+
+          if ! tagged=$(git rev-parse -q --verify "refs/tags/${beta_tag}^{commit}"); then
+            echo "::error::${beta_tag} does not exist, so beta has not published ${version}. Deploy beta first; if its publish stopped before tagging, start Package Pipeline for ${SOURCE} again instead."
+            exit 1
+          fi
+
+          if [ "$tagged" != "$TESTED_SHA" ]; then
+            echo "::error::${beta_tag} names ${tagged}, not ${TESTED_SHA} at the head of ${SOURCE}; stable publishes only the commit beta published."
+            exit 1
+          fi
+
+          # This endpoint answers for published releases only, and the release is the last thing a
+          # publish creates.
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/${beta_tag}" --silent 2>"$errors"; then
+            if grep -q "HTTP 404" "$errors"; then
+              echo "::error::${beta_tag} is tagged but not released, so its publish did not finish. Start Package Pipeline for ${SOURCE} again first."
+            else
+              echo "::error::Could not tell whether ${beta_tag} was released, so nothing was promoted: $(cat "$errors")"
+            fi
+            exit 1
+          fi
 
       - name: Bump the version on top of the tested commit
         if: inputs.channel == 'beta'
@@ -171,44 +297,66 @@ jobs:
             exit 1
           fi
 
-          git add "$PROJECT"
-          git commit -m "chore: release $version"
+          # pipeline-pkg would refuse a version already tagged, but only once main and
+          # release/beta had moved. It is refused here, before anything is committed.
+          for tag in "v${version}-beta" "v${version}"; do
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "::error::${tag} already exists, so ${version} was published before; pass a higher version."
+              exit 1
+            fi
+          done
 
-          # A fast-forward of the tested commit. If main moved while the matrix ran, git
-          # rejects this push, and nothing untested reaches main or a release branch.
-          git push origin "HEAD:refs/heads/main"
+          git add "$PROJECT"
+          git commit -m "v$version"
           echo "Version is now $version"
 
+      - name: Mint the deploy app's token
+        id: app-token
+        # Minted once every check has passed, for the push alone.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.DSS_DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DSS_DEPLOY_APP_PRIVATE_KEY }}
+          # With no owner or repositories, the token reaches this repository alone. It asks for
+          # contents, and for workflows: a promotion carries every change to workflow files since
+          # the last one, which GitHub lets an app push only with that permission. An app that
+          # lacks either cannot mint this token, so nothing moves.
+          permission-contents: write
+          permission-workflows: write
+
       - name: Promote
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
 
-          # For beta this is the bump on top of the tested commit; for rc and lts it is
-          # the tested commit itself.
+          # For beta this is the bump on top of the tested commit; for stable, the tested commit.
           promoted=$(git rev-parse HEAD)
 
-          if git ls-remote --exit-code --heads origin "$TARGET" >/dev/null 2>&1; then
-            git fetch origin "$TARGET"
-
-            # A promotion that brings nothing across pushes nothing and publishes
-            # nothing, while the run reports green. Refuse instead of reporting that.
-            if git merge-base --is-ancestor "$promoted" "origin/$TARGET"; then
-              echo "::error::$TARGET already contains $promoted; nothing to promote."
-              exit 1
-            fi
-
-            # Fast-forward only. A merge would put a tree on the release branch that the
-            # matrix never tested; a release branch that cannot fast-forward holds commits
-            # that did not come through this gate, and must be reconciled by a person.
-            if ! git merge-base --is-ancestor "origin/$TARGET" "$promoted"; then
-              echo "::error::$TARGET has commits that $SOURCE does not; it only ever moves forward to tested commits. Reconcile it before promoting."
-              exit 1
-            fi
+          # beta moves main and release/beta together or not at all. Nothing is forced: a branch
+          # that moved to a commit the promotion does not contain rejects the whole push, and
+          # nothing untested reaches either branch.
+          if [ "$CHANNEL" = "beta" ]; then
+            refs=("$promoted:refs/heads/main" "$promoted:refs/heads/$TARGET")
+          else
+            refs=("$promoted:refs/heads/$TARGET")
           fi
 
-          git push origin "$promoted:refs/heads/$TARGET"
+          # The token reaches git only through this one command's environment, as the header
+          # actions/checkout would have written, and never through the working copy.
+          basic=$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic"
+
+          if ! GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
+              git push --atomic origin "${refs[@]}"; then
+            echo "::error::The push failed. It was atomic: GitHub moves every branch in it or none."
+            exit 1
+          fi
+
           echo "PROMOTED_SHA=$promoted" >> "$GITHUB_ENV"
-          echo "Promoted $SOURCE ($promoted) to $TARGET."
+          echo "Promoted $SOURCE ($TESTED_SHA) to $TARGET as $promoted."
 
       - name: Start the package pipeline
         env:
@@ -216,13 +364,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A push made with the GITHUB_TOKEN starts no workflow, so the release branch
-          # moving is not enough to publish it. A dispatch is the one event this token
-          # may start, and it names the exact commit promoted, which pipeline-pkg
-          # refuses to substitute.
-          gh workflow run pipeline-pkg.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$TARGET" \
-            -f expected_sha="$PROMOTED_SHA"
+          # Started by dispatch, naming the exact commit promoted, which pipeline-pkg refuses to
+          # substitute. A release branch moving publishes nothing by itself, so a stray push to
+          # one can never ship.
+          if ! gh workflow run pipeline-pkg.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref "$TARGET" \
+              -f expected_sha="$PROMOTED_SHA"; then
+            echo "::error::$TARGET was promoted to $PROMOTED_SHA, but Package Pipeline could not be started. Nothing is published until it runs: start it by hand for $TARGET."
+            exit 1
+          fi
 
           echo "Started pipeline-pkg for $TARGET at $PROMOTED_SHA."

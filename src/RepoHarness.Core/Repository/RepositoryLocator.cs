@@ -48,7 +48,7 @@ public sealed class RepositoryLocator(IGitClient gitClient) : IRepositoryLocator
             throw new HarnessException(
                 HarnessExit.Refused,
                 $"'{repositoryRoot}' is a worktree of the bare repository '{main.Path}'. "
-                + "repo-harness keeps its state in the main checkout, and a bare repository has none.");
+                + "DssHarness keeps its state in the main checkout, and a bare repository has none.");
         }
 
         return new HarnessLayout(repositoryRoot, main.Path);

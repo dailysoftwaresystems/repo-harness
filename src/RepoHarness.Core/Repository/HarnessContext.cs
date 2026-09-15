@@ -1,6 +1,7 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Repository;
@@ -70,7 +71,7 @@ public sealed class HarnessContextLoader(
         {
             throw new HarnessException(
                 HarnessExit.NotInitialized,
-                $"No harness configuration in '{layout.MainCheckoutRoot}'. Run 'repo-harness init' first.");
+                $"No harness configuration in '{layout.MainCheckoutRoot}'. Run '{ToolPackage.Command} init' first.");
         }
 
         return new HarnessContext(layout, _configStore.Load(configFile));

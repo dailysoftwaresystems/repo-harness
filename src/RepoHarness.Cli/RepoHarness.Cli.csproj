@@ -3,11 +3,11 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>RepoHarness.Cli</RootNamespace>
-    <AssemblyName>repo-harness</AssemblyName>
+    <AssemblyName>DssHarness</AssemblyName>
 
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>repo-harness</ToolCommandName>
-    <PackageId>RepoHarness</PackageId>
+    <ToolCommandName>DssHarness</ToolCommandName>
+    <PackageId>DssHarness</PackageId>
     <Version>0.1.0</Version>
     <Description>Cross-platform repository harness CLI: git worktree management with Windows path-budget checks, driven entirely by .harness-config/config.json.</Description>
     <RollForward>latestMajor</RollForward>
@@ -22,7 +22,7 @@
          the package's whole first impression. -->
     <Authors>Daily Software Systems</Authors>
     <Company>Daily Software Systems</Company>
-    <Product>repo-harness</Product>
+    <Product>DssHarness</Product>
     <PackageTags>cli;tool;git;worktree;build;test;cross-platform;devops</PackageTags>
     <PackageProjectUrl>https://github.com/dailysoftwaresystems/repo-harness</PackageProjectUrl>
     <RepositoryUrl>https://github.com/dailysoftwaresystems/repo-harness</RepositoryUrl>

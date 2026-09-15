@@ -1,4 +1,5 @@
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -307,7 +308,7 @@ public sealed class AnchorRegistryService(
                     registry.RelativePath,
                     0,
                     AnchorFindingSeverity.Fatal,
-                    $"there is no {registry.Name} registry here; run 'repo-harness init' to create it"));
+                    $"there is no {registry.Name} registry here; run '{ToolPackage.Command} init' to create it"));
                 continue;
             }
 
@@ -402,7 +403,7 @@ public sealed class AnchorRegistryService(
         {
             throw new HarnessException(
                 HarnessExit.NotInitialized,
-                $"There is no {registry.Name} anchor registry at '{registry.RelativePath}'. Run 'repo-harness init' "
+                $"There is no {registry.Name} anchor registry at '{registry.RelativePath}'. Run '{ToolPackage.Command} init' "
                 + $"to create it, or correct {registry.Setting} in config.json.");
         }
 

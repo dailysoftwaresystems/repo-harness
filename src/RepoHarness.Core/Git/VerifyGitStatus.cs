@@ -1,7 +1,7 @@
 namespace RepoHarness.Core.Git;
 
 /// <summary>
-/// Result of <c>repo-harness verify-git</c>, returned directly as the process exit code.
+/// Result of <c>DssHarness verify-git</c>, returned directly as the process exit code.
 /// </summary>
 /// <remarks>
 /// The two failure values are deliberately distinct: "git is not installed" is a

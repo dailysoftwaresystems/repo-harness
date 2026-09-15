@@ -6,6 +6,11 @@ namespace RepoHarness.Tests;
 
 public sealed class ConfigStoreTests
 {
+    /// <summary>An emulator declaration every leg test below can refer to.</summary>
+    private const string QemuArm64 = """
+        { "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["/opt/arm64/uname", "-m"], "pattern": "^aarch64$" } }
+        """;
+
     [Fact]
     public void Load_Throws_WhenTheFileIsMissing()
     {
@@ -56,26 +61,34 @@ public sealed class ConfigStoreTests
 
         var original = new HarnessConfig
         {
-            Defaults = new HarnessDefaults { BuildCores = 12, TestCores = 4, MaxParallelLegs = 2, LegSet = "gate" },
+            Defaults = new HarnessDefaults { BuildCores = 12, TestCores = 4, MaxParallelLegs = 2 },
             Toolchains = { ["clang"] = new ToolchainConfig { Env = { ["CXX"] = "clang++" } } },
             Sanitizers = { ["asan"] = new VariantOverlay { Env = { ["CFLAGS"] = "-fsanitize=address" } } },
             BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
-            Targets =
+            Hosts = new HostsConfig
             {
-                ["vps"] = new TargetConfig
+                Local = new LocalHostConfig { BuildCores = 8 },
+                Wsl = { ["Ubuntu"] = new WslHostConfig { RepositoryPath = "~/src/repo" } },
+                Ssh = { ["vps"] = new SshHostConfig { RepositoryPath = "/home/dev/repo", BuildCores = 32, TestCores = 16 } },
+            },
+            Emulators =
+            {
+                ["qemu-arm64"] = new EmulatorConfig
                 {
-                    Transport = "ssh",
-                    RepositoryPath = "/home/dev/repo",
-                    AvailableOn = "HOST-A,HOST-B",
-                    BuildCores = 32,
-                    TestCores = 16,
+                    HostOs = "linux",
+                    HostProcessor = "x86_64",
+                    Processor = "arm64",
+                    Launcher = ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu"],
+                    Requires = ["qemu-aarch64", "/usr/aarch64-linux-gnu"],
+                    Witness = new EmulatorWitness { Command = ["/opt/arm64/uname", "-m"], Pattern = "^aarch64$" },
                 },
             },
             Legs =
             {
-                ["vps-debug"] = new LegConfig { Target = "vps", Config = "debug", Toolchain = "clang", Sanitizer = "asan" },
+                ["vps-debug"] = new LegConfig { Os = "linux", Processor = "x86_64", Ssh = "vps", Config = "debug", Toolchain = "clang", Sanitizer = "asan" },
+                ["arm64-debug"] = new LegConfig { Os = "linux", Processor = "arm64", Emulator = "qemu-arm64", Wsl = "Ubuntu", Config = "debug" },
             },
-            LegSets = { ["gate"] = ["vps-debug"] },
+            LegSets = { ["gate"] = ["vps-debug", "arm64-debug"] },
             Exec = { ["fmt"] = new ExecConfig { Command = "clang-format", Args = ["-i"] } },
             Worktrees = new WorktreeSettings { MaxNameLength = 16, PathLimit = 1024 },
         };
@@ -86,16 +99,23 @@ public sealed class ConfigStoreTests
         Assert.Equal(12, loaded.Defaults.BuildCores);
         Assert.Equal(4, loaded.Defaults.TestCores);
         Assert.Equal(2, loaded.Defaults.MaxParallelLegs);
-        Assert.Equal("gate", loaded.Defaults.LegSet);
         Assert.Equal("clang++", loaded.Toolchains["clang"].Env["CXX"]);
         Assert.Equal("-fsanitize=address", loaded.Sanitizers["asan"].Env["CFLAGS"]);
         Assert.Equal("Debug", loaded.BuildConfigs["debug"].CmakeBuildType);
-        Assert.Equal("ssh", loaded.Targets["vps"].Transport);
-        Assert.Equal("HOST-A,HOST-B", loaded.Targets["vps"].AvailableOn);
-        Assert.Equal(32, loaded.Targets["vps"].BuildCores);
-        Assert.Equal(16, loaded.Targets["vps"].TestCores);
+        Assert.Equal(8, loaded.Hosts.Local.BuildCores);
+        Assert.Equal("~/src/repo", loaded.Hosts.Wsl["Ubuntu"].RepositoryPath);
+        Assert.Equal("/home/dev/repo", loaded.Hosts.Ssh["vps"].RepositoryPath);
+        Assert.Equal(32, loaded.Hosts.Ssh["vps"].BuildCores);
+        Assert.Equal(16, loaded.Hosts.Ssh["vps"].TestCores);
+        Assert.Equal(["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu"], loaded.Emulators["qemu-arm64"].Launcher);
+        Assert.Equal(["qemu-aarch64", "/usr/aarch64-linux-gnu"], loaded.Emulators["qemu-arm64"].Requires);
+        Assert.Equal(["test"], loaded.Emulators["qemu-arm64"].Phases);
+        Assert.Equal("^aarch64$", loaded.Emulators["qemu-arm64"].Witness.Pattern);
+        Assert.Equal("vps", loaded.Legs["vps-debug"].Ssh);
         Assert.Equal("asan", loaded.Legs["vps-debug"].Sanitizer);
-        Assert.Equal(["vps-debug"], loaded.LegSets["gate"]);
+        Assert.Equal("qemu-arm64", loaded.Legs["arm64-debug"].Emulator);
+        Assert.Equal("Ubuntu", loaded.Legs["arm64-debug"].Wsl);
+        Assert.Equal(["vps-debug", "arm64-debug"], loaded.LegSets["gate"]);
         Assert.Equal(["-i"], loaded.Exec["fmt"].Args);
         Assert.Equal(16, loaded.Worktrees.MaxNameLength);
         Assert.Equal(1024, loaded.Worktrees.PathLimit);
@@ -131,7 +151,7 @@ public sealed class ConfigStoreTests
     public void Serialize_WritesLineFeeds_OnEveryPlatform()
     {
         // config.json is tracked; its bytes must not depend on which machine ran init.
-        var json = CreateStore().Serialize(DefaultConfigFactory.Create([]));
+        var json = CreateStore().Serialize(DefaultConfigFactory.Create([], PlatformNames.Linux, PlatformNames.X64));
 
         Assert.DoesNotContain("\r", json, StringComparison.Ordinal);
         Assert.EndsWith("}\n", json, StringComparison.Ordinal);
@@ -143,12 +163,13 @@ public sealed class ConfigStoreTests
         // Config keys are names a person typed. Looking up "Local-Debug" against a
         // config declaring "local-debug" must not report the leg as unknown, and the
         // in-memory config and the loaded one must not disagree about that.
-        var config = LoadValid("""
+        var config = LoadValid($$"""
             {
               "toolchains": { "msvc": { "generator": "Ninja" } },
               "buildConfigs": { "debug": { "cmakeBuildType": "Debug" } },
-              "targets": { "root": { "transport": "local" } },
-              "legs": { "local-debug": { "target": "root", "config": "debug" } },
+              "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
+              "emulators": { "qemu-arm64": {{QemuArm64}} },
+              "legs": { "local-debug": { "os": "linux", "processor": "x86_64", "config": "debug" } },
               "legSets": { "gate": ["local-debug"] },
               "exec": { "fmt": { "command": "clang-format" } }
             }
@@ -156,7 +177,9 @@ public sealed class ConfigStoreTests
 
         Assert.True(config.Toolchains.ContainsKey("MSVC"), "toolchains");
         Assert.True(config.BuildConfigs.ContainsKey("Debug"), "buildConfigs");
-        Assert.True(config.Targets.ContainsKey("ROOT"), "targets");
+        Assert.True(config.Hosts.Wsl.ContainsKey("ubuntu"), "hosts.wsl");
+        Assert.True(config.Hosts.Ssh.ContainsKey("VPS"), "hosts.ssh");
+        Assert.True(config.Emulators.ContainsKey("QEMU-ARM64"), "emulators");
         Assert.True(config.Legs.ContainsKey("Local-Debug"), "legs");
         Assert.True(config.LegSets.ContainsKey("Gate"), "legSets");
         Assert.True(config.Exec.ContainsKey("FMT"), "exec");
@@ -184,17 +207,29 @@ public sealed class ConfigStoreTests
         Assert.Contains("pathBudgetReserv", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("""{ "targets": { "root": { "transport": "local" } } }""", "targets")]
+    [InlineData("""{ "defaults": { "legSet": "gate" } }""", "legSet")]
+    [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "test": { "all": { "runner": "ctest", "successPattern": "ok" }, "testAgainstSshIfAvailable": [] } } ] }""", "testAgainstSshIfAvailable")]
+    public void Load_RejectsSettingsThatNoLongerExist(string json, string setting)
+    {
+        // Silently ignored, a file written for the old shape would lose its legs' hosts and its
+        // default selection without a word.
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(setting, exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Load_RejectsAKeyDeclaredTwice_InDifferentCase()
     {
         // Looked up ignoring case, the two would be one entry, silently discarding one.
         var exception = LoadInvalid("""
             {
-              "targets": { "root": { "transport": "local" } },
               "buildConfigs": { "debug": {} },
               "legs": {
-                "local": { "target": "root", "config": "debug" },
-                "LOCAL": { "target": "root", "config": "debug" }
+                "local": { "os": "linux", "processor": "x86_64", "config": "debug" },
+                "LOCAL": { "os": "linux", "processor": "x86_64", "config": "debug" }
               }
             }
             """);
@@ -205,9 +240,9 @@ public sealed class ConfigStoreTests
     [Fact]
     public void Load_NamesAMissingRequiredSetting()
     {
-        var exception = LoadInvalid("""{ "targets": { "vps": { "repositoryPath": "/srv/repo" } } }""");
+        var exception = LoadInvalid("""{ "hosts": { "ssh": { "vps": { "buildCores": 2 } } } }""");
 
-        Assert.Contains("transport", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("repositoryPath", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -263,14 +298,13 @@ public sealed class ConfigStoreTests
     {
         var exception = LoadInvalid("""
             {
-              "targets": { "root": { "transport": "local" } },
               "buildConfigs": { "debug": { "cmakeBuildType": "Debug" } },
-              "legs": { "bad": { "target": "typo", "config": "nope", "sanitizer": "tsan" } }
+              "legs": { "bad": { "os": "linux", "processor": "x86_64", "ssh": "typo", "config": "nope", "sanitizer": "tsan" } }
             }
             """);
 
         // Fixing one problem only to be shown the next is a poor way to correct a file.
-        Assert.Contains("target 'typo'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh host 'typo'", exception.Message, StringComparison.Ordinal);
         Assert.Contains("config 'nope'", exception.Message, StringComparison.Ordinal);
         Assert.Contains("sanitizer 'tsan'", exception.Message, StringComparison.Ordinal);
     }
@@ -280,29 +314,195 @@ public sealed class ConfigStoreTests
     {
         var exception = LoadInvalid("""
             {
-              "targets": { "root": { "transport": "local" } },
               "buildConfigs": { "debug": {} },
-              "legs": { "in-worktree": { "target": "root", "config": "debug", "worktree": "Bad_Name" } }
+              "legs": { "in-worktree": { "os": "linux", "processor": "x86_64", "config": "debug", "worktree": "Bad_Name" } }
             }
             """);
 
         Assert.Contains("leg 'in-worktree' worktree", exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Load_RejectsAnSshTargetWithNoRepositoryPath()
+    [Theory]
+    [InlineData("""{ "os": "linx", "processor": "x86_64", "config": "debug" }""", "leg 'x' os is 'linx'")]
+    [InlineData("""{ "os": "linux", "processor": "amd64", "config": "debug" }""", "leg 'x' processor is 'amd64'")]
+    [InlineData("""{ "os": "linux", "processor": "x86_64", "config": "debug", "wsl": "Ubuntu", "ssh": "vps" }""", "names both a wsl and an ssh host")]
+    [InlineData("""{ "os": "windows", "processor": "x86_64", "config": "debug", "wsl": "Ubuntu" }""", "names wsl host 'Ubuntu', which runs linux")]
+    [InlineData("""{ "os": "linux", "processor": "x86_64", "config": "debug", "wsl": "Debian" }""", "wsl host 'Debian', which is not declared under hosts.wsl")]
+    [InlineData("""{ "os": "linux", "processor": "arm64", "config": "debug", "emulator": "missing" }""", "emulator 'missing', which is not declared")]
+    [InlineData("""{ "os": "linux", "processor": "riscv64", "config": "debug", "emulator": "qemu-arm64" }""", "but emulator 'qemu-arm64' runs arm64 programs")]
+    [InlineData("""{ "os": "macos", "processor": "arm64", "config": "debug", "emulator": "qemu-arm64" }""", "but emulator 'qemu-arm64' runs on linux hosts")]
+    public void Load_RejectsALegThatCanNeverBePlaced(string leg, string expected)
     {
-        var exception = LoadInvalid("""{ "targets": { "vps": { "transport": "ssh" } } }""");
+        var exception = LoadInvalid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
+              "emulators": { "qemu-arm64": {{QemuArm64}} },
+              "legs": { "x": {{leg}} }
+            }
+            """);
 
-        Assert.Contains("repositoryPath", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Load_RejectsAWslTargetWithNoDistro()
+    public void Load_AcceptsALegThatNamesNoHost_BecauseWhereItRunsIsMeasured()
     {
-        var exception = LoadInvalid("""{ "targets": { "wsl": { "transport": "wsl" } } }""");
+        var config = LoadValid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "emulators": { "qemu-arm64": {{QemuArm64}} },
+              "legs": { "arm64": { "os": "linux", "processor": "arm64", "emulator": "qemu-arm64", "config": "debug" } }
+            }
+            """);
 
-        Assert.Contains("distro", exception.Message, StringComparison.Ordinal);
+        var leg = config.Legs["arm64"];
+        Assert.Null(leg.Wsl);
+        Assert.Null(leg.Ssh);
+    }
+
+    [Fact]
+    public void Load_RejectsALegSetNamedLikeALeg()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "legs": { "gate": { "os": "linux", "processor": "x86_64", "config": "debug" } },
+              "legSets": { "gate": ["gate"] }
+            }
+            """);
+
+        Assert.Contains("legSet 'gate' has the same name as a leg", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "legs": { "a,b": { "os": "linux", "processor": "x86_64", "config": "debug" } } }""", "leg 'a,b' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "a b": { "os": "linux", "processor": "x86_64", "config": "debug" } } }""", "leg 'a b' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "gate": { "os": "linux", "processor": "x86_64", "config": "debug" } }, "legSets": { "x,y": ["gate"] } }""", "legSet 'x,y' cannot be selected with --legs")]
+    [InlineData("""{ "legs": { "gate": { "os": "linux", "processor": "x86_64", "config": "debug" } }, "legSets": { "set": ["missing"] } }""", "legSet 'set' names leg 'missing', which is not declared")]
+    public void Load_RejectsALegOrLegSet_ThatLegsCouldNeverSelect(string json, string expected)
+    {
+        // --legs splits its value at commas and the command line at spaces, so such a name is unreachable.
+        var exception = LoadInvalid(json.Replace("{ \"legs\"", "{ \"buildConfigs\": { \"debug\": {} }, \"legs\"", StringComparison.Ordinal));
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "repo" } } } }""", "repositoryPath 'repo' must be absolute")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~" } } } }""", "is a home or root directory")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~/" } } } }""", "is a home or root directory")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/" } } } }""", "is a home or root directory")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "C:\\" } } } }""", "is a home or root directory")]
+    [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "C:\\src\\repo" } } } }""", "start with ~/ for the home directory inside the distribution")]
+    [InlineData("""{ "hosts": { "ssh": { "-oProxyCommand=x": { "repositoryPath": "/r" } } } }""", "is not a usable name")]
+    [InlineData("""{ "hosts": { "wsl": { "my distro": { "repositoryPath": "/r" } } } }""", "is not a usable name")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "~/src/.." } } } }""", "has a '.' or '..' segment")]
+    [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/./repo" } } } }""", "has a '.' or '..' segment")]
+    public void Load_RejectsAHostThatCannotBeUsed(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/home/dev/repo")]
+    [InlineData("~/src/repo")]
+    [InlineData("C:\\\\src\\\\repo")]
+    [InlineData("D:/src/repo")]
+    public void Load_AcceptsAnSshRepositoryPath_ThatNamesItsDirectory(string path)
+    {
+        var config = LoadValid($$"""{ "hosts": { "ssh": { "vps": { "repositoryPath": "{{path}}" } } } }""");
+
+        Assert.True(config.Hosts.Ssh.ContainsKey("vps"));
+    }
+
+    [Theory]
+    [InlineData("""{ "hostOs": "beos", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": ["w"], "pattern": "x" } }""", "emulator 'e' hostOs is 'beos'")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "x86_64", "witness": { "command": ["w"], "pattern": "x" } }""", "which needs no emulator")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": [], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher is empty")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "phases": ["deploy"], "witness": { "command": ["w"], "pattern": "x" } }""", "phases names 'deploy'")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "phases": [], "witness": { "command": ["w"], "pattern": "x" } }""", "phases is empty")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": [], "pattern": "x" } }""", "witness has an empty command")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": ["w"], "pattern": "(" } }""", "witness.pattern is not a valid regular expression")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "tool": "qemu", "witness": { "command": ["w"], "pattern": "x" } }""", "names tool 'qemu', which is not declared")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "requires": [" "], "witness": { "command": ["w"], "pattern": "x" } }""", "requires contains a blank entry")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["./qemu-aarch64"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher './qemu-aarch64' must be a program name, looked up on the PATH, or an absolute path")]
+    [InlineData("""{ "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64", "launcher": ["tools\\prism.exe"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher 'tools\\prism.exe' must be a program name")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": ["bin/uname"], "pattern": "x" } }""", "witness 'bin/uname' must be a program name")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "requires": ["~/sysroot"], "witness": { "command": ["w"], "pattern": "x" } }""", "requires '~/sysroot' must be a program name")]
+    [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["uname", "-m"], "pattern": "x" } }""", "witness 'uname' must be an absolute path: behind a launcher it is found by the launcher")]
+    public void Load_RejectsAnEmulatorThatCannotWork(string emulator, string expected)
+    {
+        var exception = LoadInvalid($$"""{ "emulators": { "e": {{emulator}} } }""");
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("qemu-aarch64")]
+    [InlineData("/usr/bin/qemu-aarch64")]
+    [InlineData("C:/Tools/qemu-aarch64.exe")]
+    [InlineData("C:\\\\Tools\\\\qemu-aarch64.exe")]
+    public void Load_AcceptsAnEmulatorProgram_NamedOrGivenByAnAbsolutePath(string program)
+    {
+        var config = LoadValid($$"""
+            { "emulators": { "e": {
+                "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64",
+                "launcher": ["{{program}}"], "requires": ["{{program}}"],
+                "witness": { "command": ["/opt/arm64/uname"], "pattern": "x" } } } }
+            """);
+
+        Assert.True(config.Emulators.ContainsKey("e"));
+    }
+
+    [Fact]
+    public void Load_AcceptsAWitnessNamedWithoutAPath_WhenNoLauncherStandsBeforeIt()
+    {
+        // With no launcher the witness is started like any program, so it is looked up on the PATH.
+        var config = LoadValid("""
+            { "emulators": { "prism": {
+                "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64",
+                "witness": { "command": ["x64-witness"], "pattern": "x" } } } }
+            """);
+
+        Assert.Null(config.Emulators["prism"].Launcher);
+    }
+
+    [Theory]
+    [InlineData("""{ "commit": { "template": "{area}: {summary}", "variables": { "area": {} } } }""", "commit.template uses {summary}, which is not declared")]
+    [InlineData("""{ "commit": { "template": "{area}: fix", "variables": { "area": {}, "scope": {} } } }""", "commit.variables 'scope' is never used")]
+    [InlineData("""{ "commit": { "variables": { "area": {} } } }""", "there is no commit.template to use them")]
+    [InlineData("""{ "commit": { "template": "{area}", "variables": { "area": { "required": true, "default": "core" } } } }""", "is required and has a default")]
+    [InlineData("""{ "commit": { "template": "{1area}", "variables": { "1area": {} } } }""", "commit.variables '1area' must be letters")]
+    [InlineData("""{ "commit": { "template": " " } }""", "commit.template is blank")]
+    public void Load_RejectsACommitPolicyThatCannotWork(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_AcceptsACommitTemplate_WhoseEveryPlaceholderIsDeclared()
+    {
+        var config = LoadValid("""
+            { "commit": { "template": "{area}: {summary}", "variables": { "area": { "required": true }, "summary": { "default": "update" } } } }
+            """);
+
+        Assert.Equal(2, config.Commit.Variables.Count);
+    }
+
+    [Theory]
+    [InlineData("""{ "sync": { "exclude": ["../outside"] } }""", "sync.exclude entry '../outside'")]
+    [InlineData("""{ "sync": { "neverTransfer": ["/etc"] } }""", "sync.neverTransfer entry '/etc'")]
+    [InlineData("""{ "sync": { "exclude": [""] } }""", "sync.exclude entry ''")]
+    public void Load_RejectsASyncPathOutsideTheTree(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -317,8 +517,8 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "defaults": { "buildCores": 0 } }""", "defaults.buildCores")]
     [InlineData("""{ "defaults": { "testCores": -1 } }""", "defaults.testCores")]
     [InlineData("""{ "defaults": { "maxParallelLegs": 0 } }""", "defaults.maxParallelLegs")]
-    [InlineData("""{ "targets": { "vps": { "transport": "local", "buildCores": 0 } } }""", "target 'vps' buildCores")]
-    [InlineData("""{ "targets": { "vps": { "transport": "local", "testCores": 0 } } }""", "target 'vps' testCores")]
+    [InlineData("""{ "hosts": { "local": { "buildCores": 0 } } }""", "hosts.local buildCores")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "testCores": 0 } } } }""", "hosts.ssh 'vps' testCores")]
     public void Load_RejectsACoreCountBelowOne(string json, string setting)
     {
         var exception = LoadInvalid(json);
@@ -334,25 +534,6 @@ public sealed class ConfigStoreTests
             """);
 
         Assert.Contains("declares no invocation", exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Load_RejectsTestingAgainstATargetThatDoesNotUseSsh()
-    {
-        var exception = LoadInvalid("""
-            {
-              "targets": { "root": { "transport": "local" } },
-              "projects": [
-                {
-                  "name": "main",
-                  "type": "cmake",
-                  "test": { "all": { "runner": "ctest" }, "testAgainstSshIfAvailable": ["root"] }
-                }
-              ]
-            }
-            """);
-
-        Assert.Contains("does not use the ssh transport", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -410,15 +591,17 @@ public sealed class ConfigStoreTests
                 ProcessSampleSeconds = 2,
             },
             Contention = new ContentionConfig { BuildTools = ["ninja"], SharedResourceTools = ["compiler-daemon"] },
-            Targets =
+            Hosts = new HostsConfig
             {
-                ["mac"] = new TargetConfig
+                Ssh =
                 {
-                    Transport = "ssh",
-                    RepositoryPath = "/Users/dev/repo",
-                    KeepAwake = ["caffeinate", "-dimsu", "-w", "{pid}"],
-                    ConnectTimeoutSeconds = 10,
-                    KeepAliveSeconds = 15,
+                    ["mac"] = new SshHostConfig
+                    {
+                        RepositoryPath = "/Users/dev/repo",
+                        KeepAwake = ["caffeinate", "-dimsu", "-w", "{pid}"],
+                        ConnectTimeoutSeconds = 10,
+                        KeepAliveSeconds = 15,
+                    },
                 },
             },
             Projects =
@@ -452,9 +635,9 @@ public sealed class ConfigStoreTests
         Assert.Equal(2, loaded.Defaults.ProcessSampleSeconds);
         Assert.Equal(["ninja"], loaded.Contention.BuildTools);
         Assert.Equal(["compiler-daemon"], loaded.Contention.SharedResourceTools);
-        Assert.Equal(["caffeinate", "-dimsu", "-w", "{pid}"], loaded.Targets["mac"].KeepAwake);
-        Assert.Equal(10, loaded.Targets["mac"].ConnectTimeoutSeconds);
-        Assert.Equal(15, loaded.Targets["mac"].KeepAliveSeconds);
+        Assert.Equal(["caffeinate", "-dimsu", "-w", "{pid}"], loaded.Hosts.Ssh["mac"].KeepAwake);
+        Assert.Equal(10, loaded.Hosts.Ssh["mac"].ConnectTimeoutSeconds);
+        Assert.Equal(15, loaded.Hosts.Ssh["mac"].KeepAliveSeconds);
 
         var project = Assert.Single(loaded.Projects);
         Assert.Equal(["bin/tool"], project.BuildOutputs);
@@ -468,7 +651,7 @@ public sealed class ConfigStoreTests
     public void LegIntegrityDefaults_ApplyWithoutConfiguration()
     {
         var config = new HarnessConfig();
-        var target = new TargetConfig { Transport = "ssh" };
+        var host = new SshHostConfig { RepositoryPath = "/srv/repo" };
 
         Assert.Equal(3.0, config.Defaults.DurationWarningFactor);
         Assert.Equal(2000, config.Defaults.ClockStepToleranceMilliseconds);
@@ -476,9 +659,9 @@ public sealed class ConfigStoreTests
         Assert.Contains("ctest", config.Contention.BuildTools);
         Assert.Contains("ninja", config.Contention.BuildTools);
         Assert.Empty(config.Contention.SharedResourceTools);
-        Assert.Equal(25, target.ConnectTimeoutSeconds);
-        Assert.Equal(30, target.KeepAliveSeconds);
-        Assert.Null(target.KeepAwake);
+        Assert.Equal(25, host.ConnectTimeoutSeconds);
+        Assert.Equal(30, host.KeepAliveSeconds);
+        Assert.Null(host.KeepAwake);
     }
 
     [Theory]
@@ -486,9 +669,9 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "defaults": { "clockStepToleranceMilliseconds": -1 } }""", "defaults.clockStepToleranceMilliseconds")]
     [InlineData("""{ "defaults": { "processSampleSeconds": 0 } }""", "defaults.processSampleSeconds")]
     [InlineData("""{ "contention": { "buildTools": ["ninja", " "] } }""", "contention.buildTools contains a blank name")]
-    [InlineData("""{ "targets": { "mac": { "transport": "local", "keepAwake": [] } } }""", "keepAwake has an empty command")]
-    [InlineData("""{ "targets": { "vps": { "transport": "ssh", "repositoryPath": "/r", "connectTimeoutSeconds": 0 } } }""", "connectTimeoutSeconds")]
-    [InlineData("""{ "targets": { "vps": { "transport": "ssh", "repositoryPath": "/r", "keepAliveSeconds": 0 } } }""", "keepAliveSeconds")]
+    [InlineData("""{ "hosts": { "local": { "keepAwake": [] } } }""", "keepAwake has an empty command")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "connectTimeoutSeconds": 0 } } } }""", "connectTimeoutSeconds")]
+    [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "keepAliveSeconds": 0 } } } }""", "keepAliveSeconds")]
     [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "buildOutputs": ["../other/bin"] } ] }""", "buildOutputs entry '../other/bin'")]
     [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "buildOutputs": ["/abs/bin"] } ] }""", "buildOutputs entry '/abs/bin'")]
     [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "buildOutputs": ["C:/bin"] } ] }""", "buildOutputs entry 'C:/bin'")]
@@ -591,7 +774,7 @@ public sealed class ConfigStoreTests
     [Fact]
     public void SeededConfiguration_NamesTheAnchorRegistries()
     {
-        var json = CreateStore().Serialize(DefaultConfigFactory.Create([]));
+        var json = CreateStore().Serialize(DefaultConfigFactory.Create([], PlatformNames.Linux, PlatformNames.X64));
 
         Assert.Contains("\"pendingAnchorsPath\": \".plans/_deferred-anchor-registry.md\"", json, StringComparison.Ordinal);
         Assert.Contains("\"doneAnchorsPath\": \".plans/_deferred-anchor-registry-done.md\"", json, StringComparison.Ordinal);

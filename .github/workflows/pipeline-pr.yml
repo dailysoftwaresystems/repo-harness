@@ -6,7 +6,11 @@ name: Pipeline
 # Self-contained by design. This repository is PUBLIC, so it deliberately does not
 # call the reusable workflows in the private DevOps repository and never uses
 # `secrets: inherit`. Nothing here needs a secret, which is what makes it safe to
-# run on pull requests from forks.
+# run on pull requests from forks. Every action is pinned to a full commit SHA; see
+# docs/releasing.md.
+#
+# The ci-check job rolls every result into the one commit status merging requires,
+# "Pipeline / ci-check result"; see "The required check" in docs/releasing.md.
 
 on:
   pull_request:
@@ -14,8 +18,9 @@ on:
   push:
     branches: ["main"]
 
-# Read-only. A pull request from a fork must never be able to reach a credential,
-# and the surest way to guarantee that is for the workflow to have none.
+# Read-only. A pull request from a fork must never be able to reach a credential, and
+# the surest way to guarantee that is for every job that runs the repository's code to
+# have read access only. ci-check alone may post a commit status, and it runs none.
 permissions:
   contents: read
 
@@ -35,12 +40,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
@@ -64,8 +69,80 @@ jobs:
           version: ${{ env.PACKED_VERSION }}
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        # Kept for as long as the repository's artifact retention allows. There is no
+        # retention-days here: a value above the maximum the repository allows is cut down
+        # to it with a warning on every run, so the repository setting is the one place that
+        # decides.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nupkg-pr
           path: build/package/*.nupkg
-          retention-days: 7
+
+  ci-check:
+    # The one result merging waits for. The organisation's ruleset requires a commit status
+    # named "Pipeline / ci-check result" on every pull request into main. A status, unlike a
+    # job's check, exists only once something posts it, so this job rolls the test matrix
+    # and the package check into it.
+    name: ci-check
+    runs-on: ubuntu-latest
+    needs: [test, package]
+
+    # Runs whatever the jobs it rolls up did, so a failed, skipped or cancelled job is
+    # reported as a failure rather than leaving the status missing.
+    if: ${{ always() }}
+    timeout-minutes: 5
+
+    # Posting one commit status is all this job does. It checks out nothing and runs none of
+    # the repository's code, which is why it alone gets more than read access.
+    permissions:
+      statuses: write
+
+    steps:
+      - name: Report the ci-check result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          set -euo pipefail
+
+          # Green only when every rolled-up job succeeded. "skipped" is not a pass here:
+          # package is skipped exactly when the test matrix did not succeed.
+          if [ "$TEST_RESULT" = "success" ] && [ "$PACKAGE_RESULT" = "success" ]; then
+            STATE=success
+            DESCRIPTION="Tests and package passed"
+          else
+            STATE=failure
+            DESCRIPTION="test: $TEST_RESULT, package: $PACKAGE_RESULT"
+          fi
+
+          echo "test: $TEST_RESULT, package: $PACKAGE_RESULT, so ci-check is $STATE"
+
+          if [ "$EVENT" = "pull_request" ]; then
+            # GitHub gives a pull request from a fork a read-only token, whatever this job
+            # asks for, so the status cannot be posted from its run. Said plainly, instead
+            # of as the refusal the API would answer with.
+            if [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
+              echo "::error::A pull request from a fork cannot post the 'Pipeline / ci-check result' status that merging requires. A maintainer runs the change from a branch in $REPOSITORY."
+              exit 1
+            fi
+
+            gh api --silent --method POST "repos/$REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$STATE" \
+              -f context="Pipeline / ci-check result" \
+              -f description="$DESCRIPTION" \
+              -f target_url="$RUN_URL"
+          fi
+
+          # The job's conclusion must agree with the status it posts. Ending on a successful
+          # post would show a green job beside a red status: merging reads the status, but
+          # people read the job first. Derived from STATE, so the two cannot drift apart.
+          if [ "$STATE" != "success" ]; then
+            echo "::error::ci-check is failing: test $TEST_RESULT, package $PACKAGE_RESULT."
+            exit 1
+          fi

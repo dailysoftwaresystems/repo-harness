@@ -11,19 +11,20 @@ public static class DefaultConfigFactory
     /// <summary>Name the first detected project is declared under.</summary>
     private const string PrimaryProject = "main";
 
-    /// <summary>Creates a starter configuration for the detected projects.</summary>
-    public static HarnessConfig Create(IReadOnlyList<DetectedProject> detected)
+    /// <summary>
+    /// Creates a starter configuration for the detected projects, with legs for the machine
+    /// <c>init</c> runs on, named by its operating system and processor as measured.
+    /// </summary>
+    public static HarnessConfig Create(IReadOnlyList<DetectedProject> detected, string os, string processor)
     {
         ArgumentNullException.ThrowIfNull(detected);
+        ArgumentException.ThrowIfNullOrWhiteSpace(os);
+        ArgumentException.ThrowIfNullOrWhiteSpace(processor);
 
         var config = new HarnessConfig
         {
             // The default project exists exactly when a project was detected to declare.
             Defaults = new HarnessDefaults { Project = detected.Count == 0 ? null : PrimaryProject },
-            Targets =
-            {
-                ["root"] = new TargetConfig { Transport = "local" },
-            },
             BuildConfigs =
             {
                 ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug", DotnetConfiguration = "Debug", DartMode = "debug" },
@@ -33,7 +34,7 @@ public static class DefaultConfigFactory
 
         AddToolchains(config, detected);
         AddProjects(config, detected);
-        AddLegs(config);
+        AddLegs(config, os, processor);
 
         return config;
     }
@@ -149,24 +150,33 @@ public static class DefaultConfigFactory
         },
     };
 
-    private static void AddLegs(HarnessConfig config)
+    private static void AddLegs(HarnessConfig config, string os, string processor)
     {
         if (config.Projects.Count == 0)
         {
             return;
         }
 
+        var names = new List<string>();
+
         foreach (var buildConfig in new[] { "debug", "release" })
         {
-            config.Legs[$"local-{buildConfig}"] = new LegConfig
+            // Named for what the leg needs rather than for the machine that wrote it, because the
+            // file is shared: from another machine the same leg runs wherever such a host is found.
+            var name = $"{os}-{processor}-{buildConfig}";
+
+            config.Legs[name] = new LegConfig
             {
-                Target = "root",
+                Os = os,
+                Processor = processor,
                 Project = PrimaryProject,
                 Config = buildConfig,
-                Description = $"Local {buildConfig} build and test",
+                Description = $"{buildConfig} build and test on {os} {processor}",
             };
+
+            names.Add(name);
         }
 
-        config.LegSets["gate"] = ["local-debug", "local-release"];
+        config.LegSets["gate"] = names;
     }
 }
