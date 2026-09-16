@@ -94,6 +94,23 @@ public static class HarnessConfigValidator
             RequireAtLeastOne(maxParallelLegs, "defaults.maxParallelLegs", problems);
         }
 
+        if (defaults.MaxParallelLegsTotal is { } maxParallelLegsTotal)
+        {
+            RequireAtLeastOne(maxParallelLegsTotal, "defaults.maxParallelLegsTotal", problems);
+        }
+
+        // A ceiling below the per-machine cap makes the per-machine number a claim nothing can
+        // honour: no machine could ever reach it, and a reader comparing the two would be told one
+        // thing by the file and shown another by the run.
+        if (defaults.MaxParallelLegs is { } perMachine
+            && defaults.MaxParallelLegsTotal is { } total
+            && total < perMachine)
+        {
+            problems.Add(
+                $"defaults.maxParallelLegsTotal ({total}) is below defaults.maxParallelLegs "
+                + $"({perMachine}), so no machine could ever run the per-machine number");
+        }
+
         if (defaults.StallSeconds < 0)
         {
             problems.Add($"defaults.stallSeconds cannot be negative, found {defaults.StallSeconds}");
@@ -230,6 +247,11 @@ public static class HarnessConfigValidator
         foreach (var (pattern, index) in config.BuildTimingRegex.Select((pattern, index) => (pattern, index)))
         {
             CheckPattern(pattern, $"buildTimingRegex[{index}]", problems);
+        }
+
+        foreach (var (pattern, index) in config.TestTimingRegex.Select((pattern, index) => (pattern, index)))
+        {
+            CheckPattern(pattern, $"testTimingRegex[{index}]", problems);
         }
 
         foreach (var (pattern, index) in config.RunTimingRegex.Select((pattern, index) => (pattern, index)))

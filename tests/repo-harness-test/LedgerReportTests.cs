@@ -222,6 +222,75 @@ public sealed class LedgerReportTests
 
     private static PhaseRecord Phase(string name, int seconds) => new(name, TimeSpan.FromSeconds(seconds), ClockStepped: false);
 
+    /// <summary>
+    /// What a phase reported about its own timing is shown, and shown with the leg and phase that
+    /// reported it. Collected under <c>--time</c> and, before this, never printed anywhere: the
+    /// flag extracted the marks and discarded them, so it had no observable effect at all.
+    /// </summary>
+    [Fact]
+    public void TimingsAPhaseReported_AreShownBelowTheTable_NamingTheLegAndPhase()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(134), "412 tests") with
+            {
+                Timings = [new TimingMark("build", "took 1.5s", "1.5"), new TimingMark("test", "took 12.25s", "12.25")],
+            },
+            Entry("wsl-clang-asan", LegVerdict.Passed, TimeSpan.FromSeconds(200), "412 tests") with
+            {
+                Timings = [new TimingMark("build", "took 9s", "9")],
+            },
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+        var timings = string.Join("\n", rows);
+
+        Assert.Contains("TIMINGS", timings, StringComparison.Ordinal);
+        Assert.Contains("win-msvc-release", timings, StringComparison.Ordinal);
+        Assert.Contains("took 12.25s", timings, StringComparison.Ordinal);
+        Assert.Contains("12.25", timings, StringComparison.Ordinal);
+
+        // Each mark names the phase that printed it: a leg runs several, and a bare number with
+        // nothing saying which phase produced it measures nothing.
+        var line = Assert.Single(rows, row => row.Contains("took 9s", StringComparison.Ordinal));
+        Assert.Contains("wsl-clang-asan", line, StringComparison.Ordinal);
+        Assert.Contains("build", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Without <c>--time</c>, or with it where nothing matched, the block is absent rather than
+    /// printed empty: a heading over nothing reads as a run that reported no timings.
+    /// </summary>
+    [Fact]
+    public void WithNoTimings_TheBlockIsAbsent()
+    {
+        var report = LedgerReport.From(
+            [Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(134), "412 tests")],
+            durationWarningFactor: 0);
+
+        Assert.DoesNotContain("TIMINGS", string.Join("\n", report.Render()), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheJsonLedger_CarriesEveryTimingMark()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(134), "412 tests") with
+            {
+                Timings = [new TimingMark("build", "took 1.5s", "1.5")],
+            },
+        ],
+        durationWarningFactor: 0);
+
+        var json = report.ToJson();
+
+        Assert.Contains("\"build\"", json, StringComparison.Ordinal);
+        Assert.Contains("took 1.5s", json, StringComparison.Ordinal);
+        Assert.Contains("\"1.5\"", json, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ALegRunningFewerTestsThanItsSiblings_IsMarked()
     {

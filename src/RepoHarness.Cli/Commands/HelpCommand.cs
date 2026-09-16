@@ -352,6 +352,16 @@ internal static class HelpCommand
         builder.AppendLine("              processor; a leg naming one never runs natively, and a leg naming");
         builder.AppendLine("              none runs only natively");
         builder.AppendLine();
+        builder.AppendLine("Selected legs run at once and the command waits for all of them, reporting each");
+        builder.AppendLine("live. Legs are chunked by the PHYSICAL machine they run on: this machine and every");
+        builder.AppendLine("WSL distribution are one machine, because a distribution runs on it, and each ssh");
+        builder.AppendLine("host is its own. defaults.maxParallelLegs caps how many run at once on any one");
+        builder.AppendLine("machine, so a busy laptop is not asked for more than it has while the remote hosts");
+        builder.AppendLine("sit idle; defaults.maxParallelLegsTotal caps the whole fleet on top of that, for");
+        builder.AppendLine("what it shares even when its machines do not - a license server, a network share.");
+        builder.AppendLine("Every line says which leg it came from, and a child's own output under --verbose");
+        builder.AppendLine("is tagged '<leg>/<phase>:', so several hosts building at once stay readable.");
+        builder.AppendLine();
         builder.AppendLine("Hosts are this machine, the WSL distributions under hosts.wsl and the ssh hosts");
         builder.AppendLine("under hosts.ssh. Before anything runs, hosts are measured, never assumed: their");
         builder.AppendLine("operating system, their processor, and whether each emulator the legs use works");
@@ -607,8 +617,9 @@ internal static class HelpCommand
 
         builder.AppendLine("config.json");
         builder.AppendLine();
-        builder.AppendLine($"  defaults       buildCores and testCores ({HarnessDefaults.DefaultCores} each), maxParallelLegs, default");
-        builder.AppendLine("                 project, stall bound");
+        builder.AppendLine($"  defaults       buildCores and testCores ({HarnessDefaults.DefaultCores} each), maxParallelLegs (per");
+        builder.AppendLine("                 machine) and maxParallelLegsTotal (the whole fleet), default project,");
+        builder.AppendLine("                 stall bound");
         builder.AppendLine("  toolchains     compilers, as environment and cache variables (msvc, gcc, clang)");
         builder.AppendLine("  sanitizers     instrumentation overlays composed onto a build");
         builder.AppendLine("  buildConfigs   named configurations (debug, release, o1, o2)");

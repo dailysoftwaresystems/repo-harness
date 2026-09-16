@@ -25,6 +25,15 @@ public sealed record LegPlan
 
     /// <summary>Whether the leg runs under emulation, which decides what its timings are compared with.</summary>
     public bool Emulated { get; init; }
+
+    /// <summary>
+    /// The physical machine this leg runs on. Legs sharing it are capped against each other; legs on
+    /// different machines proceed independently.
+    /// </summary>
+    public string MachineKey { get; init; } = string.Empty;
+
+    /// <summary>The host as a message names it, such as <c>local</c> or <c>ssh vps</c>.</summary>
+    public string Host { get; init; } = string.Empty;
 }
 
 /// <summary>What running the selected legs produced.</summary>
@@ -59,11 +68,28 @@ public sealed record LegExecutionRequest
     public Func<string, CancellationToken, Task>? SyncTree { get; init; }
 
     /// <summary>
-    /// Most legs to run at once, or <see langword="null"/> to start every selected leg together.
-    /// Legs are isolated from one another, so running fewer at a time is never needed for
-    /// correctness; this caps the load on a busy machine and nothing else.
+    /// Most legs to run at once <em>on any one physical machine</em>, or <see langword="null"/> for
+    /// no per-machine cap.
     /// </summary>
+    /// <remarks>
+    /// Per machine rather than across the run, because that is where the contention is: a Windows
+    /// leg and a WSL leg are one machine's processors however differently they are named, while an
+    /// ssh host on the other side of the room shares nothing with either. A single cap across every
+    /// leg had to be set low enough for the busiest machine, which left every other host idle.
+    /// Legs are isolated from one another, so a cap is never needed for correctness; it keeps a
+    /// machine from being asked for more than it has, and nothing else.
+    /// </remarks>
     public int? MaxParallelLegs { get; init; }
+
+    /// <summary>
+    /// Most legs to run at once across every machine together, or <see langword="null"/> for no
+    /// overall ceiling.
+    /// </summary>
+    /// <remarks>
+    /// Applied on top of <see cref="MaxParallelLegs"/>, for what a fleet shares even when its
+    /// machines do not: a license server, a network share, the bandwidth a sync needs.
+    /// </remarks>
+    public int? MaxParallelLegsTotal { get; init; }
 }
 
 /// <summary>
@@ -102,9 +128,17 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
 
         Refuse(request.Legs);
 
-        using var slots = request.MaxParallelLegs is > 0
-            ? new SemaphoreSlim(request.MaxParallelLegs.Value, request.MaxParallelLegs.Value)
-            : null;
+        // One semaphore per machine, and one across all of them. A leg takes the overall slot first
+        // and its machine's second, in that order everywhere: two legs taking them in opposite
+        // orders would each hold what the other waits for, and the run would stop having reported
+        // nothing. Released in the reverse order by the same rule.
+        using var overall = Slots(request.MaxParallelLegsTotal);
+        var machines = request.Legs
+            .Select(leg => MachineOf(leg))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(machine => machine, _ => Slots(request.MaxParallelLegs), StringComparer.OrdinalIgnoreCase);
+
+        Announce(request, ledger, machines.Count);
 
         var syncs = new Dictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
         var syncGate = new Lock();
@@ -112,7 +146,15 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
         // Started together and awaited together. A leg that finishes early reports at once through
         // the ledger; nothing waits for the slowest leg before saying anything.
         var running = request.Legs
-            .Select(leg => RunOneAsync(leg, request, ledger, slots, syncs, syncGate, cancellationToken))
+            .Select(leg => RunOneAsync(
+                leg,
+                request,
+                ledger,
+                overall,
+                machines[MachineOf(leg)],
+                syncs,
+                syncGate,
+                cancellationToken))
             .ToList();
 
         var entries = await Task.WhenAll(running).ConfigureAwait(false);
@@ -130,7 +172,51 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
                 $"The run was interrupted; {unfinished.Count} leg(s) reached no verdict: {string.Join(", ", unfinished)}");
         }
 
+        foreach (var machine in machines.Values)
+        {
+            machine?.Dispose();
+        }
+
         return new LegExecution(finished, unfinished, cancellationToken.IsCancellationRequested);
+    }
+
+    /// <summary>A semaphore for <paramref name="limit"/>, or none when nothing is being limited.</summary>
+    private static SemaphoreSlim? Slots(int? limit)
+        => limit is > 0 ? new SemaphoreSlim(limit.Value, limit.Value) : null;
+
+    /// <summary>The machine a leg runs on, or one shared machine where nothing said.</summary>
+    /// <remarks>
+    /// Legs that do not say where they run are counted as sharing one machine, not as owning one
+    /// each. Both answers are guesses, and they fail in opposite directions: treating each as its
+    /// own machine removes the cap entirely, so an unset field would quietly start every leg at
+    /// once on a machine sized for two. Sharing one key only ever runs fewer at a time than the
+    /// truth would allow, which costs time and nothing else.
+    /// </remarks>
+    private static string MachineOf(LegPlan leg)
+        => leg.MachineKey.Length > 0 ? leg.MachineKey : "machine:unspecified";
+
+    /// <summary>
+    /// Says what is about to run, and where, before any of it starts.
+    /// </summary>
+    /// <remarks>
+    /// A parallel run's output is several legs' lines woven together, so the one thing a reader
+    /// cannot reconstruct afterwards is what was started and what it was waiting for. Said once, up
+    /// front, naming every leg and the machines they are spread across.
+    /// </remarks>
+    private void Announce(LegExecutionRequest request, LegLedger ledger, int machineCount)
+    {
+        var legs = string.Join(", ", request.Legs.Select(leg => leg.Name));
+        var caps = (request.MaxParallelLegs, request.MaxParallelLegsTotal) switch
+        {
+            (null, null) => "all at once",
+            ({ } perMachine, null) => $"up to {perMachine} at once per machine",
+            (null, { } total) => $"up to {total} at once",
+            var (perMachine, total) => $"up to {perMachine.Value} at once per machine, {total.Value} in all",
+        };
+
+        _output.Info(
+            ledger.CommandName,
+            $"starting {request.Legs.Count} leg(s) across {machineCount} machine(s), {caps}: {legs}");
     }
 
     /// <summary>
@@ -187,24 +273,43 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
         LegPlan leg,
         LegExecutionRequest request,
         LegLedger ledger,
-        SemaphoreSlim? slots,
+        SemaphoreSlim? overall,
+        SemaphoreSlim? machine,
         Dictionary<string, Task> syncs,
         Lock syncGate,
         CancellationToken cancellationToken)
     {
         LegEntry entry;
 
+        var held = 0;
+
         try
         {
-            if (slots is not null)
+            if (overall is not null)
             {
-                await slots.WaitAsync(cancellationToken).ConfigureAwait(false);
+                await overall.WaitAsync(cancellationToken).ConfigureAwait(false);
+                held = 1;
+            }
+
+            if (machine is not null)
+            {
+                await machine.WaitAsync(cancellationToken).ConfigureAwait(false);
+                held = 2;
             }
         }
         catch (OperationCanceledException)
         {
+            // Whatever was taken before the wait was cancelled is given back, or a run interrupted
+            // while legs were queued would leave the slots they hold taken for the rest of it.
+            if (held >= 1)
+            {
+                overall?.Release();
+            }
+
             return null;
         }
+
+        ledger.Transition(leg.Name, $"starting on {(leg.Host.Length > 0 ? leg.Host : "this machine")}");
 
         try
         {
@@ -254,7 +359,10 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
         }
         finally
         {
-            slots?.Release();
+            // Released in the reverse of the order they were taken, so a leg never holds the overall
+            // slot while waiting on anything else.
+            machine?.Release();
+            overall?.Release();
         }
 
         ledger.Record(entry);

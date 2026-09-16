@@ -205,6 +205,14 @@ public sealed class RunnerRunService(
         var elapsed = Stopwatch.StartNew();
         var state = new RunState { Leg = request.Leg };
 
+        // Said before the first one starts, naming every step. A parallel run weaves several legs'
+        // lines together, so what a leg set out to do is the one thing its output cannot be read
+        // backwards to recover.
+        _output.Info(
+            CommandName,
+            $"{request.Leg}: starting {steps.Phases.Count} step(s): "
+            + string.Join(", ", steps.Phases.Select(phase => values.Redact(phase.Name))));
+
         foreach (var phase in steps.Phases)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -218,8 +226,15 @@ public sealed class RunnerRunService(
                 continue;
             }
 
+            _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
+
             var result = await RunPhaseAsync(config, request, phase, values, cancellationToken).ConfigureAwait(false);
             Record(state, phase, result, values);
+
+            _output.Info(
+                CommandName,
+                $"{request.Leg}: '{values.Redact(phase.Name)}' finished "
+                + $"{(result.Passed ? "ok" : "failed")} in {LedgerReport.FormatDuration(result.Duration)}");
 
             await _runSegments
                 .RecordCompletedAsync(
@@ -238,6 +253,11 @@ public sealed class RunnerRunService(
                 break;
             }
         }
+
+        _output.Info(
+            CommandName,
+            $"{request.Leg}: finished {state.Outcomes.Count} of {steps.Phases.Count} step(s) in "
+            + $"{LedgerReport.FormatDuration(elapsed.Elapsed)}");
 
         await _runSegments
             .EndAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
@@ -260,6 +280,14 @@ public sealed class RunnerRunService(
             TimingNotes = [.. state.Phases
                 .Where(phase => phase.ClockStepped)
                 .Select(phase => $"'{values.Redact(phase.Phase)}' spanned a clock step or a host sleep, so its duration is suspect")],
+
+            // Redacted like every other line that leaves a run: a timing pattern matches the phase's
+            // own output, and a phase that printed a secret would otherwise have it copied into the
+            // ledger and the JSON a script keeps.
+            Timings = [.. state.Phases.SelectMany(phase => phase.Timings.Select(timing => new TimingMark(
+                values.Redact(phase.Phase),
+                values.Redact(timing.Text),
+                values.Redact(timing.Value))))],
         };
 
         return new RunnerLegResult(

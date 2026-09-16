@@ -76,6 +76,13 @@ public sealed record TestRequest
 
     /// <summary>The phase's name, which also names its log file under the leg's run directory.</summary>
     public string PhaseName { get; init; } = TestService.DefaultPhaseName;
+
+    /// <summary>
+    /// Whether to pull <c>testTimingRegex</c> out of the phase's output, so a timing comes from what
+    /// the suite itself reported rather than from the harness guessing which part of the wall clock
+    /// was the testing.
+    /// </summary>
+    public bool Time { get; init; }
 }
 
 /// <summary>What one leg's test run established.</summary>
@@ -216,6 +223,7 @@ public sealed class TestService(
                     Environment = Environment(command),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
+                    TimingPatterns = request.Time ? config.TestTimingRegex : [],
                     ClockStepToleranceMilliseconds = config.Defaults.ClockStepToleranceMilliseconds,
                 },
                 cancellationToken)
@@ -245,6 +253,7 @@ public sealed class TestService(
             TestCount = CountFrom(counter, phase.Output),
             Phases = [new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped)],
             TimingNotes = TimingNotes(phase),
+            Timings = [.. phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value))],
         };
 
         return new TestLegResult(reached, entry, phase.LogFile, phase, comparison, contention, cores, command);

@@ -12,6 +12,20 @@ namespace RepoHarness.Core.Execution;
 /// </param>
 public sealed record PhaseRecord(string Phase, TimeSpan Duration, bool ClockStepped);
 
+/// <summary>
+/// One timing a phase reported about itself, pulled from its output under <c>--time</c>.
+/// </summary>
+/// <remarks>
+/// Carries the phase as well as the value because a leg runs several, and a list of bare numbers
+/// with nothing saying which phase produced them is not a measurement anyone can act on. The
+/// matched text is kept beside the captured value so a reader can see what the pattern actually
+/// found, rather than trusting a number whose units the pattern alone decided.
+/// </remarks>
+/// <param name="Phase">The phase whose output carried the mark.</param>
+/// <param name="Text">The whole match, as the phase printed it.</param>
+/// <param name="Value">The first captured group, or the whole match when the pattern captures none.</param>
+public sealed record TimingMark(string Phase, string Text, string Value);
+
 /// <summary>One leg's line in the ledger.</summary>
 public sealed record LegEntry
 {
@@ -48,6 +62,12 @@ public sealed record LegEntry
 
     /// <summary>Each phase, for the comparison that marks a slow one suspect.</summary>
     public IReadOnlyList<PhaseRecord> Phases { get; init; } = [];
+
+    /// <summary>
+    /// What the leg's phases reported about their own timing under <c>--time</c>. Empty without it,
+    /// and empty with it where no timing pattern is configured or none matched.
+    /// </summary>
+    public IReadOnlyList<TimingMark> Timings { get; init; } = [];
 
     /// <summary>
     /// Anything already known to make this leg's timings meaningless, such as a host that can sleep

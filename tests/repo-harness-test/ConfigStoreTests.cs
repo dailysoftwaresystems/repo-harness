@@ -844,6 +844,42 @@ public sealed class ConfigStoreTests
         Assert.Equal(action, config.PredefinedRunners["corpus"].Action);
     }
 
+    /// <summary>
+    /// A ceiling below the per-machine cap makes the per-machine number a claim nothing can honour,
+    /// so the file would say one thing and the run show another.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAFleetCeilingBelowThePerMachineCap()
+    {
+        var exception = LoadInvalid("""
+            { "defaults": { "maxParallelLegs": 4, "maxParallelLegsTotal": 2 } }
+            """);
+
+        Assert.Contains("maxParallelLegsTotal", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("maxParallelLegs", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "defaults": { "maxParallelLegsTotal": 0 } }""", "defaults.maxParallelLegsTotal")]
+    [InlineData("""{ "testTimingRegex": ["(unclosed"] }""", "testTimingRegex[0]")]
+    public void Load_RejectsParallelismAndTimingSettingsThatCannotWork(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_AcceptsAFleetCeilingAtOrAboveThePerMachineCap()
+    {
+        var config = LoadValid("""
+            { "defaults": { "maxParallelLegs": 2, "maxParallelLegsTotal": 6 } }
+            """);
+
+        Assert.Equal(2, config.Defaults.MaxParallelLegs);
+        Assert.Equal(6, config.Defaults.MaxParallelLegsTotal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

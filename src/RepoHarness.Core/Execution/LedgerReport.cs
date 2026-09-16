@@ -18,6 +18,7 @@ namespace RepoHarness.Core.Execution;
 /// <param name="CommandTime">The time the leg's own commands took.</param>
 /// <param name="Overhead">What the harness spent on syncing, fingerprinting and sampling.</param>
 /// <param name="TestCount">How many tests it reported running, where a count pattern extracted one.</param>
+/// <param name="Timings">What its phases reported about their own timing under <c>--time</c>.</param>
 public sealed record LedgerLine(
     string Leg,
     LegVerdict Verdict,
@@ -27,7 +28,8 @@ public sealed record LedgerLine(
     IReadOnlyList<string> TimingNotes,
     TimeSpan CommandTime,
     TimeSpan Overhead,
-    int? TestCount);
+    int? TestCount,
+    IReadOnlyList<TimingMark> Timings);
 
 /// <summary>
 /// The per-leg ledger a run ends with: the table a reader sees, and the same facts as data.
@@ -105,7 +107,8 @@ public sealed class LedgerReport
                     notes,
                     entry.CommandTime,
                     entry.Overhead,
-                    entry.TestCount);
+                    entry.TestCount,
+                    entry.Timings);
             }),
         ]);
     }
@@ -163,7 +166,44 @@ public sealed class LedgerReport
             verdict,
             duration)));
 
+        rows.AddRange(RenderTimings());
+
         return rows;
+    }
+
+    /// <summary>
+    /// What each leg's phases reported about their own timing, as a block below the table.
+    /// </summary>
+    /// <remarks>
+    /// Below rather than in the table: a leg can report many marks, and a column wide enough for all
+    /// of them would push the verdict a reader came for off the edge. Empty without <c>--time</c>,
+    /// and empty with it where no pattern is configured or none matched, so the block appears only
+    /// when there is something in it. Each row names the leg and the phase that printed it, because
+    /// legs run at the same time and a number with neither is a measurement of nothing.
+    /// </remarks>
+    private IReadOnlyList<string> RenderTimings()
+    {
+        var marks = Lines
+            .SelectMany(line => line.Timings.Select(timing => (line.Leg, timing.Phase, timing.Text, timing.Value)))
+            .ToList();
+
+        if (marks.Count == 0)
+        {
+            return [];
+        }
+
+        var leg = Width("LEG", marks.Select(mark => mark.Leg));
+        var phase = Width("PHASE", marks.Select(mark => mark.Phase));
+        var text = Width("REPORTED", marks.Select(mark => mark.Text));
+
+        return
+        [
+            string.Empty,
+            "TIMINGS",
+            $"  {"LEG".PadRight(leg)}  {"PHASE".PadRight(phase)}  {"REPORTED".PadRight(text)}  VALUE",
+            .. marks.Select(mark =>
+                $"  {mark.Leg.PadRight(leg)}  {mark.Phase.PadRight(phase)}  {mark.Text.PadRight(text)}  {mark.Value}"),
+        ];
     }
 
     /// <summary>The same ledger as data, for <c>--json</c>.</summary>
@@ -185,6 +225,12 @@ public sealed class LedgerReport
                 line.TimingsSuspect,
                 TimingNotes = line.TimingNotes,
                 line.TestCount,
+                Timings = line.Timings.Select(timing => new
+                {
+                    timing.Phase,
+                    timing.Text,
+                    timing.Value,
+                }),
             }),
         },
         JsonOptions);

@@ -34,6 +34,11 @@ internal static class TestCommand
         Description = "Write the per-leg ledger as JSON.",
     };
 
+    private static readonly Option<bool> TimeOption = new("--time")
+    {
+        Description = "Report the profile timing, taken from testTimingRegex where it is configured and measured here where it is not.",
+    };
+
     private static readonly Option<bool> ForceLockOption = new("--force-lock")
     {
         Description = "Take a lock a run on another host holds. Always a human decision.",
@@ -65,6 +70,7 @@ internal static class TestCommand
         command.Options.Add(FilterOption);
         command.Options.Add(ExcludeOption);
         command.Options.Add(JsonOption);
+        command.Options.Add(TimeOption);
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
         command.Options.Add(SkipBuildOption);
@@ -94,7 +100,7 @@ internal static class TestCommand
                         arguments.GetValue(ForceLockOption),
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
-                        Time: false,
+                        arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
                         RemoteArguments(arguments)),
                     (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
@@ -134,6 +140,11 @@ internal static class TestCommand
         if (arguments.GetValue(SkipBuildOption))
         {
             remote.Add("--no-build");
+        }
+
+        if (arguments.GetValue(TimeOption))
+        {
+            remote.Add("--time");
         }
 
         return remote;
@@ -202,6 +213,7 @@ internal static class TestCommand
                     Filter = filter,
                     Excludes = excludes,
                     Emulated = leg.Emulated,
+                    Time = work.Time,
                 },
                 cancellationToken)
             .ConfigureAwait(false);

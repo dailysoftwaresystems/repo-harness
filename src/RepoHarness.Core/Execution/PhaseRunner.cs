@@ -154,16 +154,22 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             }
 
             // Progress is one line per leg transition, not a stream of child output; the child's own
-            // output is echoed only when it was asked for.
+            // output is echoed only when it was asked for. Echoed, it says which leg and phase wrote
+            // it: legs run at the same time, so without that the terminal carries several children's
+            // output woven together with nothing to tell one from another. The log files keep the
+            // line as the child wrote it — this prefix is for the terminal alone, so nothing that
+            // reads a log has to know about it.
             if (_output.IsVerbose)
             {
+                var tagged = $"{request.Leg}/{request.Phase}: {line}";
+
                 if (error)
                 {
-                    _output.RawError(line);
+                    _output.RawError(tagged);
                 }
                 else
                 {
-                    _output.Raw(line);
+                    _output.Raw(tagged);
                 }
             }
         }

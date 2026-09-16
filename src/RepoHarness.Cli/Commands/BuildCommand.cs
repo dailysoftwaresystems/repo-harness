@@ -120,6 +120,8 @@ internal static class BuildCommand
             Emulated = leg.Emulated,
             Phases = [.. result.Phases.Select(phase => new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped))],
             TimingNotes = [.. Notes(result)],
+            Timings = [.. result.Phases.SelectMany(phase =>
+                phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value)))],
         };
     }
 

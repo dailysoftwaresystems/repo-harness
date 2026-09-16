@@ -109,6 +109,14 @@ public sealed class HarnessConfig
     /// <summary>Patterns whose every match is pulled out of a predefined run's output under <c>--time</c>.</summary>
     public List<string> RunTimingRegex { get; init; } = [];
 
+    /// <summary>Patterns whose every match is pulled out of a test's output under <c>--time</c>.</summary>
+    /// <remarks>
+    /// Separate from <see cref="BuildTimingRegex"/> because <c>test</c> builds first and then tests:
+    /// one pattern list covering both would attribute a build's marks to the test phase, and the
+    /// whole point of asking is to tell the two apart.
+    /// </remarks>
+    public List<string> TestTimingRegex { get; init; } = [];
+
     /// <summary>The repository's line-ending policy, and what stands outside it.</summary>
     public LineEndingSettings LineEndings { get; init; } = new();
 
@@ -138,11 +146,24 @@ public sealed class HarnessDefaults
     public int TestCores { get; init; } = DefaultCores;
 
     /// <summary>
-    /// Most legs a command runs at once, or <see langword="null"/> to start every selected
-    /// leg together. Legs are isolated from one another, so running them one at a time is
-    /// never needed for correctness; this exists only to cap the load on a busy machine.
+    /// Most legs a command runs at once <em>on any one physical machine</em>, or
+    /// <see langword="null"/> for no per-machine cap.
     /// </summary>
+    /// <remarks>
+    /// Counted per machine, not across the run: a local leg and every WSL leg are one machine's
+    /// processors however differently they are named, while an ssh host shares nothing with either.
+    /// A cap across every leg had to be set low enough for the busiest machine, which left every
+    /// other host idle. Legs are isolated from one another, so this is never needed for correctness;
+    /// it keeps a machine from being asked for more than it has.
+    /// </remarks>
     public int? MaxParallelLegs { get; init; }
+
+    /// <summary>
+    /// Most legs a command runs at once across every machine together, or <see langword="null"/> for
+    /// no overall ceiling. Applied on top of <see cref="MaxParallelLegs"/>, for what a fleet shares
+    /// even when its machines do not: a license server, a network share, a sync's bandwidth.
+    /// </summary>
+    public int? MaxParallelLegsTotal { get; init; }
 
     /// <summary>Project used when a command names none.</summary>
     public string? Project { get; init; }

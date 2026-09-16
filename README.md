@@ -56,12 +56,31 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `install-missing-tools [--legs a,b]` | Install or update what each configured leg's host is missing |
 | `sync` | Put a host's copy of the repository in step with this tree, deletions included |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
-| `test [--legs a,b]` | Build and test every selected leg, with a witness for each verdict |
-| `run <runner> [--legs a,b]` | Run a predefined runner across the legs it declares |
+| `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
+| `run <runner> [--legs a,b] [--time]` | Run a predefined runner across the legs it declares |
 | `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a DssHarness command on an ssh host or in a WSL distribution |
 | `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout, secrets, runners |
 
 Every command takes `-C, --directory <dir>` and `-v, --verbose`.
+
+`--time` pulls each phase's own timing marks out of its output, using `buildTimingRegex`,
+`testTimingRegex` or `runTimingRegex`, and prints them under the ledger as a `TIMINGS` block naming
+the leg and phase that reported each one. `host-exec` needs no `--time` of its own: everything after
+`--` is the command run on the host, so `host-exec --ssh vps -- test --legs a,b --time` asks for it
+there.
+
+## Running legs at once
+
+Every leg-running command dispatches its legs in parallel and waits for all of them, reporting each
+one live rather than buffering until the end. Output is written a whole line at a time, and every
+line says which leg it came from — a streamed child line under `-v` is tagged `<leg>/<phase>:`, so
+three hosts building at once stay readable.
+
+Legs are chunked by the **physical machine** they run on. A local leg and every WSL leg are one
+machine, because WSL runs on it; each ssh host is its own. `defaults.maxParallelLegs` caps how many
+run at once *on any one machine*, so a busy laptop is not asked for more than it has while the
+remote hosts sit idle, and `defaults.maxParallelLegsTotal` caps the whole fleet for what it shares
+even when its machines do not — a license server, a network share, a sync's bandwidth.
 
 ## Design
 

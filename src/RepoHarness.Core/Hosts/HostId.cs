@@ -57,6 +57,20 @@ public sealed class HostId : IEquatable<HostId>
 
     public override int GetHashCode() => HashCode.Combine(Kind, StringComparer.OrdinalIgnoreCase.GetHashCode(Name));
 
+    /// <summary>
+    /// The physical machine this host runs on, which two hosts share when they contend for one
+    /// machine's processors, memory and disk.
+    /// </summary>
+    /// <remarks>
+    /// A WSL distribution runs on the machine running the harness, so it and <see cref="Local"/> are
+    /// one machine however many distributions are declared; each ssh host is its own. This is what
+    /// legs are chunked by, because two legs on one machine take that machine's cores from each
+    /// other whatever their operating systems say, and a build timed while another build had the
+    /// same processors measured something nobody asked about. Two ssh names that happen to reach one
+    /// machine are counted as two, because nothing here can tell that they do.
+    /// </remarks>
+    public string MachineKey => Kind == HostKind.Ssh ? $"ssh:{Name.ToLowerInvariant()}" : "machine:local";
+
     /// <summary>The host as the command line names it: <c>local</c>, <c>wsl Ubuntu</c>, <c>ssh vps</c>.</summary>
     public override string ToString() => Kind switch
     {
