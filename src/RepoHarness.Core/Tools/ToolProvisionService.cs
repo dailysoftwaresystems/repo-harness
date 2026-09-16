@@ -260,7 +260,7 @@ public sealed class ToolProvisionService(
         HostId host,
         HostConnection connection,
         ToolConfig tool,
-        string platformKey,
+        string? platformKey,
         Superuser superuser,
         CancellationToken cancellationToken)
     {
@@ -468,7 +468,18 @@ public sealed class ToolProvisionService(
     /// ssh host is usually not the same system as the one reaching it, and the entry chosen decides
     /// which package manager runs.
     /// </summary>
-    private async Task<string> PlatformKeyAsync(HostConnection connection, string? measured, CancellationToken cancellationToken)
+    /// <summary>
+    /// The platform a host's tools are chosen for, or <see langword="null"/> when it could not be
+    /// established.
+    /// </summary>
+    /// <remarks>
+    /// Null rather than a guess, because a guess here decides which tools a host is asked about at
+    /// all. A host that answered <c>uname</c> with a system this build has no name for is some
+    /// POSIX machine; calling it Windows would skip every tool scoped to Linux and then report the
+    /// leg as having everything it needs. Unknown instead means every tool is probed, which costs a
+    /// round trip and tells the truth.
+    /// </remarks>
+    private async Task<string?> PlatformKeyAsync(HostConnection connection, string? measured, CancellationToken cancellationToken)
     {
         if (measured is { Length: > 0 })
         {
@@ -482,9 +493,10 @@ public sealed class ToolProvisionService(
 
         var uname = await RunAsync(connection, "uname", ["-s"], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
-        // uname is on every POSIX system; a host that does not have it is a Windows one running
-        // PowerShell, which is the only other shell an ssh server here hands a command to.
-        return (uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : null) ?? PlatformNames.Windows;
+        // uname is on every POSIX system, so a host without it is a Windows one running PowerShell,
+        // which is the only other shell an ssh server here hands a command to. A host that has it
+        // and names a system this build does not know is not that, and is not guessed at.
+        return uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : PlatformNames.Windows;
     }
 
     /// <summary>
@@ -520,17 +532,20 @@ public sealed class ToolProvisionService(
     }
 
     /// <summary>The install entry for one platform, falling back to the one declared for <c>all</c>.</summary>
-    private static ToolInstall? InstallFor(ToolConfig tool, string platformKey)
+    private static ToolInstall? InstallFor(ToolConfig tool, string? platformKey)
         => PlatformScope.Select(tool.Install, platformKey);
 
     /// <summary>What a tool that is not there, and cannot be installed, is reported as.</summary>
-    private static string Needed(ToolConfig tool, string platformKey)
+    private static string Needed(ToolConfig tool, string? platformKey)
     {
         var why = tool.Why is { Length: > 0 } purpose ? $" ({purpose})" : string.Empty;
+        var platform = platformKey is { Length: > 0 } measured
+            ? $"'{measured}'"
+            : "this host, whose operating system could not be established,";
 
         return tool.Install.Count == 0
             ? $"it is not installed there{why}; nothing declares how to install it, so install it by hand"
-            : $"it is not installed there{why}; its install declares nothing for '{platformKey}' or for 'all'";
+            : $"it is not installed there{why}; its install declares nothing for {platform} or for 'all'";
     }
 
     private async Task<ProcessResult> RunAsync(

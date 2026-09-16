@@ -559,21 +559,28 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>
-    /// The verdict and the outcome the leg reached, an expected exception applied only where its
-    /// checks confirmed it.
-    /// </summary>
-    /// <summary>
-    /// What this run's steps printed, in the order they ran, with every secret masked.
+    /// What this run's passing steps printed, in the order they ran, with every secret masked.
     /// </summary>
     /// <remarks>
     /// Carried on the outcome so a run check can be satisfied by a marker a step emits, which is
     /// what an author asking for one plainly means. Redacted here rather than where it is compared:
     /// the outcome reaches a ledger and a report, and a value that escaped once has escaped.
+    /// <para>
+    /// Only what passed. A step that failed and was passed over under <c>continueOnError</c> still
+    /// printed, and a run check confirming an excused failure would otherwise be satisfiable by
+    /// something a dying step said on its way out — which is the opposite of the evidence an
+    /// excusal is supposed to rest on.
+    /// </para>
     /// </remarks>
     /// <param name="state">The run so far.</param>
     /// <param name="values">Supplies the mask.</param>
     private static string StepOutput(RunState state, ActionValues values)
-        => values.Redact(string.Join("\n", state.Phases.Select(phase => phase.Output)));
+        => values.Redact(string.Join("\n", state.Phases.Where(phase => phase.Passed).Select(phase => phase.Output)));
+
+    /// <summary>
+    /// The verdict and the outcome the leg reached, an expected exception applied only where its
+    /// checks confirmed it.
+    /// </summary>
 
     private async Task<Decision> DecideAsync(
         RunnerRunRequest request,

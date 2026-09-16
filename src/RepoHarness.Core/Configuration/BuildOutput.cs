@@ -28,31 +28,54 @@ namespace RepoHarness.Core.Configuration;
 [JsonConverter(typeof(BuildOutputConverter))]
 public sealed class BuildOutput : IEquatable<BuildOutput>
 {
-    /// <summary>The paths this entry declares, keyed by platform or <see cref="PlatformScope.Every"/>.</summary>
-    public Dictionary<string, string> Paths { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _paths;
 
-    /// <summary>Whether the entry was written as a bare string rather than a map.</summary>
+    private BuildOutput(Dictionary<string, string> paths, string? plain)
+    {
+        _paths = paths;
+        Plain = plain;
+    }
+
+    /// <summary>
+    /// The bare path this entry was written as, or <see langword="null"/> when it was written as a
+    /// map of platform to path.
+    /// </summary>
     /// <remarks>
-    /// Kept so the file can be written back as it was read. A path that applies everywhere and was
-    /// spelled as a string would otherwise come back as a map, turning every save into a diff
-    /// against a file nobody edited.
+    /// The path itself rather than a flag saying there is one, so the shape cannot disagree with
+    /// the content. Held so the file is written back as it was read: a path applying everywhere and
+    /// spelled as a string would otherwise return as a map, turning every save into a diff against
+    /// a file nobody edited. A reader asking "does this cover every platform" asks this, and gets
+    /// an answer the type guarantees rather than one two fields have to keep agreeing on.
     /// </remarks>
-    public bool IsPlain { get; init; }
+    public string? Plain { get; }
+
+    /// <summary>The paths this entry declares, keyed by platform or <see cref="PlatformScope.Every"/>.</summary>
+    public IReadOnlyDictionary<string, string> Paths => _paths;
 
     /// <summary>An entry naming one path on every platform.</summary>
     /// <param name="path">The path, relative to the build directory.</param>
+    /// <exception cref="ArgumentException">The path is blank; an entry naming nothing witnesses nothing.</exception>
     public static BuildOutput Everywhere(string path)
     {
-        ArgumentNullException.ThrowIfNull(path);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
-        return new BuildOutput
-        {
-            Paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                [PlatformScope.Every] = path,
-            },
-            IsPlain = true,
-        };
+        return new BuildOutput(
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [PlatformScope.Every] = path },
+            path);
+    }
+
+    /// <summary>An entry naming one path per platform.</summary>
+    /// <remarks>
+    /// The comparer is fixed here rather than taken from the caller, so every entry answers a
+    /// platform lookup the same way however it was built, and two entries declaring the same
+    /// platforms compare equal whichever of them is asked first.
+    /// </remarks>
+    /// <param name="paths">The paths, keyed by platform name or <see cref="PlatformScope.Every"/>.</param>
+    public static BuildOutput Keyed(IEnumerable<KeyValuePair<string, string>> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        return new BuildOutput(new Dictionary<string, string>(paths, StringComparer.OrdinalIgnoreCase), plain: null);
     }
 
     /// <summary>A bare path, which applies on every platform.</summary>
@@ -86,22 +109,38 @@ public sealed class BuildOutput : IEquatable<BuildOutput>
     /// <param name="other">The entry to compare with.</param>
     public bool Equals(BuildOutput? other)
         => other is not null
-            && Paths.Count == other.Paths.Count
-            && Paths.All(entry
-                => other.Paths.TryGetValue(entry.Key, out var path)
+            && _paths.Count == other._paths.Count
+            && _paths.All(entry
+                => other._paths.TryGetValue(entry.Key, out var path)
                 && string.Equals(entry.Value, path, StringComparison.Ordinal));
 
     /// <inheritdoc />
     public override bool Equals(object? obj) => Equals(obj as BuildOutput);
+
+    /// <summary>Whether two entries declare the same paths for the same platforms.</summary>
+    /// <remarks>
+    /// Defined because the type has value equality: left out, <c>==</c> would answer by reference
+    /// while <see cref="Equals(BuildOutput)"/> answered by content, and the two would disagree
+    /// silently at whichever call site reached for the operator.
+    /// </remarks>
+    /// <param name="left">One entry.</param>
+    /// <param name="right">The other.</param>
+    public static bool operator ==(BuildOutput? left, BuildOutput? right)
+        => left is null ? right is null : left.Equals(right);
+
+    /// <summary>Whether two entries declare different paths.</summary>
+    /// <param name="left">One entry.</param>
+    /// <param name="right">The other.</param>
+    public static bool operator !=(BuildOutput? left, BuildOutput? right) => !(left == right);
 
     /// <inheritdoc />
     public override int GetHashCode()
     {
         // Order-independent, because two maps declaring the same platforms in a different order are
         // the same entry and a dictionary does not promise an order to begin with.
-        var hash = Paths.Count;
+        var hash = _paths.Count;
 
-        foreach (var (platform, path) in Paths)
+        foreach (var (platform, path) in _paths)
         {
             hash ^= HashCode.Combine(
                 StringComparer.OrdinalIgnoreCase.GetHashCode(platform),
@@ -113,9 +152,7 @@ public sealed class BuildOutput : IEquatable<BuildOutput>
 
     /// <summary>The entry as a refusal shows it: the bare path, or every platform it names.</summary>
     public override string ToString()
-        => IsPlain && Paths.TryGetValue(PlatformScope.Every, out var plain)
-            ? plain
-            : string.Join(", ", Paths.Select(entry => $"{entry.Key}: {entry.Value}"));
+        => Plain ?? string.Join(", ", _paths.Select(entry => $"{entry.Key}: {entry.Value}"));
 }
 
 /// <summary>
@@ -135,7 +172,11 @@ public sealed class BuildOutputConverter : JsonConverter<BuildOutput>
     {
         if (reader.TokenType == JsonTokenType.String)
         {
-            return BuildOutput.Everywhere(reader.GetString() ?? string.Empty);
+            // Refused here rather than left to resolve to the build directory itself, which is never
+            // found there and would fail a build that produced everything it actually named.
+            return reader.GetString() is { } plain && !string.IsNullOrWhiteSpace(plain)
+                ? BuildOutput.Everywhere(plain)
+                : throw new JsonException("A buildOutputs entry is an empty path, which names no file.");
         }
 
         if (reader.TokenType != JsonTokenType.StartObject)
@@ -150,7 +191,11 @@ public sealed class BuildOutputConverter : JsonConverter<BuildOutput>
         {
             if (reader.TokenType == JsonTokenType.EndObject)
             {
-                return new BuildOutput { Paths = paths };
+                return paths.Count > 0
+                    ? BuildOutput.Keyed(paths)
+                    : throw new JsonException(
+                        "A buildOutputs entry names no path at all; an entry that witnesses nothing "
+                        + "is the same as not declaring it, which is refused for the same reason.");
             }
 
             if (reader.TokenType != JsonTokenType.PropertyName)
@@ -166,9 +211,16 @@ public sealed class BuildOutputConverter : JsonConverter<BuildOutput>
                     $"A buildOutputs entry for '{platform}' is not a path.");
             }
 
+            var path = reader.GetString();
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new JsonException($"A buildOutputs entry for '{platform}' is an empty path, which names no file.");
+            }
+
             // Refused rather than resolved one way: two spellings of one platform are one key on
             // this dictionary, so the second would silently replace the first.
-            if (!paths.TryAdd(platform, reader.GetString() ?? string.Empty))
+            if (!paths.TryAdd(platform, path))
             {
                 throw new JsonException(
                     $"A buildOutputs entry names platform '{platform}' twice; nothing could say which path it meant.");
@@ -184,7 +236,7 @@ public sealed class BuildOutputConverter : JsonConverter<BuildOutput>
         ArgumentNullException.ThrowIfNull(writer);
         ArgumentNullException.ThrowIfNull(value);
 
-        if (value.IsPlain && value.Paths.TryGetValue(PlatformScope.Every, out var plain))
+        if (value.Plain is { } plain)
         {
             writer.WriteStringValue(plain);
             return;

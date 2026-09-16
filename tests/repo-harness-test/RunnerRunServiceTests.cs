@@ -329,6 +329,37 @@ public sealed class RunnerRunServiceTests
         Assert.Equal("System.IO.IOException", RunnerRunService.FailureTypeIn("Unhandled: System.IO.IOException: gone"));
     }
 
+    /// <summary>
+    /// The production half of matching a run check against what a step printed. Without this the
+    /// gate has nothing to match and the feature does nothing.
+    /// </summary>
+    [Fact]
+    public async Task APassingRun_CarriesWhatItsStepsPrinted_OnItsOutcome()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, """
+            name: corpus
+            steps:
+              - name: measure
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.NotNull(result.Outcome.Output);
+        Assert.Contains(result.Outcome.Output!, result.Outcome.Texts);
+    }
+
     private static RunnerRunService Service(HarnessFactory factory)
         => new(
             new PhaseRunner(factory.ProcessRunner, factory.FileSystem, factory.Output),

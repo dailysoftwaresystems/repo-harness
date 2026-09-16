@@ -148,7 +148,35 @@ public sealed class BuildService(
                 null);
         }
 
-        var missing = MissingOutputs(request, buildDirectory);
+        var unresolved = request.Project.BuildOutputs
+            .Where(output => string.IsNullOrWhiteSpace(output.For(request.PlatformKey)))
+            .ToList();
+
+        if (unresolved.Count > 0)
+        {
+            // Every declared output must name a path here, not merely some of them. An entry that
+            // resolves to nothing is dropped from the list this build is held to, so a project
+            // declaring three and resolving two passes having checked two thirds of its own evidence
+            // with nothing saying so, and one resolving none passes having checked nothing at all.
+            // The configuration reader refuses an entry naming no path for a platform some leg
+            // builds on, and a leg only runs on a host whose system it matches, so reaching here
+            // means one of those two stopped holding. Refused anyway: the cost of being wrong is a
+            // green build nobody witnessed, which is the whole of what buildOutputs is for.
+            return new BuildResult(
+                ReachedVerdict.Of(
+                    LegVerdict.Unwitnessed,
+                    $"project '{request.Project.Name}' declares {unresolved.Count} buildOutput(s) naming no "
+                    + $"path for '{request.PlatformKey}', so this build would be held to fewer files than "
+                    + $"the configuration declares: {string.Join("; ", unresolved)}"),
+                buildDirectory,
+                phases,
+                rebuilt,
+                null);
+        }
+
+        var missing = ExpectedOutputs(request, buildDirectory)
+            .Where(path => !_fileSystem.FileExists(path))
+            .ToList();
 
         if (missing.Count > 0)
         {
@@ -325,9 +353,12 @@ public sealed class BuildService(
     /// </summary>
     /// <remarks>
     /// An entry naming no path for this platform contributes none, rather than contributing an
-    /// empty one that would be looked for at the build directory itself and found. Such an entry is
-    /// refused when the configuration is read, so reaching here means the leg's platform was never
-    /// measured; nothing is a safer answer than a path nobody named.
+    /// empty one: that would resolve to the build directory itself, which <c>FileExists</c> never
+    /// finds, failing a build that produced everything it actually named. The caller refuses a
+    /// project with any such entry, so this never silently shortens the list of files a build is
+    /// held to. What is reported afterwards is the resolved path rather than the entry as written:
+    /// an entry naming one file per platform would otherwise report every platform's spelling,
+    /// leaving the reader to work out which this leg actually missed.
     /// </remarks>
     /// <param name="request">The build, carrying the platform it ran on.</param>
     /// <param name="buildDirectory">The directory the paths are relative to.</param>
@@ -497,17 +528,6 @@ public sealed class BuildService(
 
         _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecordFileName), record.ToString());
     }
-
-    /// <summary>
-    /// The outputs this build was meant to produce and did not, as the paths that were looked for.
-    /// </summary>
-    /// <remarks>
-    /// The resolved path is reported, not the entry as written: an entry naming one file per
-    /// platform would otherwise report every platform's spelling, and the reader would have to work
-    /// out which of them this leg was actually missing.
-    /// </remarks>
-    private List<string> MissingOutputs(BuildRequest request, string buildDirectory)
-        => [.. ExpectedOutputs(request, buildDirectory).Where(path => !_fileSystem.FileExists(path))];
 
     /// <summary>
     /// The dependency report for a cmake build, or why it could not be produced.

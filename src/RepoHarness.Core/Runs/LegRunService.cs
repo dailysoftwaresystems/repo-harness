@@ -344,7 +344,7 @@ public sealed class LegRunService(
             {
                 Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
                 Quiet = true,
-                ExitCode = execution.Cancelled ? HarnessExit.Cancelled : report.ExitCode,
+                ExitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished),
             };
         }
 
@@ -377,13 +377,19 @@ public sealed class LegRunService(
         // red run; but reporting it as an unqualified success would put "OK - 8 leg(s) passed" in
         // front of a reader when none of those eight ran, which is the one thing a gate reads. The
         // legs are named, because which of them went unreported is the first thing to ask.
-        if (report.WithoutVerdict.Count > 0)
+        // Asked about legs that did no work, or left running when the run stopped: neither is a
+        // failure, and neither is a pass. Decided by the same derivation the JSON uses, so a reader
+        // and a script are never told different things about one run.
+        var code = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
+
+        if (code != HarnessExit.Success)
         {
+            var withoutWork = report.WithoutVerdict.Select(line => line.Leg).Concat(execution.Unfinished).ToList();
+
             return CommandOutcome.Failed(
-                HarnessExit.Incomplete,
+                code,
                 $"{report.Reported} of {report.Lines.Count} leg(s) passed; "
-                + $"{report.WithoutVerdict.Count} reached no verdict: "
-                + string.Join(", ", report.WithoutVerdict.Select(line => line.Leg)),
+                + $"{withoutWork.Count} did no work: {string.Join(", ", withoutWork)}",
                 details);
         }
 

@@ -250,7 +250,10 @@ public sealed class HostConnector(
         {
             var version = await _processRunner
                 .RunAsync(
-                    new ProcessRequest { FileName = path, Arguments = ["-V"] },
+                    // Bounded like every other probe here. This runs whatever PATH resolved first,
+                    // on the failure path of every ssh connection, and a client that prompts or sits
+                    // on a stalled mount would otherwise hang a run whose outcome is already decided.
+                    new ProcessRequest { FileName = path, Arguments = ["-V"], Timeout = ProbeBudget },
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -262,8 +265,10 @@ public sealed class HostConnector(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            // Naming the client matters more than saying why it would not introduce itself.
-            return $"using {path}";
+            // A client that will not say its version is itself worth reporting: not executable, the
+            // wrong architecture, or refused. Naming it matters more than the reason, so the reason
+            // is summarised rather than dropped.
+            return $"using {path}, which would not report its version ({exception.Message})";
         }
     }
 

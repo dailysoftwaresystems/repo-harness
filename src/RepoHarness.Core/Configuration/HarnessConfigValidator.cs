@@ -389,7 +389,7 @@ public static class HarnessConfigValidator
             }
         }
 
-        foreach (var output in project.BuildOutputs.Where(output => !output.IsPlain))
+        foreach (var output in project.BuildOutputs.Where(output => output.Plain is null))
         {
             foreach (var (leg, os) in LegsBuilding(config, project).Where(leg => !output.Covers(leg.Os)))
             {
@@ -777,6 +777,12 @@ public static class HarnessConfigValidator
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        var legPlatforms = config.Legs.Values
+            .Select(leg => leg.Os)
+            .Where(os => !string.IsNullOrWhiteSpace(os))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         foreach (var tool in config.Tools)
         {
             if (string.IsNullOrWhiteSpace(tool.Name))
@@ -800,6 +806,20 @@ public static class HarnessConfigValidator
                         $"tool '{tool.Name}' lists platform '{platform}'; "
                         + $"expected one of {string.Join(", ", PlatformKeys)}");
                 }
+            }
+
+            // A list naming only platforms no leg runs on removes the tool from every host, which
+            // reads exactly like never having declared it. Refused for the reason a buildOutput
+            // covering no leg is: a rule that applies nowhere is one the file appears to state and
+            // nothing enforces, and the spelling that causes it is a single mistyped word.
+            if (tool.Platforms.Count > 0
+                && legPlatforms.Count > 0
+                && !legPlatforms.Any(os => PlatformScope.Applies(tool.Platforms, os)))
+            {
+                problems.Add(
+                    $"tool '{tool.Name}' is needed only on {string.Join(", ", tool.Platforms)}, "
+                    + $"and no declared leg runs on any of those ({string.Join(", ", legPlatforms)}), "
+                    + "so it would never be checked anywhere");
             }
 
             if (tool.MinVersion is { } minVersion && !Version.TryParse(minVersion, out _))

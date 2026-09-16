@@ -13,9 +13,10 @@ namespace RepoHarness.Core.Platform;
 /// </para>
 /// <para>
 /// Both spell every platform <c>all</c>, both compare ignoring case, and both live here rather than
-/// beside each caller because the rule was previously written out at each one. Four copies of
-/// "try the platform, then try 'all'" agreed by luck; a fifth written for a new setting is how they
-/// stop agreeing.
+/// beside each caller because the rule was previously written out at each one. The two copies of
+/// "try the platform, then try 'all'" — a tool's install and a project's default toolchain — agreed
+/// by luck; a third written for a new setting is how they stop agreeing. The list shape had no
+/// reader at all: a toolchain declared its platforms and nothing compared them to anything.
 /// </para>
 /// </remarks>
 public static class PlatformScope

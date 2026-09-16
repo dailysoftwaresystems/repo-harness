@@ -1077,6 +1077,109 @@ public sealed class ConfigStoreTests
         Assert.Equal("gcc", Assert.Single(config.Projects).DefaultToolchain["all"]);
     }
 
+    /// <summary>
+    /// Every way a buildOutputs entry can be malformed is refused where the file is read, so the
+    /// reader is told which line is wrong rather than handed a degenerate entry that witnesses
+    /// nothing later.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ 3 ] } ] }""", "a path, or a mapping")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ ["x"] ] } ] }""", "a path, or a mapping")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "windows": 3 } ] } ] }""", "is not a path")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "windows": { "x": "y" } } ] } ] }""", "is not a path")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ {} ] } ] }""", "names no path at all")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ "" ] } ] }""", "empty path")]
+    public void Load_RefusesAMalformedBuildOutput(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two spellings of one platform are one key on the entry, so the second would silently replace
+    /// the first and a leg would be witnessed by a file nobody meant to name.
+    /// </summary>
+    [Fact]
+    public void Load_RefusesABuildOutputThatNamesOnePlatformTwice()
+    {
+        var exception = LoadInvalid("""
+            {
+              "projects": [
+                { "name": "a", "type": "cmake",
+                  "buildOutputs": [ { "windows": "bin/a.exe", "WINDOWS": "bin/b.exe" } ] }
+              ]
+            }
+            """);
+
+        Assert.Contains("names platform 'WINDOWS' twice", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A keyed entry comes back keyed. Written back as a bare string it would lose every platform
+    /// but one; written back as a map, an entry spelled as a string would turn every save into a
+    /// diff against a file nobody edited.
+    /// </summary>
+    [Fact]
+    public void ABuildOutput_RoundTripsInTheShapeItWasWritten()
+    {
+        using var temp = new TempDirectory();
+        var store = CreateStore();
+        var path = temp.Combine("config.json");
+
+        store.Save(path, new HarnessConfig
+        {
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "a",
+                    Type = "cmake",
+                    BuildOutputs =
+                    [
+                        "compile_commands.json",
+                        BuildOutput.Keyed([
+                            new KeyValuePair<string, string>("windows", "bin/a.exe"),
+                            new KeyValuePair<string, string>("all", "bin/a"),
+                        ]),
+                    ],
+                },
+            },
+        });
+
+        var text = File.ReadAllText(path);
+
+        // The plain entry stays plain, and the keyed one keeps every platform it named.
+        Assert.Contains("\"compile_commands.json\"", text, StringComparison.Ordinal);
+        Assert.Contains("\"windows\"", text, StringComparison.Ordinal);
+
+        var outputs = Assert.Single(store.Load(path).Projects).BuildOutputs;
+
+        Assert.Equal("compile_commands.json", outputs[0].Plain);
+        Assert.Null(outputs[1].Plain);
+        Assert.Equal("bin/a.exe", outputs[1].For("windows"));
+        Assert.Equal("bin/a", outputs[1].For("linux"));
+    }
+
+    /// <summary>
+    /// A list naming only platforms no leg runs on removes the tool from every host, which reads
+    /// exactly like never having declared it — and the spelling that causes it is one mistyped word.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolNeededOnlyWhereNoLegRuns()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "tools": [ { "name": "clang", "platforms": ["macos"] } ],
+              "legs": { "nix": { "os": "linux", "processor": "x86_64", "config": "debug" } }
+            }
+            """);
+
+        Assert.Contains("tool 'clang'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("never be checked anywhere", exception.Message, StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

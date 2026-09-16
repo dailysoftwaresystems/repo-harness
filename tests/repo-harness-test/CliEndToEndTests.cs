@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
@@ -393,6 +394,36 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
         Assert.Contains("1 leg(s) passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// B2's whole point is that a green nobody earned must not be reported, and the JSON ledger is
+    /// the machine-readable half of that — the half a gate actually parses.
+    /// </summary>
+    [Fact]
+    public async Task TheJsonLedgerOfARunWithAnUnreportedLeg_SaysItIsNotComplete()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native,elsewhere", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Incomplete, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        // The document and the process agree, and both say the same thing the table said.
+        Assert.Equal(HarnessExit.Incomplete, root.GetProperty("exitCode").GetInt32());
+        Assert.True(root.GetProperty("passed").GetBoolean(), "nothing failed, so this is not a red run");
+        Assert.False(root.GetProperty("complete").GetBoolean());
+        Assert.False(root.GetProperty("cancelled").GetBoolean());
+
+        var legs = root.GetProperty("legs").EnumerateArray().Select(leg => leg.GetProperty("leg").GetString()).ToList();
+        Assert.Contains("native", legs);
+        Assert.Contains("elsewhere", legs);
     }
 
     /// <summary>

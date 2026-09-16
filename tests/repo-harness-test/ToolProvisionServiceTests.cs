@@ -304,6 +304,56 @@ public sealed class ToolProvisionServiceTests
         Assert.Contains(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
     }
 
+    /// <summary>
+    /// dotnet-install.sh uses bash features that dash does not have, and dash is /bin/sh on Debian
+    /// and Ubuntu. Handed to sh it fails with "Illegal option -o pipefail", which says nothing about
+    /// a shell and sends the reader after the SDK instead.
+    /// </summary>
+    [Fact]
+    public async Task TheSdkInstaller_HandsTheScriptToBash_NotToBinSh()
+    {
+        using var fixture = new Fixture();
+
+        _ = await fixture.ProvisionAsync();
+
+        var script = Assert.Single(fixture.Host.Calls, call => call.Program == "sh" && call.Arguments.Count == 0);
+
+        Assert.Contains("bash \"$script\"", script.StandardInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("\nsh \"$script\"", script.StandardInput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheSdkInstaller_RefusesOnAHostWithNoBash_SayingWhatToInstall()
+    {
+        using var fixture = new Fixture();
+
+        _ = await fixture.ProvisionAsync();
+
+        var script = Assert.Single(fixture.Host.Calls, call => call.Program == "sh" && call.Arguments.Count == 0);
+
+        // The guard runs before anything is downloaded, and quotes back what to install.
+        Assert.Contains("command -v bash", script.StandardInput, StringComparison.Ordinal);
+        Assert.Contains(ToolProvisionService.BashMissing, script.StandardInput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that answered <c>uname</c> with a system this build has no name for is some POSIX
+    /// machine, not a Windows one. Guessing Windows there would skip every tool scoped to Linux and
+    /// then report the leg as having everything it needs.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseSystemCouldNotBeNamed_StillHasEveryToolChecked()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", platforms: ["linux"])],
+            present: new() { ["ninja"] = "1.12.0" },
+            kernel: "Minix");
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Contains(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
+    }
+
     [Fact]
     public void RepositoryPath_IsRequiredOfEveryRemoteHost()
     {
@@ -347,7 +397,8 @@ public sealed class ToolProvisionServiceTests
         Dictionary<string, string> present,
         Dictionary<string, string> installs,
         bool passwordlessSudo,
-        string? installFails)
+        string? installFails,
+        string kernel)
     {
         public List<HostCall> Calls { get; } = [];
 
@@ -371,7 +422,7 @@ public sealed class ToolProvisionServiceTests
 
             return (command.Program, command.Arguments.FirstOrDefault()) switch
             {
-                ("uname", _) => HostResults.Ok("Linux x86_64\n"),
+                ("uname", _) => HostResults.Ok($"{kernel} x86_64\n"),
                 ("pwd", _) => HostResults.Ok(Home + "\n"),
                 ("ls", _) => HostResults.Ok(DotnetInstalled
                     ? string.Join('\n', command.Arguments.Where(path => path == dotnetPath)) + "\n"
@@ -429,7 +480,8 @@ public sealed class ToolProvisionServiceTests
             bool distributionExists = true,
             string? credential = Credential,
             bool passwordlessSudo = false,
-            string? installFails = null)
+            string? installFails = null,
+            string kernel = "Linux")
         {
             var declared = tools ?? [];
 
@@ -438,7 +490,8 @@ public sealed class ToolProvisionServiceTests
                 present ?? [],
                 declared.ToDictionary(tool => tool.Name, _ => InstalledVersion, StringComparer.Ordinal),
                 passwordlessSudo,
-                installFails);
+                installFails,
+                kernel);
 
             _repository.WriteFile(
                 Path.Combine(".harness-config", "wslDistros", Distro, ".env"),

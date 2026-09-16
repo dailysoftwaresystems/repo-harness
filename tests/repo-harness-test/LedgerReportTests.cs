@@ -168,7 +168,7 @@ public sealed class LedgerReportTests
         ],
         durationWarningFactor: 0);
 
-        using var document = JsonDocument.Parse(report.ToJson());
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
         var root = document.RootElement;
 
         Assert.Equal("inputs-moved", root.GetProperty("verdict").GetString());
@@ -305,7 +305,7 @@ public sealed class LedgerReportTests
             [Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(10), "412 tests")],
             durationWarningFactor: 0);
 
-        using var document = JsonDocument.Parse(report.ToJson());
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
         var root = document.RootElement;
 
         Assert.Equal(HarnessExit.Success, root.GetProperty("exitCode").GetInt32());
@@ -409,7 +409,7 @@ public sealed class LedgerReportTests
         ],
         durationWarningFactor: 0);
 
-        var json = report.ToJson();
+        var json = report.ToJson(cancelled: false, unfinished: []);
 
         Assert.Contains("\"build\"", json, StringComparison.Ordinal);
         Assert.Contains("took 1.5s", json, StringComparison.Ordinal);
