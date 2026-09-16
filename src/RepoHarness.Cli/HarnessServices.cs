@@ -1,16 +1,26 @@
 using Microsoft.Extensions.DependencyInjection;
 using RepoHarness.Core.Anchors;
+using RepoHarness.Core.Build;
+using RepoHarness.Core.Ci;
 using RepoHarness.Core.Commands;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
+using RepoHarness.Core.LineEndings;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Runners;
+using RepoHarness.Core.Runs;
+using RepoHarness.Core.Secrets;
+using RepoHarness.Core.Sync;
+using RepoHarness.Core.Testing;
+using RepoHarness.Core.Tools;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Cli;
@@ -26,10 +36,14 @@ internal static class HarnessServices
     {
         var services = new ServiceCollection();
 
-        // The only two registrations that observe the operating system. Everything
+        // The only registrations that observe the operating system: which system this is, how it
+        // expresses a file's permissions, and how it publishes its process table. Everything
         // registered after them depends on these abstractions, never on the platform.
         services.AddSingleton<IHostPlatform, HostPlatform>();
         services.AddSingleton(_ => FilePermissionsFactory.Create());
+        services.AddSingleton(provider => ProcessTableFactory.Create(
+            provider.GetRequiredService<IHostPlatform>(),
+            provider.GetRequiredService<IProcessRunner>()));
 
         services.AddSingleton<IHarnessOutput>(_ => new ConsoleHarnessOutput(verbose));
         services.AddSingleton<IFileSystem, PhysicalFileSystem>();
@@ -53,9 +67,63 @@ internal static class HarnessServices
         services.AddSingleton<IHostCommandRunner, HostCommandRunner>();
         services.AddSingleton<EmulatorProbe>();
         services.AddSingleton<HostAgentService>();
+
+        // Reaching a host: its own directory under .harness-config says where it is, a name is
+        // resolved with a retry before ssh is started, and where each program is on it is measured
+        // per connection rather than assumed from a login shell's PATH.
+        services.AddSingleton<IHostSecretsStore, HostSecretsStore>();
+        services.AddSingleton<INameLookup, DnsNameLookup>();
+        services.AddSingleton<IHostAddressResolver>(provider => new HostAddressResolver(
+            provider.GetRequiredService<INameLookup>(),
+            TimeProvider.System,
+            HostAddressResolver.DefaultRetryDelay));
+        services.AddSingleton<IHostProgramResolver, HostProgramResolver>();
+        services.AddSingleton<IHostConnector, HostConnector>();
+
         services.AddSingleton<IHostInspector, HostInspector>();
+        services.AddSingleton<IToolProvisionService, ToolProvisionService>();
         services.AddSingleton<LegsService>();
         services.AddSingleton<HostExecService>();
+
+        // Leg machinery. Shared by build, test and run, so the isolation rules cannot hold for one
+        // command and not another.
+        services.AddSingleton<PhaseRunner>();
+        services.AddSingleton<LegExecutor>();
+        services.AddSingleton<RunLock>();
+        services.AddSingleton<LogOwnership>();
+        services.AddSingleton<InputFingerprint>();
+        services.AddSingleton<ProcessSampler>();
+        services.AddSingleton<RemoteLegRunner>();
+        services.AddSingleton<LegRunService>();
+
+        services.AddSingleton<BuildDirectoryGuard>();
+        services.AddSingleton<NinjaDependencyCheck>();
+        services.AddSingleton<IBuildService, BuildService>();
+
+        // Sync. The local transport is registered as the interface because it is also what a host
+        // runs on its own side, where `sync-serve` resolves exactly this one.
+        services.AddSingleton<IManifestBuilder, ManifestBuilder>();
+        services.AddSingleton<ISyncTransport, LocalSyncTransport>();
+        services.AddSingleton<ISyncTransportFactory, SyncTransportFactory>();
+        services.AddSingleton<ISyncService, SyncService>();
+
+        // Predefined runners and their action files.
+        services.AddSingleton<IActionFileParser, ActionFileParser>();
+        services.AddSingleton<ActionToolPolicy>();
+        services.AddSingleton<ActionValuesReader>();
+        services.AddSingleton<ExpectedExceptionMatcher>();
+        services.AddSingleton<RunCheckGate>();
+        services.AddSingleton<RunSegments>();
+        services.AddSingleton<IPredefinedActionRunner, PredefinedActionRunner>();
+        services.AddSingleton<IRunnerRunService, RunnerRunService>();
+        services.AddSingleton<ITestService, TestService>();
+
+        // Guards that became commands.
+        services.AddSingleton<IRootLitterService, RootLitterService>();
+        services.AddSingleton<IAnchorCitationService, AnchorCitationService>();
+        services.AddSingleton<ILineEndingService, LineEndingService>();
+        services.AddSingleton<ICiJobSource, GhCiJobSource>();
+        services.AddSingleton<ICiLegsService, CiLegsService>();
 
         services.AddSingleton<VerifyGitService>();
         services.AddSingleton<InitService>();

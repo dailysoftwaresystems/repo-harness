@@ -55,6 +55,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
     public async Task<LegsReport> CheckAsync(
         string directory,
         IReadOnlyList<string>? legNames,
+        bool here = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
@@ -63,7 +64,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         var config = context.Config;
         var selection = LegSelection.Resolve(config, legNames);
         var emulators = EmulatorsUsedBy(config, selection);
-        var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg))).ToList();
+        var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
         // This machine costs nothing to reach, so it is measured first. Other hosts are measured only
@@ -85,7 +86,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
             reports[report.Host] = report;
         }
 
-        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, reports)).ToList();
+        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, reports, here)).ToList();
 
         // Each leg that cannot run is its own warning, naming it and saying why, while the others go on.
         foreach (var placement in placements.Where(placement => !placement.Runnable))

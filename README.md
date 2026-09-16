@@ -41,16 +41,25 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `init` | Create `.harness-config`, seed `config.json`, add ignore rules |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
-| `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, or a locked one, without `--force` |
-| `list-worktree` | List existing worktrees |
+| `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
+| `list-worktree` | List existing worktrees with the commit each was made from |
+| `check-root-litter` | Report files left loose at the root of the checkout, ignored ones included |
 | `write-anchor <id> --priority P --trigger TEXT` | Add an anchor: to the pending registry, or to done when closed |
 | `set-anchor <id>` | Change an anchor; changing its status moves it between registries |
 | `read-anchor <id>...` | Show anchors in full |
 | `read-anchors` | List anchors, or check the registries with `--lint` |
 | `check-anchor-balance` | Fail a change that leaves more open anchors than it found |
+| `check-anchor-citations` | Check every anchor cited in the declared roots resolves to a row |
+| `fix-line-endings [--all \| --changed]` | Apply the line-ending policy `.gitattributes` declares; `--check` refuses instead |
+| `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
+| `install-missing-tools [--legs a,b]` | Install or update what each configured leg's host is missing |
+| `sync` | Put a host's copy of the repository in step with this tree, deletions included |
+| `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
+| `test [--legs a,b]` | Build and test every selected leg, with a witness for each verdict |
+| `run <runner> [--legs a,b]` | Run a predefined runner across the legs it declares |
 | `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a DssHarness command on an ssh host or in a WSL distribution |
-| `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout |
+| `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout, secrets, runners |
 
 Every command takes `-C, --directory <dir>` and `-v, --verbose`.
 
@@ -80,13 +89,22 @@ in `config.json`.
 
 ```
 .harness-config/config.json                  tracked; the whole contract
-.harness-config/worktrees/                   contents ignored, .gitkeep tracked
-.harness-config/ssh/                         contents ignored, .gitkeep tracked
-.harness-config/ssh/config                   ignored; the ssh hosts --ssh names
+.harness-config/runner/actions/              tracked; a runner's steps, as YAML
+.harness-config/runner/.env/                 contents ignored, .gitkeep tracked
+.harness-config/runner/.secrets/             contents ignored, .gitkeep tracked
+.harness-config/sshItems/<name>/.env         ignored; address, user, port
+.harness-config/sshItems/<name>/.key         ignored; the private key
+.harness-config/wslDistros/<name>/.env       ignored; the distribution and its credential
+.harness-config/worktrees/                   ignored whole, never a placeholder; created on first use
+.harness-config/runs/                        ignored; one directory of logs per run
 .harness-config/lock.json                    ignored; records in-progress runs
 .plans/_deferred-anchor-registry.md          tracked; live anchors
 .plans/_deferred-anchor-registry-done.md     tracked; closed anchors
 ```
+
+The worktrees root is `worktrees.root` in `config.json`, shown here at its default. A
+repository whose build paths are long sets a shorter one, such as `.worktrees`, which buys
+back the characters the default spends before a worktree's own name.
 
 Ignored state lives only in the main checkout. A worktree receives the tracked part
 of `.harness-config` through git but never the ignored part, so secrets and the run
@@ -126,15 +144,22 @@ DssHarness legs --legs linux-release,mac-x64-release
 DssHarness host-exec --ssh mac-mini -- verify-git
 ```
 
-An ssh host is a `Host` entry in `.harness-config/ssh/config`, which git ignores, spelt
-exactly as `hosts.ssh` declares it, case included; ssh runs in batch mode, so it never
-waits at a prompt. Every WSL distribution and ssh host runs DssHarness itself,
-installed from nuget.org at this machine's exact version: a host that is behind is
-updated, never downgraded. Betas are released on GitHub rather than nuget.org, so only a
-stable build can bring a host to its version. `host-exec` runs in the host's copy of the
-repository at its `repositoryPath`, which, until sync can create it, has to be a checkout
-made by hand. An emulator counts only once its witness proves it runs programs for its
-processor.
+An ssh host's connection data lives in its own directory under `.harness-config/sshItems/`,
+which git ignores: an `.env` naming the address, the user and the port, a `.key`, and a
+`known_hosts`. `config.json` declares only the directory names, under `sshItems`, so the
+tracked configuration never carries an address, a user, a key path or a credential. A WSL
+distribution has the same shape under `.harness-config/wslDistros/`. ssh runs in batch mode,
+so it never waits at a prompt, and a key other users can read is refused before anything
+connects, with the command that fixes it.
+
+Every WSL distribution and ssh host runs DssHarness itself, installed from nuget.org at
+this machine's exact version: a host that is behind is updated, never downgraded. Betas are
+released on GitHub rather than nuget.org, so only a stable build can bring a host to its
+version. `install-missing-tools` installs the .NET SDK, and everything `tools` declares an
+`install` for, on every configured leg's host; a `tools` entry with no `install` is an
+allowlist entry, reported when missing and never installed. `sync` creates the host's copy
+of the repository at its `repositoryPath` and keeps it in step, deletions included. An
+emulator counts only once its witness proves it runs programs for its processor.
 
 `legs` runs the witness of each emulator the selected legs use, and both commands install
 or update DssHarness on the hosts they reach, as `config.json` declares. That is the

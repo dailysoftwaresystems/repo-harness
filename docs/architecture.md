@@ -13,14 +13,14 @@ If a behaviour cannot be expressed in `config.json`, that is a defect.
 ## Status
 
 Implemented today: `init`, `verify-git`, `create-worktree`, `delete-worktree`,
-`list-worktree`, the anchor commands (`write-anchor`, `set-anchor`, `read-anchor`,
-`read-anchors`, `check-anchor-balance`), `legs`, `host-exec` and `help`.
+`list-worktree`, `check-root-litter`, the anchor commands (`write-anchor`, `set-anchor`,
+`read-anchor`, `read-anchors`, `check-anchor-balance`, `check-anchor-citations`),
+`fix-line-endings`, `check-ci-legs`, `legs`, `host-exec`, `install-missing-tools`,
+`sync`, `build`, `test`, `run` and `help`.
 
-Under **Hosts, trees and legs**, where a leg runs and how a host is reached are
-implemented. The verdict vocabulary, and everything from **Parallel execution** onward,
-is the design the remaining commands — sync, build, run and test — are built to. It is
-written in the present tense because it is the contract those commands must satisfy,
-not a description of code that already exists.
+Every section of this document now describes code that exists. Where a rule is stated in
+the present tense it is enforced, and a gap between the two is a defect in the tool rather
+than a section still waiting to be written.
 
 ## Layering
 
@@ -29,8 +29,9 @@ RepoHarness.Cli        Program.cs: argument parsing and dependency wiring only
 RepoHarness.Core       domain, services, abstractions
 repo-harness-test      tests
 
-(RepoHarness.Adapters arrives with the first build adapter; an empty project would
-ship an empty assembly inside the published tool.)
+(RepoHarness.Adapters was planned for the build adapters; they arrived in
+RepoHarness.Core instead, beside the build service that is their only caller, and the
+project was not created.)
 ```
 
 `Core` is a library, so "no logic in Program.cs" is enforced by the assembly
@@ -38,16 +39,23 @@ boundary rather than by discipline.
 
 ### The platform layer
 
-`HostPlatform` and `FilePermissionsFactory` are the **only** types that observe
-the operating system. Everything else depends on `IHostPlatform`,
-`IFilePermissions`, `IProcessRunner` and `IFileSystem`.
+`HostPlatform`, `FilePermissionsFactory` and `ProcessTableFactory` are the **only**
+types that observe the operating system. Everything else depends on `IHostPlatform`,
+`IFilePermissions`, `IProcessTable`, `IProcessRunner` and `IFileSystem`.
 
 A platform-specific implementation is created only where behaviour genuinely
-differs. Today that is one family of behaviour, file permissions: making a file
-readable only by its owner, deciding whether a file is a program at all, and whether
-other users can read or change a file. Unix answers these with mode bits; Windows
-answers them with access lists and file extensions. Hence a POSIX implementation and
-a Windows implementation, and no third.
+differs. Today that is two families of behaviour.
+
+**File permissions**: making a file readable only by its owner, deciding whether a file
+is a program at all, and whether other users can read or change a file. Unix answers
+these with mode bits; Windows answers them with access lists and file extensions. Hence
+a POSIX implementation and a Windows implementation, and no third.
+
+**The process table**: what else is running on this machine, with each process's parent,
+its start time and its command line, which is what a leg's contention check reads.
+Windows publishes it through WMI, Linux through `/proc`, macOS through `ps`. Behind the
+seam so that nothing above it branches on the operating system to find out, and so a test
+can say what the machine was running without the machine having to be running it.
 
 ### Process execution
 
@@ -111,8 +119,52 @@ is tracked, and its bytes must not depend on which machine ran `init`.
 
 ## Worktrees
 
-`create-worktree` adds a worktree under the main checkout's `.harness-config/worktrees`, and
-`delete-worktree` removes one, everything under it, and git's record of it.
+`create-worktree` adds a worktree under the main checkout's `worktrees.root`, which defaults to
+`.harness-config/worktrees`, and `delete-worktree` removes one, everything under it, and git's
+record of it.
+
+The root is configurable because it is spent before a worktree's own name. The default costs 25
+characters of the Windows path budget, and a repository whose build paths are long has no name left
+that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
+checked against the real path, so a shorter root never hides an overrun — it only makes one
+avoidable.
+
+**The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>/` for it and
+creates nothing there; `create-worktree` makes the directory the first time it needs it. The other
+harness directories a person fills by hand — `sshItems`, `wslDistros`, `runner/.env`,
+`runner/.secrets` — keep the opposite shape, their *contents* ignored and a `.gitkeep` tracked, so
+the directory itself tells that person where the file goes. The root cannot afford that shape.
+Measured: excluding only a directory's contents makes the directory's own `git check-ignore` answer
+depend on a trailing slash, and it fails toward *not ignored* — `<root>` without the slash reads as
+not ignored while worktrees sit inside it. A directory holding any tracked file never reads as
+ignored under either spelling, so a committed placeholder turns even `<root>/` wrong. For a slot
+holding an address and a key that answer costs nothing; for a root holding whole checkouts it is the
+difference between a clean sync and every worktree reaching a remote host. The placeholder also
+showed as untracked until committed, which is exactly the state sync's no-longer-ignored guard
+refuses.
+
+`init` leaves hand-written `.gitignore` rules alone, so a repository that already ignored one of
+these paths by hand keeps its rule beside the managed one. `init` reports each such pair as a note,
+naming the line and saying whether the two rules repeat each other or point opposite ways, since
+whichever of two contradicting rules comes later in the file wins. The comparison is by exact path
+after dropping a leading `!`, one anchoring `/`, a trailing `/*` and a trailing `/`; a rule that
+reaches a managed path only through a wildcard is not reported.
+
+`create-worktree` records the commit a worktree was made from, under
+`refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
+with every commit made in it, so after the first one nothing else says what tree the lane started
+from, and the lane can only be reproduced from the moment it happened to be made. The record is
+kept under `refs/harness/` rather than among heads, tags or remotes precisely so it can never be
+mistaken for somewhere work is kept: the deletion checks below read branches, tags,
+remote-tracking refs, the newest stash and other worktrees' HEADs, and this record is none of them.
+It is removed when the worktree is, so it can never answer for a later worktree of the same name.
+
+Every git command the harness runs first clears `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`
+from the child's environment. Each of the three silently outranks `-C <directory>`, and a git hook
+runs with all three set, so a harness command invoked from a hook — or from a shell someone left in
+another checkout — would otherwise read and write a repository nobody named. A caller that
+deliberately wants a different index still gets one: the inherited value is cleared first and the
+requested one set after.
 
 ### What deleting one refuses
 
@@ -152,15 +204,24 @@ names everything it found on one line, each with its remedy, and exits 13:
   record: when it was moved or its `.git` file was lost. A clone at the path would pass a status
   check and take its whole history with it.
 
+- **Evidence.** The directories `worktrees.evidenceRoots` declares are checked before git is asked
+  anything, because they hold files git was never told about. One of them holding anything refuses
+  the deletion and names it. A lane's measurements live in an ignored directory precisely because
+  they are not source, and deleting them is silent: git reports nothing missing afterwards.
+  `--delete-evidence` proceeds while every other check still runs; `--force` proceeds too, and
+  skips everything else as well. A declared root that cannot be read counts as holding something,
+  because an unreadable directory is not an empty one. A root resolving outside the worktree is
+  ignored rather than refused, since the deletion was never going to touch it.
+
 Without `--force`, when the check cannot be finished, because git cannot answer or a record
 cannot be read or its directory found, nothing is deleted and the command exits 20, with the
 reason first. Which worktree a directory is, and whether its record is gone, is decided
 from paths git reports. A path the harness spelled is compared with one only after every link
 along it is followed, so a linked `.harness-config` or worktrees directory changes nothing.
 
-Ignored files are deleted without a check, including ones no build makes again, such as
-`.env`, and so are ignored directories with everything in them, the history of a repository
-nested inside one included.
+Ignored files outside a declared evidence root are deleted without a check, including ones no
+build makes again, such as `.env`, and so are ignored directories with everything in them, the
+history of a repository nested inside one included.
 
 ### Removal
 
@@ -264,6 +325,26 @@ that already existed), and whenever the registries as they stand are unsound: a 
 in pending, a live anchor in done, a missing registry, or a structural problem. Every problem
 is reported at once.
 
+### Citations
+
+`check-anchor-citations` requires every anchor id cited in a **scanned root** to resolve to a
+row in either registry. The roots are `anchors.citationRoots`, and nothing outside a declared
+root is scanned: which code is production code is a judgement a repository makes, not one a
+tool can infer. An empty list scans nothing and the command says so, rather than reporting a
+pass over a check that looked at no file. `--current-commit` reads HEAD, `--current-tree` reads
+the disk, `--current-pr` reads only what this branch changed.
+
+Resolution is by substring, so a row naming a more specific child answers a citation of its
+parent.
+
+The scanner is the point of the command. The guard it replaces required a word boundary before
+an id, which is right for `FIXED-32-BIT-WORD` — whose tail is anchor-shaped and is correctly
+skipped — and wrong for an id written straight after an escape, as in the C++ literal
+`<< "\nD-SOME-ID: …"`: the `n` of `\n` is a letter, the boundary fails, and the whole citation
+is not reported missing but simply never seen. A wrapped id does not fail, it disappears. So a
+preceding word character blocks a match unless it is the tail of a recognised escape sequence,
+and a doubled backslash counts as a literal backslash, which is not one.
+
 ## Hosts, trees and legs
 
 Three concepts that are frequently conflated, kept separate here:
@@ -338,19 +419,29 @@ is not dependable on such a host.
   UTF-16. Its errors are recognised by the code they carry, such as
   `WSL_E_DISTRO_NOT_FOUND`, never by their sentence, which is translated. `--wsl` with no
   name is WSL's default distribution, as the distribution itself reports it.
-- **ssh.** A host is a `Host` entry in `.harness-config/ssh/config`, passed with `-F`, and
-  only an entry that names the host exactly, case included, counts: a wildcard alone would
-  let a misspelt name connect somewhere, and ssh applies `Host VPS` to `VPS` and never to
-  `vps`. ssh is always given the name `hosts.ssh` declares. ssh runs in batch mode, so an
-  untrusted host key or a password prompt fails with ssh's own reason instead of waiting,
-  and `connectTimeoutSeconds` and `keepAliveSeconds` bound a dead link. A configuration file
-  other users can change is refused, because ssh reads one passed with `-F` whatever its
-  permissions, and whoever can change it can make ssh run any command; a key other users
-  can read, ssh ignores. Both are checked before connecting, and reported with the command
-  that fixes them. The keys
-  checked are every key ssh would offer: those of each `Host` entry whose patterns select
-  the host, `Host *` included. `Match` blocks and `Include` are not evaluated; a key named
-  only there is still ignored by ssh itself when other users can read it.
+- **ssh.** A host's connection data lives in its own directory under
+  `.harness-config/sshItems/<name>/`, which git ignores: an `.env` naming the address, the
+  user and the port, a `.key`, and a `known_hosts`. `config.json` declares only the directory
+  names, under `sshItems`, and `hosts.ssh` is keyed by them. Nothing tracked names an address,
+  a user, a key path or a credential, so a `config.json` that arrives through git cannot point
+  the harness at a machine nobody set up here, and a public repository carries no connection
+  data at all. There is no wildcard and no pattern matching: a directory either has the name or
+  it does not, which is what a shared ssh config file made subtle. ssh is invoked with that
+  item's key, port and known-hosts file, in batch mode, so an untrusted host key or a password
+  prompt fails with ssh's own reason instead of waiting, and `connectTimeoutSeconds` and
+  `keepAliveSeconds` bound a dead link. An `.env` other users can change is refused, because
+  whoever can change it can send the harness somewhere else; a key other users can read, ssh
+  ignores, so it is refused too. Both are checked before connecting, and reported with the
+  command that fixes them. Per-host files also confine that risk: one world-writable shared
+  configuration file threatened every host at once.
+- **Names that resolve.** A host reached by an mDNS `.local` name on a DHCP network fails a
+  lookup as a matter of course. The lookup is retried and the answer cached briefly, so one
+  failed lookup never fails a leg.
+- **PATH truth.** A login shell's PATH is not what a command sees: `/opt/homebrew/bin` is absent
+  from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
+  are resolved to an absolute path once per connection, measured rather than assumed, the same
+  way the remote shell is. A host whose SDK is installed but off that PATH is reported as exactly
+  that, never as "not installed": the remedy differs.
 - **No quoting.** An ssh server hands its command line to a shell, and which shell is not
   known in advance: sh, bash, zsh, fish, cmd or PowerShell. The harness quotes for none of
   them. The command line holds only words every one of them reads literally (letters,
@@ -395,9 +486,31 @@ build, or has no copy of the repository.
   have run, or run only in part.
 - Interrupting `host-exec` stops ssh or wsl.exe, which ends the host's input, and the host
   cancels the command instead of leaving it running there.
-- Until sync exists, nothing creates a host's copy: `host-exec` runs in a checkout made by
-  hand at `repositoryPath`. Sync will not adopt that checkout, since it never writes into a
-  directory it did not create.
+- A host's copy is created by `sync`, which also puts `.harness-config/config.json` there so
+  the DssHarness running there can find the repository at all. Sync will not adopt a checkout
+  made by hand, since it never writes into a directory it did not create.
+
+### Installing what a host is missing
+
+`install-missing-tools` runs over every declared leg, or those `--legs` names, on the host each
+leg names with `wsl` or `ssh` and on this machine otherwise. Its logic lives in the core, so
+other commands share it, and `init` calls it: a fresh clone should be ready to run rather than
+ready to be told what is missing.
+
+- **The .NET SDK is the default tool on every remote leg.** A WSL distribution or ssh host that
+  cannot run DssHarness has it installed, under the home directory, where no login-free PATH
+  names it — which is why every command the harness runs there spells the resolved absolute path.
+  The machine running the harness is assumed to have it already.
+- **Everything under `tools` that carries an `install` is probed and installed or updated
+  through it**, by `probe.args`, `probe.regex` and `minVersion`. An entry with no `install` is an
+  allowlist entry: probed where it declares a probe, reported when missing, never installed. That
+  is how a program shipping with the platform, or with the repository, is allowed to appear in a
+  runner's steps.
+- **A privileged install takes its credential from that host's own item, on standard input
+  only.** It never reaches an argument list, a log or an error message, and redaction happens at
+  one place rather than at each call site: a failure excerpt was measured carrying one through.
+- A second run reports "already current" and changes nothing. An unreachable host is named, and
+  the other legs still go ahead.
 
 ### What legs and host-exec run
 
@@ -407,9 +520,10 @@ run DssHarness itself on WSL distributions and ssh hosts, which they install or 
 there. That is the trust building the repository already asks for, since a build runs the
 repository's own code.
 
-- An ssh host is reached only when the main checkout's `.harness-config/ssh/config`, which
-  git ignores, declares it, and ssh reads no other configuration. A `config.json` that
-  arrives through git cannot point the harness at a machine nobody set up here.
+- An ssh host is reached only when the main checkout holds its directory under
+  `.harness-config/sshItems/`, which git ignores, and ssh reads no configuration file of its
+  own. A `config.json` that arrives through git cannot point the harness at a machine nobody
+  set up here.
 - A launcher and a required file are each a program name, looked up on the host's `PATH`,
   or an absolute path. A relative path would resolve against whichever directory a host
   starts programs in, and would let a file shipped in the repository stand in for the tool
@@ -435,6 +549,7 @@ from the report.
 | `skipped-unavailable` | No host can run the leg | warning |
 | `skipped-tool-missing` | A required tool is not installed | warning |
 | `refused-locked` | Another run holds the lock for this leg | **yes** |
+| `log-held` | Another live run owns this leg's log path | **yes** |
 | `poisoned` | The harness could not produce a verdict | **yes** |
 
 `failed` and `poisoned` are deliberately distinct: "your code is broken" and
@@ -442,8 +557,15 @@ from the report.
 `contended` say nothing about the code at all: the first two call for letting the tree
 settle and running again, the third for waiting for the other run.
 
+`refused-locked` and `log-held` are deliberately distinct, though both mean another run got
+there first. A lock is taken for the duration of the work and is released by the run that
+took it; a log path is owned by a run id, and one already owning it means two runs would
+write one file and each would read the other's output as its own. The remedies differ — wait,
+against find out which run is still holding a finished run's logs — and a reader who cannot
+tell which fired cannot pick either.
+
 When several apply, the more fundamental one is reported: `poisoned`, then
-`unmeasured`, `inputs-moved`, `contended`, `refused-locked`, `failed`, and
+`unmeasured`, `inputs-moved`, `contended`, `log-held`, `refused-locked`, `failed`, and
 `unwitnessed`. A leg whose inputs moved is not reported as failed even if its tests
 failed, because what failed was a tree that never existed.
 
@@ -546,6 +668,11 @@ while a gate ran turned a green suite red, with four test processes live at once
 - Every sample is kept, and the report says when each process was seen: throughout, at
   the start, or at the end. A process table that could not be read is reported as
   unknown, never as nothing found.
+- **A leg no sample could read the process table for is `unmeasured`, not passed.** The
+  platform's own source is the only one that carries a command line, and a command line is the
+  whole of what contention is decided by, so a machine whose query is blocked by policy would
+  otherwise report "no contender" for every leg, for ever, without a word. One failed reading
+  among several is a stated limit rather than a verdict: the samples that succeeded did look.
 - No verdict depends on a sample finishing within a time window. Sampling costs
   seconds on one platform and a fraction of that on another, and one such overhead
   asymmetry was once read, for a whole cycle, as a speed difference between legs.
@@ -572,7 +699,7 @@ while a gate ran turned a green suite red, with four test processes live at once
   passes on less evidence than its siblings.
 - The ledger reports command time and harness overhead (sync, fingerprints, sampling)
   separately. A phase slower than `defaults.durationWarningFactor` times the same phase
-  on sibling legs, or times its own recent runs, is marked suspect. A timing mark never
+  on sibling legs of the same kind is marked suspect. A timing mark never
   changes a verdict. An emulated leg is never compared with a native one.
 - `keepAwake` holds a host awake for the leg. A host that slept once reported a
   4 millisecond test at 729 seconds. Without it, timings from a host that can sleep are
@@ -583,12 +710,13 @@ while a gate ran turned a green suite red, with four test processes live at once
 - An ssh host bounds how long a connection may take to open and how long it may go
   unanswered (`connectTimeoutSeconds`, `keepAliveSeconds`). Without both, a dead link
   hangs a leg indefinitely, with no output and no verdict.
-- A host's copy of the repository is a git repository sync creates at its
-  `repositoryPath`: the commit being tested is pushed into it, and uncommitted changes are
-  synced on top. It is never a clone from a remote, which would need credentials on the
-  host and could not see commits nobody has pushed. It must be a git repository because the
-  host's DssHarness finds everything through git, and sync never writes into a directory it
-  did not create, because it deletes whatever the source does not have.
+- A host's copy of the repository is a git repository sync creates at its `repositoryPath`: the
+  working tree being tested is transferred into it file by file, compared by content hash, so what
+  the host holds is this tree including its uncommitted changes. Nothing is pushed and it is never
+  a clone from a remote, either of which would need credentials on the host and neither of which
+  could carry a change nobody has committed. It is made a git repository because the host's
+  DssHarness finds everything through git, and sync never writes into a directory it did not
+  create, because it deletes whatever the source does not have.
 - A remote tree's identity is its content manifest, confirmed equal to the source after
   every sync. The ledger records the commit and manifest each leg built, and a build
   directory produced from a different manifest is flagged.
@@ -662,6 +790,143 @@ while their sources are being replaced. A lock is released only by the run that 
 - Process start time is recorded alongside the pid so a recycled pid is not
   mistaken for a live holder.
 
+## Syncing a tree
+
+`sync` puts a host's copy of the repository in step with this tree. It is the same code path
+for this machine, a WSL distribution and an ssh host, so a sync to a host and a sync to a
+directory here cannot drift apart.
+
+- **The copy is the tool's.** Sync creates it, records that it did, and refuses to write into a
+  directory it did not create. It deletes whatever the source does not have, so adopting a
+  checkout somebody made by hand would delete work nothing here knows about, on a machine whose
+  owner is not watching. The refusal says to move that directory aside and let sync create the
+  copy itself.
+- **The copy is created, with its parents,** when the declared `repositoryPath` is not there, so
+  the first sync to a fresh host needs no hand-made clone. A path that exists and is not a
+  directory, or that cannot be created, is a named failure — never a silent fallback to
+  somewhere else, because a leg would then report on a tree the reader cannot find.
+- **The copy is a git repository,** because the DssHarness on that host finds everything through
+  git. It is made one after the transfer, so a copy that failed part way is never left looking
+  complete.
+- **Content, never timestamps.** A file is written only when its content differs. An unchanged
+  file is not touched, so its modification time does not move and an incremental build on that
+  host stays correct; a changed file is rewritten now, so its time advances. Nothing compares two
+  times taken at different moments or on different machines.
+- **Deletions propagate.** A file removed from the source is removed from the copy in the same
+  sync. A copy that only ever gains files is not a copy of the tree: a deleted source file keeps
+  compiling, a deleted test keeps running, and a renamed file exists twice, so the leg's verdict
+  describes a tree that no longer exists.
+- **The never-transfer floor is also a never-delete floor.** `.git`, `.harness-config`, the
+  worktrees root and everything under `sync.neverTransfer` are neither written nor deleted. A
+  path the harness will not write is one it cannot know the source lacks, so deleting it would
+  remove the host's own state rather than a file the source gave up — including the build
+  directories that make an incremental build possible. `sync.exclude` is different: the source
+  chooses not to send those, and a copy that kept them for ever would be a copy of a tree that no
+  longer exists, so they are deleted.
+- **What git ignores is never transferred, and never deleted.** Asked of git once per sync, so a
+  local `.env`, a virtual environment or an editor's cache never reaches a host, and the host's own
+  copies of such things are left alone. `sync.exclude` names paths to withhold *in addition* to
+  these.
+- **The copy gets `.harness-config/config.json`, and nothing else from that directory.** A leg
+  placed on a host runs DssHarness there, and DssHarness in a directory holding no configuration
+  refuses as not initialised — so without it the copy is a tree no leg can run in. The rest of the
+  directory is connection data, credentials, locks and logs, each local to a machine by design.
+- **Deletion is bounded.** A sync that would delete more than `sync.maxDeleteFraction` of the
+  copy stops and changes nothing. A mistyped repository path makes the source look empty, which
+  is indistinguishable from a source that deleted everything, and without the bound that empties
+  a host. A first sync into an empty copy has nothing to measure and is never over it.
+- **Deletion stays inside the tree.** Every path is resolved against the copy's declared root and
+  refused if it leaves by `..`, by an absolute path, or through a link.
+- **What was deleted is reported** by name, at the level a reader sees by default rather than
+  behind `--verbose`: what a sync removed from another machine is the one thing running it again
+  cannot recover. `--dry-run` lists every write and every deletion and changes nothing.
+- **The result is verified, not assumed.** After the transfer the copy's manifest is read back and
+  compared with the source's. A tree that still differs fails, names what differs, and says
+  nothing should be run against it.
+- **Staging is the two commands, not a flag.** `sync` transfers and stops — that is all it ever
+  does — and `build`, `test` and `run` take `--use-staged` to act on what is already there without
+  syncing again. A `--stage-only` on `sync` would name a mode `sync` is always in.
+- **Artefacts come home** with `--pull`, each file hashed on the far side and checked again on
+  arrival. Evidence that a binary built here runs there is not evidence if nobody checked it
+  survived the journey.
+
+## Predefined runners
+
+A procedure specific to one repository — a corpus build-and-test, a benchmark, a round trip —
+lives in `predefinedRunners` rather than in the tool. `run <name>` executes one across the legs
+it declares, with the same isolation, locking, stall bounds, witnesses and reporting every other
+leg-running command gets. A runner that declares `requireBuild` has its leg's tree synced first
+when the leg is an ssh host or a WSL distribution, then built, and only then run: a runner that
+calls a program the build produces otherwise runs against whatever was left there.
+
+Runners are keyed by name because a name is how one is selected — by `run`, and by the checks
+below. An unnamed entry in a list could not be selected at all.
+
+### Action files
+
+A runner declares either `phases` or an `action` naming a YAML file under
+`.harness-config/runner/actions`, never both: two descriptions of what one runner does would
+eventually disagree, and nothing could say which one ran. Every field a phase carries —
+`workingDirectory`, `env`, `successPattern`, `stallSeconds`, `continueOnError` — is a key on a
+step, so nothing the verdict contract depends on is lost by declaring one instead of the other.
+
+- A step either `uses` a predefined action or carries a `run` block. There are two predefined
+  actions, confirming the tree is at a named commit and reading inputs; an unknown one is refused
+  naming what is available.
+- A `run` block is split on newlines and each line is trimmed, so indentation and blank lines
+  cannot change what runs.
+- **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
+  shell's word splitting, globbing or process emulation sits between the harness and the program.
+- The splitter honours double quotes only, understands no escape, and strips every `"` from the
+  token it returns. Measured: an **unterminated** double quote makes it drop the rest of the line
+  silently. A line with unbalanced quotes is therefore refused when the file is read, because the
+  alternative is a command that runs with arguments nobody can see are missing. An argument that
+  must keep a quote, or that uses single quotes, is carried as its own list item rather than
+  inside a `run` line.
+- The first token must be a program the configuration declares under `tools`, or a path inside
+  the repository. An undeclared program is refused before anything runs — the same list
+  `install-missing-tools` guarantees is installed.
+- Values come from `.harness-config/runner/.env` and `.harness-config/runner/.secrets`, each a
+  directory of files. A value that came from `.secrets` never reaches a log, an argument list or
+  an error message.
+- An unknown key, at the top level or on a step, is an error, as it is in `config.json`: a
+  silently ignored key is a rule nobody applied.
+
+### Expected exceptions
+
+A runner may declare failures it is allowed to produce, each with the outcome to report instead
+of an unexplained one. An entry has two halves that must not be confused: what it **matches** —
+an exception type and a list of messages, each plain text or a regular expression, any one
+matching being a match — and the **outcome** the match produces.
+
+**An entry must show its work.** Every entry carries when it was earned, where, the mechanism
+measured, and the anchor holding the evidence, and the file is refused without them. The lint
+also refuses an entry that repeats another's type and messages, a message that does not compile,
+and an entry that names no message or names one matching anything: that is an unconditional claim
+spelled as a scope, and it excuses whatever happens to fail, hiding the regression it was written
+to explain. Every measurement here is biased toward ABSENT — where the tool cannot establish that
+an entry is scoped and earned, it refuses the entry rather than giving it the benefit of the
+doubt.
+
+An entry is scoped by the runner carrying it and the legs that runner declares, so an excusal
+earned under emulation is never available to a native leg.
+
+### The gate
+
+An expected exception may carry `runChecks`, and until every one passes it excuses nothing.
+
+- Each check invokes **another** predefined runner by name and compares its outcome with what the
+  check expects. A field left out is not a requirement. `sameException` requires the same success,
+  warning, result code and message as the entry it gates.
+- The runner a check names is never the one carrying it, and a runner reached that way may carry
+  no checks of its own, so a check is one level deep and cannot recurse.
+- **Unconfirmed, the failure stays genuine.** That is the whole point of the gate.
+- **The window is the failing unit's own** — its output up to its verdict line — never a
+  once-per-run sample. A failure is excused only when at least `minStepsInFailureWindow` steps of
+  at least `minStepSeconds` fall inside that window. A once-per-run sample was measured charging
+  genuine-looking failures to the tool under test on a loaded machine and excusing them on a quiet
+  one, on the same day; a sample taken before a run says only what the machine was doing then.
+
 ## Reporting
 
 Progress is one line per leg transition, not a stream of child process output.
@@ -699,21 +964,32 @@ with "the harness could not run", because the remedies differ.
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,
-or when no selected leg can. `host-exec` returns the exit code of the command it ran on
-the host, unchanged, or 15 when that command never reported how it finished. `DssHarness help exit-codes` prints this table from the code
-itself; this copy is maintained by hand.
+or when no selected leg can. `install-missing-tools` exits `1` when a tool is missing, out of
+date or could not be installed, and `15` when a host could not be reached: a tool that is not
+there and a host that did not answer call for different things. `check-anchor-balance` and
+`check-anchor-citations` exit `1` on a finding, which is what they were asked to look for rather
+than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `2` when the
+matrix did not run at all — an empty answer is indistinguishable from every leg passing, and is
+never read as one. `host-exec` returns the exit code of the command it ran on the host,
+unchanged, or 15 when that command never reported how it finished.
+`DssHarness help exit-codes` prints the shared table from the code itself; this copy, and the
+per-command codes above, are maintained by hand.
 
-Commands that run legs (`build`, `run`, `test`) will use three codes from the range
-reserved for command contracts, because each calls for a different remedy:
+Commands that run legs (`build`, `run`, `test`) use four codes from the range reserved for
+command contracts, because each calls for a different remedy:
 
 | Code | Verdict | Remedy |
 |---|---|---|
 | 3 | `inputs-moved` or `unmeasured` | Let the tree settle, then run again |
 | 4 | `contended` | Wait for the other run |
 | 5 | `unwitnessed` | Find out what actually ran |
+| 6 | `log-held` | Find out which run still owns this leg's logs |
 
 `failed` reports 20, `refused-locked` 13 and `poisoned` 70. When legs disagree, the
 more fundamental verdict decides the code, in the order given under *Verdict vocabulary*.
+Five outcomes therefore carry five codes — refused before starting, the tree moved under the
+run, another run in the build directory, another run holding the logs, and a zero exit code
+with no witness — because a reader who cannot tell which fired cannot pick the remedy.
 
 ## Success witnesses
 

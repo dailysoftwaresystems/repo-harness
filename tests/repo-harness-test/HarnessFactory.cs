@@ -1,3 +1,4 @@
+using NSubstitute;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Commands;
 using RepoHarness.Core.Configuration;
@@ -8,6 +9,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Tools;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Tests;
@@ -30,6 +32,7 @@ public sealed class HarnessFactory
 
         FileSystem = new PhysicalFileSystem(FilePermissions);
         ProcessRunner = new ProcessRunner(Platform, FilePermissions);
+        ProcessTable = ProcessTableFactory.Create(Platform, ProcessRunner);
         GitClient = new GitClient(ProcessRunner, Output);
         RepositoryLocator = new RepositoryLocator(GitClient);
         ConfigStore = new JsonConfigStore(FileSystem);
@@ -46,6 +49,14 @@ public sealed class HarnessFactory
         AnchorRegistryService = new AnchorRegistryService(ContextLoader, AnchorRegistryLocator, AnchorRegistryLock, FileSystem);
         AnchorBalanceService = new AnchorBalanceService(ContextLoader, AnchorRegistryLocator, GitClient, FileSystem);
 
+        // A double rather than the real service: init calls it for every declared leg, and the real
+        // one reaches hosts. A test that declared a leg would otherwise try to install a .NET SDK
+        // somewhere, which is not what any of these tests are about.
+        ToolProvisionService = Substitute.For<IToolProvisionService>();
+        ToolProvisionService
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new ToolProvisionReport([])));
+
         InitService = new InitService(
             FileSystem,
             RepositoryLocator,
@@ -54,6 +65,7 @@ public sealed class HarnessFactory
             ProjectDetector,
             VerifyGitService,
             AnchorRegistryLocator,
+            ToolProvisionService,
             Platform);
     }
 
@@ -70,6 +82,9 @@ public sealed class HarnessFactory
     public IFileSystem FileSystem { get; }
 
     public IProcessRunner ProcessRunner { get; }
+
+    /// <summary>How this machine publishes its process table, which contention sampling reads.</summary>
+    public IProcessTable ProcessTable { get; }
 
     public IGitClient GitClient { get; }
 
@@ -98,6 +113,9 @@ public sealed class HarnessFactory
     public VerifyGitService VerifyGitService { get; }
 
     public InitService InitService { get; }
+
+    /// <summary>The tool provisioning init calls, a double so no test reaches a host.</summary>
+    public IToolProvisionService ToolProvisionService { get; }
 
     /// <summary>Creates a git repository with one commit, so worktrees can be added.</summary>
     public async Task InitializeGitRepositoryAsync(string path, CancellationToken cancellationToken)

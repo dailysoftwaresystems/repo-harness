@@ -330,6 +330,25 @@ public sealed class GitClientProtocolTests
     }
 
     [Fact]
+    public async Task EveryCommand_ClearsTheVariablesThatWouldPointGitAtAnotherTree()
+    {
+        // GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE each outrank `-C <directory>`. A git hook runs
+        // with all three set, so a harness command invoked from a hook, or from a shell left in
+        // another checkout, would read and write a repository nobody named.
+        var (git, requests) = Scripted(Exited(0));
+
+        await git.RunAsync("/repo", ["status"], cancellationToken: TestContext.Current.CancellationToken);
+
+        var environment = Assert.Single(requests).Environment;
+
+        foreach (var name in (string[])["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"])
+        {
+            Assert.True(environment.ContainsKey(name), $"{name} was not cleared.");
+            Assert.Null(environment[name]);
+        }
+    }
+
+    [Fact]
     public async Task RepositoryQueries_RunUntranslated_WhileOtherCommandsKeepTheUsersLocale()
     {
         // The queries are matched against git's English messages. Everything else, hooks

@@ -46,11 +46,9 @@ public static class RemoteCommandLine
     {
         ArgumentNullException.ThrowIfNull(tokens);
 
-        var literal = shell == RemoteShell.Cmd ? CmdLiteral : Literal;
-
         foreach (var token in tokens)
         {
-            if (string.IsNullOrEmpty(token) || token.AsSpan().ContainsAnyExcept(literal))
+            if (!IsLiteral(token, shell))
             {
                 throw new ArgumentException(
                     $"'{token}' cannot be passed to a remote shell without quoting; it has to travel on standard input.",
@@ -60,6 +58,15 @@ public static class RemoteCommandLine
 
         return string.Join(' ', tokens);
     }
+
+    /// <summary>
+    /// Whether <paramref name="token"/> can travel in a command line for <paramref name="shell"/>
+    /// unchanged. Asked before a path is used rather than after <see cref="Join"/> has thrown, so that
+    /// a program found at a path holding a space is passed over instead of stopping the host.
+    /// </summary>
+    public static bool IsLiteral(string token, RemoteShell shell)
+        => !string.IsNullOrEmpty(token)
+            && !token.AsSpan().ContainsAnyExcept(shell == RemoteShell.Cmd ? CmdLiteral : Literal);
 
     /// <summary>Reads which kind of shell answered <see cref="ShellProbe"/>.</summary>
     public static RemoteShell ReadShellProbe(string output)

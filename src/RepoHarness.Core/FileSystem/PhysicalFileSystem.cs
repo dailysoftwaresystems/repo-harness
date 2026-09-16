@@ -149,6 +149,65 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         }
     }
 
+    public DateTime LastWriteTimeUtc(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var info = new FileInfo(path);
+
+        // Refresh() raises what Exists and LastWriteTimeUtc would swallow. Asked directly, the
+        // runtime answers 1601-01-01 for a file it could not stat, and that reads as a real time.
+        info.Refresh();
+
+        return info.Exists
+            ? info.LastWriteTimeUtc
+            : throw new FileNotFoundException($"'{path}' could not be asked when it was last written.", path);
+    }
+
+    public Stream OpenRead(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        // Sequential, and sharing read access: a tree sync walks every file in a repository while
+        // other tools legitimately hold some of them open for reading.
+        return new FileStream(
+            path,
+            new FileStreamOptions
+            {
+                Mode = FileMode.Open,
+                Access = FileAccess.Read,
+                Share = FileShare.ReadWrite | FileShare.Delete,
+                Options = FileOptions.SequentialScan | FileOptions.Asynchronous,
+            });
+    }
+
+    public async Task WriteAllBytesAtomicAsync(
+        string path,
+        byte[] contents,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(contents);
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N")[..8];
+
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, contents, cancellationToken).ConfigureAwait(false);
+            await ReplaceWithAsync(temporary, path, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            TryDelete(temporary);
+        }
+    }
+
     public void ProtectSecretFile(string path) => _filePermissions.ProtectSecret(path);
 
     /// <summary>
@@ -179,6 +238,33 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             catch (UnauthorizedAccessException) when (attempt < ReplaceAttempts)
             {
                 Thread.Sleep(10 * attempt);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ReplaceWith"/> without blocking the thread between attempts, and stopping when
+    /// the caller does.
+    /// </summary>
+    /// <remarks>
+    /// The synchronous form blocks a thread-pool thread for up to 450ms per file while it waits.
+    /// A tree sync writes thousands of files, and the parallel legs above it are sharing that pool:
+    /// sleeping in it makes a transient lock on one file look like a stall in every other leg.
+    /// </remarks>
+    private static async Task ReplaceWithAsync(string source, string destination, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                File.Move(source, destination, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < ReplaceAttempts)
+            {
+                await Task.Delay(10 * attempt, cancellationToken).ConfigureAwait(false);
             }
         }
     }

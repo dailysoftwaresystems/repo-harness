@@ -1,12 +1,16 @@
 using System.CommandLine;
 using System.Text;
+using RepoHarness.Core.Ci;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Cli.Commands;
 
@@ -24,13 +28,13 @@ internal static class HelpCommand
 
     private static readonly Argument<string?> TopicArgument = new("topic")
     {
-        Description = "Topic to explain: exit-codes, config, legs, worktrees, anchors, layout. Omit for an overview.",
+        Description = "Topic to explain: exit-codes, config, legs, worktrees, anchors, layout, secrets, tools, runners, verdicts. Omit for an overview.",
         Arity = ArgumentArity.ZeroOrOne,
     };
 
     internal static Command Create()
     {
-        var command = new Command(Name, "Explain exit codes, configuration, legs and hosts, worktrees, anchors and layout.");
+        var command = new Command(Name, "Explain exit codes, configuration, legs and hosts, worktrees, anchors, layout, connection data, tools, runners and leg verdicts.");
         command.Arguments.Add(TopicArgument);
         GlobalOptions.AddTo(command);
 
@@ -69,9 +73,153 @@ internal static class HelpCommand
         "worktrees" or "worktree" => RenderWorktrees(),
         "anchors" or "anchor" => RenderAnchors(),
         "layout" => RenderLayout(),
+        "secrets" or "hosts-secrets" => RenderSecrets(),
+        "tools" => RenderTools(),
+        "runners" or "runner" or "actions" => RenderRunners(),
+        "verdicts" or "verdict" => RenderVerdicts(),
         null or "" => RenderOverview(),
-        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout.{Environment.NewLine}",
+        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
+            + $"secrets, tools, runners, verdicts.{Environment.NewLine}",
     };
+
+    private static string RenderTools()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Installing what a host is missing");
+        builder.AppendLine();
+        builder.AppendLine("'install-missing-tools' runs over every declared leg, or those --legs names, on the");
+        builder.AppendLine("host each leg names with wsl or ssh, and on this machine otherwise. init calls it");
+        builder.AppendLine("too, so a fresh clone is ready to run rather than ready to be told what is missing.");
+        builder.AppendLine();
+        builder.AppendLine("Every WSL distribution and ssh host gets the .NET 10 SDK when it has none, under");
+        builder.AppendLine("the home directory, where no login-free PATH names it - which is why every command");
+        builder.AppendLine("the harness runs there spells the resolved absolute path rather than a bare name.");
+        builder.AppendLine();
+        builder.AppendLine("Each entry under tools that carries an install is probed with probe.args and");
+        builder.AppendLine("probe.regex, compared against minVersion, and installed or updated through it. An");
+        builder.AppendLine("entry with no install is an allowlist entry: probed if it declares a probe,");
+        builder.AppendLine("reported when missing, never installed. That is how a program shipping with the");
+        builder.AppendLine("platform, or with the repository, is allowed to appear in a runner's steps.");
+        builder.AppendLine();
+        builder.AppendLine("A privileged install takes its credential from that host's own item, on standard");
+        builder.AppendLine("input only: it reaches no argument list, no log and no error message. A second run");
+        builder.AppendLine("reports 'already current' and changes nothing. An unreachable host is named, and");
+        builder.AppendLine("the other legs still go ahead.");
+
+        return builder.ToString();
+    }
+
+    private static string RenderSecrets()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Where each host's connection data lives");
+        builder.AppendLine();
+        builder.AppendLine("config.json declares only NAMES, under sshItems and wslDistros. An address, a");
+        builder.AppendLine("user, a key path and a credential are never in it: that file is tracked, and a");
+        builder.AppendLine("config.json arriving through git must not be able to point the harness at a");
+        builder.AppendLine("machine nobody set up here.");
+        builder.AppendLine();
+        builder.AppendLine($"  .harness-config/{HarnessLayout.SshItemsDirectoryName}/<name>/{HarnessLayout.ItemEnvFileName}");
+        builder.AppendLine("                                     ADDRESS=, USER=, PORT= (optional)");
+        builder.AppendLine($"  .harness-config/{HarnessLayout.SshItemsDirectoryName}/<name>/{HarnessLayout.ItemKeyFileName}");
+        builder.AppendLine("                                     the private key");
+        builder.AppendLine($"  .harness-config/{HarnessLayout.SshItemsDirectoryName}/<name>/{HarnessLayout.ItemKnownHostsFileName}");
+        builder.AppendLine("                                     the host keys ssh may accept");
+        builder.AppendLine($"  .harness-config/{HarnessLayout.WslDistrosDirectoryName}/<name>/{HarnessLayout.ItemEnvFileName}");
+        builder.AppendLine("                                     the distribution, and the superuser credential");
+        builder.AppendLine("                                     install-missing-tools needs");
+        builder.AppendLine();
+        builder.AppendLine("hosts.ssh and hosts.wsl are keyed by these names, and a host declared without an");
+        builder.AppendLine("item is refused when config.json is read: it could never be reached, and failing");
+        builder.AppendLine("later would blame ssh for a mistake in this file.");
+        builder.AppendLine();
+        builder.AppendLine("An .env other users can change is refused before anything connects, because");
+        builder.AppendLine("whoever can change it can send the harness somewhere else. A key other users can");
+        builder.AppendLine("read is refused because ssh ignores it. Both refusals name the command that fixes");
+        builder.AppendLine("them. A credential is passed to a privileged command on standard input, and");
+        builder.AppendLine("reaches no log, no argument list and no error message.");
+        builder.AppendLine();
+        builder.AppendLine("init writes the ignore rules that keep all of it out of git. A fresh clone plus");
+        builder.AppendLine("this tree is enough for 'legs' to reach every host.");
+
+        return builder.ToString();
+    }
+
+    private static string RenderRunners()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Predefined runners");
+        builder.AppendLine();
+        builder.AppendLine("A procedure specific to this repository - a corpus run, a benchmark, a round trip");
+        builder.AppendLine("- is declared under predefinedRunners and started with 'DssHarness run <name>'.");
+        builder.AppendLine("It runs across the legs it declares, with the same isolation, locking, stall");
+        builder.AppendLine("bounds, witnesses and reporting build and test get.");
+        builder.AppendLine();
+        builder.AppendLine("A runner declares phases, or an action file, never both.");
+        builder.AppendLine();
+        builder.AppendLine($"  .harness-config/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerActionsDirectoryName}/<name>.yml");
+        builder.AppendLine("                                     the steps, tracked by git");
+        builder.AppendLine($"  .harness-config/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerEnvDirectoryName}/");
+        builder.AppendLine("                                     values the steps read, ignored");
+        builder.AppendLine($"  .harness-config/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerSecretsDirectoryName}/");
+        builder.AppendLine("                                     secret values, ignored and never printed");
+        builder.AppendLine();
+        builder.AppendLine("A step either uses a predefined action or carries a run block. A run block is");
+        builder.AppendLine("split on newlines and each line trimmed, so indentation and blank lines cannot");
+        builder.AppendLine("change what runs. Each line is a program and its arguments, never a shell string.");
+        builder.AppendLine("Quoting is double quotes only, no escapes, and a line with an unbalanced quote is");
+        builder.AppendLine("refused when the file is read: the splitter silently drops everything after one,");
+        builder.AppendLine("so the alternative is a command missing arguments nobody can see are missing.");
+        builder.AppendLine("The first token must be a program declared under tools, or a path in the");
+        builder.AppendLine("repository; anything else is refused before a single step runs.");
+        builder.AppendLine();
+        builder.AppendLine("expectedExceptions names failures a runner may produce, with the outcome to");
+        builder.AppendLine("report instead. Every entry carries earnedOn, earnedAt, mechanism and anchor, and");
+        builder.AppendLine("is refused without them: an excusal nobody can audit stops being a record of a");
+        builder.AppendLine("measured confound and becomes a way to make a regression invisible. An entry");
+        builder.AppendLine("naming no message, or one matching anything, is refused for the same reason.");
+        builder.AppendLine();
+        builder.AppendLine("runChecks gate an entry on another runner confirming the confound. Unconfirmed,");
+        builder.AppendLine("the failure stays genuine. The window is the failing unit's own output up to its");
+        builder.AppendLine("verdict line, never a once-per-run sample: a sample was measured charging");
+        builder.AppendLine("genuine-looking failures to the tool on a loaded machine and excusing them on a");
+        builder.AppendLine("quiet one, the same day.");
+
+        return builder.ToString();
+    }
+
+    private static string RenderVerdicts()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("What each leg verdict means");
+        builder.AppendLine();
+        builder.AppendLine("Every declared leg reaches exactly one. A leg that reaches none is a defect in");
+        builder.AppendLine("the harness and fails the run, rather than vanishing from the report.");
+        builder.AppendLine();
+
+        foreach (var info in Verdicts.All)
+        {
+            builder.AppendLine(
+                $"  {info.Display,-22} {(info.IsFailure ? "counts as failure" : "not a failure"),-18} exit {info.ExitCode}");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("When several apply the more fundamental one is reported, in the order above.");
+        builder.AppendLine("A leg whose inputs moved is not reported as failed even when its tests failed,");
+        builder.AppendLine("because what failed was a tree that never existed.");
+        builder.AppendLine();
+        builder.AppendLine("Remedies");
+        builder.AppendLine($"  {LegExit.InputsMoved}  inputs-moved, unmeasured   Let the tree settle, then run again");
+        builder.AppendLine($"  {LegExit.Contended}  contended                  Wait for the other run");
+        builder.AppendLine($"  {LegExit.Unwitnessed}  unwitnessed                Find out what actually ran");
+        builder.AppendLine($"  {LegExit.LogHeld}  log-held                   Find out which run still owns the logs");
+
+        return builder.ToString();
+    }
 
     private static string RenderOverview()
     {
@@ -85,6 +233,11 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness verify-git              Check git is present and this is a repository");
         builder.AppendLine("  DssHarness init                    Create .harness-config and seed config.json");
         builder.AppendLine("  DssHarness legs                    Show where each leg can run, or why it cannot");
+        builder.AppendLine("  DssHarness install-missing-tools   Install what each leg's host is missing");
+        builder.AppendLine("  DssHarness sync                    Put each host's copy in step with this tree");
+        builder.AppendLine("  DssHarness build                   Build every selected leg");
+        builder.AppendLine("  DssHarness test                    Build and test every selected leg");
+        builder.AppendLine("  DssHarness run <runner>            Run a predefined runner across its legs");
         builder.AppendLine("  DssHarness list-worktree           Show existing worktrees");
         builder.AppendLine("  DssHarness read-anchors            List the deferred work recorded as anchors");
         builder.AppendLine();
@@ -99,6 +252,10 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness help worktrees          Naming rules, the path budget, and when deleting refuses");
         builder.AppendLine("  DssHarness help anchors            Anchor registries and the commands that change them");
         builder.AppendLine("  DssHarness help layout             What init creates, and what git tracks");
+        builder.AppendLine("  DssHarness help secrets            Where each host's connection data lives");
+        builder.AppendLine("  DssHarness help tools              What install-missing-tools installs, and where");
+        builder.AppendLine("  DssHarness help runners            Predefined runners, action files and excused failures");
+        builder.AppendLine("  DssHarness help verdicts           What each leg verdict means, and what to do about it");
         builder.AppendLine();
         builder.AppendLine("Use 'DssHarness <command> --help' for a command's own options.");
 
@@ -132,11 +289,24 @@ internal static class HelpCommand
         }
 
         builder.AppendLine();
-        builder.AppendLine("  read-anchor, read-anchors --lint, check-anchor-balance");
+        builder.AppendLine("  read-anchor, read-anchors --lint, check-anchor-balance, check-anchor-citations");
         builder.AppendLine($"    {AnchorExit.Findings,3}  an id was not found, the registries have problems, or the balance did not hold");
         builder.AppendLine();
         builder.AppendLine("  legs");
         builder.AppendLine($"    {LegsExit.Unavailable,3}  a leg named with --legs cannot run, or no selected leg can");
+        builder.AppendLine();
+        builder.AppendLine("  install-missing-tools");
+        builder.AppendLine($"    {ToolsExit.NotProvisioned,3}  a tool is missing, out of date, or could not be installed");
+        builder.AppendLine();
+        builder.AppendLine("  check-ci-legs");
+        builder.AppendLine($"    {CiExit.LegRed,3}  a leg is red");
+        builder.AppendLine($"    {CiExit.MatrixDidNotRun,3}  the matrix did not run, which is never read as every leg passing");
+        builder.AppendLine();
+        builder.AppendLine("  build, test, run");
+        builder.AppendLine($"    {LegExit.InputsMoved,3}  inputs-moved or unmeasured: let the tree settle, then run again");
+        builder.AppendLine($"    {LegExit.Contended,3}  contended: wait for the other run");
+        builder.AppendLine($"    {LegExit.Unwitnessed,3}  unwitnessed: find out what actually ran");
+        builder.AppendLine($"    {LegExit.LogHeld,3}  log-held: find out which run still owns this leg's logs");
         builder.AppendLine();
         builder.AppendLine("host-exec returns the exit code of the command it ran on the host, unchanged, or");
         builder.AppendLine($"{HarnessExit.HostUnavailable} when nothing ran there, or the command never reported how it finished.");
@@ -177,12 +347,12 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("A WSL distribution is available when this machine runs Windows, wsl.exe exists,");
         builder.AppendLine("and a program starts in the distribution; --wsl with no name is WSL's default.");
-        builder.AppendLine("An ssh host is available when .harness-config/ssh/config has a 'Host <name>' entry");
-        builder.AppendLine("spelt exactly as hosts.ssh declares it, case included, ssh connects in batch mode,");
-        builder.AppendLine("so without ever waiting at a prompt, and DssHarness runs there. A configuration");
-        builder.AppendLine("file other users can change is refused, since ssh reads one passed with -F whatever");
-        builder.AppendLine("its permissions, and a key they can read, ssh ignores; both are checked before");
-        builder.AppendLine("connecting.");
+        builder.AppendLine("An ssh host is available when .harness-config/sshItems/<name>/ holds its connection");
+        builder.AppendLine("data, named under sshItems and keyed the same way by hosts.ssh, ssh connects in batch");
+        builder.AppendLine("mode, so without ever waiting at a prompt, and DssHarness runs there. An .env other");
+        builder.AppendLine("users can change is refused, since whoever can change it can send the harness");
+        builder.AppendLine("elsewhere, and a key they can read, ssh ignores; both are checked before connecting.");
+        builder.AppendLine("Run 'DssHarness help secrets' for the layout.");
         builder.AppendLine();
         builder.AppendLine("Every WSL distribution and ssh host runs DssHarness itself, installed as a global");
         builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
@@ -196,7 +366,7 @@ internal static class HelpCommand
         builder.AppendLine("ends it, and the host cancels the command. The command line ssh hands a remote");
         builder.AppendLine("shell holds only fixed words, so no argument is ever reinterpreted by sh, cmd or");
         builder.AppendLine("PowerShell. host-exec runs in the host's copy of the repository at repositoryPath,");
-        builder.AppendLine("which has to exist already: until sync exists, nothing creates it.");
+        builder.AppendLine("which 'DssHarness sync' creates and keeps in step with this tree.");
         builder.AppendLine();
         builder.AppendLine("An emulator declares the hosts it runs on (hostOs, hostProcessor), the processor it");
         builder.AppendLine("runs programs for, the launcher placed in front of each program (such as");
@@ -211,7 +381,8 @@ internal static class HelpCommand
         builder.AppendLine("emulator the selected legs use, and both run DssHarness itself on WSL distributions");
         builder.AppendLine("and ssh hosts, which they install or update there from nuget.org, and from nuget.org");
         builder.AppendLine("only. That is the trust building the repository already asks for. An ssh host is");
-        builder.AppendLine("reached only when the main checkout's .harness-config/ssh/config declares it.");
+        builder.AppendLine("reached only when the main checkout holds its directory under sshItems, so a");
+        builder.AppendLine("config.json arriving through git cannot point the harness at a machine nobody set up.");
         builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run, or with no --legs, at least one leg can");
@@ -266,10 +437,12 @@ internal static class HelpCommand
         builder.AppendLine("Without --force, when the check cannot be finished, because git cannot answer or");
         builder.AppendLine("a record cannot be read or its directory found, nothing is deleted and it");
         builder.AppendLine($"exits {HarnessExit.CommandFailed}.");
-        builder.AppendLine("Ignored files are deleted unchecked, even ones no build makes again, such as");
-        builder.AppendLine(".env, and so are ignored directories with everything in them, the history of a");
-        builder.AppendLine("repository nested inside one included. --force skips every check and overrides");
-        builder.AppendLine("a lock; whatever the worktree held is lost.");
+        builder.AppendLine("Ignored files outside a declared evidenceRoots directory are deleted unchecked,");
+        builder.AppendLine("even ones no build makes again, such as .env, and so are ignored directories");
+        builder.AppendLine("with everything in them, the history of a repository nested inside one included.");
+        builder.AppendLine("A worktree whose evidenceRoots directory holds anything is refused;");
+        builder.AppendLine("--delete-evidence waives that one check and nothing else. --force skips every");
+        builder.AppendLine("check and overrides a lock; whatever the worktree held is lost.");
         builder.AppendLine();
         builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
         builder.AppendLine("running delete-worktree again with --force finishes it.");
@@ -369,9 +542,16 @@ internal static class HelpCommand
         builder.AppendLine("Layout created by init");
         builder.AppendLine();
         builder.AppendLine("  .harness-config/config.json        tracked by git; the whole contract");
-        builder.AppendLine("  .harness-config/worktrees/         contents ignored, .gitkeep tracked");
-        builder.AppendLine("  .harness-config/ssh/               contents ignored, .gitkeep tracked");
-        builder.AppendLine($"  .harness-config/ssh/{HostInspector.SshConfigFileName}             ignored, and written by you, not init: the hosts --ssh names");
+        builder.AppendLine("  .harness-config/runner/actions/    tracked; a predefined runner's steps, as YAML");
+        builder.AppendLine("  .harness-config/runner/.env/       contents ignored; values actions read");
+        builder.AppendLine("  .harness-config/runner/.secrets/   contents ignored; secret values actions read");
+        builder.AppendLine("  .harness-config/sshItems/<name>/   ignored, and written by you, not init:");
+        builder.AppendLine("                                     .env (address, user, port), .key, known_hosts");
+        builder.AppendLine("  .harness-config/wslDistros/<name>/ ignored; .env (distribution, credential)");
+        builder.AppendLine("  .harness-config/worktrees/         ignored whole, with no placeholder; made by the");
+        builder.AppendLine("                                     first create-worktree, not by init");
+        builder.AppendLine("                                     (the default; worktrees.root moves it)");
+        builder.AppendLine("  .harness-config/runs/              ignored; one directory of logs per run");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");
         builder.AppendLine($"  {AnchorSettings.DefaultPendingAnchorsPath}");
         builder.AppendLine("                                     tracked; live anchors (anchors.pendingAnchorsPath)");
@@ -386,8 +566,10 @@ internal static class HelpCommand
         builder.AppendLine("block on later runs and leaving every other rule untouched.");
         builder.AppendLine();
         builder.AppendLine("Ignored state lives only in the main checkout. A worktree receives the tracked");
-        builder.AppendLine("part of .harness-config through git but never the ignored part, so ssh secrets");
-        builder.AppendLine("and the run lock resolve back to the originating checkout.");
+        builder.AppendLine("part of .harness-config through git but never the ignored part, so connection");
+        builder.AppendLine("data and the run lock resolve back to the originating checkout. Action files");
+        builder.AppendLine("are tracked, so a worktree has its own and a runner acts on the tree it was");
+        builder.AppendLine("asked about.");
 
         return builder.ToString();
     }
@@ -412,7 +594,7 @@ internal static class HelpCommand
         builder.AppendLine("                 + config (+ sanitizer)");
         builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
-        builder.AppendLine("  runners        multi-phase procedures such as a corpus test or a benchmark");
+        builder.AppendLine("  predefinedRunners  multi-phase procedures such as a corpus test or a benchmark");
         builder.AppendLine("  exec           named commands to run through 'DssHarness exec'");
         builder.AppendLine("  commit         commit template and sign-off policy");
         builder.AppendLine("  sync           what the tree mirror carries, and what it must never carry");

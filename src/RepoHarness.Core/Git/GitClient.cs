@@ -10,6 +10,18 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
 {
     private const string GitExecutable = "git";
 
+    /// <summary>
+    /// Variables a caller's environment may carry that would redirect git away from the directory
+    /// it was pointed at. Cleared before every git command this client runs.
+    /// </summary>
+    /// <remarks>
+    /// Each one silently outranks <c>-C &lt;directory&gt;</c>. A git hook runs with all three set, so
+    /// a harness command invoked from a hook — or from a shell someone left in another checkout —
+    /// reads and writes a repository nobody named.
+    /// </remarks>
+    private static readonly string[] InheritedGitEnvironment =
+        ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHarnessOutput _output = output;
 
@@ -479,6 +491,16 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             // report, so git is told up front that nobody is watching.
             ["GIT_TERMINAL_PROMPT"] = "0",
         };
+
+        // Cleared before every question, not only before every change. These three override the
+        // repository, the working tree and the index that `-C <directory>` would otherwise select,
+        // so a hook, or a command started from another checkout, steers every answer git gives:
+        // the harness would then read one tree's status and act on another's. A caller that
+        // genuinely wants a different index passes it below, after the inherited one is gone.
+        foreach (var inherited in InheritedGitEnvironment)
+        {
+            environment[inherited] = null;
+        }
 
         if (untranslated)
         {

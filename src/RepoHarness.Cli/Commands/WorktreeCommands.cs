@@ -60,11 +60,17 @@ internal static class DeleteWorktreeCommand
         Description = "Delete the worktree without checking it, even when locked: uncommitted changes, commits on no branch, tag, remote-tracking ref, newest stash or other worktree's HEAD, and submodules' unpushed work are lost.",
     };
 
+    private static readonly Option<bool> DeleteEvidenceOption = new("--delete-evidence")
+    {
+        Description = "Delete the configured evidence directories with the worktree. Every other check still runs.",
+    };
+
     internal static Command Create()
     {
-        var command = new Command(Name, "Remove a worktree and everything under it; refuses one holding work that would be lost, or a locked one, without --force.");
+        var command = new Command(Name, "Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without --force.");
         command.Arguments.Add(NameArgument);
         command.Options.Add(ForceOption);
+        command.Options.Add(DeleteEvidenceOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -74,6 +80,7 @@ internal static class DeleteWorktreeCommand
                     context.Directory,
                     context.ParseResult.GetRequiredValue(NameArgument),
                     context.ParseResult.GetValue(ForceOption),
+                    context.ParseResult.GetValue(DeleteEvidenceOption),
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -96,13 +103,15 @@ internal static class ListWorktreeCommand
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
         {
-            var names = await context.Get<IWorktreeService>()
+            var worktrees = await context.Get<IWorktreeService>()
                 .ListAsync(context.Directory, cancellationToken)
                 .ConfigureAwait(false);
 
-            return names.Count == 0
+            return worktrees.Count == 0
                 ? CommandOutcome.Ok("no worktrees")
-                : CommandOutcome.Ok($"{names.Count} worktree(s)", [.. names]);
+                : CommandOutcome.Ok(
+                    $"{worktrees.Count} worktree(s)",
+                    [.. worktrees.Select(worktree => worktree.ToString())]);
         }));
 
         return command;

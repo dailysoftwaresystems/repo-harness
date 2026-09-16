@@ -1,0 +1,297 @@
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
+using RepoHarness.Core.Results;
+
+namespace RepoHarness.Core.Execution;
+
+/// <summary>One leg as the executor needs to see it, whatever command is running it.</summary>
+public sealed record LegPlan
+{
+    /// <summary>The leg, as the configuration names it.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>
+    /// The variant-keyed build directory this leg uses. Two selected legs resolving to one
+    /// directory is refused before either starts: CMake refuses a compiler change on an existing
+    /// cache, and a native build and a cross-build in one directory corrupt each other silently.
+    /// </summary>
+    public required string BuildDirectory { get; init; }
+
+    /// <summary>
+    /// What identifies the host's tree this leg works in, such as the host and the tree root.
+    /// Legs sharing it share one sync. Empty where the leg needs no sync.
+    /// </summary>
+    public string TreeKey { get; init; } = string.Empty;
+
+    /// <summary>Whether the leg runs under emulation, which decides what its timings are compared with.</summary>
+    public bool Emulated { get; init; }
+}
+
+/// <summary>What running the selected legs produced.</summary>
+/// <param name="Entries">
+/// One entry per leg that reached a verdict, in the order the legs were selected rather than the
+/// order they finished, so two runs of the same gate print the same table.
+/// </param>
+/// <param name="Unfinished">Legs that were still running when the run was interrupted.</param>
+/// <param name="Cancelled">
+/// Whether the run was interrupted. A cancelled run reached no verdict and must not be read as a
+/// red one, so the caller reports it as interrupted rather than as a failure.
+/// </param>
+public sealed record LegExecution(IReadOnlyList<LegEntry> Entries, IReadOnlyList<string> Unfinished, bool Cancelled);
+
+/// <summary>What to run, and what a leg actually does.</summary>
+public sealed record LegExecutionRequest
+{
+    /// <summary>The selected legs.</summary>
+    public required IReadOnlyList<LegPlan> Legs { get; init; }
+
+    /// <summary>
+    /// What a leg does once its tree is synced: build, then test, or whatever the command in
+    /// question means by the leg. Returning <see langword="null"/> means the leg reached no
+    /// verdict, which is recorded as <c>poisoned</c> rather than dropped.
+    /// </summary>
+    public required Func<LegPlan, CancellationToken, Task<LegEntry?>> RunLeg { get; init; }
+
+    /// <summary>
+    /// Syncs one host tree, called once per <see cref="LegPlan.TreeKey"/> however many legs share
+    /// it. Left <see langword="null"/> where nothing needs syncing.
+    /// </summary>
+    public Func<string, CancellationToken, Task>? SyncTree { get; init; }
+
+    /// <summary>
+    /// Most legs to run at once, or <see langword="null"/> to start every selected leg together.
+    /// Legs are isolated from one another, so running fewer at a time is never needed for
+    /// correctness; this caps the load on a busy machine and nothing else.
+    /// </summary>
+    public int? MaxParallelLegs { get; init; }
+}
+
+/// <summary>
+/// Runs the selected legs: all of them at once, in a fixed order within each, sharing one sync per
+/// host tree, and reporting what was left when a run is interrupted.
+/// </summary>
+/// <remarks>
+/// Legs are isolated from one another, so running them one at a time would only make a gate slower.
+/// The work a leg does is supplied by the caller, which is what lets <c>build</c>, <c>test</c> and
+/// <c>run</c> share this trunk instead of each growing its own parallelism, its own sync sharing
+/// and its own idea of what an interrupted run reports.
+/// </remarks>
+public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
+{
+    private readonly IHostPlatform _platform = platform;
+    private readonly IHarnessOutput _output = output;
+
+    /// <summary>Runs every selected leg and waits for all of them.</summary>
+    /// <param name="request">The legs, and what a leg does.</param>
+    /// <param name="ledger">Collects each leg's line as it finishes, and its progress while it runs.</param>
+    /// <param name="cancellationToken">
+    /// Stops the legs. The children go with them, and the report says what was left rather than
+    /// raising: a run interrupted halfway still has to say which legs got a verdict.
+    /// </param>
+    /// <exception cref="HarnessException">
+    /// Nothing was selected, a leg was selected twice, or two legs resolve to the same build
+    /// directory. Raised before any leg starts, because the point of the check is that neither ran.
+    /// </exception>
+    public async Task<LegExecution> RunAsync(
+        LegExecutionRequest request,
+        LegLedger ledger,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(ledger);
+
+        Refuse(request.Legs);
+
+        using var slots = request.MaxParallelLegs is > 0
+            ? new SemaphoreSlim(request.MaxParallelLegs.Value, request.MaxParallelLegs.Value)
+            : null;
+
+        var syncs = new Dictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
+        var syncGate = new Lock();
+
+        // Started together and awaited together. A leg that finishes early reports at once through
+        // the ledger; nothing waits for the slowest leg before saying anything.
+        var running = request.Legs
+            .Select(leg => RunOneAsync(leg, request, ledger, slots, syncs, syncGate, cancellationToken))
+            .ToList();
+
+        var entries = await Task.WhenAll(running).ConfigureAwait(false);
+
+        var finished = entries.Where(entry => entry is not null).Select(entry => entry!).ToList();
+        var unfinished = request.Legs
+            .Where((_, index) => entries[index] is null)
+            .Select(leg => leg.Name)
+            .ToList();
+
+        if (unfinished.Count > 0)
+        {
+            _output.Warn(
+                ledger.CommandName,
+                $"The run was interrupted; {unfinished.Count} leg(s) reached no verdict: {string.Join(", ", unfinished)}");
+        }
+
+        return new LegExecution(finished, unfinished, cancellationToken.IsCancellationRequested);
+    }
+
+    /// <summary>
+    /// Refuses a selection that cannot be run as a set, before anything starts.
+    /// </summary>
+    private void Refuse(IReadOnlyList<LegPlan> legs)
+    {
+        if (legs.Count == 0)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                "No leg was selected, so there is nothing to run and nothing to report a verdict on.");
+        }
+
+        var repeated = legs
+            .GroupBy(leg => leg.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToList();
+
+        if (repeated.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"Leg(s) {string.Join(", ", repeated)} were selected more than once; each leg reaches exactly one verdict.");
+        }
+
+        var comparer = _platform.PathComparison == StringComparison.OrdinalIgnoreCase
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+
+        // Keyed by the tree as well as the directory. Two hosts commonly keep their copy at the same
+        // path — `~/work/repo` is an ordinary convention — and two legs of the same variant on two
+        // different machines are exactly the "run this suite on both" case the tool exists for.
+        // Comparing paths alone would refuse it as a collision that does not exist.
+        var shared = legs
+            .GroupBy(
+                leg => CompositeKey.Of(leg.TreeKey, Path.TrimEndingDirectorySeparator(Path.GetFullPath(leg.BuildDirectory))),
+                comparer)
+            .Where(group => group.Count() > 1)
+            .Select(group => $"{string.Join(", ", group.Select(leg => leg.Name))} all build in "
+                + $"'{Path.TrimEndingDirectorySeparator(Path.GetFullPath(group.First().BuildDirectory))}'")
+            .ToList();
+
+        if (shared.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"Selected legs share a build directory, so neither result would describe its own leg: {string.Join("; ", shared)}");
+        }
+    }
+
+    private async Task<LegEntry?> RunOneAsync(
+        LegPlan leg,
+        LegExecutionRequest request,
+        LegLedger ledger,
+        SemaphoreSlim? slots,
+        Dictionary<string, Task> syncs,
+        Lock syncGate,
+        CancellationToken cancellationToken)
+    {
+        LegEntry entry;
+
+        try
+        {
+            if (slots is not null)
+            {
+                await slots.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+
+        try
+        {
+            // The order within a leg is fixed: sync, then whatever the command does with the tree,
+            // which is build on buildCores and then test on testCores. A leg that tested before its
+            // tree was in place would be testing the previous run's sources.
+            if (request.SyncTree is { } sync && leg.TreeKey.Length > 0)
+            {
+                ledger.Transition(leg.Name, $"sync of {leg.TreeKey}");
+                await Shared(syncs, syncGate, leg.TreeKey, sync, cancellationToken).ConfigureAwait(false);
+            }
+
+            entry = await request.RunLeg(leg, cancellationToken).ConfigureAwait(false)
+                ?? Entry(leg, ReachedVerdict.OrPoisoned(null, leg.Name));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Left without a verdict on purpose: an interrupted run reached none, and a caller must
+            // not read one. What was left is named in the report.
+            return null;
+        }
+        catch (HarnessException ex)
+            when (ex.ExitCode is HarnessExit.ConfigInvalid or HarnessExit.UsageError or HarnessExit.Refused)
+        {
+            // Left to propagate, and it ends the run. A configuration or a policy a leg cannot
+            // satisfy — an action file naming an undeclared program, a leg whose project declares no
+            // toolchain — is the same fact for every leg. Turned into a verdict it would be reported
+            // once per leg, under a name that said the wrong cause, when what the reader has to do
+            // is edit one file.
+            // The one refusal that IS about this leg alone, a lock another run holds, never reaches
+            // here: the caller turns it into a verdict itself, precisely so that the other legs
+            // still report. The slot is released by the finally below, as on every other path out.
+            throw;
+        }
+        catch (HarnessException ex)
+        {
+            // A refusal that is genuinely about this leg keeps its own verdict: a host that is
+            // switched off is skipped-unavailable, and a lock another run holds is refused-locked,
+            // neither of them a defect in the tool. The other legs still report.
+            entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(ex.ExitCode), ex.Message));
+        }
+        catch (Exception ex)
+        {
+            // The harness could not produce a verdict, which is what poisoned means. Recorded
+            // rather than rethrown, so one broken leg does not take the other legs' results with it.
+            entry = Entry(leg, ReachedVerdict.Of(LegVerdict.Poisoned, $"{ex.GetType().Name}: {ex.Message}"));
+        }
+        finally
+        {
+            slots?.Release();
+        }
+
+        ledger.Record(entry);
+        return entry;
+    }
+
+    /// <summary>
+    /// The one sync of <paramref name="treeKey"/>, started by whichever leg needs it first and
+    /// awaited by every other leg on that tree. A tree is synced once, not once per leg: if each
+    /// leg synced, their copies would race over the same files.
+    /// </summary>
+    private static Task Shared(
+        Dictionary<string, Task> syncs,
+        Lock gate,
+        string treeKey,
+        Func<string, CancellationToken, Task> sync,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!syncs.TryGetValue(treeKey, out var running))
+            {
+                running = sync(treeKey, cancellationToken);
+                syncs[treeKey] = running;
+            }
+
+            return running;
+        }
+    }
+
+    /// <summary>The line a leg gets when the executor, rather than the leg's own work, decided its verdict.</summary>
+    private static LegEntry Entry(LegPlan leg, ReachedVerdict reached)
+        => new()
+        {
+            Leg = leg.Name,
+            Verdict = reached.Verdict,
+            Detail = reached.Detail,
+            Emulated = leg.Emulated,
+        };
+}

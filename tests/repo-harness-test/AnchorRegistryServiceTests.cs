@@ -599,6 +599,16 @@ public sealed class AnchorRegistryServiceTests
 
         public string ResolveLinks(string path) => inner.ResolveLinks(path);
 
+
+        public Stream OpenRead(string path) => inner.OpenRead(path);
+
+        public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
+
+
+        public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
+
+            => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
+
         public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
 
         public void DeleteDirectory(string path) => inner.DeleteDirectory(path);

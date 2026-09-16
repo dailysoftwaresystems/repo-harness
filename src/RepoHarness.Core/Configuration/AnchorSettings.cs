@@ -29,4 +29,17 @@ public sealed class AnchorSettings
     /// every citation of it.
     /// </summary>
     public int MinimumIdSegments { get; init; } = 3;
+
+    /// <summary>
+    /// Files and directories, relative to the repository root, where every cited anchor id must
+    /// resolve to a row. Nothing outside a declared root is scanned.
+    /// </summary>
+    /// <remarks>
+    /// Which code is production code is a judgement a repository makes, not one a tool can infer, so
+    /// it is declared rather than guessed. Scanning everything would make the check fail on ids that
+    /// were never anchors, and scanning nothing would make it pass on a citation that resolves to
+    /// nothing; an empty list therefore scans nothing and the command says so, rather than quietly
+    /// reporting success.
+    /// </remarks>
+    public List<string> CitationRoots { get; init; } = [];
 }

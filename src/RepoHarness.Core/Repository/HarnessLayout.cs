@@ -19,8 +19,35 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// <summary>Name of the worktrees directory inside the harness directory.</summary>
     public const string WorktreesDirectoryName = "worktrees";
 
-    /// <summary>Name of the ssh directory inside the harness directory.</summary>
-    public const string SshDirectoryName = "ssh";
+    /// <summary>Name of the directory holding one subdirectory per ssh host's connection data.</summary>
+    public const string SshItemsDirectoryName = "sshItems";
+
+    /// <summary>Name of the directory holding one subdirectory per WSL distribution's connection data.</summary>
+    public const string WslDistrosDirectoryName = "wslDistros";
+
+    /// <summary>Name of the file holding one item's connection settings, as <c>NAME=value</c> lines.</summary>
+    public const string ItemEnvFileName = ".env";
+
+    /// <summary>Name of the file holding an ssh item's private key.</summary>
+    public const string ItemKeyFileName = ".key";
+
+    /// <summary>Name of the file holding the host keys ssh will accept for an item.</summary>
+    public const string ItemKnownHostsFileName = "known_hosts";
+
+    /// <summary>Name of the directory holding runner action files and the values they read.</summary>
+    public const string RunnerDirectoryName = "runner";
+
+    /// <summary>Name of the directory holding runner action files. Tracked by git.</summary>
+    public const string RunnerActionsDirectoryName = "actions";
+
+    /// <summary>Name of the directory holding values actions read. Gitignored.</summary>
+    public const string RunnerEnvDirectoryName = ".env";
+
+    /// <summary>Name of the directory holding secret values actions read. Gitignored.</summary>
+    public const string RunnerSecretsDirectoryName = ".secrets";
+
+    /// <summary>Name of the directory holding one subdirectory per run, with its logs. Gitignored.</summary>
+    public const string RunsDirectoryName = "runs";
 
     /// <summary>Name of the configuration file.</summary>
     public const string ConfigFileName = "config.json";
@@ -72,13 +99,69 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// Worktrees live under the main checkout, never under another worktree, so
     /// running <c>create-worktree</c> from inside a worktree cannot nest them.
     /// </summary>
+    /// <remarks>
+    /// The default root. A configuration naming its own is resolved by
+    /// <see cref="WorktreesDirectoryUnder"/>, which every command uses: the root spends path budget
+    /// before a worktree's own name, and on Windows the difference decides whether any name fits.
+    /// </remarks>
     public string WorktreesDirectory => Path.Combine(MainHarnessDirectory, WorktreesDirectoryName);
 
+    /// <summary>The worktrees root a configuration declares, resolved against the main checkout.</summary>
+    /// <param name="root">The configured root, relative to the main checkout.</param>
+    public string WorktreesDirectoryUnder(string root)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(root);
+
+        return Path.GetFullPath(Path.Combine(MainCheckoutRoot, root));
+    }
+
     /// <summary>
-    /// SSH configuration, resolved against the main checkout because the secrets it
-    /// holds are gitignored and therefore absent from every worktree's checkout.
+    /// The ssh items directory, resolved against the main checkout because the connection data it
+    /// holds is gitignored and therefore absent from every worktree's checkout.
     /// </summary>
-    public string SshDirectory => Path.Combine(MainHarnessDirectory, SshDirectoryName);
+    public string SshItemsDirectory => Path.Combine(MainHarnessDirectory, SshItemsDirectoryName);
+
+    /// <summary>The WSL distributions directory, resolved against the main checkout for the same reason.</summary>
+    public string WslDistrosDirectory => Path.Combine(MainHarnessDirectory, WslDistrosDirectoryName);
+
+    /// <summary>One ssh host's directory, holding its <c>.env</c>, its key and its known hosts.</summary>
+    /// <param name="item">The item name, as <c>sshItems</c> declares it.</param>
+    public string SshItemDirectory(string item) => Path.Combine(SshItemsDirectory, item);
+
+    /// <summary>One WSL distribution's directory, holding its <c>.env</c>.</summary>
+    /// <param name="item">The distribution name, as <c>wslDistros</c> declares it.</param>
+    public string WslDistroDirectory(string item) => Path.Combine(WslDistrosDirectory, item);
+
+    /// <summary>The runner directory of the tree being acted on: action files, and the values they read.</summary>
+    /// <remarks>
+    /// Resolved against the tree rather than the main checkout: action files are tracked, so a
+    /// worktree has its own, and a runner must act on the tree it was asked about.
+    /// </remarks>
+    public string RunnerDirectory => Path.Combine(HarnessDirectory, RunnerDirectoryName);
+
+    /// <summary>Where a runner's action files live. Tracked by git.</summary>
+    public string RunnerActionsDirectory => Path.Combine(RunnerDirectory, RunnerActionsDirectoryName);
+
+    /// <summary>
+    /// Where the values actions read live, resolved against the main checkout because they are
+    /// gitignored and therefore absent from a worktree's checkout.
+    /// </summary>
+    public string RunnerEnvDirectory
+        => Path.Combine(MainHarnessDirectory, RunnerDirectoryName, RunnerEnvDirectoryName);
+
+    /// <summary>Where the secret values actions read live, resolved against the main checkout.</summary>
+    public string RunnerSecretsDirectory
+        => Path.Combine(MainHarnessDirectory, RunnerDirectoryName, RunnerSecretsDirectoryName);
+
+    /// <summary>
+    /// Where a run's logs live, resolved against the main checkout so that two runs started from
+    /// different trees of one repository cannot write the same file without seeing each other.
+    /// </summary>
+    public string RunsDirectory => Path.Combine(MainHarnessDirectory, RunsDirectoryName);
+
+    /// <summary>One run's directory, named by its id.</summary>
+    /// <param name="runId">The run's id.</param>
+    public string RunDirectory(string runId) => Path.Combine(RunsDirectory, runId);
 
     /// <summary>
     /// The run lock, resolved against the main checkout so that a run started from
@@ -87,8 +170,14 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     public string LockFile => Path.Combine(MainHarnessDirectory, LockFileName);
 
     /// <summary>
-    /// Directory of one named worktree. Callers validate the name first; the worktree
-    /// service also checks containment before it deletes anything beneath this path.
+    /// Directory of one named worktree under the default root. Callers validate the name first; the
+    /// worktree service also checks containment before it deletes anything beneath this path.
     /// </summary>
     public string WorktreePath(string name) => Path.Combine(WorktreesDirectory, name);
+
+    /// <summary>Directory of one named worktree under a configured root.</summary>
+    /// <param name="root">The configured worktrees root, relative to the main checkout.</param>
+    /// <param name="name">The worktree's name, already validated by the caller.</param>
+    public string WorktreePathUnder(string root, string name)
+        => Path.Combine(WorktreesDirectoryUnder(root), name);
 }

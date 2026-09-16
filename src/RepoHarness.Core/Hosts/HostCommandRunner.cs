@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Globalization;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Core.Hosts;
@@ -6,11 +7,33 @@ namespace RepoHarness.Core.Hosts;
 /// <summary>Everything needed to start a program on one host.</summary>
 public sealed record HostConnection
 {
+    /// <summary>Nothing has been resolved on a connection yet.</summary>
+    private static readonly FrozenDictionary<string, ProgramLocation> NoPrograms =
+        new Dictionary<string, ProgramLocation>(StringComparer.Ordinal).ToFrozenDictionary(StringComparer.Ordinal);
+
     /// <summary>The host.</summary>
     public required HostId Host { get; init; }
 
-    /// <summary>The ssh configuration file the host is declared in. ssh only.</summary>
-    public string? SshConfigFile { get; init; }
+    /// <summary>
+    /// The distribution wsl.exe is given, read from the item's <c>.env</c> rather than from
+    /// <c>config.json</c>, which git tracks and which therefore names no machine. WSL only.
+    /// </summary>
+    public string? Distribution { get; init; }
+
+    /// <summary>The address ssh connects to, read from the item's <c>.env</c>. ssh only.</summary>
+    public string? Address { get; init; }
+
+    /// <summary>The user ssh logs in as, read from the item's <c>.env</c>. ssh only.</summary>
+    public string? User { get; init; }
+
+    /// <summary>The port ssh connects to. ssh only.</summary>
+    public int Port { get; init; } = Secrets.SshItem.DefaultPort;
+
+    /// <summary>The private key file ssh offers, and the only one it offers. ssh only.</summary>
+    public string? KeyFile { get; init; }
+
+    /// <summary>The file holding the host keys ssh may accept for this host. ssh only.</summary>
+    public string? KnownHostsFile { get; init; }
 
     /// <summary>Seconds ssh may take to open the connection. ssh only.</summary>
     public int ConnectTimeoutSeconds { get; init; } = 25;
@@ -19,13 +42,57 @@ public sealed record HostConnection
     public int KeepAliveSeconds { get; init; } = 30;
 
     /// <summary>
-    /// The directory on this machine ssh starts in, which a relative <c>IdentityFile</c> in the ssh
-    /// configuration is resolved against. ssh only.
+    /// The directory on this machine ssh starts in. Every path ssh is given is absolute, so this
+    /// decides nothing ssh resolves; it keeps ssh out of a directory this process may be about to
+    /// delete. ssh only.
     /// </summary>
     public string? LocalDirectory { get; init; }
 
     /// <summary>The kind of shell the ssh server runs commands with, once measured. ssh only.</summary>
     public RemoteShell Shell { get; init; } = RemoteShell.Standard;
+
+    /// <summary>
+    /// Where each program asked about is on the host, by the name it was asked for, once measured.
+    /// Measured per connection and never assumed: the PATH of a command run without a login shell is
+    /// not the PATH a login shell shows, and on macOS it does not carry <c>/opt/homebrew/bin</c>.
+    /// </summary>
+    public IReadOnlyDictionary<string, ProgramLocation> Programs { get; init; } = NoPrograms;
+
+    /// <summary>What was measured about <paramref name="program"/> here, or <see langword="null"/> when it was never asked about.</summary>
+    public ProgramLocation? Located(string program)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+
+        return Programs.TryGetValue(program, out var location) ? location : null;
+    }
+
+    /// <summary>
+    /// How <paramref name="program"/> has to be spelt to start it here: its absolute path when the
+    /// PATH of a command run without a login shell does not name it, and the name itself otherwise.
+    /// </summary>
+    public string Spell(string program)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+
+        return Located(program) is { Found: ProgramFound.OffPath, Path: { } path } ? path : program;
+    }
+
+    /// <summary>
+    /// Drops what was measured about <paramref name="program"/>, so that the next resolution measures
+    /// it again. Used after installing one: what was true before the install is exactly what the
+    /// install changed, and reusing it would start the copy that was not there.
+    /// </summary>
+    public HostConnection Forget(string program)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+
+        return this with
+        {
+            Programs = Programs
+                .Where(entry => !string.Equals(entry.Key, program, StringComparison.Ordinal))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal),
+        };
+    }
 }
 
 /// <summary>A program to run on a host, and what to hand it.</summary>
@@ -163,7 +230,16 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
                 // --exec starts the program without the distribution's shell, so each argument arrives
                 // as it is; --cd ~ starts it in the home directory rather than in whatever the Windows
                 // directory of this process translates to.
-                Arguments = ["--distribution", connection.Host.Name, "--cd", "~", "--exec", command.Program, .. command.Arguments],
+                Arguments =
+                [
+                    "--distribution",
+                    Declared(connection.Distribution, nameof(HostConnection.Distribution)),
+                    "--cd",
+                    "~",
+                    "--exec",
+                    command.Program,
+                    .. command.Arguments,
+                ],
                 Environment = WslEnvironment,
             },
             _ => SshRequest(connection, RemoteCommandLine.Join([command.Program, .. command.Arguments], connection.Shell)),
@@ -179,12 +255,25 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         };
     }
 
+    /// <summary>
+    /// How ssh is invoked, built entirely from the host's own item. No ssh configuration file is read:
+    /// one passed with <c>-F</c> is read whatever its permissions, and a repository that named a file
+    /// would decide, through git, which machine a clone reaches.
+    /// </summary>
     private static ProcessRequest SshRequest(HostConnection connection, string commandLine) => new()
     {
         FileName = SshProgram,
         Arguments =
         [
-            "-F", connection.SshConfigFile ?? throw new ArgumentException("An ssh host needs its configuration file.", nameof(connection)),
+            "-i", Declared(connection.KeyFile, nameof(HostConnection.KeyFile)),
+
+            // Only that key: without this, ssh offers every key an agent holds, and a host that counts
+            // failed authentications locks the account before the right key is reached.
+            "-o", "IdentitiesOnly=yes",
+
+            // The host keys this repository set up, never the user's own file: a machine that never
+            // connected by hand has none, and one that did may trust a key nobody here checked.
+            "-o", $"UserKnownHostsFile={Declared(connection.KnownHostsFile, nameof(HostConnection.KnownHostsFile))}",
 
             // Batch mode: a host key not yet trusted, or a login that asks for a password, fails at once
             // with ssh's reason instead of waiting for somebody to type.
@@ -192,12 +281,24 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
             "-o", $"ConnectTimeout={connection.ConnectTimeoutSeconds}",
             "-o", $"ServerAliveInterval={connection.KeepAliveSeconds}",
             "-o", "ServerAliveCountMax=1",
+            "-p", connection.Port.ToString(CultureInfo.InvariantCulture),
 
             // No terminal: standard input then carries its bytes unchanged, and nothing waits for a key.
             "-T",
-            connection.Host.Name,
+            $"{Declared(connection.User, nameof(HostConnection.User))}@{Declared(connection.Address, nameof(HostConnection.Address))}",
             commandLine,
         ],
         WorkingDirectory = connection.LocalDirectory,
     };
+
+    /// <summary>
+    /// One part of a connection that the host's own item declares. Absent, it stops the call rather
+    /// than falling back to a default: ssh's own defaults reach the current user on port 22 at
+    /// whatever the name happens to resolve to, which is a machine nobody chose.
+    /// </summary>
+    private static string Declared(string? value, string part)
+        => string.IsNullOrEmpty(value)
+            ? throw new InvalidOperationException(
+                $"The connection to this host declares no {part}; it is read from the host's item under .harness-config.")
+            : value;
 }

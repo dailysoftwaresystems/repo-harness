@@ -1,0 +1,92 @@
+using RepoHarness.Core.Configuration;
+
+namespace RepoHarness.Core.Runners;
+
+/// <summary>
+/// One step of an action file: either a predefined action or a <c>run</c> block, plus everything
+/// a <see cref="RunnerPhase"/> carries.
+/// </summary>
+/// <remarks>
+/// Every field a phase has is a key on a step. That is not decoration: <c>successPattern</c>,
+/// <c>stallSeconds</c> and <c>continueOnError</c> are what decide a leg's verdict, and a step
+/// unable to express one of them would make an action file a quieter way to run the same work
+/// with no witness, no stall bound and no recorded decision about a failure.
+/// </remarks>
+public sealed record ActionStep
+{
+    /// <summary>
+    /// The step's name, which names its log file and identifies it in the ledger. Required, because
+    /// two unnamed steps would write one log and the second would overwrite the first's evidence.
+    /// </summary>
+    public required string Name { get; init; }
+
+    /// <summary>The predefined action this step performs, or <see cref="PredefinedAction.None"/>.</summary>
+    public PredefinedAction Uses { get; init; }
+
+    /// <summary>
+    /// The commit or branch <see cref="PredefinedAction.Checkout"/> puts the tree at. Only that
+    /// action reads it.
+    /// </summary>
+    public string? Reference { get; init; }
+
+    /// <summary>
+    /// The program invocations this step's <c>run</c> block declares, one per surviving line.
+    /// Empty when <see cref="Uses"/> names a predefined action.
+    /// </summary>
+    public IReadOnlyList<ActionCommand> Commands { get; init; } = [];
+
+    /// <summary>Working directory, relative to the leg's work directory.</summary>
+    public string? WorkingDirectory { get; init; }
+
+    /// <summary>Environment for this step, applied over the runner's own.</summary>
+    public IReadOnlyDictionary<string, string> Env { get; init; }
+        = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Pattern proving the step ran, checked in addition to its exit code. Already known to compile.
+    /// </summary>
+    public string? SuccessPattern { get; init; }
+
+    /// <summary>Seconds without output after which this step is treated as hung.</summary>
+    public int? StallSeconds { get; init; }
+
+    /// <summary>Whether a failure here ends the leg or is recorded and passed over.</summary>
+    public bool ContinueOnError { get; init; }
+
+    /// <summary>
+    /// This step as the phases the harness runs: one per line of its <c>run</c> block, each
+    /// carrying the step's working directory, environment, witness, stall bound and failure policy.
+    /// A predefined action yields none, because it is not a child process.
+    /// </summary>
+    /// <remarks>
+    /// A step whose block holds several lines yields several phases, each named
+    /// <c>&lt;step&gt; (n/total)</c>, so every line gets its own log file and its own verdict line.
+    /// Folding them into one phase would put several programs behind a single exit code, and the
+    /// one that failed would no longer be identifiable.
+    /// </remarks>
+    public IReadOnlyList<RunnerPhase> ToPhases()
+    {
+        var total = Commands.Count;
+
+        return
+        [
+            .. Commands.Select((command, index) => new RunnerPhase
+            {
+                Name = total == 1 ? Name : $"{Name} ({index + 1}/{total})",
+                Command = [.. command.Arguments],
+                WorkingDirectory = WorkingDirectory,
+                Env = new Dictionary<string, string>(Env, StringComparer.OrdinalIgnoreCase),
+
+                // The witness belongs to the step, so it is checked against the step's last command:
+                // that is the one whose finishing means the step did its work. Copied to every line
+                // instead, a step would have to make each of its commands print the same evidence,
+                // which no honest sequence does — the first `git --version` would have to say what
+                // the last `ctest` says. The earlier commands are still witnessed by their own exit
+                // codes, and by the last one having been reached at all.
+                SuccessPattern = index == total - 1 ? SuccessPattern : null,
+                StallSeconds = StallSeconds,
+                ContinueOnError = ContinueOnError,
+            }),
+        ];
+    }
+}

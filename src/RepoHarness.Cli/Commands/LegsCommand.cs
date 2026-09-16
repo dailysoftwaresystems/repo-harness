@@ -40,7 +40,7 @@ internal static class LegsCommand
                 : null;
 
             var report = await context.Get<LegsService>()
-                .CheckAsync(context.Directory, legs, cancellationToken)
+                .CheckAsync(context.Directory, legs, here: false, cancellationToken)
                 .ConfigureAwait(false);
 
             return LegsReports.Render(report, arguments.GetValue(JsonOption));

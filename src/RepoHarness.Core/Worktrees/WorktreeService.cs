@@ -30,7 +30,10 @@ public interface IWorktreeService
     /// newest stash or other worktree's HEAD, or a submodule repository's unpushed commits or stash;
     /// when it is locked or was moved by hand; and when git does not see it as a worktree of this
     /// repository. Ignored files, and ignored directories with everything in them, are deleted
-    /// unchecked. <paramref name="force"/> skips every check and overrides a lock.
+    /// unchecked, except the evidence roots the configuration declares: one of those holding
+    /// anything is refused unless <paramref name="deleteEvidence"/> is set, because a lane's
+    /// measurements are ignored precisely because they are not source, and losing them is silent.
+    /// <paramref name="force"/> skips every check and overrides a lock.
     /// </summary>
     /// <exception cref="HarnessException">
     /// As for <see cref="CreateAsync"/>, or the path resolved outside the worktrees directory.
@@ -39,13 +42,29 @@ public interface IWorktreeService
         string startDirectory,
         string name,
         bool force,
+        bool deleteEvidence,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Lists existing worktree names.</summary>
+    /// <summary>Lists existing worktrees with the commit each was made from.</summary>
     /// <exception cref="HarnessException">The repository is not initialised.</exception>
-    Task<IReadOnlyList<string>> ListAsync(
+    Task<IReadOnlyList<WorktreeListing>> ListAsync(
         string startDirectory,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>One existing worktree.</summary>
+/// <param name="Name">The worktree's name, which is its directory name under the worktrees root.</param>
+/// <param name="BaseCommit">
+/// The commit it was made from, or <see langword="null"/> when none was recorded — a worktree made
+/// before the record existed, or one whose record could not be written. Reported so a lane's tree
+/// can be reproduced from git rather than from the moment it happened to be made: the worktree's own
+/// HEAD moves with every commit in it and stops answering that question after the first one.
+/// </param>
+public sealed record WorktreeListing(string Name, string? BaseCommit)
+{
+    /// <summary>The line <c>list-worktree</c> prints for this worktree.</summary>
+    public override string ToString()
+        => BaseCommit is null ? Name : $"{Name}  base {BaseCommit[..Math.Min(12, BaseCommit.Length)]}";
 }
 
 /// <summary>
@@ -76,6 +95,15 @@ public sealed class WorktreeService(
 {
     /// <summary>The command a deletion reports under.</summary>
     internal const string DeleteCommand = "delete-worktree";
+
+    /// <summary>The command a creation reports under.</summary>
+    internal const string CreateCommand = "create-worktree";
+
+    /// <summary>
+    /// Where the commit a worktree was made from is recorded. Under <c>refs/harness/</c> rather than
+    /// under heads, tags or remotes, so the record can never be mistaken for somewhere work is kept.
+    /// </summary>
+    internal const string BaseCommitRefPrefix = "refs/harness/worktree-base/";
 
     private const int GenerateAttempts = 10;
 
@@ -134,7 +162,7 @@ public sealed class WorktreeService(
 
         if (useRandomName)
         {
-            var generated = GenerateUnusedName(layout, Math.Min(WorktreeName.RandomLength, settings.MaxNameLength));
+            var generated = GenerateUnusedName(layout, settings.Root, Math.Min(WorktreeName.RandomLength, settings.MaxNameLength));
             if (generated is null)
             {
                 // The caller's arguments were fine; the harness could not satisfy them,
@@ -155,7 +183,7 @@ public sealed class WorktreeService(
             worktreeName = accepted;
         }
 
-        var path = layout.WorktreePath(worktreeName);
+        var path = layout.WorktreePathUnder(settings.Root, worktreeName);
 
         if (_fileSystem.DirectoryExists(path))
         {
@@ -174,7 +202,7 @@ public sealed class WorktreeService(
             return WorktreeOutcome.Failed(CommandOutcome.Refused(budget.Describe(path)));
         }
 
-        _fileSystem.CreateDirectory(layout.WorktreesDirectory);
+        _fileSystem.CreateDirectory(layout.WorktreesDirectoryUnder(settings.Root));
 
         // Worktrees are always created from the main checkout, so running this from
         // inside a worktree adds a sibling rather than nesting one.
@@ -203,16 +231,120 @@ public sealed class WorktreeService(
                 $"git reported success but '{path}' does not exist."));
         }
 
+        var baseCommit = await RecordBaseCommitAsync(layout, worktreeName, path, cancellationToken)
+            .ConfigureAwait(false);
+
+        var details = baseCommit is null ? new List<string> { path } : [path, $"base {Short(baseCommit)}"];
+
         return new WorktreeOutcome(
-            CommandOutcome.Ok($"created worktree '{worktreeName}'", [path]),
+            CommandOutcome.Ok($"created worktree '{worktreeName}'", details),
             worktreeName,
             path);
     }
+
+    /// <summary>
+    /// Records the commit a worktree was made from, under <c>refs/harness/worktree-base/</c>, and
+    /// returns it.
+    /// </summary>
+    /// <remarks>
+    /// A worktree's HEAD moves as work is committed in it, so after the first commit nothing says
+    /// what tree it started from any more, and a lane can only be reproduced from the moment it
+    /// happened to be made. A ref is the record because git keeps it, it survives a clone of the
+    /// repository, and it is not one of the refs a deletion counts as keeping a commit alive: the
+    /// deletion check reads branches, tags, remote-tracking refs, the newest stash and other
+    /// worktrees' HEADs, so this record cannot quietly make lost work look safe.
+    /// A failure to record is reported and not fatal: the worktree exists, and refusing here would
+    /// leave one behind that the caller was not told about.
+    /// </remarks>
+    private async Task<string?> RecordBaseCommitAsync(
+        HarnessLayout layout,
+        string worktreeName,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var head = await _gitClient
+            .RunAsync(path, ["rev-parse", "HEAD"], cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!head.Succeeded)
+        {
+            _output.Detail(CreateCommand, $"could not read the new worktree's commit: {head.FailureMessage}");
+            return null;
+        }
+
+        var commit = head.StandardOutput.Trim();
+
+        if (commit.Length == 0)
+        {
+            return null;
+        }
+
+        var recorded = await _gitClient
+            .RunAsync(
+                layout.MainCheckoutRoot,
+                ["update-ref", BaseCommitRef(worktreeName), commit],
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!recorded.Succeeded)
+        {
+            _output.Detail(CreateCommand, $"could not record the base commit: {recorded.FailureMessage}");
+            return null;
+        }
+
+        return commit;
+    }
+
+    /// <summary>Reads the recorded base commit of one worktree, or null when none was recorded.</summary>
+    /// <exception cref="HarnessException">
+    /// git could not be asked. Distinguished from "no such ref" on purpose: null here is reported as
+    /// a worktree made before the record existed, and a reader who sees that stops looking — when
+    /// what may have happened is that the record is there and git could not read it.
+    /// </exception>
+    private Task<string?> ReadBaseCommitAsync(
+        HarnessLayout layout,
+        string worktreeName,
+        CancellationToken cancellationToken)
+        => _gitClient.ResolveCommitAsync(layout.MainCheckoutRoot, BaseCommitRef(worktreeName), cancellationToken);
+
+    /// <summary>Removes the base commit record of a worktree that no longer exists.</summary>
+    private async Task ForgetBaseCommitAsync(
+        HarnessLayout layout,
+        string worktreeName,
+        CancellationToken cancellationToken)
+    {
+        // Left behind, the record would answer for a later worktree of the same name with the
+        // commit an earlier one started from.
+        var removed = await _gitClient
+            .RunAsync(
+                layout.MainCheckoutRoot,
+                ["update-ref", "-d", BaseCommitRef(worktreeName)],
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!removed.Succeeded)
+        {
+            // Said rather than swallowed. The deletion itself succeeded, so this is not a failure of
+            // the command; what is left is a stale record that will answer for the next worktree of
+            // this name, and nobody would otherwise know to remove it.
+            _output.Warn(
+                DeleteCommand,
+                $"'{worktreeName}' was deleted, and the commit it was made from is still recorded at "
+                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage}. Remove it with "
+                + $"'git update-ref -d {BaseCommitRef(worktreeName)}', or the next worktree of this name "
+                + "inherits it.");
+        }
+    }
+
+    private static string BaseCommitRef(string worktreeName) => BaseCommitRefPrefix + worktreeName;
+
+    private static string Short(string commit) => commit.Length <= 12 ? commit : commit[..12];
 
     public async Task<WorktreeOutcome> DeleteAsync(
         string startDirectory,
         string name,
         bool force,
+        bool deleteEvidence,
         CancellationToken cancellationToken = default)
     {
         // Only the shape is checked, not the length: a worktree created under a longer
@@ -224,23 +356,43 @@ public sealed class WorktreeService(
 
         var context = await _contextLoader.LoadAsync(startDirectory, cancellationToken).ConfigureAwait(false);
         var layout = context.Layout;
-        var path = layout.WorktreePath(worktreeName);
+        var settings = context.Config.Worktrees;
+        var worktreesDirectory = layout.WorktreesDirectoryUnder(settings.Root);
+        var path = layout.WorktreePathUnder(settings.Root, worktreeName);
 
         // Guards the one recursive delete this command performs, and comes before anything is
         // touched, so this refusal can never follow a deletion.
-        if (!PathContainment.IsStrictlyInside(layout.WorktreesDirectory, path, _platform.PathComparison))
+        if (!PathContainment.IsStrictlyInside(worktreesDirectory, path, _platform.PathComparison))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"Refusing to delete '{path}': it is not inside '{layout.WorktreesDirectory}'.");
+                $"Refusing to delete '{path}': it is not inside '{worktreesDirectory}'.");
         }
 
         var inspector = new WorktreeInspector(_gitClient, _fileSystem, _platform, _output);
 
         if (!_fileSystem.DirectoryExists(path))
         {
-            return await ClearRecordAsync(layout, worktreeName, path, force, inspector, cancellationToken)
+            var cleared = await ClearRecordAsync(layout, worktreeName, path, force, inspector, cancellationToken)
                 .ConfigureAwait(false);
+
+            if (cleared.Succeeded)
+            {
+                await ForgetBaseCommitAsync(layout, worktreeName, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            return cleared;
+        }
+
+        // Before git is asked anything, because it is about files git was never told about. Asked
+        // afterwards, a git that cannot answer reports "unchecked" and this refusal — the one with
+        // the --delete-evidence remedy attached — is never the one the reader sees.
+        if (!force && !deleteEvidence && DescribeEvidence(path, settings.EvidenceRoots) is { } holdsEvidence)
+        {
+            return Refused(
+                $"Worktree '{worktreeName}' was not deleted, because {holdsEvidence}. "
+                + "Copy what you need out first, or pass --delete-evidence to delete it with the worktree "
+                + "(--force does too, and skips every other check as well).");
         }
 
         WorktreeIdentity identity;
@@ -308,9 +460,20 @@ public sealed class WorktreeService(
 
         try
         {
-            return force
+            var outcome = force
                 ? await RemoveForcedAsync(layout, worktreeName, path, identity.AdministrativeDirectory, inspector, stopping.Token).ConfigureAwait(false)
                 : await RemoveCheckedAsync(layout, worktreeName, path, identity.AdministrativeDirectory!, holdsSubmodules, stopping.Token).ConfigureAwait(false);
+
+            if (outcome.Succeeded)
+            {
+                // Only once the worktree is really gone. Forgetting it earlier would lose the record
+                // of a worktree a failed removal left in place. Not cancelled: the removal is past
+                // its point of no return, and a record left behind would answer for a later
+                // worktree of the same name.
+                await ForgetBaseCommitAsync(layout, worktreeName, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            return outcome;
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
@@ -318,23 +481,34 @@ public sealed class WorktreeService(
         }
     }
 
-    public async Task<IReadOnlyList<string>> ListAsync(
+    public async Task<IReadOnlyList<WorktreeListing>> ListAsync(
         string startDirectory,
         CancellationToken cancellationToken = default)
     {
         var context = await _contextLoader.LoadAsync(startDirectory, cancellationToken).ConfigureAwait(false);
-        var worktreesDirectory = context.Layout.WorktreesDirectory;
+        var worktreesDirectory = context.Layout.WorktreesDirectoryUnder(context.Config.Worktrees.Root);
 
         if (!_fileSystem.DirectoryExists(worktreesDirectory))
         {
             return [];
         }
 
-        return [.. _fileSystem
+        var names = _fileSystem
             .EnumerateDirectories(worktreesDirectory)
             .Select(directory => Path.GetFileName(Path.TrimEndingDirectorySeparator(directory)))
             .Where(directoryName => !string.IsNullOrEmpty(directoryName))
-            .OrderBy(directoryName => directoryName, StringComparer.Ordinal)];
+            .OrderBy(directoryName => directoryName, StringComparer.Ordinal);
+
+        var listings = new List<WorktreeListing>();
+
+        foreach (var name in names)
+        {
+            listings.Add(new WorktreeListing(
+                name,
+                await ReadBaseCommitAsync(context.Layout, name, cancellationToken).ConfigureAwait(false)));
+        }
+
+        return listings;
     }
 
     private static WorktreeOutcome Usage(string message)
@@ -769,13 +943,70 @@ public sealed class WorktreeService(
     /// Generates a name no existing worktree already uses, or <see langword="null"/>
     /// when repeated attempts all collided.
     /// </summary>
-    private string? GenerateUnusedName(HarnessLayout layout, int length)
+    /// <summary>
+    /// Describes the declared evidence roots that hold anything, or <see langword="null"/> when none
+    /// does. Phrased to follow "because", like every other reason a deletion gives.
+    /// </summary>
+    /// <remarks>
+    /// A root that cannot be read counts as holding something. An unreadable directory is not an
+    /// empty one, and every measurement here is biased toward keeping work rather than losing it.
+    /// </remarks>
+    private string? DescribeEvidence(string worktreePath, IReadOnlyList<string> evidenceRoots)
+    {
+        var occupied = new List<string>();
+
+        foreach (var declared in evidenceRoots)
+        {
+            var root = Path.GetFullPath(Path.Combine(worktreePath, declared));
+
+            // A declared root reaching outside the worktree would make this refuse on files the
+            // deletion was never going to touch.
+            if (!PathContainment.IsStrictlyInside(worktreePath, root, _platform.PathComparison))
+            {
+                continue;
+            }
+
+            if (!_fileSystem.DirectoryExists(root))
+            {
+                continue;
+            }
+
+            try
+            {
+                // Files anywhere beneath it, not only directly in it: a measurement written into a
+                // subdirectory is still the only copy of it.
+                if (_fileSystem.EnumerateFiles(root, recursive: true).Any())
+                {
+                    occupied.Add(declared);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                occupied.Add($"{declared} (which could not be read: {ex.Message})");
+            }
+        }
+
+        if (occupied.Count == 0)
+        {
+            return null;
+        }
+
+        var named = occupied.Take(NamedChangeLimit).ToList();
+        var listed = string.Join(", ", named);
+        var remaining = occupied.Count - named.Count;
+
+        return remaining > 0
+            ? $"{occupied.Count} declared evidence directories hold measurements that only exist there: {listed} and {remaining} more"
+            : $"{occupied.Count} declared evidence director{(occupied.Count == 1 ? "y holds" : "ies hold")} measurements that only exist there: {listed}";
+    }
+
+    private string? GenerateUnusedName(HarnessLayout layout, string root, int length)
     {
         for (var attempt = 0; attempt < GenerateAttempts; attempt++)
         {
             var candidate = WorktreeName.Generate(length);
 
-            if (!_fileSystem.DirectoryExists(layout.WorktreePath(candidate)))
+            if (!_fileSystem.DirectoryExists(layout.WorktreePathUnder(root, candidate)))
             {
                 return candidate;
             }

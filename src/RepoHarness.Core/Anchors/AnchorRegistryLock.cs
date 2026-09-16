@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
@@ -41,9 +39,9 @@ public sealed class NamedMutexAnchorRegistryLock(IHostPlatform platform, TimeSpa
         ArgumentNullException.ThrowIfNull(registries);
         ArgumentNullException.ThrowIfNull(work);
 
-        using var mutex = Open(NameFor(registries));
+        using var mutex = MachineWideMutex.Open(NameFor(registries), "the anchor registries");
 
-        if (!Wait(mutex))
+        if (!MachineWideMutex.Wait(mutex, _timeout))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
@@ -66,45 +64,9 @@ public sealed class NamedMutexAnchorRegistryLock(IHostPlatform platform, TimeSpa
     {
         ArgumentNullException.ThrowIfNull(registries);
 
-        var ignoreCase = _platform.PathComparison == StringComparison.OrdinalIgnoreCase;
-
-        var key = string.Join('\n', registries.All
-            .Select(registry => Path.GetFullPath(registry.FullPath))
-            .Select(path => ignoreCase ? path.ToUpperInvariant() : path)
-            .Order(StringComparer.Ordinal));
-
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(key));
-
-        // Global, so a run in another terminal session contends for the same lock.
-        return @"Global\repo-harness-anchors-" + Convert.ToHexString(hash, 0, 16).ToLowerInvariant();
-    }
-
-    private static Mutex Open(string name)
-    {
-        try
-        {
-            return new Mutex(initiallyOwned: false, name);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            throw new HarnessException(
-                HarnessExit.Refused,
-                $"The anchor registry lock '{name}' belongs to another user on this machine, so nothing was changed.",
-                ex);
-        }
-    }
-
-    private bool Wait(Mutex mutex)
-    {
-        try
-        {
-            return mutex.WaitOne(_timeout);
-        }
-        catch (AbandonedMutexException)
-        {
-            // The previous holder exited while holding the lock, and ownership has passed to this
-            // thread. Nothing it wrote can be half written: every registry file is replaced whole.
-            return true;
-        }
+        return MachineWideMutex.NameFor(
+            "anchors",
+            registries.All.Select(registry => registry.FullPath),
+            _platform.PathComparison == StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -18,8 +18,9 @@ public sealed class HostsConfig
     public Dictionary<string, WslHostConfig> Wsl { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// ssh hosts, keyed by the <c>Host</c> name declared in <c>.harness-config/ssh/config</c>, which is
-    /// where the address, the user and the key are found.
+    /// ssh hosts, keyed by the item name declared under <c>sshItems</c>, whose directory under
+    /// <c>.harness-config/sshItems</c> holds the address, the user and the port in its <c>.env</c>,
+    /// with the private key in its <c>.key</c>. Nothing here names any of them: this file is tracked.
     /// </summary>
     public Dictionary<string, SshHostConfig> Ssh { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }

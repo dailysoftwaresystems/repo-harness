@@ -113,8 +113,37 @@ public sealed class HarnessLayoutTests
 
         Assert.Equal(mainHarness, layout.MainHarnessDirectory);
         Assert.Equal(Path.Combine(mainHarness, "worktrees"), layout.WorktreesDirectory);
-        Assert.Equal(Path.Combine(mainHarness, "ssh"), layout.SshDirectory);
+        Assert.Equal(Path.Combine(mainHarness, "sshItems"), layout.SshItemsDirectory);
+        Assert.Equal(Path.Combine(mainHarness, "wslDistros"), layout.WslDistrosDirectory);
+        Assert.Equal(Path.Combine(mainHarness, "runs"), layout.RunsDirectory);
+        Assert.Equal(Path.Combine(mainHarness, "runner", ".env"), layout.RunnerEnvDirectory);
+        Assert.Equal(Path.Combine(mainHarness, "runner", ".secrets"), layout.RunnerSecretsDirectory);
         Assert.Equal(Path.Combine(mainHarness, "lock.json"), layout.LockFile);
+    }
+
+    [Fact]
+    public void ActionFiles_ResolveAgainstTheTreeBeingActedOn_BecauseGitTracksThem()
+    {
+        // The values an action reads are ignored state and belong to the main checkout; the action
+        // files themselves are tracked, so a worktree has its own and a runner acts on the tree it
+        // was asked about.
+        var layout = new HarnessLayout(Worktree, Main);
+
+        Assert.Equal(
+            Path.Combine(Worktree, ".harness-config", "runner", "actions"),
+            layout.RunnerActionsDirectory);
+    }
+
+    [Fact]
+    public void WorktreesRoot_FollowsTheConfiguredRoot_BecauseItSpendsPathBudget()
+    {
+        // The default root spends 22 characters before a worktree's own name. On Windows that
+        // difference decides whether any name fits inside the path limit at all.
+        var layout = new HarnessLayout(Worktree, Main);
+
+        PathAssert.Same(
+            Path.Combine(Main, ".worktrees"),
+            layout.WorktreesDirectoryUnder(".worktrees"));
     }
 
     [Fact]

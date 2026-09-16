@@ -154,7 +154,7 @@ public sealed partial class HelpTests
             "--legs",
             "host-exec --ssh",
             "--wsl",
-            ".harness-config/ssh/config",
+            ".harness-config/sshItems/<name>/",
             $".NET {ToolPackage.MinimumSdkMajor} SDK",
             "never downgraded",
             "witness",
@@ -176,6 +176,10 @@ public sealed partial class HelpTests
     [InlineData("worktrees")]
     [InlineData("anchors")]
     [InlineData("layout")]
+    [InlineData("secrets")]
+    [InlineData("tools")]
+    [InlineData("runners")]
+    [InlineData("verdicts")]
     public async Task EveryAdvertisedTopic_Renders(string topic)
     {
         var result = await CliRunner.RunAsync(["help", topic], TestContext.Current.CancellationToken);
