@@ -104,7 +104,7 @@ internal static class BuildCommand
                     leg.BuildableProject(),
                     leg.Variant,
                     leg.Host.Os ?? string.Empty,
-                    CoreCounts.Resolve(null, null, work.Context.Config.Defaults.BuildCores).Value,
+                    CoreCounts.Resolve(null, leg.HostSettings.BuildCores, work.Context.Config.Defaults.BuildCores).Value,
                     work.RunDirectory,
                     work.Time),
                 cancellationToken)

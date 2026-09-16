@@ -209,19 +209,27 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             log.WriteLine($"# exit {(result.TimedOut ? "(stopped)" : result.ExitCode.ToString(CultureInfo.InvariantCulture))} after {clock.Elapsed}");
         }
 
+        // Redacted before it leaves this method, not at each place that later reads it. The captured
+        // text is the one copy of the child's output that outlives the run — it reaches the ledger's
+        // detail, an expected exception's message and the verdict — and a redaction applied by every
+        // reader is one a new reader can forget. The witness and the timings are matched against the
+        // redacted text too, deliberately: a success pattern that only matches a password is a
+        // pattern nobody should be able to write.
+        var visible = request.RedactLine is { } redactAll ? redactAll(childOutput) : childOutput;
+
         return new PhaseResult(
             Leg: request.Leg,
             Phase: request.Phase,
             ExitCode: result.ExitCode,
             Stalled: result.TimedOut,
             StallSeconds: request.StallSeconds,
-            Witnessed: success is null ? null : Matches(success, childOutput, request.SuccessPattern!),
+            Witnessed: success is null ? null : Matches(success, visible, request.SuccessPattern!),
             Duration: result.Duration,
             ClockDrift: drift,
             ClockStepped: stepped,
-            Timings: Extract(timings, childOutput, request.Phase),
+            Timings: Extract(timings, visible, request.Phase),
             LogFile: request.LogFile,
-            Output: childOutput);
+            Output: visible);
     }
 
     /// <summary>

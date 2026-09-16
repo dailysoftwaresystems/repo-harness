@@ -259,16 +259,43 @@ public sealed class SyncServiceTests
     {
         // The source of a path is a manifest the far side produced, and `..` is what turns a
         // deletion inside a copy into a deletion of whatever sits beside it.
-        var refusal = Assert.Throws<HarnessException>(() => LocalSyncTransport.Resolve("/host/repo", path));
+        var harness = new HarnessFactory();
+
+        var refusal = Assert.Throws<HarnessException>(
+            () => ((LocalSyncTransport)Transport(harness)).Resolve("/host/repo", path));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
     }
 
-    private static ISyncTransport Transport(HarnessFactory harness)
+    [Fact]
+    public async Task TheAgentAnswersAManifestRequest_WithTheArgumentsARemoteSyncSends()
+    {
+        // The far side of every remote sync. Every non-created path reads the copy's manifest, and
+        // the verification afterwards reads it again, so an agent that refuses this request is an
+        // agent no host can be synced to — and nothing else in the suite goes through it.
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        temp.WriteFile("src/app.cs", "// code");
+
+        var result = await CliRunner.RunAsync(
+            ["sync-serve", SyncServe.Manifest, temp.Path, ".git\n.harness-config"],
+            token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        var answer = SyncServe.ReadAnswer<SyncManifestAnswer>(result.StandardOutput.Trim());
+
+        Assert.NotNull(answer);
+        Assert.Contains(answer.Entries, entry => entry.Path == "src/app.cs");
+    }
+
+    private static LocalSyncTransport Transport(HarnessFactory harness)
         => new LocalSyncTransport(
             harness.FileSystem,
             new ManifestBuilder(harness.FileSystem, harness.Platform),
-            harness.GitClient);
+            harness.GitClient,
+            harness.Platform);
 
     private static async Task<(HarnessFactory Harness, ISyncService Service)> PrepareAsync(
         TempDirectory temp,

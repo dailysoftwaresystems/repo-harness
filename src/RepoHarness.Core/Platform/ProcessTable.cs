@@ -31,15 +31,30 @@ public sealed record SampledProcess(int Id, int? ParentId, string Name, DateTime
 public interface IProcessTable
 {
     /// <summary>
-    /// Everything running on this machine, or an empty list when the table could not be read.
+    /// Everything running on this machine, and why the reading is less than it should be when it is.
     /// </summary>
     /// <param name="cancellationToken">Stops the reading.</param>
     /// <remarks>
     /// Machine-wide, never limited to this process's tree: the contender a leg has to notice is one
     /// somebody started by hand, and that is in nobody's tree but their own.
     /// </remarks>
-    Task<IReadOnlyList<SampledProcess>> ReadAsync(CancellationToken cancellationToken = default);
+    Task<ProcessTableReading> ReadAsync(CancellationToken cancellationToken = default);
 }
+
+/// <summary>One reading of the machine's process table, and what it could not establish.</summary>
+/// <param name="Processes">What was running, as far as this reading could tell.</param>
+/// <param name="Degraded">
+/// Why this reading cannot answer the question it is taken for, or <see langword="null"/> where it
+/// can.
+/// </param>
+/// <remarks>
+/// Carried rather than swallowed. The platform's own source is the only one on any of these systems
+/// that reports a command line, and a command line is the whole of what contention is decided by:
+/// fall back to what the runtime alone can see and every process matches nothing, so a machine
+/// where the query is blocked reports "no contender" for every leg, for ever, without a word.
+/// "Nobody looked" and "nothing was found" are different facts.
+/// </remarks>
+public sealed record ProcessTableReading(IReadOnlyList<SampledProcess> Processes, string? Degraded);
 
 /// <summary>Builds the reader for the machine this is running on.</summary>
 /// <remarks>
@@ -62,19 +77,44 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
     private readonly IHostPlatform _platform = platform;
     private readonly IProcessRunner _processRunner = processRunner;
 
-    /// <inheritdoc/>
-    public async Task<IReadOnlyList<SampledProcess>> ReadAsync(CancellationToken cancellationToken = default)
+    /// <summary>Why a platform query failed, in one line, with what it said.</summary>
+    private static string HostFailure(string what, ProcessResult result)
     {
-        var table = _platform.Current switch
+        var said = result.StandardError.Trim();
+
+        return said.Length == 0
+            ? $"{what} (it exited {result.ExitCode})"
+            : $"{what} (it exited {result.ExitCode}: {said.Split(Environment.NewLine)[0]})";
+    }
+
+    /// <summary>
+    /// What the Windows query separates its fields with: the unit separator, which no process name
+    /// or command line contains. Written as a code point rather than typed in as the byte, because a
+    /// source file holding a control character is one git and grep read as binary.
+    /// </summary>
+    private const char UnitSeparator = (char)31;
+
+    /// <inheritdoc/>
+    public async Task<ProcessTableReading> ReadAsync(CancellationToken cancellationToken = default)
+    {
+        var (table, problem) = _platform.Current switch
         {
             PlatformId.Windows => await WindowsTableAsync(cancellationToken).ConfigureAwait(false),
             PlatformId.Linux => LinuxTable(),
             _ => await MacTableAsync(cancellationToken).ConfigureAwait(false),
         };
 
-        // Falling back rather than failing: the ids and names alone still place a tool on the
-        // machine, and the report already says a process with no command line is not matched.
-        return table.Count > 0 ? table : FromDiagnostics();
+        if (table.Count > 0)
+        {
+            return new ProcessTableReading(table, null);
+        }
+
+        // The fallback still places a tool on the machine by name, which is worth keeping; what it
+        // cannot do is say what that tool was pointed at, and that is what decides contention. So it
+        // is returned with the reason attached rather than in place of one.
+        return new ProcessTableReading(
+            FromDiagnostics(),
+            problem ?? "the process table came back empty, which no running machine's is");
     }
 
 
@@ -83,7 +123,7 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
     /// through PowerShell because reading WMI in process would add a dependency the tool does not
     /// otherwise need, and the query is sent base64-encoded so no layer of quoting can change it.
     /// </summary>
-    private async Task<IReadOnlyList<SampledProcess>> WindowsTableAsync(CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<SampledProcess> Table, string? Problem)> WindowsTableAsync(CancellationToken cancellationToken)
     {
         const string script = """
             $s = [char]31
@@ -112,14 +152,14 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
 
         if (!result.Succeeded)
         {
-            return [];
+            return ([], HostFailure("the process table could not be read from WMI through PowerShell", result));
         }
 
         var processes = new List<SampledProcess>();
 
         foreach (var line in Lines(result.StandardOutput))
         {
-            var fields = line.Split('');
+            var fields = line.Split(UnitSeparator);
 
             if (fields.Length < 5 || !int.TryParse(fields[0], CultureInfo.InvariantCulture, out var id))
             {
@@ -134,14 +174,14 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
                 fields[4].Length == 0 ? null : fields[4]));
         }
 
-        return processes;
+        return (processes, null);
     }
 
     /// <summary>
     /// The table from <c>/proc</c>, read directly: the kernel already publishes every field needed,
     /// so no other program has to be installed for a leg to know what else is running.
     /// </summary>
-    private static IReadOnlyList<SampledProcess> LinuxTable()
+    private static (IReadOnlyList<SampledProcess> Table, string? Problem) LinuxTable()
     {
         var processes = new List<SampledProcess>();
         var boot = LinuxBootTime();
@@ -190,14 +230,14 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
             }
         }
 
-        return processes;
+        return (processes, null);
     }
 
     /// <summary>
     /// The table from <c>ps</c>, which is where macOS publishes another process's command line.
     /// <c>lstart</c> rather than elapsed time, because an identity must not shift between samples.
     /// </summary>
-    private async Task<IReadOnlyList<SampledProcess>> MacTableAsync(CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<SampledProcess> Table, string? Problem)> MacTableAsync(CancellationToken cancellationToken)
     {
         var result = await _processRunner.RunAsync(
             new ProcessRequest
@@ -213,7 +253,7 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
 
         if (!result.Succeeded)
         {
-            return [];
+            return ([], HostFailure("the process table could not be read from ps", result));
         }
 
         var processes = new List<SampledProcess>();
@@ -246,7 +286,7 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
                 commandLine.Length == 0 ? null : commandLine));
         }
 
-        return processes;
+        return (processes, null);
     }
 
     /// <summary>

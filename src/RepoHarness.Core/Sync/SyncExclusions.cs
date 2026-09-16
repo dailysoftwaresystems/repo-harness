@@ -21,12 +21,21 @@ public sealed class SyncExclusions
     /// <summary>Builds the policy from configuration.</summary>
     /// <param name="sync">The sync section.</param>
     /// <param name="worktreesRoot">The configured worktrees root, withheld with the rest.</param>
-    public SyncExclusions(SyncConfig sync, string worktreesRoot)
+    /// <param name="gitIgnored">
+    /// What git ignores in the source tree, withheld with the rest. <c>sync.exclude</c> is documented
+    /// as naming paths to withhold <em>in addition to</em> these, and without them a repository's
+    /// ignored files — a local <c>.env</c>, a virtual environment, an editor's cache — are copied to
+    /// every host the moment a leg is placed on one. Withheld rather than merely excluded, because a
+    /// path that is local to a machine is local on the far side too: deleting the host's own copy of
+    /// one would remove that machine's state rather than a file this tree gave up.
+    /// </param>
+    public SyncExclusions(SyncConfig sync, string worktreesRoot, IReadOnlyList<string>? gitIgnored = null)
     {
         ArgumentNullException.ThrowIfNull(sync);
 
         _withheld = [.. sync.EffectiveNeverTransfer
             .Concat([worktreesRoot])
+            .Concat(gitIgnored ?? [])
             .Select(Normalize)
             .Where(path => path.Length > 0)
             .Distinct(StringComparer.Ordinal)];

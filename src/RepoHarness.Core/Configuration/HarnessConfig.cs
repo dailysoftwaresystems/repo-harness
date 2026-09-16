@@ -146,8 +146,8 @@ public sealed class HarnessDefaults
     public int StallSeconds { get; init; }
 
     /// <summary>
-    /// How many times longer than the same phase on a sibling leg, or than its own recent
-    /// runs, a phase may take before the ledger marks its timings suspect; zero disables the
+    /// How many times longer than the same phase on a sibling leg of the same kind
+    /// a phase may take before the ledger marks its timings suspect; zero disables the
     /// mark. The mark never changes a verdict: a host that slept, or a clock that stepped,
     /// makes a duration meaningless, and whether the code passed is a separate fact.
     /// </summary>

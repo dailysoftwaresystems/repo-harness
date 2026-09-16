@@ -296,22 +296,16 @@ public sealed class WorktreeService(
     }
 
     /// <summary>Reads the recorded base commit of one worktree, or null when none was recorded.</summary>
-    private async Task<string?> ReadBaseCommitAsync(
+    /// <exception cref="HarnessException">
+    /// git could not be asked. Distinguished from "no such ref" on purpose: null here is reported as
+    /// a worktree made before the record existed, and a reader who sees that stops looking — when
+    /// what may have happened is that the record is there and git could not read it.
+    /// </exception>
+    private Task<string?> ReadBaseCommitAsync(
         HarnessLayout layout,
         string worktreeName,
         CancellationToken cancellationToken)
-    {
-        var result = await _gitClient
-            .RunAsync(
-                layout.MainCheckoutRoot,
-                ["rev-parse", "--verify", "--quiet", BaseCommitRef(worktreeName)],
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-
-        var commit = result.StandardOutput.Trim();
-
-        return result.Succeeded && commit.Length > 0 ? commit : null;
-    }
+        => _gitClient.ResolveCommitAsync(layout.MainCheckoutRoot, BaseCommitRef(worktreeName), cancellationToken);
 
     /// <summary>Removes the base commit record of a worktree that no longer exists.</summary>
     private async Task ForgetBaseCommitAsync(
@@ -321,12 +315,25 @@ public sealed class WorktreeService(
     {
         // Left behind, the record would answer for a later worktree of the same name with the
         // commit an earlier one started from.
-        _ = await _gitClient
+        var removed = await _gitClient
             .RunAsync(
                 layout.MainCheckoutRoot,
                 ["update-ref", "-d", BaseCommitRef(worktreeName)],
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+
+        if (!removed.Succeeded)
+        {
+            // Said rather than swallowed. The deletion itself succeeded, so this is not a failure of
+            // the command; what is left is a stale record that will answer for the next worktree of
+            // this name, and nobody would otherwise know to remove it.
+            _output.Warn(
+                DeleteCommand,
+                $"'{worktreeName}' was deleted, and the commit it was made from is still recorded at "
+                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage}. Remove it with "
+                + $"'git update-ref -d {BaseCommitRef(worktreeName)}', or the next worktree of this name "
+                + "inherits it.");
+        }
     }
 
     private static string BaseCommitRef(string worktreeName) => BaseCommitRefPrefix + worktreeName;
@@ -377,6 +384,17 @@ public sealed class WorktreeService(
             return cleared;
         }
 
+        // Before git is asked anything, because it is about files git was never told about. Asked
+        // afterwards, a git that cannot answer reports "unchecked" and this refusal — the one with
+        // the --delete-evidence remedy attached — is never the one the reader sees.
+        if (!force && !deleteEvidence && DescribeEvidence(path, settings.EvidenceRoots) is { } holdsEvidence)
+        {
+            return Refused(
+                $"Worktree '{worktreeName}' was not deleted, because {holdsEvidence}. "
+                + "Copy what you need out first, or pass --delete-evidence to delete it with the worktree "
+                + "(--force does too, and skips every other check as well).");
+        }
+
         WorktreeIdentity identity;
 
         try
@@ -397,17 +415,6 @@ public sealed class WorktreeService(
 
         if (!force)
         {
-            // Checked before git is asked anything, because it is about files git was never told
-            // about. A lane's measurements live in an ignored directory precisely because they are
-            // not source, and deleting them is silent: git reports nothing missing afterwards.
-            if (!deleteEvidence && DescribeEvidence(path, settings.EvidenceRoots) is { } evidence)
-            {
-                return Refused(
-                    $"Worktree '{worktreeName}' was not deleted, because {evidence}. "
-                    + "Copy what you need out first, or pass --delete-evidence to delete it with the worktree "
-                    + "(--force does too, and skips every other check as well).");
-            }
-
             switch (identity.Membership)
             {
                 case WorktreeMembership.NotAWorktree:

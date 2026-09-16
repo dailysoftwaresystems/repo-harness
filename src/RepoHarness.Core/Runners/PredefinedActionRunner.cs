@@ -60,18 +60,27 @@ public sealed class PredefinedActionRunner(IGitClient gitClient, IHarnessOutput 
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // Recorded inside each arm, and an unhandled action raises. Recorded after the switch
+            // instead, an action this build does not implement would run nothing and then report
+            // itself as performed — the run's own record asserting a checkout that never happened.
             switch (step.Uses)
             {
                 case PredefinedAction.ReadInputs:
                     ReadInputs(file, environment);
+                    performed.Add($"{step.Name} ({PredefinedActions.Spell(step.Uses)})");
                     break;
 
                 case PredefinedAction.Checkout:
                     await CheckoutAsync(step, treeRoot, cancellationToken).ConfigureAwait(false);
+                    performed.Add($"{step.Name} ({PredefinedActions.Spell(step.Uses)})");
                     break;
-            }
 
-            performed.Add($"{step.Name} ({PredefinedActions.Spell(step.Uses)})");
+                default:
+                    throw new HarnessException(
+                        HarnessExit.InternalError,
+                        $"Step '{step.Name}' uses '{step.Uses}', which this build knows the name of and "
+                        + "cannot perform. Nothing was run.");
+            }
         }
 
         return new PredefinedActionResult(environment, performed);

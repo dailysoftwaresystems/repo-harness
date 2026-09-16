@@ -106,6 +106,31 @@ public sealed class RunLockTests
     }
 
     [Fact]
+    public async Task ForcingALock_TakesOnlyTheOneInTheWay()
+    {
+        // --force-lock says "this lock is stale, take it", about the lock that is refusing this
+        // run. Taking every other machine's lock as well would drop holds on trees and variants
+        // this run never asked about — including one another run is part way through syncing.
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var layout = Layout(temp);
+
+        Write(layout, Entry("another-machine", int.MaxValue - 1, DateTimeOffset.UtcNow.AddHours(-1), tree: "/other-repo"));
+
+        await using var forced = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync") with { Force = true },
+            TestContext.Current.CancellationToken);
+
+        var kept = runLock.Read(layout);
+
+        Assert.Equal(2, kept.Count);
+        Assert.Contains(kept, entry => entry.Tree == "/other-repo");
+        Assert.DoesNotContain("--force-lock", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task VariantsShareATree_ButNeverTheSameVariant()
     {
         using var temp = new TempDirectory();
@@ -276,13 +301,14 @@ public sealed class RunLockTests
         int processId,
         DateTimeOffset startedUtc,
         string? variant = null,
-        string scope = "TreeExclusive")
+        string scope = "TreeExclusive",
+        string tree = "/repo")
     {
         var stamp = startedUtc.ToString("O", CultureInfo.InvariantCulture);
         var id = processId.ToString(CultureInfo.InvariantCulture);
         var variantField = variant is null ? string.Empty : $"\"variant\": \"{variant}\",";
 
-        return "{ \"host\": \"local\", \"tree\": \"/repo\", " + variantField + " \"scope\": \"" + scope + "\", "
+        return "{ \"host\": \"local\", \"tree\": \"" + tree + "\", " + variantField + " \"scope\": \"" + scope + "\", "
             + "\"holder\": { \"machine\": \"" + machine + "\", \"processId\": " + id + ", "
             + "\"processStartedUtc\": \"" + stamp + "\", \"runId\": \"20250101-120000-deadbeef\", "
             + "\"takenUtc\": \"" + stamp + "\", \"command\": \"test\" } }";

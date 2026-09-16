@@ -72,7 +72,7 @@ public sealed class HostProgramResolver(IProcessRunner processRunner, IHostComma
     /// <summary>
     /// Directories searched when the PATH of a command run without a login shell does not name a
     /// program, in the order they are preferred. <c>~</c> is this host's home directory, measured with
-    /// <c>pwd</c>, because a command run this way expands nothing and <c>$HOME</c> reaches it as four
+    /// <c>pwd</c>, because a command run this way expands nothing and <c>$HOME</c> reaches it as five
     /// characters.
     /// </summary>
     public static readonly ImmutableArray<string> SearchedDirectories =

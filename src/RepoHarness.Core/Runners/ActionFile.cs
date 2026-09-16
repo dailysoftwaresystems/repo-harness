@@ -13,7 +13,9 @@ public enum PredefinedAction
     None = 0,
 
     /// <summary>
-    /// <c>harness/checkout</c>: put the leg's tree at a named commit or branch before the next step.
+    /// <c>harness/checkout</c>: confirm the leg's tree is already at a named commit or branch before
+    /// the next step. It never moves the tree: a runner that moved the tree would decide for itself
+    /// what was being measured, after the sync that put it there.
     /// </summary>
     Checkout,
 
@@ -41,7 +43,12 @@ public static class PredefinedActions
     public const string ReadInputs = "harness/read-inputs";
 
     /// <summary>Every spelling, in the order a refusal lists them.</summary>
-    public static IReadOnlyList<string> All { get; } = [Checkout, ReadInputs];
+    /// <remarks>
+    /// Derived from the actions themselves, so an action added to the enum cannot go missing from
+    /// the refusal that lists what is available.
+    /// </remarks>
+    public static IReadOnlyList<string> All { get; } =
+        [.. Enum.GetValues<PredefinedAction>().Where(action => action != PredefinedAction.None).Select(Spell)];
 
     /// <summary>
     /// The action <paramref name="uses"/> names, or <see langword="null"/> when nothing does.
@@ -62,7 +69,7 @@ public static class PredefinedActions
     {
         PredefinedAction.Checkout => Checkout,
         PredefinedAction.ReadInputs => ReadInputs,
-        _ => string.Empty,
+        _ => throw new ArgumentOutOfRangeException(nameof(action), action, "This build has no spelling for that action."),
     };
 }
 
@@ -89,6 +96,16 @@ public sealed record ActionInput(string Name, string? Default, bool Required, st
 /// <param name="Arguments">The program, then its arguments. Never empty.</param>
 public sealed record ActionCommand(string Line, int LineNumber, IReadOnlyList<string> Arguments)
 {
+    /// <summary>The program, then its arguments. Never empty.</summary>
+    /// <exception cref="ArgumentException">
+    /// The list is empty. Enforced here rather than only in the parser, because
+    /// <see cref="Program"/> is what the tool policy vets and an empty list would reach it as an
+    /// index out of range: a refusal about a program nobody can see, instead of one naming the line.
+    /// </exception>
+    public IReadOnlyList<string> Arguments { get; init; } = Arguments.Count > 0
+        ? Arguments
+        : throw new ArgumentException("A command line holds a program and its arguments, so it is never empty.", nameof(Arguments));
+
     /// <summary>The program this line starts. The token the tool policy vets.</summary>
     public string Program => Arguments[0];
 }

@@ -12,6 +12,21 @@ namespace RepoHarness.Tests;
 public sealed class BuildVariantTests
 {
     [Fact]
+    public void AnEmptySanitizer_IsTheSameVariantAsNoneAtAll()
+    {
+        // "sanitizer": "" is reachable from a hand-edited configuration. Left as two values they
+        // are one build directory and two keys, which surfaces later as a shared-build-directory
+        // refusal naming two legs their author believes are different.
+        var declared = new VariantKey("x86_64", "msvc", "release", string.Empty);
+        var absent = new VariantKey("x86_64", "msvc", "release", null);
+
+        Assert.Equal(absent, declared);
+        Assert.Equal(absent.GetHashCode(), declared.GetHashCode());
+        Assert.Equal(absent.DirectoryName, declared.DirectoryName);
+        Assert.Null(declared.Sanitizer);
+    }
+
+    [Fact]
     public void AVariantKey_NamesEveryThingThatChangesWhatIsCompiled()
     {
         Assert.Equal("x86_64-msvc-release", new VariantKey("x86_64", "msvc", "release", null).DirectoryName);
@@ -74,7 +89,7 @@ public sealed class BuildVariantTests
         var buildDirectory = WriteCache(temp, "CMAKE_HOME_DIRECTORY:INTERNAL=/repo/other");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => guard.Check(buildDirectory, "/repo/mine", expectedCompiler: null, expectedBuildType: null));
+            () => guard.Check(buildDirectory, "/repo/mine", expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: null));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("/repo/other", refusal.Message, StringComparison.Ordinal);
@@ -89,7 +104,7 @@ public sealed class BuildVariantTests
         var buildDirectory = WriteCache(temp, $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_BUILD_TYPE:STRING=Debug");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: null, expectedBuildType: "Release"));
+            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: "Release"));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("fixed once per directory", refusal.Message, StringComparison.Ordinal);
@@ -104,7 +119,7 @@ public sealed class BuildVariantTests
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: "clang", expectedBuildType: null));
+            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: "clang", expectedCxxCompiler: null, expectedBuildType: null));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
     }
@@ -119,7 +134,7 @@ public sealed class BuildVariantTests
             temp,
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
-        Guard().Check(buildDirectory, temp.Path, expectedCompiler: "gcc", expectedBuildType: null);
+        Guard().Check(buildDirectory, temp.Path, expectedCompiler: "gcc", expectedCxxCompiler: null, expectedBuildType: null);
     }
 
     [Fact]
@@ -129,7 +144,7 @@ public sealed class BuildVariantTests
         // impossible to build.
         using var temp = new TempDirectory();
 
-        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, "gcc", "Debug");
+        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, "gcc", "g++", "Debug");
     }
 
     private static BuildDirectoryGuard Guard()

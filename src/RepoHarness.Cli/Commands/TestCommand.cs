@@ -168,7 +168,7 @@ internal static class TestCommand
                         leg.BuildableProject(),
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
-                        CoreCounts.Resolve(null, null, config.Defaults.BuildCores).Value,
+                        CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
                         work.RunDirectory),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -198,6 +198,7 @@ internal static class TestCommand
                     LegSettings = leg.Leg,
                     Project = leg.Project,
                     PlatformKey = leg.Host.Os ?? string.Empty,
+                    HostTestCores = leg.HostSettings.TestCores,
                     Filter = filter,
                     Excludes = excludes,
                     Emulated = leg.Emulated,

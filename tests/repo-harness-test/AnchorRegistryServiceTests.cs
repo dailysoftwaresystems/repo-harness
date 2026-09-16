@@ -602,6 +602,8 @@ public sealed class AnchorRegistryServiceTests
 
         public Stream OpenRead(string path) => inner.OpenRead(path);
 
+        public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
+
 
         public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
 

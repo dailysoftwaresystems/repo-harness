@@ -339,6 +339,7 @@ public sealed class RunnerRunServiceTests
             new RunCheckGate(factory.Output),
             new RunSegments(factory.FileSystem, factory.Output),
             new PredefinedActionRunner(factory.GitClient, factory.Output),
+            factory.Platform,
             factory.FileSystem,
             factory.Output);
 

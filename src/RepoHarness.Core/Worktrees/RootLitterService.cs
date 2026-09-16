@@ -1,4 +1,3 @@
-using System.Text;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Repository;
@@ -87,10 +86,15 @@ public sealed class RootLitterService(
         // git client, which clears GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE first: with any of
         // them inherited this answers for a tree nobody named, which was measured convicting a
         // tracked file and, the other way round, calling a dirty root clean.
+        // -z, so paths arrive NUL separated and exactly as they are on disk. Without it git applies
+        // C-style quoting to anything outside ASCII, and an accented file name comes back as
+        // "r\303\251sum\303\251.txt" — a name that is neither what is on disk nor anything a reader
+        // can delete. --no-optional-locks because this only reads: a check run in a loop would
+        // otherwise keep rewriting the index of a tree nobody asked it to touch.
         var status = await _gitClient
             .RunAsync(
                 root,
-                ["status", "--porcelain=v1", "--untracked-files=normal", "--ignored=matching"],
+                ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal", "--ignored=matching", "-z"],
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
@@ -103,11 +107,10 @@ public sealed class RootLitterService(
         }
 
         var untracked = status.StandardOutput
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => line.TrimEnd('\r'))
-            .Where(line => line.StartsWith("?? ", StringComparison.Ordinal)
-                || line.StartsWith("!! ", StringComparison.Ordinal))
-            .Select(line => Unquote(line[3..]))
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(entry => entry.StartsWith("?? ", StringComparison.Ordinal)
+                || entry.StartsWith("!! ", StringComparison.Ordinal))
+            .Select(entry => entry[3..])
 
             // Anything holding a separator is below the root, and git reports an untracked
             // directory as one entry ending in a separator, so this is also what keeps directories
@@ -141,40 +144,5 @@ public sealed class RootLitterService(
             .Select(name => name!)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(name => name, StringComparer.Ordinal)];
-    }
-
-    /// <summary>
-    /// Undoes the quoting git applies to a path holding a character it will not print raw. Without
-    /// it the reported name is not the name anybody can delete.
-    /// </summary>
-    private static string Unquote(string path)
-    {
-        if (path.Length < 2 || path[0] != '"' || path[^1] != '"')
-        {
-            return path;
-        }
-
-        var inner = path[1..^1];
-        var text = new StringBuilder(inner.Length);
-
-        for (var index = 0; index < inner.Length; index++)
-        {
-            if (inner[index] != '\\' || index + 1 >= inner.Length)
-            {
-                text.Append(inner[index]);
-                continue;
-            }
-
-            index++;
-            text.Append(inner[index] switch
-            {
-                'n' => '\n',
-                't' => '\t',
-                'r' => '\r',
-                _ => inner[index],
-            });
-        }
-
-        return text.ToString();
     }
 }

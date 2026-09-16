@@ -366,7 +366,7 @@ internal static class HelpCommand
         builder.AppendLine("ends it, and the host cancels the command. The command line ssh hands a remote");
         builder.AppendLine("shell holds only fixed words, so no argument is ever reinterpreted by sh, cmd or");
         builder.AppendLine("PowerShell. host-exec runs in the host's copy of the repository at repositoryPath,");
-        builder.AppendLine("which has to exist already: until sync exists, nothing creates it.");
+        builder.AppendLine("which 'DssHarness sync' creates and keeps in step with this tree.");
         builder.AppendLine();
         builder.AppendLine("An emulator declares the hosts it runs on (hostOs, hostProcessor), the processor it");
         builder.AppendLine("runs programs for, the launcher placed in front of each program (such as");
@@ -437,10 +437,12 @@ internal static class HelpCommand
         builder.AppendLine("Without --force, when the check cannot be finished, because git cannot answer or");
         builder.AppendLine("a record cannot be read or its directory found, nothing is deleted and it");
         builder.AppendLine($"exits {HarnessExit.CommandFailed}.");
-        builder.AppendLine("Ignored files are deleted unchecked, even ones no build makes again, such as");
-        builder.AppendLine(".env, and so are ignored directories with everything in them, the history of a");
-        builder.AppendLine("repository nested inside one included. --force skips every check and overrides");
-        builder.AppendLine("a lock; whatever the worktree held is lost.");
+        builder.AppendLine("Ignored files outside a declared evidenceRoots directory are deleted unchecked,");
+        builder.AppendLine("even ones no build makes again, such as .env, and so are ignored directories");
+        builder.AppendLine("with everything in them, the history of a repository nested inside one included.");
+        builder.AppendLine("A worktree whose evidenceRoots directory holds anything is refused;");
+        builder.AppendLine("--delete-evidence waives that one check and nothing else. --force skips every");
+        builder.AppendLine("check and overrides a lock; whatever the worktree held is lost.");
         builder.AppendLine();
         builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
         builder.AppendLine("running delete-worktree again with --force finishes it.");
@@ -591,7 +593,7 @@ internal static class HelpCommand
         builder.AppendLine("                 + config (+ sanitizer)");
         builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
-        builder.AppendLine("  runners        multi-phase procedures such as a corpus test or a benchmark");
+        builder.AppendLine("  predefinedRunners  multi-phase procedures such as a corpus test or a benchmark");
         builder.AppendLine("  exec           named commands to run through 'DssHarness exec'");
         builder.AppendLine("  commit         commit template and sign-off policy");
         builder.AppendLine("  sync           what the tree mirror carries, and what it must never carry");

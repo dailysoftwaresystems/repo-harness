@@ -155,7 +155,7 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
             layout,
             entries =>
             {
-                var kept = Live(entries, request.Force);
+                var kept = Live(entries, entry, request.Force);
 
                 if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
                 {
@@ -230,7 +230,7 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
     /// reported, and a holder on another machine stands until <c>--force-lock</c> says otherwise,
     /// because nothing here can ask that machine whether it is still running.
     /// </summary>
-    private IReadOnlyList<LockEntry> Live(IReadOnlyList<LockEntry> entries, bool force)
+    private IReadOnlyList<LockEntry> Live(IReadOnlyList<LockEntry> entries, LockEntry wanted, bool force)
     {
         var kept = new List<LockEntry>();
 
@@ -240,7 +240,10 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
 
             if (!mine)
             {
-                if (force)
+                // Only the entry actually in the way. --force-lock says "this lock is stale, take
+                // it"; taking every other machine's lock as well would drop holds on trees and
+                // variants this run never asked for, including one another run is mid-sync on.
+                if (force && Conflicts(entry, wanted))
                 {
                     _output.Warn(CommandName, $"Taking {Describe(entry)} from {entry.Describe()} because --force-lock was given.");
                     continue;

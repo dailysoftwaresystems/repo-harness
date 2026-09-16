@@ -65,8 +65,10 @@ public sealed class CiLegsService(
     public const string WorkflowsDirectory = ".github/workflows";
 
     /// <summary>
-    /// The job that carries a leg. A job whose name does not begin this way is not a leg: it is the
+    /// The marker a leg's job name carries. A job whose name does not hold it is not a leg: it is the
     /// gate, the label check, or another job entirely, and its verdict is about something else.
+    /// Matched anywhere in the name rather than at its start, because a called workflow prefixes its
+    /// jobs with its own name: GitHub reports <c>ci / run-tests (win-msvc-release)</c>.
     /// </summary>
     private const string LegJobPrefix = "run-tests (";
 

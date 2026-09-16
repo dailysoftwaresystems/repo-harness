@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Core.Configuration;
@@ -781,7 +782,7 @@ public static class HarnessConfigValidator
 
             // Two entries matching the same thing make which outcome is reported depend on their
             // order in the file, which nothing else in this schema depends on.
-            var identity = expected.ExceptionType + " " + string.Join(" ", expected.Messages);
+            var identity = CompositeKey.Of([expected.ExceptionType, .. expected.Messages]);
 
             if (!seen.Add(identity))
             {

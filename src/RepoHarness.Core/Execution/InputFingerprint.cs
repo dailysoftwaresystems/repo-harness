@@ -56,11 +56,17 @@ public sealed record InputComparison(InputChange Change, IReadOnlyList<string> C
     /// A leg whose inputs moved is not reported as failed even if its tests failed, because what
     /// failed was a tree that never existed.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// A change this build does not know how to weigh. Raised rather than absorbed by a default
+    /// arm: this is the one type whose whole purpose is that an unestablished measurement never
+    /// reads as clean, and a silent <see langword="null"/> for a case added later is exactly that.
+    /// </exception>
     public ReachedVerdict? Verdict() => Change switch
     {
+        InputChange.Unchanged => null,
         InputChange.Moved => ReachedVerdict.Of(LegVerdict.InputsMoved, Detail),
         InputChange.Unmeasured => ReachedVerdict.Of(LegVerdict.Unmeasured, Detail),
-        _ => null,
+        _ => throw new ArgumentOutOfRangeException(nameof(Change), Change, "This build cannot weigh that input change."),
     };
 }
 

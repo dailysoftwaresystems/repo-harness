@@ -1,3 +1,4 @@
+using RepoHarness.Core.Platform;
 using System.Text.Json;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
@@ -14,7 +15,8 @@ namespace RepoHarness.Core.Sync;
 public sealed class LocalSyncTransport(
     IFileSystem fileSystem,
     IManifestBuilder manifestBuilder,
-    IGitClient gitClient) : ISyncTransport
+    IGitClient gitClient,
+    IHostPlatform platform) : ISyncTransport
 {
     /// <summary>
     /// The file recording that the harness made this copy, inside the copy's own harness directory,
@@ -25,20 +27,21 @@ public sealed class LocalSyncTransport(
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
     private readonly IGitClient _gitClient = gitClient;
+    private readonly IHostPlatform _platform = platform;
 
     /// <inheritdoc/>
     public HostId Host { get; } = HostId.Local;
 
     /// <inheritdoc/>
     public Task<bool> RootExistsAsync(string root, CancellationToken cancellationToken = default)
-        => Task.FromResult(_fileSystem.DirectoryExists(root));
+        => Task.FromResult(_fileSystem.DirectoryExists(Home(root)));
 
     /// <inheritdoc/>
     public Task CreateRootAsync(string root, CancellationToken cancellationToken = default)
     {
         // A file where the directory should be is named rather than worked around. Creating the
         // copy somewhere else would leave a leg reporting on a tree nobody can find.
-        if (_fileSystem.FileExists(root))
+        if (_fileSystem.FileExists(Home(root)))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
@@ -47,7 +50,7 @@ public sealed class LocalSyncTransport(
 
         try
         {
-            _fileSystem.CreateDirectory(root);
+            _fileSystem.CreateDirectory(Home(root));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -72,13 +75,13 @@ public sealed class LocalSyncTransport(
     /// <inheritdoc/>
     public async Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default)
     {
-        if (await _gitClient.IsRepositoryAsync(root, cancellationToken).ConfigureAwait(false))
+        if (await _gitClient.IsRepositoryAsync(Home(root), cancellationToken).ConfigureAwait(false))
         {
             return;
         }
 
         var result = await _gitClient
-            .RunAsync(root, ["init", "--quiet", "."], cancellationToken: cancellationToken)
+            .RunAsync(Home(root), ["init", "--quiet", "."], cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.Succeeded)
@@ -100,7 +103,7 @@ public sealed class LocalSyncTransport(
 
         var policy = new PathSet(withheld);
 
-        return _manifestBuilder.BuildAsync(root, policy.Contains, cancellationToken);
+        return _manifestBuilder.BuildAsync(Home(root), policy.Contains, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -143,7 +146,7 @@ public sealed class LocalSyncTransport(
     /// holding <c>..</c> is what turns a deletion inside a repository copy into a deletion of
     /// whatever sits beside it, and the source of a path is a manifest the far side produced.
     /// </remarks>
-    public static string Resolve(string root, string relativePath)
+    public string Resolve(string root, string relativePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
@@ -155,10 +158,13 @@ public sealed class LocalSyncTransport(
                 $"'{relativePath}' is an absolute path, and a sync acts only inside the tree it was given.");
         }
 
-        var full = Path.GetFullPath(Path.Combine(root, relativePath));
+        var expanded = Home(root);
+        var full = Path.GetFullPath(Path.Combine(expanded, relativePath));
 
-        if (!PathContainment.IsStrictlyInside(root, full, StringComparison.Ordinal)
-            && !PathContainment.IsStrictlyInside(root, full, StringComparison.OrdinalIgnoreCase))
+        // This machine's own comparison. Testing both would be no test at all: a path inside under
+        // Ordinal is inside under OrdinalIgnoreCase too, so the pair reduces to the looser of them,
+        // and on Linux a path differing only in case would escape the tree.
+        if (!PathContainment.IsStrictlyInside(expanded, full, _platform.PathComparison))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
@@ -168,8 +174,30 @@ public sealed class LocalSyncTransport(
         return full;
     }
 
+    /// <summary>
+    /// A declared path with a leading <c>~</c> expanded to this machine's home directory.
+    /// </summary>
+    /// <param name="root">The path as the configuration declares it.</param>
+    /// <remarks>
+    /// <c>hosts.*.repositoryPath</c> is documented with <c>~/</c> and the README's own example uses
+    /// it. Passed through unexpanded it becomes a directory literally named <c>~</c> beside wherever
+    /// the tool happened to run, while the host agent — which does expand it — looks in the home
+    /// directory: the sync and the run then disagree about where the tree is.
+    /// </remarks>
+    internal static string Home(string root)
+    {
+        if (root != "~" && !root.StartsWith("~/", StringComparison.Ordinal) && !root.StartsWith(@"~\", StringComparison.Ordinal))
+        {
+            return root;
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        return home.Length == 0 ? root : Path.Combine(home, root.Length <= 2 ? string.Empty : root[2..]);
+    }
+
     private static string MarkerPath(string root)
-        => Path.Combine(root, HarnessLayout.DirectoryName, MarkerFileName);
+        => Path.Combine(Home(root), HarnessLayout.DirectoryName, MarkerFileName);
 
     private static readonly JsonSerializerOptions MarkerOptions = new() { WriteIndented = true };
 

@@ -166,7 +166,7 @@ internal static class RunCommand
                         leg.BuildableProject(),
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
-                        CoreCounts.Resolve(null, null, config.Defaults.BuildCores).Value,
+                        CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
                         work.RunDirectory),
                     cancellationToken)
                 .ConfigureAwait(false);

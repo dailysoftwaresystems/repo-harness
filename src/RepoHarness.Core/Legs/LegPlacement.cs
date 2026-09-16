@@ -18,10 +18,23 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// or else this machine, then the WSL distributions when the leg runs on Linux, then the ssh hosts, each
     /// in the order the configuration declares them, and each named as the configuration declares it.
     /// </summary>
-    public static IReadOnlyList<HostId> Candidates(HarnessConfig config, LegConfig leg)
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="leg">The leg being placed.</param>
+    /// <param name="here">
+    /// Whether this machine is the only candidate, whatever the leg names. Set when a host is
+    /// running a leg the machine that reached it dispatched: the leg names that host, and asking it
+    /// to place the leg again would send it looking for connection data it was deliberately never
+    /// given, to reach a machine it already is.
+    /// </param>
+    public static IReadOnlyList<HostId> Candidates(HarnessConfig config, LegConfig leg, bool here = false)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(leg);
+
+        if (here)
+        {
+            return [HostId.Local];
+        }
 
         if (leg.Wsl is { } wsl)
         {
@@ -46,10 +59,15 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// Places a leg on the first of its candidates that measurement shows can run it. A candidate
     /// missing from <paramref name="reports"/> was not measured, and is passed over.
     /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="selected">The leg being placed.</param>
+    /// <param name="reports">What measurement found, by host.</param>
+    /// <param name="here">Whether this machine is the only candidate, whatever the leg names.</param>
     public static LegPlacement Place(
         HarnessConfig config,
         SelectedLeg selected,
-        IReadOnlyDictionary<HostId, HostReport> reports)
+        IReadOnlyDictionary<HostId, HostReport> reports,
+        bool here = false)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(selected);
@@ -57,7 +75,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
         var reasons = new List<string>();
 
-        foreach (var candidate in Candidates(config, selected.Leg))
+        foreach (var candidate in Candidates(config, selected.Leg, here))
         {
             if (!reports.TryGetValue(candidate, out var report))
             {

@@ -56,6 +56,8 @@ public sealed class BuildService(
     PhaseRunner phaseRunner,
     BuildDirectoryGuard buildDirectoryGuard,
     NinjaDependencyCheck dependencyCheck,
+    InputFingerprint fingerprints,
+    Git.IGitClient gitClient,
     IFileSystem fileSystem,
     IHarnessOutput output) : IBuildService
 {
@@ -65,6 +67,8 @@ public sealed class BuildService(
     private readonly PhaseRunner _phaseRunner = phaseRunner;
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
+    private readonly InputFingerprint _fingerprints = fingerprints;
+    private readonly Git.IGitClient _gitClient = gitClient;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
 
@@ -82,14 +86,17 @@ public sealed class BuildService(
         var overlay = Overlay(config, request);
 
         // Before configuring, not after: a directory configured from another worktree watches that
-        // tree's sources, which produced both a false refusal and a silent wrong answer.
+        // tree's sources, which produced both a false refusal and a silent wrong answer. Compared
+        // against the directory the build is actually configured from, which is the project's own
+        // path below the tree root and not the tree root itself.
         _buildDirectoryGuard.Check(
             buildDirectory,
-            request.TreeRoot,
+            Path.Combine(request.TreeRoot, request.Project.Path),
             overlay.Env.GetValueOrDefault("CC"),
+            overlay.Env.GetValueOrDefault("CXX"),
             adapter.BuildTypeOf(config, request.Variant.Config));
 
-        var rebuilt = DecideCleanRebuild(request, buildDirectory);
+        var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
 
         if (rebuilt is not null)
         {
@@ -124,6 +131,23 @@ public sealed class BuildService(
             }
         }
 
+        if (request.Project.BuildOutputs.Count == 0)
+        {
+            // Nothing declared is nothing witnessed. A build tool exits 0 having produced nothing
+            // often enough — a target filtered out, a generator writing somewhere else — that the
+            // exit code alone is not evidence, and an empty list makes the check below vacuously
+            // true rather than absent, which reads as a pass nobody performed.
+            return new BuildResult(
+                ReachedVerdict.Of(
+                    LegVerdict.Unwitnessed,
+                    $"project '{request.Project.Name}' declares no buildOutputs, so nothing established that "
+                    + "this build produced anything; a zero exit code is not that evidence"),
+                buildDirectory,
+                phases,
+                rebuilt,
+                null);
+        }
+
         var missing = MissingOutputs(request, buildDirectory);
 
         if (missing.Count > 0)
@@ -141,7 +165,24 @@ public sealed class BuildService(
                 null);
         }
 
-        var dependencies = await ReadDependenciesAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
+        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (unreadable is not null)
+        {
+            // Not a pass. The check exists because an object with no recorded headers is never
+            // rebuilt when a header changes, and a check that could not run has established nothing
+            // about that — which is what unmeasured means, and is a different fact from "clean".
+            return new BuildResult(
+                ReachedVerdict.Of(
+                    LegVerdict.Unmeasured,
+                    $"the build succeeded and its dependency records could not be read, so nothing "
+                    + $"established that its objects record the headers they include: {unreadable}"),
+                buildDirectory,
+                phases,
+                rebuilt,
+                null);
+        }
 
         if (dependencies is { IsClean: false })
         {
@@ -158,7 +199,7 @@ public sealed class BuildService(
                 dependencies);
         }
 
-        RecordInputs(request, buildDirectory, phases);
+        await RecordInputsAsync(request, buildDirectory, phases, cancellationToken).ConfigureAwait(false);
 
         return new BuildResult(ReachedVerdict.Of(LegVerdict.Passed), buildDirectory, phases, rebuilt, dependencies);
     }
@@ -217,7 +258,10 @@ public sealed class BuildService(
     /// is not newer than the newest output, the variant is rebuilt from clean and the ledger says
     /// why. A stale binary reported as a pass is the one price an incremental build must never pay.
     /// </remarks>
-    private string? DecideCleanRebuild(BuildRequest request, string buildDirectory)
+    private async Task<string?> DecideCleanRebuildAsync(
+        BuildRequest request,
+        string buildDirectory,
+        CancellationToken cancellationToken)
     {
         var record = Path.Combine(buildDirectory, BuildRecordFileName);
 
@@ -233,6 +277,16 @@ public sealed class BuildService(
             return "the previous build spanned a clock step, so nothing it stamped can be ordered";
         }
 
+        // The content comparison first, because it holds whatever the clock did. A source whose
+        // bytes differ from the ones this directory was built from is stale however its timestamp
+        // reads, and the timestamp is the only thing the build system will consult.
+        var changed = await ChangedSinceRecordAsync(request, previous, cancellationToken).ConfigureAwait(false);
+
+        if (changed is not null)
+        {
+            return changed;
+        }
+
         var newestOutput = NewestOutput(request, buildDirectory);
 
         if (newestOutput is null)
@@ -240,7 +294,8 @@ public sealed class BuildService(
             return null;
         }
 
-        var stale = ChangedInputsNotNewerThan(request.TreeRoot, newestOutput.Value);
+        var stale = await ChangedInputsNotNewerThanAsync(request, newestOutput.Value, cancellationToken)
+            .ConfigureAwait(false);
 
         return stale is null
             ? null
@@ -260,7 +315,7 @@ public sealed class BuildService(
                 continue;
             }
 
-            var written = File.GetLastWriteTimeUtc(path);
+            var written = _fileSystem.LastWriteTimeUtc(path);
             newest = newest is null || written > newest ? written : newest;
         }
 
@@ -269,63 +324,200 @@ public sealed class BuildService(
 
     /// <summary>
     /// The first tracked source that changed without becoming newer than the build's newest output.
-    /// Compared by equality of content elsewhere; here the question is only whether the build system
-    /// would notice, and the build system asks about times.
+    /// Here the question is only whether the build system would notice, and the build system asks
+    /// about times; the content question is asked separately, and first.
     /// </summary>
-    private string? ChangedInputsNotNewerThan(string treeRoot, DateTime newestOutput)
+    /// <remarks>
+    /// Over the files git tracks, recursively, and not over whatever happens to sit in the tree's
+    /// top directory: a C++ project keeps its sources in subdirectories, so a scan of the root alone
+    /// looks at a README and a .gitignore and reports every build clean.
+    /// </remarks>
+    private async Task<string?> ChangedInputsNotNewerThanAsync(
+        BuildRequest request,
+        DateTime newestOutput,
+        CancellationToken cancellationToken)
     {
-        foreach (var file in _fileSystem.EnumerateFiles(treeRoot, recursive: false))
+        foreach (var relativePath in await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false))
         {
-            var written = File.GetLastWriteTimeUtc(file);
+            var path = Path.Combine(request.TreeRoot, relativePath);
 
-            if (written > newestOutput)
+            if (!_fileSystem.FileExists(path))
             {
                 continue;
             }
 
-            if (written.AddSeconds(ClockStepSuspicionSeconds) > newestOutput
-                && written < newestOutput)
+            var written = _fileSystem.LastWriteTimeUtc(path);
+
+            if (written >= newestOutput)
             {
-                return Path.GetFileName(file);
+                continue;
+            }
+
+            if (written.AddSeconds(ClockStepSuspicionSeconds) > newestOutput)
+            {
+                return relativePath;
             }
         }
 
         return null;
     }
 
-    private void RecordInputs(BuildRequest request, string buildDirectory, IReadOnlyList<PhaseResult> phases)
+    /// <summary>
+    /// The files git tracks in the leg's tree, or an empty list when git could not be asked.
+    /// </summary>
+    /// <remarks>
+    /// An empty list makes both callers fail closed: the staleness scan finds nothing to clear the
+    /// build, and the record written afterwards holds no fingerprint, so the next build cannot
+    /// conclude the tree held still and rebuilds from clean.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> TrackedInputsAsync(
+        BuildRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var index = await _gitClient.ListIndexAsync(request.TreeRoot, cancellationToken).ConfigureAwait(false);
+
+            return [.. index
+                .Where(entry => entry.IsRegularFile)
+                .Select(entry => entry.Path)
+                .Distinct(StringComparer.Ordinal)];
+        }
+        catch (HarnessException ex)
+        {
+            _output.Warn(CommandName, $"{request.Leg}: the files git tracks could not be listed: {ex.Message}");
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Whether any input's content differs from what this directory was last built from, which is
+    /// the question no clock can answer wrongly.
+    /// </summary>
+    private async Task<string?> ChangedSinceRecordAsync(
+        BuildRequest request,
+        string previous,
+        CancellationToken cancellationToken)
+    {
+        var recorded = Fingerprints(previous);
+
+        if (recorded.Count == 0)
+        {
+            // Either the record predates fingerprinting or nothing could be fingerprinted when it
+            // was written. Neither says the tree held still, and reading it as though it did is how
+            // a stepped clock gets to hand the tests yesterday's object.
+            return "the previous build recorded no input fingerprint, so nothing here can say the tree held still";
+        }
+
+        var current = await _fingerprints
+            .TakeAsync(request.TreeRoot, await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (current.Unreadable.Count > 0)
+        {
+            return $"'{current.Unreadable[0].Path}' could not be read, so nothing here can say the tree held still";
+        }
+
+        foreach (var file in current.Files)
+        {
+            if (recorded.TryGetValue(file.Path, out var content) && !content.Equals(file.Content, StringComparison.Ordinal))
+            {
+                return $"'{file.Path}' differs from what this directory was built from";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The content hash of every input the record names, by path.</summary>
+    private static Dictionary<string, string> Fingerprints(string record)
+    {
+        var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var line in record.Split('\n'))
+        {
+            if (!line.StartsWith(FingerprintMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf(' ', FingerprintMarker.Length);
+
+            if (separator > 0)
+            {
+                fingerprints[line[(separator + 1)..]] = line[FingerprintMarker.Length..separator];
+            }
+        }
+
+        return fingerprints;
+    }
+
+    /// <summary>
+    /// Records what this build was built from: whether it spanned a clock step, and a content
+    /// fingerprint of every input.
+    /// </summary>
+    /// <remarks>
+    /// The fingerprint is what makes the next build's staleness decision independent of the clock.
+    /// Without it the only question that can be asked is whether a source is newer than an object,
+    /// which is exactly the question a stepped clock answers wrongly.
+    /// </remarks>
+    private async Task RecordInputsAsync(
+        BuildRequest request,
+        string buildDirectory,
+        IReadOnlyList<PhaseResult> phases,
+        CancellationToken cancellationToken)
     {
         var stepped = phases.Any(phase => phase.ClockStepped);
+        var inputs = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+        var snapshot = await _fingerprints.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
 
-        _fileSystem.WriteAllTextAtomic(
-            Path.Combine(buildDirectory, BuildRecordFileName),
-            (stepped ? ClockStepMarker : "clean") + "\n" + request.Variant.DirectoryName + "\n");
+        var record = new System.Text.StringBuilder()
+            .Append(stepped ? ClockStepMarker : "clean").Append('\n')
+            .Append(request.Variant.DirectoryName).Append('\n');
+
+        foreach (var file in snapshot.Files)
+        {
+            record.Append(FingerprintMarker).Append(file.Content).Append(' ').Append(file.Path).Append('\n');
+        }
+
+        _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecordFileName), record.ToString());
     }
 
     private List<string> MissingOutputs(BuildRequest request, string buildDirectory)
         => [.. request.Project.BuildOutputs
             .Where(output => !_fileSystem.FileExists(Path.Combine(buildDirectory, output)))];
 
-    private async Task<NinjaDependencyReport?> ReadDependenciesAsync(
+    /// <summary>
+    /// The dependency report for a cmake build, or why it could not be produced.
+    /// </summary>
+    /// <returns>
+    /// The report and no reason where the check ran, no report and no reason where the project is
+    /// not one this check applies to, and a reason where the check was attempted and failed.
+    /// </returns>
+    /// <remarks>
+    /// The reason is returned rather than warned about and dropped. The check's whole purpose is to
+    /// catch a build directory whose objects record no headers, which is how a stale object survives
+    /// a header change; a run that could not perform it and passed anyway reports "no such object
+    /// found" when what happened is that nobody looked.
+    /// </remarks>
+    private async Task<(NinjaDependencyReport? Report, string? Unreadable)> ReadDependenciesAsync(
         BuildRequest request,
         string buildDirectory,
         CancellationToken cancellationToken)
     {
         if (!string.Equals(request.Project.Type, "cmake", StringComparison.OrdinalIgnoreCase))
         {
-            return null;
+            return (null, null);
         }
 
         try
         {
-            return await _dependencyCheck.CheckAsync(buildDirectory, cancellationToken).ConfigureAwait(false);
+            return (await _dependencyCheck.CheckAsync(buildDirectory, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {
-            // Reported, never fatal on its own: the build itself succeeded, and a dependency record
-            // that could not be read is a fact about the check rather than about the code.
             _output.Warn(CommandName, $"{request.Leg}: dependency records could not be read: {ex.Message}");
-            return null;
+            return (null, ex.Message);
         }
     }
 
@@ -334,6 +526,9 @@ public sealed class BuildService(
 
     /// <summary>What that record says when the build it describes spanned a clock step.</summary>
     private const string ClockStepMarker = "clock-stepped";
+
+    /// <summary>What every fingerprint line in that record starts with.</summary>
+    private const string FingerprintMarker = "in ";
 
     /// <summary>
     /// How far behind the newest output a changed input may be before it is treated as a clock step

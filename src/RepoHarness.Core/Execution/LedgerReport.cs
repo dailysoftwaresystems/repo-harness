@@ -83,6 +83,7 @@ public sealed class LedgerReport
         ArgumentNullException.ThrowIfNull(entries);
 
         var suspect = Compare(entries, durationWarningFactor);
+        var counts = CompareCounts(entries);
 
         return new LedgerReport(
         [
@@ -91,6 +92,7 @@ public sealed class LedgerReport
                 var notes = entry.TimingNotes
                     .Concat(entry.Phases.Where(phase => phase.ClockStepped).Select(phase => $"the clock stepped during {phase.Phase}"))
                     .Concat(suspect.TryGetValue(entry.Leg, out var slow) ? slow : [])
+                    .Concat(counts.TryGetValue(entry.Leg, out var counted) ? [counted] : Array.Empty<string>())
                     .Distinct(StringComparer.Ordinal)
                     .ToList();
 
@@ -186,6 +188,50 @@ public sealed class LedgerReport
             }),
         },
         JsonOptions);
+
+    /// <summary>
+    /// Which legs ran a different number of tests from the rest, and what the rest ran.
+    /// </summary>
+    /// <remarks>
+    /// Legs running the same suite are meant to run the same tests. A leg that reports three where
+    /// its siblings report four hundred is green on both the exit code and the success pattern, and
+    /// neither of those can see the difference — a filter that matched almost nothing, a discovery
+    /// step that failed quietly, a test project excluded by a stale glob. The count is the only
+    /// thing in the ledger that can, so a leg disagreeing with the others is marked.
+    /// Compared only where at least three legs reported a count: with two, "which one is wrong" has
+    /// no answer, and marking both says nothing a reader can act on. Emulated legs are compared with
+    /// the rest here, because a count does not depend on how fast the machine is.
+    /// </remarks>
+    private static Dictionary<string, string> CompareCounts(IReadOnlyList<LegEntry> entries)
+    {
+        var marks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        var counted = entries
+            .Where(entry => entry.TestCount is not null && !Verdicts.IsFailure(entry.Verdict))
+            .ToList();
+
+        if (counted.Count < 3)
+        {
+            return marks;
+        }
+
+        var agreed = counted
+            .GroupBy(entry => entry.TestCount!.Value)
+            .OrderByDescending(group => group.Count())
+            .First();
+
+        if (agreed.Count() == counted.Count)
+        {
+            return marks;
+        }
+
+        foreach (var entry in counted.Where(entry => entry.TestCount != agreed.Key))
+        {
+            marks[entry.Leg] = $"it ran {entry.TestCount} test(s), where {agreed.Count()} other leg(s) ran {agreed.Key}";
+        }
+
+        return marks;
+    }
 
     /// <summary>
     /// Which legs have a phase slower than its siblings, and by how much. Phases are compared only

@@ -231,13 +231,12 @@ public sealed class TestServiceTests
             new PhaseRunner(phaseRunner ?? factory.ProcessRunner, factory.FileSystem, factory.Output),
             new InputFingerprint(factory.FileSystem, factory.Platform),
 
-            // The table this process can read directly, rather than the platform's own source: that
-            // one is a program on Windows, and these tests are about the verdict rather than about
-            // a WMI query.
-            new ProcessSampler(
-                ProcessTableFactory.Create(factory.Platform, new SilentRunner()),
-                factory.Platform,
-                factory.Output),
+            // A table that answers, rather than the platform's own source: that one is a program on
+            // Windows, and these tests are about the verdict rather than about a WMI query. It has
+            // to answer, though — a reading that failed is reported as unmeasured, so a double that
+            // quietly failed would make every one of these legs unmeasured and hide what they pin.
+            new ProcessSampler(new QuietProcessTable(), factory.Platform, factory.Output),
+            factory.FileSystem,
             factory.GitClient,
             factory.Output);
 
@@ -326,12 +325,16 @@ public sealed class TestServiceTests
         public string? FindExecutable(string command) => command;
     }
 
-    /// <summary>A runner that starts nothing and reports nothing, for the sampler's own transport.</summary>
-    private sealed class SilentRunner : IProcessRunner
+    /// <summary>
+    /// A process table that reads, and finds a machine running nothing but this test. It reports no
+    /// degradation, which is what makes these tests about the suite's verdict: a table that could
+    /// not be read is a verdict of its own.
+    /// </summary>
+    private sealed class QuietProcessTable : IProcessTable
     {
-        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new ProcessResult(1, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
-
-        public string? FindExecutable(string command) => command;
+        public Task<ProcessTableReading> ReadAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(new ProcessTableReading(
+                [new SampledProcess(Environment.ProcessId, null, "repo-harness-test", DateTimeOffset.UnixEpoch, "repo-harness-test")],
+                null));
     }
 }

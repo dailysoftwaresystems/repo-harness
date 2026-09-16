@@ -141,6 +141,7 @@ public sealed class RunnerRunService(
     RunCheckGate runCheckGate,
     RunSegments runSegments,
     IPredefinedActionRunner predefinedActions,
+    Platform.IHostPlatform platform,
     IFileSystem fileSystem,
     IHarnessOutput output) : IRunnerRunService
 {
@@ -167,13 +168,6 @@ public sealed class RunnerRunService(
         RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
 
-    /// <summary>
-    /// Characters a step's name may keep when it becomes a file name: the ones every platform this
-    /// tool runs on accepts. Parentheses are among them, because the runner itself puts them in the
-    /// name of a step with several lines.
-    /// </summary>
-    private static readonly SearchValues<char> LogNameCharacters =
-        SearchValues.Create("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. ()");
 
     private readonly PhaseRunner _phaseRunner = phaseRunner;
     private readonly IActionFileParser _actionFileParser = actionFileParser;
@@ -184,6 +178,7 @@ public sealed class RunnerRunService(
     private readonly RunSegments _runSegments = runSegments;
     private readonly IPredefinedActionRunner _predefinedActions = predefinedActions;
     private readonly IFileSystem _fileSystem = fileSystem;
+    private readonly Platform.IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
     /// <inheritdoc/>
@@ -203,7 +198,7 @@ public sealed class RunnerRunService(
         Refuse(request, steps.Phases, values);
 
         var record = await _runSegments
-            .BeginAsync(request.Layout, request.RunId, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
+            .BeginAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
             .ConfigureAwait(false);
 
         var remaining = new HashSet<string>(record.Remaining(steps.Phases.Select(phase => phase.Name)), StringComparer.OrdinalIgnoreCase);
@@ -230,6 +225,7 @@ public sealed class RunnerRunService(
                 .RecordCompletedAsync(
                     request.Layout,
                     request.RunId,
+                    request.Leg,
                     request.SegmentId,
                     phase.Name,
                     state.Outcomes[^1],
@@ -244,11 +240,11 @@ public sealed class RunnerRunService(
         }
 
         await _runSegments
-            .EndAsync(request.Layout, request.RunId, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
+            .EndAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
             .ConfigureAwait(false);
 
         var decided = await DecideAsync(request, state, values, cancellationToken).ConfigureAwait(false);
-        var union = _runSegments.Load(request.Layout, request.RunId).Union;
+        var union = _runSegments.Load(request.Layout, request.RunId, request.Leg).Union;
 
         decided = Carried(decided, state, union);
 
@@ -287,18 +283,7 @@ public sealed class RunnerRunService(
     /// so two steps whose names differ only in such a character still name two different files.
     /// </remarks>
     /// <param name="phase">The step's name, as the ledger shows it.</param>
-    public static string LogNameFor(string phase)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
-
-        return string.Create(phase.Length, phase, static (span, name) =>
-        {
-            for (var index = 0; index < name.Length; index++)
-            {
-                span[index] = LogNameCharacters.Contains(name[index]) ? name[index] : '-';
-            }
-        });
-    }
+    public static string LogNameFor(string phase) => RunSegments.FileNameFor(phase);
 
     /// <summary>
     /// The exception type <paramref name="output"/> names, or <see cref="StepFailureType"/> when it
@@ -725,8 +710,10 @@ public sealed class RunnerRunService(
         {
             var path = Path.GetFullPath(Path.Combine(request.TreeRoot, declared));
 
-            if (!PathContainment.IsStrictlyInside(request.TreeRoot, path, StringComparison.Ordinal)
-                && !PathContainment.IsStrictlyInside(request.TreeRoot, path, StringComparison.OrdinalIgnoreCase))
+            // This machine's own comparison, and only it. A path inside under Ordinal is inside
+            // under OrdinalIgnoreCase too, so testing both reduces to the looser of the two — and
+            // this guard stands in front of a recursive directory deletion.
+            if (!PathContainment.IsStrictlyInside(request.TreeRoot, path, _platform.PathComparison))
             {
                 _output.Warn(
                     CommandName,

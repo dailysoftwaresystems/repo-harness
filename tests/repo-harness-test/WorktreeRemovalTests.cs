@@ -583,6 +583,8 @@ public sealed class WorktreeRemovalTests
 
         public Stream OpenRead(string path) => inner.OpenRead(path);
 
+        public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
+
 
         public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
 
@@ -673,6 +675,8 @@ internal sealed class UndeletableFileSystem(IFileSystem inner) : IFileSystem
 
 
     public Stream OpenRead(string path) => inner.OpenRead(path);
+
+    public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
 
 
     public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)

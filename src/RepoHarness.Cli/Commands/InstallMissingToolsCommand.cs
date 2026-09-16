@@ -1,4 +1,5 @@
 using System.CommandLine;
+using RepoHarness.Core.Output;
 using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Cli.Commands;
@@ -40,11 +41,18 @@ internal static class InstallMissingToolsCommand
                 ? arguments.GetValue(LegsOption) ?? []
                 : null;
 
+            var json = arguments.GetValue(JsonOption);
+
+            // Asked for JSON, the document is the whole of standard output. Progress still appears,
+            // on standard error: an install that actually installs something writes a line per host
+            // while it works, and ahead of the document that line is what stops it parsing.
+            using var document = json ? context.Get<IHarnessOutput>().DataOnly() : null;
+
             var report = await context.Get<IToolProvisionService>()
                 .ProvisionAsync(context.Directory, legs, cancellationToken)
                 .ConfigureAwait(false);
 
-            return ToolProvisionReports.Render(report, arguments.GetValue(JsonOption));
+            return ToolProvisionReports.Render(report, json);
         }));
 
         return command;

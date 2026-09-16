@@ -17,8 +17,19 @@ namespace RepoHarness.Core.Build;
 /// </remarks>
 public sealed record VariantKey(string Processor, string Toolchain, string Config, string? Sanitizer)
 {
+    /// <summary>
+    /// The instrumentation overlay, with "none declared" spelt one way.
+    /// </summary>
+    /// <remarks>
+    /// An empty string and no string are the same absence, and <c>"sanitizer": ""</c> is reachable
+    /// from a hand-edited configuration. Left as two values they are one build directory and two
+    /// keys, which surfaces as a shared-build-directory refusal naming two legs their author
+    /// believes are different.
+    /// </remarks>
+    public string? Sanitizer { get; init; } = string.IsNullOrEmpty(Sanitizer) ? null : Sanitizer;
+
     /// <summary>The directory name this variant builds in, below the tree's build root.</summary>
-    public string DirectoryName => Sanitizer is null or ""
+    public string DirectoryName => Sanitizer is null
         ? $"{Processor}-{Toolchain}-{Config}"
         : $"{Processor}-{Toolchain}-{Config}-{Sanitizer}";
 

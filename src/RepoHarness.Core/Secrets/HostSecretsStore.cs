@@ -217,6 +217,17 @@ public sealed class HostSecretsStore(IFileSystem fileSystem, IFilePermissions fi
             DotEnvFile.Read(_fileSystem.ReadAllText(file)),
             StringComparer.Ordinal);
 
+        // Readable is as bad as writable once this file holds a password: it is where a privileged
+        // install reads one from, and a credential every account on the machine can read has already
+        // been shared. Asked only when there is one, because an address, a user name and a port are
+        // not secrets, and refusing a world-readable file that holds only those would demand a
+        // permission change for nothing.
+        if (values.ContainsKey(SuperuserKey) && !_filePermissions.IsPrivate(file))
+        {
+            return (null, $"other users can read '{Show(layout, file)}', and it holds this host's "
+                + $"{SuperuserKey}; {HowToProtect(file)}");
+        }
+
         foreach (var key in expected)
         {
             if (!values.TryGetValue(key.Name, out var value))

@@ -24,12 +24,14 @@ public sealed class SyncTransportFactory(
     IManifestBuilder manifestBuilder,
     IGitClient gitClient,
     IHostCommandRunner hostCommandRunner,
+    Platform.IHostPlatform platform,
     IHarnessOutput output) : ISyncTransportFactory
 {
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
     private readonly IGitClient _gitClient = gitClient;
     private readonly IHostCommandRunner _hostCommandRunner = hostCommandRunner;
+    private readonly Platform.IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
     /// <inheritdoc/>
@@ -39,7 +41,7 @@ public sealed class SyncTransportFactory(
 
         if (host.Host.Kind == HostKind.Local)
         {
-            return new LocalSyncTransport(_fileSystem, _manifestBuilder, _gitClient);
+            return new LocalSyncTransport(_fileSystem, _manifestBuilder, _gitClient, _platform);
         }
 
         var session = host.Session ?? throw new HarnessException(

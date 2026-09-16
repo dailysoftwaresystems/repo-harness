@@ -194,6 +194,54 @@ public sealed class ProcessSamplerTests
         Assert.Contains(report.Contenders, found => found.Seen == ProcessSeen.AtTheEnd);
     }
 
+    [Fact]
+    public void ALegNoSampleCouldReadTheTableFor_IsUnmeasured_AndNeverPassed()
+    {
+        // The one shape that turns the whole subsystem off silently: on a machine where the
+        // platform's query is blocked, every process comes back without a command line, nothing can
+        // ever match a build directory, and every leg reports no contender for ever.
+        var report = Classify(
+        [
+            new ProcessSample(0, TimeSpan.Zero, [], "the process table could not be read from WMI"),
+            new ProcessSample(1, TimeSpan.FromSeconds(5), [], "the process table could not be read from WMI"),
+        ]);
+
+        Assert.False(report.Looked);
+        Assert.Equal(LegVerdict.Unmeasured, report.Verdict()!.Verdict);
+        Assert.Contains("could not be read", report.Verdict()!.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneReadingThatFailedAmongSeveral_IsALimitRatherThanAVerdict()
+    {
+        // The samples that succeeded did look. Forcing a verdict here would make a transient
+        // failure of one query turn an honest green leg red.
+        var report = Classify(
+        [
+            Sample(0),
+            new ProcessSample(1, TimeSpan.FromSeconds(5), [], "the process table could not be read"),
+            Sample(2),
+        ]);
+
+        Assert.True(report.Looked);
+        Assert.Null(report.Verdict());
+        Assert.Single(report.Unreadable);
+    }
+
+    [Fact]
+    public void AContenderFound_IsStillReportedAsContended_EvenWhereAReadingFailed()
+    {
+        // A contender found is a positive fact and names something to do about it, so it outranks
+        // the reading that did not happen.
+        var report = Classify(
+        [
+            Sample(0, Process(4242, "ninja", $"ninja -C {BuildDirectory} all", parent: 9999)),
+            new ProcessSample(1, TimeSpan.FromSeconds(5), [], "the process table could not be read"),
+        ]);
+
+        Assert.Equal(LegVerdict.Contended, report.Verdict()!.Verdict);
+    }
+
     private static ContentionReport Classify(
         IReadOnlyList<ProcessSample> samples,
         IReadOnlyList<string>? sharedResourceTools = null)

@@ -36,7 +36,7 @@ public static class LegExit
 
     /// <summary>
     /// Another live run owns this run's log path, so this run cannot write the evidence for its own
-    /// verdict. Remedy: wait for that run, or point this one at another log path. Distinct from a
+    /// verdict. Remedy: find out which run still owns this leg's logs. Distinct from a
     /// held lock, which stopped the run before it started: here the work could run and its record
     /// could not be kept.
     /// </summary>

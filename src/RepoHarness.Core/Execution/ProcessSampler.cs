@@ -71,8 +71,17 @@ public sealed class ProcessSampler(IProcessTable processTable, IHostPlatform pla
     {
         try
         {
-            var table = await _processTable.ReadAsync(cancellationToken).ConfigureAwait(false);
-            return new ProcessSample(index, elapsed, table, null);
+            var reading = await _processTable.ReadAsync(cancellationToken).ConfigureAwait(false);
+
+            if (reading.Degraded is { } degraded)
+            {
+                // A reading that came back without command lines is reported as a reading that
+                // failed, not as one that found nothing: contention is decided by a command line,
+                // so this sample can no longer answer the question it was taken for.
+                _output.Detail("sample", $"the process table could not be read: {degraded}");
+            }
+
+            return new ProcessSample(index, elapsed, reading.Processes, reading.Degraded);
         }
         catch (OperationCanceledException)
         {

@@ -36,4 +36,18 @@ public interface IHarnessOutput
 
     /// <summary>Writes a line of passthrough stderr from a child process, unprefixed.</summary>
     void RawError(string line);
+
+    /// <summary>
+    /// Sends everything except <see cref="Data"/> to standard error until the returned scope is
+    /// disposed, so a command answering with a document leaves standard output holding only that
+    /// document.
+    /// </summary>
+    /// <remarks>
+    /// A command asked for JSON has one reader, and that reader parses standard output whole.
+    /// Progress written there would be read as part of the document, and the run's own progress is
+    /// the most likely thing to appear before it. Measured: a leg dispatched to a host returned its
+    /// ledger behind two lines of progress, and the machine that asked reported the host as
+    /// unreachable — a green leg turned into a connection failure by a line of prose.
+    /// </remarks>
+    IDisposable DataOnly();
 }

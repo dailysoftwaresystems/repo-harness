@@ -27,7 +27,7 @@ public sealed class LegsServiceTests
     {
         var fixture = Create(new() { ["a"] = HostDoubles.Leg("linux", "x86_64"), ["b"] = HostDoubles.Leg("linux", "x86_64") });
 
-        var report = await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        var report = await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.True(report.Passed);
         Assert.Equal([HostId.Local], fixture.Inspector.Inspected);
@@ -38,7 +38,7 @@ public sealed class LegsServiceTests
     {
         var fixture = Create(new() { ["arm-a"] = HostDoubles.Leg("linux", "arm64"), ["arm-b"] = HostDoubles.Leg("linux", "arm64") });
 
-        var report = await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        var report = await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.All(report.Placements, placement => Assert.Equal(HostId.Ssh("pi"), placement.Host?.Host));
         Assert.Equal(3, fixture.Inspector.Inspected.Count);
@@ -50,7 +50,7 @@ public sealed class LegsServiceTests
     {
         var fixture = Create(new() { ["mac"] = HostDoubles.Leg("macos", "arm64"), ["native"] = HostDoubles.Leg("linux", "x86_64") });
 
-        var report = await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        var report = await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.True(report.Passed);
         Assert.Contains(
@@ -65,7 +65,7 @@ public sealed class LegsServiceTests
         // A distribution runs Linux only, and measuring one installs DssHarness there, for a leg it can never run.
         var fixture = Create(new() { ["mac"] = HostDoubles.Leg("macos", "arm64") });
 
-        await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.Equal([HostId.Local, HostId.Ssh("pi")], fixture.Inspector.Inspected);
     }
@@ -78,7 +78,7 @@ public sealed class LegsServiceTests
             ["pinned"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", Ssh = "pi" },
         });
 
-        await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.Equal([HostId.Ssh("pi")], fixture.Inspector.Inspected);
     }
@@ -90,7 +90,7 @@ public sealed class LegsServiceTests
         var fixture = Create(new() { ["a"] = HostDoubles.Leg("linux", "x86_64") });
 
         var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => fixture.Service.CheckAsync(Root, ["nope"], TestContext.Current.CancellationToken));
+            () => fixture.Service.CheckAsync(Root, ["nope"], here: false, TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.UsageError, exception.ExitCode);
         Assert.Empty(fixture.Inspector.Inspected);
@@ -111,7 +111,7 @@ public sealed class LegsServiceTests
                 config.Emulators["unused"] = Emulator();
             });
 
-        await fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken);
+        await fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken);
 
         Assert.NotEmpty(fixture.Inspector.EmulatorsAsked);
         Assert.All(fixture.Inspector.EmulatorsAsked, asked => Assert.Equal(["qemu-arm64"], asked.Keys));
@@ -133,7 +133,7 @@ public sealed class LegsServiceTests
             });
 
         var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => fixture.Service.CheckAsync(Root, null, TestContext.Current.CancellationToken));
+            () => fixture.Service.CheckAsync(Root, null, here: false, TestContext.Current.CancellationToken));
 
         Assert.Same(refusal, exception);
         Assert.Contains("legs: wsl Ubuntu: updated DssHarness 1.1.9 to 1.2.0", fixture.Output.ToString(), StringComparison.Ordinal);

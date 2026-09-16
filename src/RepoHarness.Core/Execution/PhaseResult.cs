@@ -40,9 +40,12 @@ public sealed record PhaseTiming(string Pattern, string Text, string Value);
 /// <param name="Timings">Every match of the phase's timing patterns, in the order they appeared.</param>
 /// <param name="LogFile">Where the whole of the child's output was written, for a reader or a regex.</param>
 /// <param name="Output">
-/// The child's own output, both streams, exactly as it wrote them. Held apart from the log file,
-/// which also carries the header the harness wrote: a header that echoes the command line contains
-/// the success pattern whenever the command does.
+/// The child's own output, both streams, with any secret the run declared already masked. Held
+/// apart from the log file, which also carries the header the harness wrote: a header that echoes
+/// the command line contains the success pattern whenever the command does.
+/// Masked here rather than by each reader, because this is the copy that outlives the child — it
+/// reaches the ledger's detail, an expected exception's message and the verdict — and a redaction
+/// every reader has to remember is one a new reader will not.
 /// </param>
 public sealed record PhaseResult(
     string Leg,

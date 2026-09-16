@@ -14,8 +14,10 @@ public sealed record SyncOptions(bool DryRun = false);
 /// <param name="Root">The copy's root on that host.</param>
 /// <param name="Plan">What the sync decided to do.</param>
 /// <param name="Verified">
-/// Whether the copy was confirmed equal to the source afterwards. A sync that cannot confirm its own
-/// result has not established that the leg about to run reads the tree it was asked about.
+/// Whether the copy was confirmed equal to the source afterwards. True for every sync that returns
+/// at all, and false only for a dry run, which changes nothing and so confirms nothing: a copy that
+/// does not match raises rather than returning, because a leg must not be run against it and there
+/// is nothing a caller could usefully do with a result that says so.
 /// </param>
 /// <param name="Created">Whether this sync created the copy.</param>
 public sealed record SyncResult(
@@ -106,7 +108,7 @@ public sealed class SyncService(
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pull);
 
-        var report = await _legsService.CheckAsync(directory, legNames, cancellationToken).ConfigureAwait(false);
+        var report = await _legsService.CheckAsync(directory, legNames, here: false, cancellationToken).ConfigureAwait(false);
 
         var hosts = report.Placements
             .Where(placement => placement is { Runnable: true, Host: not null })
@@ -122,7 +124,6 @@ public sealed class SyncService(
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var details = new List<string>();
-        var unverified = false;
 
         foreach (var host in hosts)
         {
@@ -147,17 +148,15 @@ public sealed class SyncService(
 
             details.Add($"{host.Host}: {destination}");
             details.AddRange(result.Plan.Describe(options.DryRun ? SyncVerb.Planned : SyncVerb.Done));
-
-            unverified |= !options.DryRun && !result.Verified;
         }
 
-        return unverified
-            ? CommandOutcome.Failed(HarnessExit.CommandFailed, "a copy does not match this tree", details)
-            : CommandOutcome.Ok(
-                options.DryRun
-                    ? $"{hosts.Count} host(s) inspected; nothing was changed"
-                    : $"{hosts.Count} host(s) in step",
-                details);
+        // Reaching here means every copy was confirmed: a copy that still differed raised from the
+        // verification inside the sync, naming the files, and took the whole command with it.
+        return CommandOutcome.Ok(
+            options.DryRun
+                ? $"{hosts.Count} host(s) inspected; nothing was changed"
+                : $"{hosts.Count} host(s) in step",
+            details);
     }
 
     /// <summary>
@@ -195,7 +194,11 @@ public sealed class SyncService(
 
         var context = await _contextLoader.LoadAsync(sourceRoot, cancellationToken).ConfigureAwait(false);
         var config = context.Config;
-        var exclusions = new SyncExclusions(config.Sync, config.Worktrees.Root);
+
+        var exclusions = new SyncExclusions(
+            config.Sync,
+            config.Worktrees.Root,
+            await IgnoredPathsAsync(context.Layout.RepositoryRoot, cancellationToken).ConfigureAwait(false));
 
         // Before anything is read from the far side, because it is about this tree and costs nothing.
         await exclusions
@@ -231,10 +234,79 @@ public sealed class SyncService(
         // after the transfer, so a copy that failed part way is not left looking complete.
         await transport.InitialiseRepositoryAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
 
+        await PlaceConfigurationAsync(context.Layout, transport, destinationRoot, cancellationToken)
+            .ConfigureAwait(false);
+
         var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
 
         return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
+    }
+
+    /// <summary>
+    /// The top of everything git ignores in <paramref name="root"/>, as paths relative to it.
+    /// </summary>
+    /// <param name="root">The source tree.</param>
+    /// <param name="cancellationToken">Stops the listing.</param>
+    /// <exception cref="HarnessException">
+    /// git could not be asked what it ignores. A refusal rather than an empty list: an empty list
+    /// reads as "this repository ignores nothing", and the sync that follows would copy every
+    /// ignored file in the tree to the host.
+    /// </exception>
+    /// <remarks>
+    /// <c>--directory</c> so an ignored directory is named once rather than file by file, which is
+    /// what keeps this cheap on a tree holding a build directory or a package cache.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> IgnoredPathsAsync(string root, CancellationToken cancellationToken)
+    {
+        var result = await _gitClient
+            .RunAsync(
+                root,
+                ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Succeeded)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"What git ignores in '{root}' could not be listed, so a sync cannot tell which files are "
+                + $"local to this machine: {result.FailureMessage}");
+        }
+
+        return [.. result.StandardOutput
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => path.Trim().TrimEnd('/'))
+            .Where(path => path.Length > 0)];
+    }
+
+    /// <summary>
+    /// Puts this repository's <c>config.json</c> in the copy, and nothing else from
+    /// <c>.harness-config</c>.
+    /// </summary>
+    /// <remarks>
+    /// A leg placed on a host runs DssHarness there, and DssHarness in a directory holding no
+    /// <c>.harness-config/config.json</c> refuses as not initialised — so without this the copy is a
+    /// tree no leg can run in, and the failure arrives as "the host could not be reached" about a
+    /// host that answered. Only this one file crosses: the rest of that directory is connection
+    /// data, credentials, locks and logs, each of which is local to a machine by design, and the
+    /// tracked configuration names hosts only by name.
+    /// Written after the transfer and the git initialisation, so a copy that failed part way is
+    /// never left looking like one a leg could run in.
+    /// </remarks>
+    private async Task PlaceConfigurationAsync(
+        Repository.HarnessLayout layout,
+        ISyncTransport transport,
+        string destinationRoot,
+        CancellationToken cancellationToken)
+    {
+        var relativePath = $"{Repository.HarnessLayout.DirectoryName}/{Repository.HarnessLayout.ConfigFileName}";
+
+        var contents = await _localTransport
+            .ReadFileAsync(layout.MainCheckoutRoot, relativePath, cancellationToken)
+            .ConfigureAwait(false);
+
+        await transport.WriteFileAsync(destinationRoot, relativePath, contents, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>

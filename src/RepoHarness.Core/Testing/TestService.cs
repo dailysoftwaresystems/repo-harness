@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Enumeration;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Sync;
 
 namespace RepoHarness.Core.Testing;
 
@@ -125,6 +128,7 @@ public sealed class TestService(
     PhaseRunner phaseRunner,
     InputFingerprint inputFingerprint,
     ProcessSampler processSampler,
+    IFileSystem fileSystem,
     IGitClient gitClient,
     IHarnessOutput output) : ITestService
 {
@@ -144,6 +148,7 @@ public sealed class TestService(
     private readonly PhaseRunner _phaseRunner = phaseRunner;
     private readonly InputFingerprint _inputFingerprint = inputFingerprint;
     private readonly ProcessSampler _processSampler = processSampler;
+    private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IGitClient _gitClient = gitClient;
     private readonly IHarnessOutput _output = output;
 
@@ -367,6 +372,60 @@ public sealed class TestService(
     /// fingerprints cleanly, and "nothing moved" is exactly the answer an unmeasured leg must not
     /// give.
     /// </remarks>
+    /// <summary>
+    /// Declared inputs with their glob patterns replaced by the files they match.
+    /// </summary>
+    /// <param name="declared">What <c>test.inputs</c> names: paths, patterns, or both.</param>
+    /// <param name="treeRoot">The tree the patterns are relative to.</param>
+    /// <remarks>
+    /// A pattern is not a file. Left unexpanded it is fingerprinted as absent before the suite and
+    /// absent after, the two compare equal, and the leg reports that its inputs held still — which
+    /// switches the whole inputs-moved contract off for any repository that declares one, silently,
+    /// in exactly the configuration its author wrote to switch it on.
+    /// A pattern matching nothing makes the leg unmeasured rather than clean: the declaration says
+    /// these files are read while the tests run, and if none of them exists the thing that was
+    /// supposed to be watched was not watched.
+    /// </remarks>
+    private (IReadOnlyList<string> Inputs, string? Unmeasurable) Expand(IReadOnlyList<string> declared, string treeRoot)
+    {
+        var resolved = new List<string>();
+
+        foreach (var input in declared)
+        {
+            if (!input.Contains('*', StringComparison.Ordinal) && !input.Contains('?', StringComparison.Ordinal))
+            {
+                resolved.Add(input);
+                continue;
+            }
+
+            var directory = Path.GetDirectoryName(input)?.Replace('\\', '/') ?? string.Empty;
+            var root = Path.Combine(treeRoot, directory);
+
+            if (!_fileSystem.DirectoryExists(root))
+            {
+                return ([], $"test.inputs names '{input}', and '{directory}' is not a directory of this tree");
+            }
+
+            var pattern = Path.GetFileName(input);
+
+            var matched = _fileSystem
+                .EnumerateFiles(root, recursive: false)
+                .Where(path => FileSystemName.MatchesSimpleExpression(pattern, Path.GetFileName(path)))
+                .Select(path => ManifestBuilder.Relative(treeRoot, path))
+                .Order(StringComparer.Ordinal)
+                .ToList();
+
+            if (matched.Count == 0)
+            {
+                return ([], $"test.inputs names '{input}', which matches no file in this tree");
+            }
+
+            resolved.AddRange(matched);
+        }
+
+        return (resolved, null);
+    }
+
     private async Task<(IReadOnlyList<string> Inputs, string? Unmeasurable)> ResolveInputsAsync(
         TestConfig settings,
         TestRequest request,
@@ -379,7 +438,7 @@ public sealed class TestService(
 
         if (settings.Inputs.Count > 0)
         {
-            return (settings.Inputs, null);
+            return Expand(settings.Inputs, request.TreeRoot);
         }
 
         try

@@ -53,6 +53,18 @@ public interface IFileSystem
     Stream OpenRead(string path);
 
     /// <summary>
+    /// When <paramref name="path"/> was last written, in UTC.
+    /// </summary>
+    /// <param name="path">The file to ask about.</param>
+    /// <exception cref="IOException">The file could not be asked about.</exception>
+    /// <remarks>
+    /// Behind the seam with everything else, and it raises rather than answering with a sentinel:
+    /// the runtime returns the year 1601 for a path it cannot stat, and a caller comparing that
+    /// against a build output concludes the file is older than everything and stops looking.
+    /// </remarks>
+    DateTime LastWriteTimeUtc(string path);
+
+    /// <summary>
     /// Writes bytes to a sibling temporary file and renames it over the target, so a reader never
     /// observes a half-written file and an interruption never truncates one.
     /// </summary>

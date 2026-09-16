@@ -139,7 +139,10 @@ public sealed class InitService(
         EnsurePlaceholderDirectory(root, layout.WorktreesDirectoryUnder(config.Worktrees.Root), actions);
         EnsurePlaceholderDirectory(root, layout.SshItemsDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.WslDistrosDirectory, actions);
-        EnsureDirectory(root, layout.RunnerActionsDirectory, actions);
+        // Described against the tree it is created in, not the main checkout. This one is tracked,
+        // so it belongs to whichever tree init was run from; described against the main checkout it
+        // prints as a path climbing out of one directory and back into another.
+        EnsureDirectory(layout.RepositoryRoot, layout.RunnerActionsDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.RunnerEnvDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.RunnerSecretsDirectory, actions);
 

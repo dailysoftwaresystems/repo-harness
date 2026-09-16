@@ -99,12 +99,17 @@ public sealed class LegRunService(
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(work);
 
+        // Asked for the ledger as data, the ledger is the whole of standard output. Progress still
+        // appears, on standard error, where a reader parsing the document never sees it — and the
+        // reader here is often this tool on another machine, collecting a dispatched leg's verdict.
+        using var document = request.Json ? _output.DataOnly() : null;
+
         var context = await _contextLoader.LoadAsync(request.Directory, cancellationToken).ConfigureAwait(false);
 
         // Hosts are measured before anything runs, and DssHarness on each is brought to this
         // machine's build there, so a leg never starts on a host that turns out not to answer.
         var report = await _legsService
-            .CheckAsync(request.Directory, request.LegNames, cancellationToken)
+            .CheckAsync(request.Directory, request.LegNames, request.Here, cancellationToken)
             .ConfigureAwait(false);
 
         var placed = LegRunPlan.From(context, report, _platform, out var skipped);
@@ -158,7 +163,7 @@ public sealed class LegRunService(
                             // transfer it did not make.
                             SyncTree = request.UseStaged || !placed.Any(leg => leg.Host.Host.Kind != HostKind.Local)
                                 ? null
-                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, token),
+                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, runId, request.ForceLock, token),
                             RunLeg = (plan, token) => RunLegAsync(
                                 context, placed, plan, runId, runDirectory, request, work, commandName, ledger, token),
                         },
@@ -200,6 +205,8 @@ public sealed class LegRunService(
         HarnessContext context,
         IReadOnlyList<PlacedLeg> placed,
         string treeKey,
+        RunId runId,
+        bool force,
         CancellationToken cancellationToken)
     {
         var leg = placed.First(candidate => candidate.TreeKey == treeKey);
@@ -209,26 +216,33 @@ public sealed class LegRunService(
             return;
         }
 
-        var destination = SyncService.RepositoryPathOf(context.Config, leg.Host);
-
         await using var handle = await _runLock
             .AcquireAsync(
                 context.Layout,
                 new LockRequest
                 {
                     Host = leg.Host.Host.ToString(),
-                    Tree = destination,
+
+                    // The tree on the host, which is what the legs sharing this sync also lock.
+                    // Locked by the source instead, the exclusive hold taken while the copy is
+                    // replaced and the shared holds taken while its variants build would sit in
+                    // two different key spaces and never exclude each other.
+                    Tree = leg.HostTreeRoot,
                     Scope = LockScope.TreeExclusive,
-                    RunId = RunId.New(),
+                    RunId = runId,
                     Command = SyncService.CommandName,
+                    Force = force,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
 
         var transport = _transportFactory.For(leg.Host);
 
+        // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
+        // worktree measures that worktree; sending the main checkout instead would report the
+        // worktree's name over the main checkout's sources.
         await _syncService
-            .SyncAsync(context.Layout.RepositoryRoot, transport, destination, new SyncOptions(), cancellationToken)
+            .SyncAsync(leg.TreeRoot, transport, leg.HostTreeRoot, new SyncOptions(), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -259,7 +273,7 @@ public sealed class LegRunService(
                     new LockRequest
                     {
                         Host = leg.Host.Host.ToString(),
-                        Tree = leg.TreeRoot,
+                        Tree = leg.HostTreeRoot,
                         Variant = leg.Variant.DirectoryName,
                         Scope = LockScope.TreeShared,
                         RunId = runId,
@@ -300,7 +314,7 @@ public sealed class LegRunService(
                     .RunAsync(
                         commandName,
                         leg,
-                        SyncService.RepositoryPathOf(context.Config, leg.Host),
+                        leg.HostTreeRoot,
                         request.RemoteArguments ?? [],
                         cancellationToken)
                     .ConfigureAwait(false);

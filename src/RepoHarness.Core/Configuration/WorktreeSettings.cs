@@ -11,7 +11,7 @@ public sealed class WorktreeSettings
 
     /// <summary>
     /// Where worktrees are created, relative to the main checkout. Configurable because the default
-    /// spends 22 characters of the Windows path budget before a worktree's own name, and a repository
+    /// spends 25 characters of the Windows path budget before a worktree's own name, and a repository
     /// whose build paths are long has no name left that fits; a shorter root is what buys those
     /// characters back. The budget is still checked against the real path, so this never hides an
     /// overrun, it only makes one avoidable.

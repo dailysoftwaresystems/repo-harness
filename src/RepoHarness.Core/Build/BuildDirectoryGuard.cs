@@ -68,14 +68,21 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
     /// another build type.
     /// </summary>
     /// <param name="buildDirectory">The directory this leg would build in.</param>
-    /// <param name="treeRoot">The tree this leg acts on.</param>
-    /// <param name="expectedCompiler">The compiler this leg builds with, or null when it names none.</param>
+    /// <param name="sourceDirectory">
+    /// The directory the build is configured from, which is the leg's tree root joined with the
+    /// project's own path. Compared against <c>CMAKE_HOME_DIRECTORY</c>, which records exactly that
+    /// — so a project living in a subdirectory must be compared with the subdirectory, or every
+    /// second build of every such leg is refused for a mismatch that is not one.
+    /// </param>
+    /// <param name="expectedCompiler">The C compiler this leg builds with, or null when it names none.</param>
+    /// <param name="expectedCxxCompiler">The C++ compiler this leg builds with, or null when it names none.</param>
     /// <param name="expectedBuildType">The build type this leg builds, or null when it names none.</param>
     /// <exception cref="HarnessException">The directory belongs to a different build.</exception>
     public void Check(
         string buildDirectory,
-        string treeRoot,
+        string sourceDirectory,
         string? expectedCompiler,
+        string? expectedCxxCompiler,
         string? expectedBuildType)
     {
         var record = Read(buildDirectory);
@@ -85,11 +92,11 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
             return;
         }
 
-        if (record.HomeDirectory is { Length: > 0 } home && !SamePath(home, treeRoot))
+        if (record.HomeDirectory is { Length: > 0 } home && !SamePath(home, sourceDirectory))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"'{buildDirectory}' was configured from '{home}', not from '{treeRoot}'. Building in it "
+                $"'{buildDirectory}' was configured from '{home}', not from '{sourceDirectory}'. Building in it "
                 + "would compile that tree's sources and report on this one. Delete it, or point this leg "
                 + "at its own build directory.");
         }
@@ -102,6 +109,20 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
                 HarnessExit.Refused,
                 $"'{buildDirectory}' was configured with '{recordedCompiler}', and this leg builds with "
                 + $"'{expectedCompiler}'. A build system refuses that change on an existing cache; "
+                + "delete the directory rather than reconfiguring it.");
+        }
+
+        // The C++ compiler as well as the C one. A directory configured with clang++ and rebuilt
+        // with g++ mixes two ABIs in one place, and reading only CMAKE_C_COMPILER misses it entirely
+        // for a project that compiles no C at all.
+        if (expectedCxxCompiler is { Length: > 0 }
+            && record.CxxCompiler is { Length: > 0 } recordedCxx
+            && !NamesSameProgram(recordedCxx, expectedCxxCompiler))
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"'{buildDirectory}' was configured with '{recordedCxx}', and this leg builds with "
+                + $"'{expectedCxxCompiler}'. A build system refuses that change on an existing cache; "
                 + "delete the directory rather than reconfiguring it.");
         }
 

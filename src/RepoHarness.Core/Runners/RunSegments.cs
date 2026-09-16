@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.FileSystem;
@@ -28,7 +29,13 @@ public sealed class RunSegment
     public required DateTimeOffset StartedAt { get; init; }
 
     /// <summary>When it ended, or <see langword="null"/> when it was interrupted.</summary>
-    public DateTimeOffset? EndedAt { get; set; }
+    /// <remarks>
+    /// Set only by the store that owns the record, and read back through <see cref="JsonIncludeAttribute"/>
+    /// because the setter is not public: the end of an attempt is the store's to record, and a
+    /// caller that could set it would be deciding on its own that work it did not do was finished.
+    /// </remarks>
+    [JsonInclude]
+    public DateTimeOffset? EndedAt { get; internal set; }
 
     /// <summary>The units this attempt carried to an outcome, in the order it finished them.</summary>
     public List<RunSegmentUnit> Completed { get; init; } = [];
@@ -47,6 +54,9 @@ public sealed class RunSegmentRecord
 {
     /// <summary>The run these segments belong to.</summary>
     public required string RunId { get; init; }
+
+    /// <summary>The leg these segments belong to, which is what keeps one run's legs apart.</summary>
+    public required string Leg { get; init; }
 
     /// <summary>Every attempt, oldest first.</summary>
     public List<RunSegment> Segments { get; init; } = [];
@@ -106,8 +116,19 @@ public sealed class RunSegmentRecord
 /// </remarks>
 public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
 {
-    /// <summary>Name of the record, inside the run's own directory.</summary>
-    public const string RecordFileName = "segments.json";
+    /// <summary>What every leg's record file name starts with, inside the run's own directory.</summary>
+    public const string RecordPrefix = "segments-";
+
+    /// <summary>What every leg's record file name ends with.</summary>
+    public const string RecordSuffix = ".json";
+
+    /// <summary>
+    /// Characters a name may keep when it becomes a file name: the ones every platform this tool
+    /// runs on accepts. Parentheses are among them, because the runner itself puts them in the name
+    /// of a step with several lines.
+    /// </summary>
+    private static readonly SearchValues<char> SafeCharacters =
+        SearchValues.Create("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. ()");
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -120,15 +141,41 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
 
-    /// <summary>Where one run's segment record lives.</summary>
+    /// <summary>Where one leg's segment record lives, inside its run's directory.</summary>
     /// <param name="layout">Resolved paths for this repository.</param>
     /// <param name="runId">The run's id.</param>
-    public static string RecordPath(HarnessLayout layout, string runId)
+    /// <param name="leg">The leg the record belongs to.</param>
+    /// <remarks>
+    /// Per leg, not per run. One run's legs run at once and are given one run id, and every leg of
+    /// a runner walks the same step names: sharing a record, the second leg finds every step
+    /// already recorded, skips all of them, and reports that it passed work another machine did.
+    /// The logs are already named this way, for the same reason.
+    /// </remarks>
+    public static string RecordPath(HarnessLayout layout, string runId, string leg)
     {
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(leg);
 
-        return Path.Combine(layout.RunDirectory(runId), RecordFileName);
+        return Path.Combine(layout.RunDirectory(runId), $"{RecordPrefix}{FileNameFor(leg)}{RecordSuffix}");
+    }
+
+    /// <summary>
+    /// <paramref name="name"/> with everything a file name cannot safely carry replaced, so a leg
+    /// or a step named after a path or a flag still gets a file of its own.
+    /// </summary>
+    /// <param name="name">The name to make safe.</param>
+    public static string FileNameFor(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        return string.Create(name.Length, name, static (span, source) =>
+        {
+            for (var index = 0; index < source.Length; index++)
+            {
+                span[index] = SafeCharacters.Contains(source[index]) ? source[index] : '-';
+            }
+        });
     }
 
     /// <summary>
@@ -140,13 +187,14 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     /// The record exists and could not be read. It is never treated as empty: that would silently
     /// repeat work already measured, and hide that the evidence of the first attempt is damaged.
     /// </exception>
-    public RunSegmentRecord Load(HarnessLayout layout, string runId)
+    /// <param name="leg">The leg the record belongs to.</param>
+    public RunSegmentRecord Load(HarnessLayout layout, string runId, string leg)
     {
-        var path = RecordPath(layout, runId);
+        var path = RecordPath(layout, runId, leg);
 
         if (!_fileSystem.FileExists(path))
         {
-            return new RunSegmentRecord { RunId = runId };
+            return new RunSegmentRecord { RunId = runId, Leg = leg };
         }
 
         try
@@ -172,12 +220,14 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     /// </summary>
     /// <param name="layout">Resolved paths for this repository.</param>
     /// <param name="runId">The run's id.</param>
+    /// <param name="leg">The leg the record belongs to.</param>
     /// <param name="segmentId">This attempt's id, unique within the run.</param>
     /// <param name="startedAt">When the attempt started.</param>
     /// <param name="cancellationToken">Stops the write.</param>
     public Task<RunSegmentRecord> BeginAsync(
         HarnessLayout layout,
         string runId,
+        string leg,
         string segmentId,
         DateTimeOffset startedAt,
         CancellationToken cancellationToken = default)
@@ -185,7 +235,7 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
         ArgumentException.ThrowIfNullOrWhiteSpace(segmentId);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var record = Load(layout, runId);
+        var record = Load(layout, runId, leg);
 
         if (record.Segments.Any(segment => segment.SegmentId.Equals(segmentId, StringComparison.Ordinal)))
         {
@@ -217,6 +267,7 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     /// </remarks>
     /// <param name="layout">Resolved paths for this repository.</param>
     /// <param name="runId">The run's id.</param>
+    /// <param name="leg">The leg the record belongs to.</param>
     /// <param name="segmentId">The open segment's id.</param>
     /// <param name="unit">The unit that finished.</param>
     /// <param name="outcome">What it reported.</param>
@@ -225,6 +276,7 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     public Task RecordCompletedAsync(
         HarnessLayout layout,
         string runId,
+        string leg,
         string segmentId,
         string unit,
         RunOutcome outcome,
@@ -235,7 +287,7 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
         ArgumentNullException.ThrowIfNull(outcome);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var record = Load(layout, runId);
+        var record = Load(layout, runId, leg);
         var segment = Segment(record, runId, segmentId);
 
         segment.Completed.Add(new RunSegmentUnit(unit, outcome, completedAt));
@@ -250,19 +302,21 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
     /// </summary>
     /// <param name="layout">Resolved paths for this repository.</param>
     /// <param name="runId">The run's id.</param>
+    /// <param name="leg">The leg the record belongs to.</param>
     /// <param name="segmentId">The open segment's id.</param>
     /// <param name="endedAt">When the attempt ended.</param>
     /// <param name="cancellationToken">Stops the write.</param>
     public Task EndAsync(
         HarnessLayout layout,
         string runId,
+        string leg,
         string segmentId,
         DateTimeOffset endedAt,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var record = Load(layout, runId);
+        var record = Load(layout, runId, leg);
         Segment(record, runId, segmentId).EndedAt = endedAt;
         Save(layout, record);
 
@@ -282,7 +336,7 @@ public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
 
     private void Save(HarnessLayout layout, RunSegmentRecord record)
     {
-        var path = RecordPath(layout, record.RunId);
+        var path = RecordPath(layout, record.RunId, record.Leg);
 
         _fileSystem.CreateDirectory(Path.GetDirectoryName(path)!);
         _fileSystem.WriteAllTextAtomic(path, JsonSerializer.Serialize(record, SerializerOptions));

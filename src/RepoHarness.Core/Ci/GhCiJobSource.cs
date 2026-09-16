@@ -101,21 +101,75 @@ public sealed class GhCiJobSource(IProcessRunner processRunner) : ICiJobSource
 
         using var run = Parse(runOutput, $"run {id}");
 
-        var jobsOutput = await RunAsync(
-            repositoryRoot,
-            ["api", $"repos/:owner/:repo/actions/runs/{id}/jobs?per_page=100"],
-            cancellationToken).ConfigureAwait(false);
-
-        using var jobs = Parse(jobsOutput, $"the jobs of run {id}");
-
         return new CiRun(
             runId,
             Text(run.RootElement, "head_sha"),
             Text(run.RootElement, "head_branch"),
             Text(run.RootElement, "created_at"),
             Text(run.RootElement, "conclusion"),
-            ReadJobs(jobs.RootElement));
+            await ReadAllJobsAsync(repositoryRoot, id, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>
+    /// Every job of a run, following the pages until the count the run itself reports is reached.
+    /// </summary>
+    /// <param name="repositoryRoot">The repository to ask from.</param>
+    /// <param name="id">The run's id.</param>
+    /// <param name="cancellationToken">Stops the requests.</param>
+    /// <exception cref="HarnessException">
+    /// Fewer jobs came back than the run says it has. A page that was never fetched is a leg that
+    /// cannot be red: a matrix wider than one page would quietly lose the legs past its end, and the
+    /// gate would report every leg it did see as green.
+    /// </exception>
+    private async Task<IReadOnlyList<CiJob>> ReadAllJobsAsync(
+        string repositoryRoot,
+        string id,
+        CancellationToken cancellationToken)
+    {
+        var collected = new List<CiJob>();
+        var total = 0;
+
+        for (var page = 1; ; page++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var output = await RunAsync(
+                repositoryRoot,
+                ["api", $"repos/:owner/:repo/actions/runs/{id}/jobs?per_page={PageSize}&page={page}"],
+                cancellationToken).ConfigureAwait(false);
+
+            using var jobs = Parse(output, $"the jobs of run {id}");
+
+            total = Count(jobs.RootElement) ?? total;
+
+            var read = ReadJobs(jobs.RootElement);
+            collected.AddRange(read);
+
+            if (read.Count < PageSize)
+            {
+                break;
+            }
+        }
+
+        // Checked rather than assumed. The count the run reports is the only statement of how many
+        // legs there were, and a gate reading fewer than that is reading a subset it cannot name.
+        if (total > collected.Count)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Run {id} reports {total} job(s) and only {collected.Count} came back, so some legs were "
+                + "never read. This is not a pass.");
+        }
+
+        return collected;
+    }
+
+    /// <summary>How many jobs a page says the run has in total.</summary>
+    private static int? Count(JsonElement root)
+        => root.TryGetProperty("total_count", out var count) && count.TryGetInt32(out var value) ? value : null;
+
+    /// <summary>How many jobs one request asks for, which is the most the API will return at once.</summary>
+    private const int PageSize = 100;
 
     private static IReadOnlyList<CiJob> ReadJobs(JsonElement root)
     {

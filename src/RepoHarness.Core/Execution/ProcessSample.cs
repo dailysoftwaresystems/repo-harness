@@ -67,12 +67,34 @@ public sealed record ContentionReport(
     /// read, for a whole cycle, as a speed difference between legs.
     /// </summary>
     public ReachedVerdict? Verdict()
-        => Contended
-            ? ReachedVerdict.Of(
+    {
+        if (Contended)
+        {
+            // A contender found is a positive fact and names something to do about it, so it is
+            // reported even when another sample could not be read.
+            return ReachedVerdict.Of(
                 LegVerdict.Contended,
                 $"{Contenders.Count} process(es) used the build directory: "
-                + string.Join(", ", Contenders.Select(found => $"{found.Process.Name} (pid {found.Process.Id}, seen {Describe(found.Seen)})")))
-            : null;
+                + string.Join(", ", Contenders.Select(found => $"{found.Process.Name} (pid {found.Process.Id}, seen {Describe(found.Seen)})")));
+        }
+
+        // Nothing found, and no reading that could have found anything. Reported as unmeasured
+        // rather than passed: "no process used this build directory" and "the machine could not be
+        // asked what was running" are different facts, and a leg reporting the first when the second
+        // happened is exactly the green nobody should trust. A machine whose process query is
+        // blocked by policy reports it for every leg, for ever, and would otherwise never say so.
+        // One failed reading among several is a limit, not a verdict: the samples that did succeed
+        // looked, and the report states what the failed one leaves unknown.
+        return Looked
+            ? null
+            : ReachedVerdict.Of(
+                LegVerdict.Unmeasured,
+                $"the process table could not be read for any of {Samples.Count} sample(s), so nothing "
+                + $"established that this leg had the build directory to itself: {Unreadable[0]}");
+    }
+
+    /// <summary>Whether any sample read the machine's process table at all.</summary>
+    public bool Looked => Samples.Count > Unreadable.Count;
 
     /// <summary>The words the report uses for when a process was seen.</summary>
     /// <param name="seen">When it was seen.</param>

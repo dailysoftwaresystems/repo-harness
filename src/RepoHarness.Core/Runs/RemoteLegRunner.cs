@@ -122,21 +122,28 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                 + $"exit {result.ExitCode}{Detail(result.StandardError)}");
         }
 
-        return Read(ledger.ToString(), leg, commandName);
+        return Read(ledger.ToString(), leg, commandName, finished.Value);
     }
 
     /// <summary>Reads the one leg's entry out of the ledger the host wrote.</summary>
-    private static LegEntry Read(string output, PlacedLeg leg, string commandName)
+    /// <remarks>
+    /// The whole of standard output is the document. The host was asked with <c>--json</c>, which
+    /// sends its progress to standard error precisely so that nothing shares this channel: hunting
+    /// for the first <c>{</c> instead would find the one inside a compiler message or a test name
+    /// that a progress line had already carried here, and report a leg that reached a verdict as a
+    /// host that could not be reached.
+    /// </remarks>
+    private static LegEntry Read(string output, PlacedLeg leg, string commandName, int exitCode)
     {
-        var start = output.IndexOf('{', StringComparison.Ordinal);
+        var document = output.Trim();
 
         RemoteLedger? ledger = null;
 
-        if (start >= 0)
+        if (document.Length > 0)
         {
             try
             {
-                ledger = JsonSerializer.Deserialize<RemoteLedger>(output[start..], LedgerOptions);
+                ledger = JsonSerializer.Deserialize<RemoteLedger>(document, LedgerOptions);
             }
             catch (JsonException ex)
             {
@@ -150,10 +157,14 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
         if (entry is null)
         {
+            // The exit code is named because it is the only thing the host did say. A copy with no
+            // configuration, a leg that cannot be placed there, a tool that refused before it began:
+            // each ends with its own code and no ledger, and without the code every one of them
+            // reads as the same shrug.
             throw new HarnessException(
                 HarnessExit.HostUnavailable,
-                $"{leg.Host.Host} ran '{commandName}' for leg '{leg.Name}' but reported no ledger entry "
-                + "for it, so nothing there said what happened.");
+                $"{leg.Host.Host} ran '{commandName}' for leg '{leg.Name}' and exited {exitCode} without "
+                + "a ledger entry for it, so nothing there said what happened.");
         }
 
         return new LegEntry

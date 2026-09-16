@@ -149,6 +149,21 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         }
     }
 
+    public DateTime LastWriteTimeUtc(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var info = new FileInfo(path);
+
+        // Refresh() raises what Exists and LastWriteTimeUtc would swallow. Asked directly, the
+        // runtime answers 1601-01-01 for a file it could not stat, and that reads as a real time.
+        info.Refresh();
+
+        return info.Exists
+            ? info.LastWriteTimeUtc
+            : throw new FileNotFoundException($"'{path}' could not be asked when it was last written.", path);
+    }
+
     public Stream OpenRead(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -185,7 +200,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         try
         {
             await File.WriteAllBytesAsync(temporary, contents, cancellationToken).ConfigureAwait(false);
-            ReplaceWith(temporary, path);
+            await ReplaceWithAsync(temporary, path, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -223,6 +238,33 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             catch (UnauthorizedAccessException) when (attempt < ReplaceAttempts)
             {
                 Thread.Sleep(10 * attempt);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ReplaceWith"/> without blocking the thread between attempts, and stopping when
+    /// the caller does.
+    /// </summary>
+    /// <remarks>
+    /// The synchronous form blocks a thread-pool thread for up to 450ms per file while it waits.
+    /// A tree sync writes thousands of files, and the parallel legs above it are sharing that pool:
+    /// sleeping in it makes a transient lock on one file look like a stall in every other leg.
+    /// </remarks>
+    private static async Task ReplaceWithAsync(string source, string destination, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                File.Move(source, destination, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < ReplaceAttempts)
+            {
+                await Task.Delay(10 * attempt, cancellationToken).ConfigureAwait(false);
             }
         }
     }

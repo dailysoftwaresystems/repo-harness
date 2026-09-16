@@ -29,8 +29,9 @@ RepoHarness.Cli        Program.cs: argument parsing and dependency wiring only
 RepoHarness.Core       domain, services, abstractions
 repo-harness-test      tests
 
-(RepoHarness.Adapters arrives with the first build adapter; an empty project would
-ship an empty assembly inside the published tool.)
+(RepoHarness.Adapters was planned for the build adapters; they arrived in
+RepoHarness.Core instead, beside the build service that is their only caller, and the
+project was not created.)
 ```
 
 `Core` is a library, so "no logic in Program.cs" is enforced by the assembly
@@ -122,7 +123,7 @@ is tracked, and its bytes must not depend on which machine ran `init`.
 `.harness-config/worktrees`, and `delete-worktree` removes one, everything under it, and git's
 record of it.
 
-The root is configurable because it is spent before a worktree's own name. The default costs 22
+The root is configurable because it is spent before a worktree's own name. The default costs 25
 characters of the Windows path budget, and a repository whose build paths are long has no name left
 that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
 checked against the real path, so a shorter root never hides an overrun — it only makes one
@@ -464,9 +465,9 @@ build, or has no copy of the repository.
   have run, or run only in part.
 - Interrupting `host-exec` stops ssh or wsl.exe, which ends the host's input, and the host
   cancels the command instead of leaving it running there.
-- Until sync exists, nothing creates a host's copy: `host-exec` runs in a checkout made by
-  hand at `repositoryPath`. Sync will not adopt that checkout, since it never writes into a
-  directory it did not create.
+- A host's copy is created by `sync`, which also puts `.harness-config/config.json` there so
+  the DssHarness running there can find the repository at all. Sync will not adopt a checkout
+  made by hand, since it never writes into a directory it did not create.
 
 ### Installing what a host is missing
 
@@ -646,6 +647,11 @@ while a gate ran turned a green suite red, with four test processes live at once
 - Every sample is kept, and the report says when each process was seen: throughout, at
   the start, or at the end. A process table that could not be read is reported as
   unknown, never as nothing found.
+- **A leg no sample could read the process table for is `unmeasured`, not passed.** The
+  platform's own source is the only one that carries a command line, and a command line is the
+  whole of what contention is decided by, so a machine whose query is blocked by policy would
+  otherwise report "no contender" for every leg, for ever, without a word. One failed reading
+  among several is a stated limit rather than a verdict: the samples that succeeded did look.
 - No verdict depends on a sample finishing within a time window. Sampling costs
   seconds on one platform and a fraction of that on another, and one such overhead
   asymmetry was once read, for a whole cycle, as a speed difference between legs.
@@ -672,7 +678,7 @@ while a gate ran turned a green suite red, with four test processes live at once
   passes on less evidence than its siblings.
 - The ledger reports command time and harness overhead (sync, fingerprints, sampling)
   separately. A phase slower than `defaults.durationWarningFactor` times the same phase
-  on sibling legs, or times its own recent runs, is marked suspect. A timing mark never
+  on sibling legs of the same kind is marked suspect. A timing mark never
   changes a verdict. An emulated leg is never compared with a native one.
 - `keepAwake` holds a host awake for the leg. A host that slept once reported a
   4 millisecond test at 729 seconds. Without it, timings from a host that can sleep are
@@ -683,12 +689,13 @@ while a gate ran turned a green suite red, with four test processes live at once
 - An ssh host bounds how long a connection may take to open and how long it may go
   unanswered (`connectTimeoutSeconds`, `keepAliveSeconds`). Without both, a dead link
   hangs a leg indefinitely, with no output and no verdict.
-- A host's copy of the repository is a git repository sync creates at its
-  `repositoryPath`: the commit being tested is pushed into it, and uncommitted changes are
-  synced on top. It is never a clone from a remote, which would need credentials on the
-  host and could not see commits nobody has pushed. It must be a git repository because the
-  host's DssHarness finds everything through git, and sync never writes into a directory it
-  did not create, because it deletes whatever the source does not have.
+- A host's copy of the repository is a git repository sync creates at its `repositoryPath`: the
+  working tree being tested is transferred into it file by file, compared by content hash, so what
+  the host holds is this tree including its uncommitted changes. Nothing is pushed and it is never
+  a clone from a remote, either of which would need credentials on the host and neither of which
+  could carry a change nobody has committed. It is made a git repository because the host's
+  DssHarness finds everything through git, and sync never writes into a directory it did not
+  create, because it deletes whatever the source does not have.
 - A remote tree's identity is its content manifest, confirmed equal to the source after
   every sync. The ledger records the commit and manifest each leg built, and a build
   directory produced from a different manifest is flagged.
@@ -795,6 +802,14 @@ directory here cannot drift apart.
   directories that make an incremental build possible. `sync.exclude` is different: the source
   chooses not to send those, and a copy that kept them for ever would be a copy of a tree that no
   longer exists, so they are deleted.
+- **What git ignores is never transferred, and never deleted.** Asked of git once per sync, so a
+  local `.env`, a virtual environment or an editor's cache never reaches a host, and the host's own
+  copies of such things are left alone. `sync.exclude` names paths to withhold *in addition* to
+  these.
+- **The copy gets `.harness-config/config.json`, and nothing else from that directory.** A leg
+  placed on a host runs DssHarness there, and DssHarness in a directory holding no configuration
+  refuses as not initialised — so without it the copy is a tree no leg can run in. The rest of the
+  directory is connection data, credentials, locks and logs, each local to a machine by design.
 - **Deletion is bounded.** A sync that would delete more than `sync.maxDeleteFraction` of the
   copy stops and changes nothing. A mistyped repository path makes the source look empty, which
   is indistinguishable from a source that deleted everything, and without the bound that empties
@@ -835,7 +850,8 @@ eventually disagree, and nothing could say which one ran. Every field a phase ca
 step, so nothing the verdict contract depends on is lost by declaring one instead of the other.
 
 - A step either `uses` a predefined action or carries a `run` block. There are two predefined
-  actions, cloning and reading inputs; an unknown one is refused naming what is available.
+  actions, confirming the tree is at a named commit and reading inputs; an unknown one is refused
+  naming what is available.
 - A `run` block is split on newlines and each line is trimmed, so indentation and blank lines
   cannot change what runs.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no

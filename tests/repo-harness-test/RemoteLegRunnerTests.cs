@@ -93,7 +93,41 @@ public sealed class RemoteLegRunnerTests
             "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.HostUnavailable, failure.ExitCode);
-        Assert.Contains("reported no ledger entry", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("without a ledger entry", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnAnswerWithNoLedger_NamesTheCodeTheHostExitedWith()
+    {
+        // The only thing the host did say. A copy with no configuration, a leg that cannot be
+        // placed there and a tool that refused before it began all end this way, and without the
+        // code every one of them reads as the same shrug about a host that answered fine.
+        var hosts = new ScriptedHostCommands((_, command) => HostResults.Finished(command, 11));
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Contains("exited 11", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProgressPrecedingTheLedger_IsNotReadAsPartOfIt()
+    {
+        // The host writes its progress to standard error under --json, so this end parses the whole
+        // of standard output. Measured: a leg whose detail held a brace was reported as a host that
+        // could not be reached, turning a real verdict into a connection failure.
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, Ledger("failed", "error: expected '}' before 'x'", 1.5, 1.0, tests: null));
+
+            return HostResults.Finished(command, HarnessExit.CommandFailed);
+        });
+
+        var entry = await Runner(hosts).RunAsync(
+            "test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Failed, entry.Verdict);
+        Assert.Contains("expected '}'", entry.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -156,8 +190,10 @@ public sealed class RemoteLegRunnerTests
             host,
             Project: null,
             new RepoHarness.Core.Build.VariantKey("x86_64", "gcc", "debug", null),
-            "/home/dev/repo",
+            TreeRoot: @"C:\src\repo",
+            HostTreeRoot: "/home/dev/repo",
             "/home/dev/repo/build/x86_64-gcc-debug",
+            new WslHostConfig { RepositoryPath = "/home/dev/repo" },
             Emulated: false);
     }
 

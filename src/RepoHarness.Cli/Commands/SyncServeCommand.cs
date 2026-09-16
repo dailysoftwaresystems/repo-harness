@@ -65,7 +65,7 @@ internal static class SyncServeCommand
                     return Done();
 
                 case SyncServe.Manifest:
-                    var withheld = Required(arguments, 2, operation)
+                    var withheld = Required(arguments, 1, operation)
                         .Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
                     var manifest = await transport

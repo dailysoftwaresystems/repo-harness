@@ -221,4 +221,42 @@ public sealed class LedgerReportTests
     };
 
     private static PhaseRecord Phase(string name, int seconds) => new(name, TimeSpan.FromSeconds(seconds), ClockStepped: false);
+
+    [Fact]
+    public void ALegRunningFewerTestsThanItsSiblings_IsMarked()
+    {
+        // Legs running the same suite are meant to run the same tests. A leg reporting three where
+        // its siblings report 412 is green on both the exit code and the success pattern; the count
+        // is the only thing in the ledger that can see the difference.
+        var report = LedgerReport.From(
+        [
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(10), string.Empty) with { TestCount = 412 },
+            Entry("linux-gcc-release", LegVerdict.Passed, TimeSpan.FromSeconds(11), string.Empty) with { TestCount = 412 },
+            Entry("wsl-clang-asan", LegVerdict.Passed, TimeSpan.FromSeconds(9), string.Empty) with { TestCount = 3 },
+        ],
+        durationWarningFactor: 0);
+
+        var marked = report.Lines.Single(line => line.Leg == "wsl-clang-asan");
+
+        Assert.True(marked.TimingsSuspect);
+        Assert.Contains(marked.TimingNotes, note => note.Contains("ran 3 test(s)", StringComparison.Ordinal));
+        Assert.All(
+            report.Lines.Where(line => line.Leg != "wsl-clang-asan"),
+            line => Assert.False(line.TimingsSuspect));
+    }
+
+    [Fact]
+    public void TwoLegsDisagreeingAboutTheirCount_AreNotMarked()
+    {
+        // With two, "which one is wrong" has no answer, and marking both says nothing anyone can
+        // act on.
+        var report = LedgerReport.From(
+        [
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(10), string.Empty) with { TestCount = 412 },
+            Entry("wsl-clang-asan", LegVerdict.Passed, TimeSpan.FromSeconds(9), string.Empty) with { TestCount = 3 },
+        ],
+        durationWarningFactor: 0);
+
+        Assert.All(report.Lines, line => Assert.False(line.TimingsSuspect));
+    }
 }

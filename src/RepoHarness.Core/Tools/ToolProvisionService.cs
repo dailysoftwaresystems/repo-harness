@@ -382,7 +382,39 @@ public sealed class ToolProvisionService(
                 connection);
         }
 
-        var (version, _) = await ProbeVersionAsync(connection, tool, cancellationToken).ConfigureAwait(false);
+        var (version, problem) = await ProbeVersionAsync(connection, tool, cancellationToken).ConfigureAwait(false);
+
+        if (problem is not null)
+        {
+            // The install reported success and the tool is there; what nobody can say is which
+            // version arrived. Reported as unknown rather than installed: "it is current" is a claim
+            // about a number this run never read.
+            return (new ToolOutcome(tool.Name, ToolState.Unknown, version, problem), connection);
+        }
+
+        // The same comparison the probe makes before installing. An installer can report success and
+        // leave an older version in place — a package pinned by a distribution, a cached artefact, a
+        // second copy earlier on the PATH — and reporting that as up to date is how a leg runs for
+        // weeks against a toolchain the configuration says it is not using.
+        if (tool.MinVersion is { Length: > 0 } minimum)
+        {
+            if (!SemanticVersion.TryParse(version, out var found) || !SemanticVersion.TryParse(minimum, out var least))
+            {
+                return (
+                    new ToolOutcome(tool.Name, ToolState.Unknown, version,
+                        $"its install reported success, and '{version ?? string.Empty}' there cannot be compared "
+                        + $"with the minVersion '{minimum}'"),
+                    connection);
+            }
+
+            if (SemanticVersion.Compare(found, least) < 0)
+            {
+                return (
+                    new ToolOutcome(tool.Name, ToolState.Failed, version,
+                        $"its install reported success, and it is still {version}, where at least {minimum} is needed"),
+                    connection);
+            }
+        }
 
         return (new ToolOutcome(tool.Name, update ? ToolState.Updated : ToolState.Installed, version), connection);
     }
@@ -411,7 +443,8 @@ public sealed class ToolProvisionService(
 
         if (probe.Regex is not { Length: > 0 } pattern)
         {
-            // With no pattern, the first word of the first line is the version a tool usually prints.
+            // With no pattern, the last word of the first line is the version a tool usually prints:
+        // "ninja version 1.12.1", "git version 2.47.0".
             return (text.Split('\n').FirstOrDefault()?.Trim().Split(' ').LastOrDefault(), null);
         }
 
