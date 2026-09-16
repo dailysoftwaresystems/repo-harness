@@ -72,18 +72,28 @@ public sealed class PhaseRunnerTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var watch = Stopwatch.StartNew();
+        var quiet = new QuietRunner(TimeSpan.FromSeconds(30));
 
-        // The child writes one line and then waits up to 30 seconds for a signal this test never
-        // sends. Nothing about its total duration is wrong; its silence is.
-        var result = await Runner(factory).RunAsync(
+        // A phase that writes one line and then says nothing. Nothing about its total duration is
+        // wrong; its silence is.
+        //
+        // Measured against a runner rather than a real child, for the reason PacedRunner below gives:
+        // the stall clock starts before the child is spawned, so with a bound of one second this once
+        // raced `dotnet` starting up, and on a loaded machine over a slow filesystem the race was
+        // sometimes lost. That made the test report on how fast a process launches. Stopping a real
+        // process tree is covered where it belongs, in ProcessRunnerTests.
+        var result = await new PhaseRunner(quiet, factory.FileSystem, factory.Output).RunAsync(
             Child("stream", temp.Combine("test.log"), temp.Combine("never")) with { StallSeconds = 1 },
             TestContext.Current.CancellationToken);
 
         Assert.True(result.Stalled, "the phase went quiet and was not stopped");
         Assert.False(result.Passed);
         Assert.Contains("hung", result.Verdict().Detail, StringComparison.Ordinal);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(20), $"the bound was enforced only after {watch.Elapsed}");
+
+        // The claim without a clock in it: the phase was told to stop rather than left to finish on
+        // its own. Had the bound never fired, the runner would have run its thirty seconds out and
+        // reported that it was not stopped.
+        Assert.True(quiet.Stopped, "the bound fired and the phase was not actually stopped");
     }
 
     [Fact]
@@ -216,6 +226,43 @@ public sealed class PhaseRunnerTests
     /// A runner that emits lines at a fixed cadence, so the stall bound can be measured against
     /// output that keeps arriving rather than against a child whose timing the machine decides.
     /// </summary>
+    /// <summary>
+    /// A runner that says one thing and then goes quiet, so a stall is what the bound sees rather
+    /// than a machine that was busy. Runs <paramref name="life"/> out if nothing stops it, which is
+    /// how a bound that never fires shows up as a failure rather than as a hang.
+    /// </summary>
+    private sealed class QuietRunner(TimeSpan life) : IProcessRunner
+    {
+        /// <summary>Whether the phase was stopped, rather than left to finish on its own.</summary>
+        public bool Stopped { get; private set; }
+
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            var watch = Stopwatch.StartNew();
+            const string Line = "starting";
+
+            request.OnOutputLine?.Invoke(Line);
+
+            try
+            {
+                await Task.Delay(life, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // What the real runner reports when it stopped the child: the exit code is
+                // meaningless and the phase is marked as stopped.
+                Stopped = true;
+                return new ProcessResult(-1, Line + "\n", string.Empty, watch.Elapsed, TimedOut: true);
+            }
+
+            return new ProcessResult(0, Line + "\n", string.Empty, watch.Elapsed, TimedOut: false);
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
     private sealed class PacedRunner(TimeSpan gap, int lines) : IProcessRunner
     {
         public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
