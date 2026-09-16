@@ -50,6 +50,7 @@ internal static class HarnessServices
             provider.GetRequiredService<IHostPlatform>(),
             provider.GetRequiredService<IProcessRunner>()));
 
+        services.AddSingleton<IProcessIdentity, ProcessIdentity>();
         services.AddSingleton<IHarnessOutput>(_ => new ConsoleHarnessOutput(verbose));
         services.AddSingleton<IFileSystem, PhysicalFileSystem>();
         services.AddSingleton<IProcessRunner, ProcessRunner>();

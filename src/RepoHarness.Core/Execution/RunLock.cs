@@ -27,14 +27,17 @@ public enum LockScope
 /// <summary>Who holds a lock, in enough detail to name them and to tell whether they still exist.</summary>
 /// <param name="Machine">The machine the holder runs on.</param>
 /// <param name="ProcessId">The holder's process id.</param>
-/// <param name="ProcessStartedUtc">When that process started, so a recycled id is not mistaken for a live holder.</param>
+/// <param name="ProcessStamp">
+/// What tells that process from another that inherits its id, so a recycled id is not mistaken for a
+/// live holder. Holds no clock, so a clock that steps cannot turn a live holder into a dead one.
+/// </param>
 /// <param name="RunId">The holder's run id, which is also what a log path is scoped to.</param>
 /// <param name="TakenUtc">When the lock was taken, for display; nothing is ordered by it.</param>
 /// <param name="Command">What the holder is doing, so the reader knows what they are waiting for.</param>
 public sealed record LockHolder(
     string Machine,
     int ProcessId,
-    DateTimeOffset ProcessStartedUtc,
+    string? ProcessStamp,
     string RunId,
     DateTimeOffset TakenUtc,
     string Command);
@@ -88,8 +91,10 @@ public sealed record LockRequest
 /// would make two runs of the same leg invisible to each other. A held lock refuses immediately and
 /// names its holder: silently blocking for hours is worse than a refusal somebody can act on.
 /// </remarks>
-public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
+public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProcessIdentity identity)
 {
+    private readonly IProcessIdentity _identity = identity;
+
     /// <summary>The command name this reports under.</summary>
     public const string CommandName = "lock";
 
@@ -144,9 +149,9 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
             request.Variant,
             request.Scope,
             new LockHolder(
-                ProcessLiveness.CurrentMachine,
-                ProcessLiveness.CurrentId,
-                ProcessLiveness.CurrentStartedUtc,
+                _identity.CurrentMachine,
+                _identity.CurrentId,
+                _identity.Current,
                 request.RunId.Value,
                 DateTimeOffset.UtcNow,
                 request.Command));
@@ -236,24 +241,28 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
 
         foreach (var entry in entries)
         {
-            var mine = string.Equals(entry.Holder.Machine, ProcessLiveness.CurrentMachine, StringComparison.OrdinalIgnoreCase);
+            // Only the entry actually in the way. --force-lock says "this lock is stale, take it";
+            // taking every other lock as well would drop holds on trees and variants this run never
+            // asked for, including one another run is mid-sync on.
+            //
+            // Asked before the holder's machine is, so that a lock this machine will not reclaim on
+            // its own can still be given up. Otherwise an entry whose process id has come back around
+            // to something live is held for ever, and only editing the file by hand recovers it.
+            if (force && Conflicts(entry, wanted))
+            {
+                _output.Warn(CommandName, $"Taking {Describe(entry)} from {entry.Describe()} because --force-lock was given.");
+                continue;
+            }
+
+            var mine = string.Equals(entry.Holder.Machine, _identity.CurrentMachine, StringComparison.OrdinalIgnoreCase);
 
             if (!mine)
             {
-                // Only the entry actually in the way. --force-lock says "this lock is stale, take
-                // it"; taking every other machine's lock as well would drop holds on trees and
-                // variants this run never asked for, including one another run is mid-sync on.
-                if (force && Conflicts(entry, wanted))
-                {
-                    _output.Warn(CommandName, $"Taking {Describe(entry)} from {entry.Describe()} because --force-lock was given.");
-                    continue;
-                }
-
                 kept.Add(entry);
                 continue;
             }
 
-            if (ProcessLiveness.IsAlive(entry.Holder.ProcessId, entry.Holder.ProcessStartedUtc))
+            if (_identity.IsAlive(entry.Holder.ProcessId, entry.Holder.ProcessStamp))
             {
                 kept.Add(entry);
                 continue;

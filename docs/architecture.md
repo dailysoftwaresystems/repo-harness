@@ -749,10 +749,17 @@ while a gate ran turned a green suite red, with four test processes live at once
 - No verdict depends on a sample finishing within a time window. Sampling costs
   seconds on one platform and a fraction of that on another, and one such overhead
   asymmetry was once read, for a whole cycle, as a speed difference between legs.
-- A process is identified by its id together with its start time, and a parent link is
-  followed only when the parent started no later than the child. Process ids are
-  recycled: on Windows a freed id was measured coming back after about a hundred
-  allocations.
+- A process is identified by its id together with a stamp that tells it from the next
+  holder of that id, and a parent link is followed only when the parent started no later
+  than the child. Process ids are recycled: on Windows a freed id was measured coming back
+  after about a hundred allocations.
+- **That stamp holds no clock.** On Linux it is the boot this machine is on and the tick
+  within it the process started, read from `/proc`; on Windows and macOS it is the start
+  time the kernel records once at creation and never works out again. A start time
+  recomputed from the current clock — which is what `ps lstart` reports, and what adding
+  `/proc/stat`'s `btime` to ticks-since-boot produces — moves for every live process the
+  moment the clock steps, and every live holder then reads as a recycled id at once. On a
+  host whose clock steps by about 25 seconds every few seconds, that is not an edge case.
 - What sampling cannot see is stated in the report: a tool started from inside the
   build directory with a relative path, since another process's working directory
   cannot be read, and processes that do not expose their command line.
@@ -860,8 +867,13 @@ while their sources are being replaced. A lock is released only by the run that 
 - A dead holder on this host is reclaimed automatically, and the reclaim is
   reported. A holder on another host requires `--force-lock`, which is always a
   human decision.
-- Process start time is recorded alongside the pid so a recycled pid is not
-  mistaken for a live holder.
+- A clock-free process stamp is recorded alongside the pid so a recycled pid is not
+  mistaken for a live holder, and so a clock that steps cannot turn a live one into a
+  dead one. Compared exactly: there is no clock in it for a tolerance to absorb.
+- `--force-lock` takes any lock actually in the way, on this host or another. On this
+  host it is the only way out of an id that has come back around to something live,
+  which would otherwise hold a tree until the file was edited by hand. It takes the log
+  path with it, for the same reason.
 
 ## Syncing a tree
 

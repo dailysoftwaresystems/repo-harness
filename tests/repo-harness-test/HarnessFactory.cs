@@ -2,6 +2,7 @@ using NSubstitute;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Commands;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
@@ -91,6 +92,9 @@ public sealed class HarnessFactory
     public IRepositoryLocator RepositoryLocator { get; }
 
     public IConfigStore ConfigStore { get; }
+
+    /// <summary>How a process is told from the next holder of its id; the real one, so tests measure this process.</summary>
+    public IProcessIdentity Identity { get; } = new ProcessIdentity(new HostPlatform());
 
     public IGitIgnoreManager GitIgnoreManager { get; }
 

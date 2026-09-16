@@ -69,7 +69,7 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
 
         lock (_gate)
         {
-            _report ??= Classify([.. _samples], _request, _pathComparison, ProcessLiveness.CurrentId);
+            _report ??= Classify([.. _samples], _request, _pathComparison, Environment.ProcessId);
             return _report;
         }
     }

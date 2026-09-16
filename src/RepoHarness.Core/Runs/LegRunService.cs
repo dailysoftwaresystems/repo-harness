@@ -131,7 +131,7 @@ public sealed class LegRunService(
             ledger.Record(entry);
         }
 
-        var claim = await _logOwnership.ClaimAsync(runDirectory, runId, cancellationToken).ConfigureAwait(false);
+        var claim = await _logOwnership.ClaimAsync(runDirectory, runId, request.ForceLock, cancellationToken).ConfigureAwait(false);
 
         if (!claim.Taken)
         {
