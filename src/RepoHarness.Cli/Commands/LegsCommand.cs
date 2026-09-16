@@ -1,5 +1,9 @@
 using System.CommandLine;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Legs;
+using RepoHarness.Core.Platform;
+using RepoHarness.Core.Repository;
+using RepoHarness.Core.Runners;
 
 namespace RepoHarness.Cli.Commands;
 
@@ -38,6 +42,19 @@ internal static class LegsCommand
             var legs = arguments.GetResult(LegsOption) is { Implicit: false }
                 ? arguments.GetValue(LegsOption) ?? []
                 : null;
+
+            // Checked here, and again when a runner is finally invoked. 'legs' answers whether this
+            // repository can run what it declares, so an action nobody can read is an answer of no
+            // — given now, rather than left for the run that finds out.
+            var harness = await context.Get<IHarnessContextLoader>()
+                .LoadAsync(context.Directory, cancellationToken)
+                .ConfigureAwait(false);
+
+            ActionPath.RequireResolvable(
+                harness.Config.ActionsByRunner(),
+                harness.Layout.RunnerActionsDirectory,
+                context.Get<IFileSystem>(),
+                context.Get<IHostPlatform>().PathComparison);
 
             var report = await context.Get<LegsService>()
                 .CheckAsync(context.Directory, legs, here: false, cancellationToken)

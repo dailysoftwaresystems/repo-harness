@@ -574,8 +574,26 @@ failed, because what failed was a tree that never existed.
 A command that selects several legs starts them together and waits for **every**
 one to finish before it reports. Legs are isolated from one another (see below), so
 running them one at a time is never needed for correctness, and doing so would only
-make a gate slower. `defaults.maxParallelLegs` caps how many run at once on a busy
-machine; left unset, every selected leg starts immediately.
+make a gate slower.
+
+**Legs are chunked by the physical machine they run on.** A local leg and every WSL leg are one
+machine, because a distribution runs on the machine running the harness; each ssh host is its own.
+Two ssh names that happen to reach one machine are counted as two, because nothing here can tell
+that they do. `defaults.maxParallelLegs` caps how many run at once **on any one machine**, and
+`defaults.maxParallelLegsTotal` caps the whole fleet on top of that, for what a fleet shares even
+when its machines do not: a license server, a network share, a sync's bandwidth. A single cap
+across every leg had to be set low enough for the busiest machine, which left every other host
+idle. A leg that says nothing about where it runs is counted as sharing one machine with every
+other such leg — both answers are guesses, and that one only ever runs fewer at a time than the
+truth would allow, while the other would remove the cap silently. Left unset, every selected leg
+starts immediately.
+
+**A parallel run is reported live, and every line says whose it is.** The run announces what it is
+starting and across how many machines; each leg announces the steps it is about to run, then each
+step as it starts and finishes; and a child's own output under `--verbose` is tagged
+`<leg>/<phase>:`. Output is written a whole line at a time under one lock, so lines from legs
+running at once never interleave within a line. The log files keep each line as the child wrote it:
+the tag is for the terminal, so nothing that reads a log has to know about it.
 
 Within a leg the order is fixed:
 
@@ -870,11 +888,36 @@ eventually disagree, and nothing could say which one ran. Every field a phase ca
 `workingDirectory`, `env`, `successPattern`, `stallSeconds`, `continueOnError` — is a key on a
 step, so nothing the verdict contract depends on is lost by declaring one instead of the other.
 
+**One directory per action.** An action lives at `actions/<name>/<name>.yml`, and everything its
+steps run — a program, a fixture, a data table — lives in that same directory. A `run` line is a
+program and its arguments with no shell, so anything that is not a one-liner has to be a file;
+a flat directory gives that file nowhere to live that is obviously owned by the action it belongs
+to, and two actions' supporting files would sit side by side with nothing saying which was whose.
+The file carries its directory's name so that neither can be renamed quietly into disagreeing.
+
+The rule is applied in two places on purpose. Its **spelling** — two segments, no `.` or `..`, not
+rooted, ending in `.yml` or `.yaml`, the file named for its directory — needs no file system, so
+`config.json` is refused for it when it is read, and `legs` and `run` therefore answer the same way
+about the same repository. Its **resolution** — that the file is there, and that no link along the
+path leads out of the actions directory once every link is followed — is what only the file system
+knows; `legs` and `run` both check it before a leg is placed, and the parser checks it again when
+it opens the file, because the last line of defence does not get to assume a caller validated
+first. Containment is compared with this platform's path rules and at a directory boundary, so a
+sibling directory whose name merely starts the same way is outside, not inside.
+
 - A step either `uses` a predefined action or carries a `run` block. There are two predefined
   actions, confirming the tree is at a named commit and reading inputs; an unknown one is refused
   naming what is available.
 - A `run` block is split on newlines and each line is trimmed, so indentation and blank lines
   cannot change what runs.
+- **A step runs at the leg's tree root unless it says otherwise.** That is measured behaviour and
+  it did not change with the layout above, which reads as though a step ran beside its own file.
+  `workingDirectoryRoot` names what `workingDirectory` starts from — `tree` (the leg's worktree or
+  the repository, the default), `harness` (`.harness-config`), or `action` (the action's own
+  directory) — and `workingDirectory` is a path under it, the root itself when absent. A step that
+  runs a program it ships says `workingDirectoryRoot: action` and names it `./probe.py`; a step
+  that builds or tests the repository says nothing and keeps the root it always had. The roots are
+  resolved relative to the leg's own tree, so a leg on a worktree reaches that worktree's copy.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

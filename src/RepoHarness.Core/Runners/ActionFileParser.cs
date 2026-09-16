@@ -2,6 +2,7 @@ using System.CommandLine.Parsing;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
@@ -22,17 +23,19 @@ public interface IActionFileParser
     ActionFile Parse(string path, string text);
 
     /// <summary>
-    /// Reads the action file <paramref name="fileName"/> from a runner's actions directory.
+    /// Reads the action file <paramref name="action"/> names from a runner's actions directory.
     /// </summary>
-    /// <param name="actionsDirectory">The directory action files live in.</param>
-    /// <param name="fileName">The file name a runner's <c>action</c> key gives.</param>
+    /// <param name="actionsDirectory">The directory action directories live in.</param>
+    /// <param name="action">
+    /// The path a runner's <c>action</c> key gives, as <c>&lt;name&gt;/&lt;name&gt;.yml</c>.
+    /// </param>
     /// <param name="cancellationToken">Stops the read.</param>
     /// <exception cref="HarnessException">
-    /// The name leaves the actions directory, the file is absent, or it is not usable.
+    /// The path leaves the actions directory, the file is absent, or it is not usable.
     /// </exception>
     Task<ActionFile> LoadAsync(
         string actionsDirectory,
-        string fileName,
+        string action,
         CancellationToken cancellationToken = default);
 }
 
@@ -51,7 +54,10 @@ public interface IActionFileParser
 /// several times over.
 /// </para>
 /// </remarks>
-public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput output) : IActionFileParser
+public sealed class ActionFileParser(
+    IFileSystem fileSystem,
+    IHarnessOutput output,
+    IHostPlatform platform) : IActionFileParser
 {
     /// <summary>
     /// How long a declared pattern may take to be compiled or matched. A pattern is author-supplied
@@ -74,6 +80,7 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
         "ref",
         "run",
         "workingDirectory",
+        "workingDirectoryRoot",
         "env",
         "successPattern",
         "stallSeconds",
@@ -82,35 +89,23 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
 
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
+    private readonly IHostPlatform _platform = platform;
 
     public Task<ActionFile> LoadAsync(
         string actionsDirectory,
-        string fileName,
+        string action,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(actionsDirectory);
-        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        // A runner names a file, not a path. Resolving a name with a separator in it against the
-        // actions directory would let a runner read, and then run, a file from anywhere on the
-        // machine; only files a reviewer sees in this directory may declare what a runner does.
-        if (!string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal)
-            || Path.IsPathRooted(fileName))
-        {
-            throw new HarnessException(
-                HarnessExit.ConfigInvalid,
-                $"'{fileName}' is not a file name. A runner's 'action' names one file directly "
-                + $"inside '{actionsDirectory}'.");
-        }
-
-        var path = Path.Combine(actionsDirectory, fileName);
-
-        if (!_fileSystem.FileExists(path))
-        {
-            throw new HarnessException(HarnessExit.ConfigInvalid, $"'{path}' does not exist.");
-        }
+        // Checked here as well as when config.json is read, and again after every link is followed.
+        // This is the last line of defence, and the file is about to be run: it does not get to
+        // assume a caller validated first, because the one caller that did not would be the one
+        // that ran a file from somewhere else.
+        var path = ActionPath.Resolve(actionsDirectory, action, _fileSystem, _platform.PathComparison);
 
         _output.Detail("run", $"reading action file '{path}'");
 
@@ -377,6 +372,9 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
         string? run = null;
         YamlNode? runNode = null;
         string? workingDirectory = null;
+        YamlNode? workingDirectoryNode = null;
+        string? workingDirectoryKey = null;
+        var workingDirectoryRoot = Runners.WorkingDirectoryRoot.Tree;
         string? successPattern = null;
         int? stallSeconds = null;
         var continueOnError = false;
@@ -411,7 +409,15 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
                     break;
 
                 case "workingDirectory":
-                    workingDirectory = RequireScalar(valueNode, "a step's workingDirectory", problems);
+                    workingDirectoryNode = valueNode;
+                    workingDirectoryKey = key;
+                    workingDirectory = ReadWorkingDirectory(valueNode, problems);
+                    break;
+
+                case "workingDirectoryRoot":
+                    workingDirectoryNode ??= valueNode;
+                    workingDirectoryKey ??= key;
+                    workingDirectoryRoot = ReadWorkingDirectoryRoot(valueNode, problems);
                     break;
 
                 case "env":
@@ -453,6 +459,18 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
             problems.Add(At(referenceNode ?? node, $"'ref' applies only to '{PredefinedActions.Checkout}'."));
         }
 
+        // A predefined action is performed by the harness, not started as a child process, so it has
+        // no working directory to run in. Accepted silently, these would be a rule nobody applied:
+        // the file would read as though the action ran somewhere chosen, and it never did.
+        if (action != PredefinedAction.None && workingDirectoryNode is not null)
+        {
+            problems.Add(At(
+                workingDirectoryNode,
+                $"'{workingDirectoryKey}' applies only to a step's 'run' block; "
+                + $"'{PredefinedActions.Spell(action)}' is performed by the harness rather than run "
+                + "as a program, so it has no working directory."));
+        }
+
         return new ActionStep
         {
             Name = name,
@@ -460,6 +478,7 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
             Reference = reference,
             Commands = commands,
             WorkingDirectory = workingDirectory,
+            WorkingDirectoryRoot = workingDirectoryRoot,
             Env = env,
             SuccessPattern = successPattern,
             StallSeconds = stallSeconds,
@@ -583,6 +602,77 @@ public sealed class ActionFileParser(IFileSystem fileSystem, IHarnessOutput outp
                     + "the step would have run with."));
             }
         }
+    }
+
+    /// <summary>
+    /// A step's <c>workingDirectory</c>, refused unless it stays under the root it is resolved
+    /// against.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both rules matter, and neither is theoretical. <c>Path.Combine</c> discards everything before
+    /// a rooted second argument, so <c>workingDirectoryRoot: action</c> with an absolute
+    /// <c>workingDirectory</c> would silently run at that absolute path, having named a root it
+    /// never used; and <c>..</c> climbs out of any root by arithmetic the combine performs for it.
+    /// A step that declares a root and then leaves it has declared nothing.
+    /// </para>
+    /// <para>
+    /// Refused when the file is read, as a runner's action path is, rather than checked where the
+    /// directory is finally composed: there the tree root is known but the file is not, and a
+    /// refusal naming neither the file nor the line would be one nobody could act on.
+    /// </para>
+    /// </remarks>
+    private static string? ReadWorkingDirectory(YamlNode node, List<string> problems)
+    {
+        var path = RequireScalar(node, "a step's workingDirectory", problems);
+
+        if (path is null)
+        {
+            return null;
+        }
+
+        // Rooted by this platform's rules and by the other's: a drive letter written on Linux is not
+        // rooted there, and a step must not mean two different directories on two machines.
+        if (Path.IsPathRooted(path) || path.Length == 0 || path[0] is '/' or '\\'
+            || (path.Length >= 2 && path[1] == ':'))
+        {
+            problems.Add(At(node, $"a step's 'workingDirectory' is '{path}', which is an absolute "
+                + "path; it names a directory under the step's own root, so that a step runs where "
+                + "its 'workingDirectoryRoot' says it does."));
+            return null;
+        }
+
+        if (path.Split('/', '\\').Any(segment => segment == ".."))
+        {
+            problems.Add(At(node, $"a step's 'workingDirectory' is '{path}', which climbs out of "
+                + "the step's own root with '..'; it names a directory under that root, so that a "
+                + "step runs where its 'workingDirectoryRoot' says it does."));
+            return null;
+        }
+
+        return path;
+    }
+
+    private static WorkingDirectoryRoot ReadWorkingDirectoryRoot(YamlNode node, List<string> problems)
+    {
+        var value = RequireScalar(node, "a step's workingDirectoryRoot", problems);
+
+        if (value is null)
+        {
+            return Runners.WorkingDirectoryRoot.Tree;
+        }
+
+        if (WorkingDirectoryRoots.Parse(value) is { } root)
+        {
+            return root;
+        }
+
+        problems.Add(At(
+            node,
+            $"'{value}' is not a working directory root. Available: "
+            + $"'{string.Join("', '", WorkingDirectoryRoots.All)}'."));
+
+        return Runners.WorkingDirectoryRoot.Tree;
     }
 
     private static string? ReadPattern(YamlNode node, List<string> problems)

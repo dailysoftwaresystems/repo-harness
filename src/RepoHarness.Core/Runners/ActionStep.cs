@@ -35,8 +35,17 @@ public sealed record ActionStep
     /// </summary>
     public IReadOnlyList<ActionCommand> Commands { get; init; } = [];
 
-    /// <summary>Working directory, relative to the leg's work directory.</summary>
+    /// <summary>
+    /// Working directory, relative to <see cref="WorkingDirectoryRoot"/>. Absent, the step runs in
+    /// that root itself.
+    /// </summary>
     public string? WorkingDirectory { get; init; }
+
+    /// <summary>
+    /// What <see cref="WorkingDirectory"/> is relative to. Defaults to the leg's tree root, which is
+    /// where a step with neither key has always run.
+    /// </summary>
+    public WorkingDirectoryRoot WorkingDirectoryRoot { get; init; }
 
     /// <summary>Environment for this step, applied over the runner's own.</summary>
     public IReadOnlyDictionary<string, string> Env { get; init; }
@@ -59,14 +68,38 @@ public sealed record ActionStep
     /// A predefined action yields none, because it is not a child process.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A step whose block holds several lines yields several phases, each named
     /// <c>&lt;step&gt; (n/total)</c>, so every line gets its own log file and its own verdict line.
     /// Folding them into one phase would put several programs behind a single exit code, and the
     /// one that failed would no longer be identifiable.
+    /// </para>
+    /// <para>
+    /// A phase carries one working directory, relative to the leg's tree root, so the step's root
+    /// and its own path are joined here rather than carried separately. That keeps
+    /// <see cref="RunnerPhase"/> as the phases declared in <c>config.json</c> already use it: a
+    /// runner's own phases have no root to declare and are unaffected by this.
+    /// </para>
     /// </remarks>
-    public IReadOnlyList<RunnerPhase> ToPhases()
+    /// <param name="actionName">
+    /// The action's directory name, which <see cref="Runners.WorkingDirectoryRoot.Action"/> resolves
+    /// against.
+    /// </param>
+    public IReadOnlyList<RunnerPhase> ToPhases(string actionName)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionName);
+
         var total = Commands.Count;
+        var root = WorkingDirectoryRoots.RelativePath(WorkingDirectoryRoot, actionName);
+
+        // Null where the step declared neither, so a phase that named no directory still names none
+        // and the runner's own "tree root" default keeps applying unchanged.
+        var working = (root, WorkingDirectory) switch
+        {
+            (null, var path) => path,
+            (var start, null) => start,
+            var (start, path) => Path.Combine(start, path),
+        };
 
         return
         [
@@ -74,7 +107,7 @@ public sealed record ActionStep
             {
                 Name = total == 1 ? Name : $"{Name} ({index + 1}/{total})",
                 Command = [.. command.Arguments],
-                WorkingDirectory = WorkingDirectory,
+                WorkingDirectory = working,
                 Env = new Dictionary<string, string>(Env, StringComparer.OrdinalIgnoreCase),
 
                 // The witness belongs to the step, so it is checked against the step's last command:

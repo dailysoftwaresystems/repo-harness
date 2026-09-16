@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Runners;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Core.Configuration;
@@ -91,6 +92,23 @@ public static class HarnessConfigValidator
         if (defaults.MaxParallelLegs is { } maxParallelLegs)
         {
             RequireAtLeastOne(maxParallelLegs, "defaults.maxParallelLegs", problems);
+        }
+
+        if (defaults.MaxParallelLegsTotal is { } maxParallelLegsTotal)
+        {
+            RequireAtLeastOne(maxParallelLegsTotal, "defaults.maxParallelLegsTotal", problems);
+        }
+
+        // A ceiling below the per-machine cap makes the per-machine number a claim nothing can
+        // honour: no machine could ever reach it, and a reader comparing the two would be told one
+        // thing by the file and shown another by the run.
+        if (defaults.MaxParallelLegs is { } perMachine
+            && defaults.MaxParallelLegsTotal is { } total
+            && total < perMachine)
+        {
+            problems.Add(
+                $"defaults.maxParallelLegsTotal ({total}) is below defaults.maxParallelLegs "
+                + $"({perMachine}), so no machine could ever run the per-machine number");
         }
 
         if (defaults.StallSeconds < 0)
@@ -229,6 +247,11 @@ public static class HarnessConfigValidator
         foreach (var (pattern, index) in config.BuildTimingRegex.Select((pattern, index) => (pattern, index)))
         {
             CheckPattern(pattern, $"buildTimingRegex[{index}]", problems);
+        }
+
+        foreach (var (pattern, index) in config.TestTimingRegex.Select((pattern, index) => (pattern, index)))
+        {
+            CheckPattern(pattern, $"testTimingRegex[{index}]", problems);
         }
 
         foreach (var (pattern, index) in config.RunTimingRegex.Select((pattern, index) => (pattern, index)))
@@ -673,9 +696,13 @@ public static class HarnessConfigValidator
                 problems.Add($"predefined runner '{name}' declares neither an action file nor phases");
             }
 
-            if (hasAction)
+            // The same rule the parser applies when it reads the file, so that a configuration
+            // 'legs' calls valid is one 'run' can act on. Applied here it is a problem listed with
+            // every other; left only to the parser it surfaced when a runner was finally invoked,
+            // which is exactly the late failure this file exists to prevent.
+            if (hasAction && ActionPath.Problem(runner.Action) is { } actionProblem)
             {
-                RequireRelativePaths([runner.Action!], $"predefined runner '{name}' action", problems);
+                problems.Add($"predefined runner '{name}' action {actionProblem}");
             }
 
             if (runner.StallSeconds is { } runnerStall && runnerStall < 0)

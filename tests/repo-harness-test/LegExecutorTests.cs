@@ -68,6 +68,125 @@ public sealed class LegExecutorTests
         Assert.Equal(2, gate.Peak);
     }
 
+    /// <summary>
+    /// The cap is per machine, so two machines run their own legs at the same time. Measured by
+    /// holding every leg until one from each machine is inside: that only ever happens if the two
+    /// machines really do proceed independently, so a cap applied across the run would hang here
+    /// rather than merely report a different number.
+    /// </summary>
+    [Fact]
+    public async Task MaxParallelLegs_CapsEachMachineSeparately_SoOtherMachinesKeepRunning()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "test");
+        var gate = new Gate(participants: 2);
+        var peaks = new MachinePeaks();
+
+        var execution = await Executor(factory).RunAsync(
+            new LegExecutionRequest
+            {
+                Legs =
+                [
+                    Leg("win", "machine:local"),
+                    Leg("wsl", "machine:local"),
+                    Leg("vps-one", "ssh:vps-a"),
+                    Leg("vps-two", "ssh:vps-a"),
+                ],
+                MaxParallelLegs = 1,
+                RunLeg = async (leg, token) =>
+                {
+                    using (peaks.Enter(leg.MachineKey))
+                    {
+                        await gate.ArriveAsync(token);
+                    }
+
+                    return Passed(leg);
+                },
+            },
+            ledger,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(4, execution.Entries.Count);
+
+        // One at a time on each machine, and both machines at once: the gate needed two.
+        Assert.Equal(1, peaks.Peak("machine:local"));
+        Assert.Equal(1, peaks.Peak("ssh:vps-a"));
+        Assert.Equal(2, gate.Peak);
+    }
+
+    /// <summary>
+    /// The overall ceiling applies on top of the per-machine cap, so a wide fleet cannot start
+    /// everything at once just because each machine is under its own limit.
+    /// </summary>
+    [Fact]
+    public async Task MaxParallelLegsTotal_CapsTheWholeRun_AcrossMachines()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "test");
+        var gate = new Gate(participants: 2);
+
+        // Four machines, each well under its own cap of two, but a ceiling of two overall. The gate
+        // releases at two, so the run finishes only if two ran together, and the peak says whether a
+        // third joined them.
+        var execution = await Executor(factory).RunAsync(
+            new LegExecutionRequest
+            {
+                Legs =
+                [
+                    Leg("a", "ssh:a"),
+                    Leg("b", "ssh:b"),
+                    Leg("c", "ssh:c"),
+                    Leg("d", "ssh:d"),
+                ],
+                MaxParallelLegs = 2,
+                MaxParallelLegsTotal = 2,
+                RunLeg = async (leg, token) =>
+                {
+                    await gate.ArriveAsync(token);
+                    return Passed(leg);
+                },
+            },
+            ledger,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(4, execution.Entries.Count);
+        Assert.Equal(2, gate.Peak);
+    }
+
+    /// <summary>
+    /// A leg that says nothing about where it runs is counted as sharing one machine with every
+    /// other such leg, so the cap still binds. The opposite guess would remove it silently.
+    /// </summary>
+    [Fact]
+    public async Task LegsWithNoMachine_ShareOneMachine_SoTheCapStillBinds()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "test");
+        var gate = new Gate(participants: 2);
+        var peaks = new MachinePeaks();
+
+        var execution = await Executor(factory).RunAsync(
+            new LegExecutionRequest
+            {
+                Legs = [Leg("one"), Leg("two"), Leg("three"), Leg("four")],
+                MaxParallelLegs = 2,
+                RunLeg = async (leg, token) =>
+                {
+                    using (peaks.Enter("all"))
+                    {
+                        await gate.ArriveAsync(token);
+                    }
+
+                    return Passed(leg);
+                },
+            },
+            ledger,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(4, execution.Entries.Count);
+        Assert.Equal(2, peaks.Peak("all"));
+    }
+
     [Fact]
     public async Task WithNoCap_EveryLegStartsAtOnce()
     {
@@ -321,6 +440,8 @@ public sealed class LegExecutorTests
         BuildDirectory = Path.Combine(Path.GetTempPath(), "build", name),
     };
 
+    private static LegPlan Leg(string name, string machine) => Leg(name) with { MachineKey = machine };
+
     private static LegEntry Passed(LegPlan leg) => new()
     {
         Leg = leg.Name,
@@ -328,6 +449,56 @@ public sealed class LegExecutorTests
         Duration = TimeSpan.FromSeconds(1),
         Emulated = leg.Emulated,
     };
+
+    /// <summary>
+    /// Records, per machine, how many of its legs were ever running at one moment.
+    /// </summary>
+    /// <remarks>
+    /// Counted around the whole of a leg's work rather than at one instant, so a cap that is not
+    /// applied is caught however the threads happen to interleave: the count only falls when a leg
+    /// actually finishes.
+    /// </remarks>
+    private sealed class MachinePeaks
+    {
+        private readonly Lock _gate = new();
+        private readonly Dictionary<string, int> _inside = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _peak = new(StringComparer.Ordinal);
+
+        public int Peak(string machine)
+        {
+            lock (_gate)
+            {
+                return _peak.TryGetValue(machine, out var peak) ? peak : 0;
+            }
+        }
+
+        public IDisposable Enter(string machine)
+        {
+            lock (_gate)
+            {
+                var inside = _inside.TryGetValue(machine, out var current) ? current + 1 : 1;
+                _inside[machine] = inside;
+
+                if (inside > (_peak.TryGetValue(machine, out var peak) ? peak : 0))
+                {
+                    _peak[machine] = inside;
+                }
+            }
+
+            return new Exit(this, machine);
+        }
+
+        private sealed class Exit(MachinePeaks peaks, string machine) : IDisposable
+        {
+            public void Dispose()
+            {
+                lock (peaks._gate)
+                {
+                    peaks._inside[machine]--;
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Holds each leg until <paramref name="participants"/> of them are inside at once, and records

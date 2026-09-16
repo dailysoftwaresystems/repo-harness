@@ -40,7 +40,7 @@ public sealed class RunnerRunServiceTests
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
             config,
-            Request(temp, new RunnerConfig { Action = "corpus.yaml" }),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
             TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
@@ -255,7 +255,7 @@ public sealed class RunnerRunServiceTests
 
         var runner = new RunnerConfig
         {
-            Action = "corpus.yaml",
+            Action = "corpus/corpus.yml",
             Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 [TestHost.ChildModeVariable] = "echo-args",
@@ -332,7 +332,7 @@ public sealed class RunnerRunServiceTests
     private static RunnerRunService Service(HarnessFactory factory)
         => new(
             new PhaseRunner(factory.ProcessRunner, factory.FileSystem, factory.Output),
-            new ActionFileParser(factory.FileSystem, factory.Output),
+            new ActionFileParser(factory.FileSystem, factory.Output, factory.Platform),
             new ActionToolPolicy(factory.Platform),
             new ActionValuesReader(factory.FileSystem, factory.Output),
             new ExpectedExceptionMatcher(factory.Output),
@@ -415,7 +415,7 @@ public sealed class RunnerRunServiceTests
     };
 
     private static void WriteAction(TempDirectory temp, string yaml)
-        => temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "corpus.yaml"), yaml);
+        => temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "corpus", "corpus.yml"), yaml);
 
     private static void WriteSecret(TempDirectory temp)
         => temp.WriteFile(

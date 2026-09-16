@@ -174,8 +174,11 @@ public sealed class InitService(
         EnsurePlaceholderDirectory(root, layout.WslDistrosDirectory, actions);
         // Described against the tree it is created in, not the main checkout. This one is tracked,
         // so it belongs to whichever tree init was run from; described against the main checkout it
-        // prints as a path climbing out of one directory and back into another.
-        EnsureDirectory(layout.RepositoryRoot, layout.RunnerActionsDirectory, actions);
+        // prints as a path climbing out of one directory and back into another. It carries a
+        // placeholder for a different reason than the ignored directories above: nothing ignores it,
+        // but git tracks no empty directory, so without one a fresh clone would arrive with the
+        // directory every runner's action is resolved against simply missing.
+        EnsurePlaceholderDirectory(layout.RepositoryRoot, layout.RunnerActionsDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.RunnerEnvDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.RunnerSecretsDirectory, actions);
 
@@ -265,8 +268,8 @@ public sealed class InitService(
     }
 
     /// <summary>
-    /// Creates a directory whose contents are ignored, plus the placeholder that
-    /// keeps the directory itself in the repository.
+    /// Creates a directory plus the placeholder that keeps the directory itself in the repository,
+    /// whether its contents are ignored or tracked: git records no empty directory either way.
     /// </summary>
     private void EnsurePlaceholderDirectory(string root, string path, List<string> actions)
     {

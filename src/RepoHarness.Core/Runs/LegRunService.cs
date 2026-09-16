@@ -156,6 +156,7 @@ public sealed class LegRunService(
                         {
                             Legs = [.. placed.Select(leg => leg.ToPlan())],
                             MaxParallelLegs = context.Config.Defaults.MaxParallelLegs,
+                            MaxParallelLegsTotal = context.Config.Defaults.MaxParallelLegsTotal,
 
                             // Left out entirely where nothing is remote, rather than supplied and
                             // made to do nothing: the executor reports a sync transition per tree,

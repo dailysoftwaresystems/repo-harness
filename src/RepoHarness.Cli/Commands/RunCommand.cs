@@ -3,6 +3,8 @@ using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
 using RepoHarness.Core.Runs;
@@ -82,10 +84,24 @@ internal static class RunCommand
                 .LoadAsync(context.Directory, cancellationToken)
                 .ConfigureAwait(false);
 
+            var runner = Resolve(harness.Config, runnerName);
+
+            // Before a leg is placed or a host is measured, so that a mistyped action costs nothing
+            // and says so in the same terms 'legs' would have. The parser checks again when it
+            // reads the file: this one is a courtesy, that one is the guard.
+            if (runner.Action is { Length: > 0 } action)
+            {
+                ActionPath.RequireResolvable(
+                    [new KeyValuePair<string, string>(runnerName, action)],
+                    harness.Layout.RunnerActionsDirectory,
+                    context.Get<IFileSystem>(),
+                    context.Get<IHostPlatform>().PathComparison);
+            }
+
             // The runner's own legs when --legs was left out. Resolved here rather than left to the
             // default of every declared leg, because running a benchmark on hosts nobody meant to
             // measure is not what "no --legs" asks for.
-            var declared = Resolve(harness.Config, runnerName).Legs;
+            var declared = runner.Legs;
             var selected = named ?? (declared.Count > 0 ? declared : null);
 
             return await context.Get<LegRunService>()

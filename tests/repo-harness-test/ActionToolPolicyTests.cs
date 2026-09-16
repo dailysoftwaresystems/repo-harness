@@ -121,6 +121,7 @@ public sealed class ActionToolPolicyTests
     private static ActionFile Parse(string text)
         => new ActionFileParser(
                 new PhysicalFileSystem(FilePermissionsFactory.Create()),
-                new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false))
+                new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false),
+                new HostPlatform())
             .Parse("actions/build.yaml", text);
 }

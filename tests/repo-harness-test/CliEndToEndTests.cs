@@ -276,6 +276,87 @@ public sealed partial class CliEndToEndTests
         Assert.False(Directory.Exists(path));
     }
 
+    /// <summary>
+    /// The defect that rode the layout change: a configuration one verb called valid and another
+    /// refused. Both verbs read the same file through the same reader, so a spelling wrong enough
+    /// for one is wrong for the other, and the run that finds out is never the first to say so.
+    /// </summary>
+    [Theory]
+    [InlineData("corpus.yml")]
+    [InlineData("../outside.yml")]
+    [InlineData("a/../../outside.yml")]
+    [InlineData("corpus/steps.yml")]
+    [InlineData("corpus/nested/corpus.yml")]
+    public async Task LegsAndRun_RefuseTheSameBadActionPath_WithTheSameExitCode(string action)
+    {
+        using var temp = new TempDirectory();
+        await PrepareRepositoryAsync(temp);
+        WriteRunner(temp, action);
+
+        var legs = await CliRunner.RunAsync(["legs", "-C", temp.Path], TestContext.Current.CancellationToken);
+        var run = await CliRunner.RunAsync(["run", "corpus", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, legs.ExitCode);
+        Assert.Equal(legs.ExitCode, run.ExitCode);
+    }
+
+    /// <summary>
+    /// The spelling is legal, so the configuration reader passes it; only the file system knows the
+    /// action is not there. Both verbs still answer the same way, because both resolve the path
+    /// before a leg is placed rather than leaving it to whichever one happened to open the file.
+    /// </summary>
+    [Fact]
+    public async Task LegsAndRun_RefuseAnActionThatIsNotThere_WithTheSameExitCode()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRepositoryAsync(temp);
+        WriteRunner(temp, "corpus/corpus.yml");
+
+        var legs = await CliRunner.RunAsync(["legs", "-C", temp.Path], TestContext.Current.CancellationToken);
+        var run = await CliRunner.RunAsync(["run", "corpus", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, legs.ExitCode);
+        Assert.Equal(legs.ExitCode, run.ExitCode);
+        Assert.Contains("corpus", legs.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Init_ScaffoldsTheActionsDirectory_WithAPlaceholderGitTracks()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRepositoryAsync(temp);
+
+        var placeholder = Path.Combine(
+            temp.Path,
+            ".harness-config",
+            "runner",
+            "actions",
+            ".gitkeep");
+
+        Assert.True(File.Exists(placeholder), $"init left no placeholder at '{placeholder}'.");
+    }
+
+    [Theory]
+    [InlineData("runners")]
+    [InlineData("layout")]
+    public async Task Help_PrintsTheDirectoryPerActionLayout(string topic)
+    {
+        var result = await CliRunner.RunAsync(["help", topic], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("actions/<name>/<name>.yml", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>Declares one runner naming <paramref name="action"/>, over the seeded config.</summary>
+    private static void WriteRunner(TempDirectory temp, string action)
+        => File.WriteAllText(
+            HarnessFactory.ConfigPath(temp.Path),
+            $$"""
+            {
+              "predefinedRunners": { "corpus": { "action": {{System.Text.Json.JsonSerializer.Serialize(action)}} } }
+            }
+            """);
+
     /// <summary>An initialised repository whose path budget any temporary directory fits.</summary>
     private static Task PrepareRepositoryAsync(TempDirectory temp)
         => new HarnessFactory().InitializeHarnessAsync(

@@ -91,6 +91,8 @@ public sealed record PlacedLeg(
         BuildDirectory = BuildDirectory,
         TreeKey = Host.Host.Kind == HostKind.Local ? string.Empty : TreeKey,
         Emulated = Emulated,
+        MachineKey = Host.Host.MachineKey,
+        Host = Host.Host.ToString(),
     };
 }
 
