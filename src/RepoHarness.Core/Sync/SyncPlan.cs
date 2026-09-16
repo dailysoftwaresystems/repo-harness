@@ -1,5 +1,5 @@
-using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Results;
+using System.Globalization;
 
 namespace RepoHarness.Core.Sync;
 
@@ -17,6 +17,17 @@ public sealed record SyncPlan(
     IReadOnlyList<string> Deletes,
     int Unchanged)
 {
+    /// <summary>
+    /// The paths among <see cref="Writes"/> that the copy already had, holding something else.
+    /// </summary>
+    /// <remarks>
+    /// Told apart from a file the copy never had, which is the other half of <see cref="Writes"/> and
+    /// costs nobody anything. These are the ones where something is lost: an edit made in the copy and
+    /// never committed reads exactly like a file that was simply never there, and a report that did not
+    /// separate them would say "would write" over work about to disappear.
+    /// </remarks>
+    public IReadOnlyList<string> Overwrites { get; init; } = [];
+
     /// <summary>Whether the copy already matches the source.</summary>
     public bool IsUpToDate => Writes.Count == 0 && Deletes.Count == 0;
 
@@ -40,18 +51,25 @@ public sealed record SyncPlan(
         ArgumentNullException.ThrowIfNull(exclusions);
 
         var writes = new List<SyncEntry>();
+        var overwrites = new List<string>();
         var unchanged = 0;
 
         foreach (var path in source.Paths)
         {
             var entry = source.Entries[path];
+            var had = destination.Entries.TryGetValue(path, out var existing);
 
-            if (destination.Entries.TryGetValue(path, out var existing)
-                && existing.Size == entry.Size
+            if (had
+                && existing!.Size == entry.Size
                 && string.Equals(existing.ContentHash, entry.ContentHash, StringComparison.Ordinal))
             {
                 unchanged++;
                 continue;
+            }
+
+            if (had)
+            {
+                overwrites.Add(path);
             }
 
             writes.Add(entry);
@@ -62,7 +80,28 @@ public sealed record SyncPlan(
             .Where(path => !exclusions.IsProtectedFromDeletion(path))
             .ToList();
 
-        return new SyncPlan(writes, deletes, unchanged);
+        return new SyncPlan(writes, deletes, unchanged) { Overwrites = overwrites };
+    }
+
+    /// <summary>
+    /// What this plan would cost a copy that already holds work of its own, worst first and bounded,
+    /// for a refusal somebody has to read and act on.
+    /// </summary>
+    /// <param name="most">How many paths to name before the rest are only counted.</param>
+    public IReadOnlyList<string> DescribeLoss(int most = 20)
+    {
+        // Overwrites first. A deleted file is obvious once it is named; a file whose content is
+        // replaced looks like an ordinary write in every other report this command prints.
+        var lost = new List<string>();
+        lost.AddRange(Overwrites.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"overwrite {path}"));
+        lost.AddRange(Deletes.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"delete    {path}"));
+
+        if (lost.Count <= most)
+        {
+            return lost;
+        }
+
+        return [.. lost.Take(most), $"...and {(lost.Count - most).ToString(CultureInfo.InvariantCulture)} more"];
     }
 
     /// <summary>

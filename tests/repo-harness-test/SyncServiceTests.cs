@@ -131,6 +131,128 @@ public sealed class SyncServiceTests
         }
     }
 
+    /// <summary>
+    /// The refusal has to answer the question its reader asks next, which is what taking the
+    /// directory over would cost. Before, it could not: the refusal came before any manifest was
+    /// built, so nothing had worked out what was in there.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryTheHarnessDidNotCreate_IsRefused_NamingWhatAdoptingWouldCost()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // A checkout somebody made by hand: one file the source never had, and one the source
+            // has too, holding an edit nobody committed.
+            Directory.CreateDirectory(Path.Combine(copy, "src"));
+            await File.WriteAllTextAsync(Path.Combine(copy, "stray.txt"), "x\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "edited and never committed\n", cancellationToken);
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+
+            // The edit is named as an overwrite, which is the half that reads like an ordinary write
+            // everywhere else, and the stray file as a deletion.
+            Assert.Contains("overwrite src/a.c", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("delete    stray.txt", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("--adopt", refusal.Message, StringComparison.Ordinal);
+
+            // Refused means refused: nothing there was touched.
+            Assert.True(File.Exists(Path.Combine(copy, "stray.txt")));
+            Assert.Equal(
+                "edited and never committed\n",
+                await File.ReadAllTextAsync(Path.Combine(copy, "src", "a.c"), cancellationToken),
+                StringComparer.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// Taking it over is one flag, and what it must not cost is a warm build directory: git ignores
+    /// it in the source, so it is withheld from the transfer and protected from the deletion alike.
+    /// That is what makes adopting a hand-made checkout cheaper than moving it aside and rebuilding.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryTheHarnessDidNotCreate_IsTakenOverBy_Adopt_KeepingWhatGitIgnores()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(copy, "src"));
+            Directory.CreateDirectory(Path.Combine(copy, "build"));
+            await File.WriteAllTextAsync(Path.Combine(copy, "stray.txt"), "x\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "stale\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "build", "warm.o"), "object\n", cancellationToken);
+
+            var result = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken);
+
+            Assert.True(result.Verified);
+
+            // The tree now matches the source, and the hours of build output are still there.
+            Assert.Equal("a\n", await File.ReadAllTextAsync(Path.Combine(copy, "src", "a.c"), cancellationToken), StringComparer.Ordinal);
+            Assert.False(File.Exists(Path.Combine(copy, "stray.txt")));
+            Assert.True(File.Exists(Path.Combine(copy, "build", "warm.o")));
+
+            // Adopted for good: a second sync no longer has anything to refuse.
+            var again = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.True(again.Plan.IsUpToDate);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A preview changes nothing, so there is nothing for either refusal to protect. Until now it hit
+    /// both of them, including the deletion bound whose own message says to run with this flag to see
+    /// the list it was refusing to show.
+    /// </summary>
+    [Fact]
+    public async Task ADryRun_ShowsWhatAdoptingWouldDo_RatherThanRefusingToSay()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(copy);
+            await File.WriteAllTextAsync(Path.Combine(copy, "stray.txt"), "x\n", cancellationToken);
+
+            var result = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(DryRun: true), cancellationToken);
+
+            Assert.Contains("stray.txt", result.Plan.Deletes);
+            Assert.Contains(result.Plan.Describe(SyncVerb.Planned), line => line.Contains("src/a.c", StringComparison.Ordinal));
+
+            // Nothing was changed, and the reader is told which flag would do it.
+            Assert.True(File.Exists(Path.Combine(copy, "stray.txt")));
+            Assert.Contains("--adopt", harness.StandardOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
     [Fact]
     public async Task ADirectoryTheHarnessDidNotCreate_IsNeverAdopted()
     {

@@ -1,3 +1,4 @@
+using System.Globalization;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Repository;
@@ -7,7 +8,24 @@ namespace RepoHarness.Core.Sync;
 
 /// <summary>How one sync should behave.</summary>
 /// <param name="DryRun">List what would be written and deleted, and change nothing.</param>
-public sealed record SyncOptions(bool DryRun = false);
+/// <param name="Adopt">
+/// Take over a directory the harness did not create, rather than refusing it. What it would cost is
+/// reported either way; this says go ahead and pay it.
+/// </param>
+public sealed record SyncOptions(bool DryRun = false, bool Adopt = false);
+
+/// <summary>What was found where a host's copy should be.</summary>
+internal enum CopyState
+{
+    /// <summary>This sync made it, so there was nothing in it to lose.</summary>
+    Created,
+
+    /// <summary>The harness made it on some earlier run, and it carries its marker.</summary>
+    Harness,
+
+    /// <summary>It exists, the harness did not make it, and what it holds is nobody here's to assume about.</summary>
+    Unclaimed,
+}
 
 /// <summary>What one sync did.</summary>
 /// <param name="Host">The host whose copy was written.</param>
@@ -205,8 +223,10 @@ public sealed class SyncService(
             .RefuseWhenNoLongerIgnoredAsync(_gitClient, context.Layout.RepositoryRoot, cancellationToken)
             .ConfigureAwait(false);
 
-        var created = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)
+        var state = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)
             .ConfigureAwait(false);
+
+        var created = state == CopyState.Created;
 
         var source = await _manifestBuilder
             .BuildAsync(context.Layout.RepositoryRoot, exclusions.IsWithheldFromTransfer, cancellationToken)
@@ -220,10 +240,38 @@ public sealed class SyncService(
 
         var plan = SyncPlan.Between(source, destination, exclusions);
 
-        plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction);
+        // Asked before the deletion bound. Whose directory this is comes first: told that a sync
+        // would remove all of a directory, the reader goes looking for a mistake in the source, when
+        // what is actually true is that this is not a copy of the source at all.
+        if (state == CopyState.Unclaimed && !options.Adopt && !options.DryRun)
+        {
+            throw new HarnessException(HarnessExit.Refused, Unclaimed(transport, destinationRoot, plan));
+        }
+
+        // Not on a dry run, which changes nothing there is a bound to protect. The bound's own
+        // message says to run with --dry-run to see the list, and until now that refused in exactly
+        // the same words rather than showing it.
+        //
+        // Nor while adopting. The bound is about a copy this harness already owns, where deleting
+        // most of it at once means the source is wrong. A directory being taken over is neither: it
+        // was somebody else's, the refusal above has already named every file adopting costs, and
+        // most of what is in a hand-made checkout is exactly what the bound would count. Asking for
+        // sync.maxDeleteFraction to be raised as well would turn one deliberate decision into two.
+        if (!options.DryRun && state != CopyState.Unclaimed)
+        {
+            plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction);
+        }
 
         if (options.DryRun)
         {
+            if (state == CopyState.Unclaimed && !options.Adopt)
+            {
+                _output.Info(
+                    CommandName,
+                    $"{transport.Host}: '{destinationRoot}' exists and the harness did not create it; "
+                    + "syncing into it needs --adopt.");
+            }
+
             return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
         }
 
@@ -239,6 +287,15 @@ public sealed class SyncService(
 
         var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
+
+        // Marked only once the copy is one: a directory claimed before the transfer finished would
+        // read as the harness's own work on the next run, and the refusal that protects it would not
+        // come back to say otherwise.
+        if (state == CopyState.Unclaimed)
+        {
+            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+            _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
+        }
 
         return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
     }
@@ -358,8 +415,8 @@ public sealed class SyncService(
     /// <summary>
     /// Makes sure there is a copy to write into, and that it is one the harness made.
     /// </summary>
-    /// <returns>Whether this call created it.</returns>
-    private async Task<bool> PrepareCopyAsync(
+    /// <returns>What was found there.</returns>
+    private async Task<CopyState> PrepareCopyAsync(
         ISyncTransport transport,
         string destinationRoot,
         bool dryRun,
@@ -370,29 +427,47 @@ public sealed class SyncService(
             if (dryRun)
             {
                 _output.Info(CommandName, $"{transport.Host}: would create '{destinationRoot}'");
-                return true;
+                return CopyState.Created;
             }
 
             _output.Info(CommandName, $"{transport.Host}: creating '{destinationRoot}'");
             await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
 
-            return true;
+            return CopyState.Created;
         }
 
-        if (await transport.IsHarnessCopyAsync(destinationRoot, cancellationToken).ConfigureAwait(false))
+        return await transport.IsHarnessCopyAsync(destinationRoot, cancellationToken).ConfigureAwait(false)
+            ? CopyState.Harness
+            : CopyState.Unclaimed;
+    }
+
+    /// <summary>
+    /// Why a directory the harness did not make is refused, and what taking it over would cost.
+    /// </summary>
+    /// <remarks>
+    /// A sync deletes whatever the source does not have, so a checkout somebody made by hand may hold
+    /// work nothing here knows about. What it may not lose is said too: everything git ignores there,
+    /// its <c>.git</c> and so every commit in it, and whatever <c>sync.neverTransfer</c> names, are
+    /// withheld from the transfer and protected from the deletion alike.
+    /// </remarks>
+    private static string Unclaimed(ISyncTransport transport, string destinationRoot, SyncPlan plan)
+    {
+        var opening = $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
+            + "so sync will not write into it on its own.";
+
+        if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0)
         {
-            return false;
+            return $"{opening} Taking it over would change nothing already there, so '--adopt' is all "
+                + "it needs. Nothing was changed.";
         }
 
-        // Never adopted. Sync deletes whatever the source does not have, so adopting a checkout
-        // somebody made by hand would delete work nobody told the harness about, on a machine whose
-        // owner is not watching.
-        throw new HarnessException(
-            HarnessExit.Refused,
-            $"'{destinationRoot}' on {transport.Host} exists but the harness did not create it, so sync "
-            + "will not write into it: a sync deletes whatever the source does not have, and that "
-            + "directory may hold work nothing here knows about. Move it aside, and sync will create "
-            + "the copy itself.");
+        var counted = $"{plan.Overwrites.Count.ToString(CultureInfo.InvariantCulture)} file(s) would be "
+            + $"overwritten and {plan.Deletes.Count.ToString(CultureInfo.InvariantCulture)} deleted there";
+
+        return $"{opening} Taking it over is '--adopt', and {counted}:\n  "
+            + string.Join("\n  ", plan.DescribeLoss())
+            + "\nIts .git, everything git ignores there and whatever sync.neverTransfer names are left "
+            + "alone either way. Run with '--dry-run' to see all of it. Nothing was changed.";
     }
 
     private async Task ApplyAsync(

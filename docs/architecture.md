@@ -495,8 +495,8 @@ build, or has no copy of the repository.
 - Interrupting `host-exec` stops ssh or wsl.exe, which ends the host's input, and the host
   cancels the command instead of leaving it running there.
 - A host's copy is created by `sync`, which also puts `.harness-config/config.json` there so
-  the DssHarness running there can find the repository at all. Sync will not adopt a checkout
-  made by hand, since it never writes into a directory it did not create.
+  the DssHarness running there can find the repository at all. Sync will not take over a checkout
+  made by hand unless `--adopt` says to, and reports what taking it over would cost either way.
 
 ### Installing what a host is missing
 
@@ -882,10 +882,28 @@ for this machine, a WSL distribution and an ssh host, so a sync to a host and a 
 directory here cannot drift apart.
 
 - **The copy is the tool's.** Sync creates it, records that it did, and refuses to write into a
-  directory it did not create. It deletes whatever the source does not have, so adopting a
-  checkout somebody made by hand would delete work nothing here knows about, on a machine whose
-  owner is not watching. The refusal says to move that directory aside and let sync create the
-  copy itself.
+  directory it did not create. It deletes whatever the source does not have, so taking over a
+  checkout somebody made by hand could delete work nothing here knows about, on a machine whose
+  owner is not watching.
+- **The refusal says what taking it over would cost.** It is worked out from the same manifest
+  and plan a real sync uses, so the reader is told which files would be overwritten and which
+  deleted, rather than only that the directory is not the tool's. An overwrite is named apart
+  from a write: a file the copy already had, holding an edit nobody committed, reads exactly like
+  a file the copy never had, and only one of the two loses anything.
+- **`--adopt` takes it over,** and marks it as the tool's once the copy is one — never before, so
+  a transfer that failed part way does not leave a directory claiming to be something it is not.
+  What git ignores there, its `.git` and every commit in it, and whatever `sync.neverTransfer`
+  names are withheld from the transfer and protected from the deletion alike, so a warm build
+  directory survives being adopted. That is what makes adopting cheaper than moving a checkout
+  aside and rebuilding it.
+- **`sync.maxDeleteFraction` does not bound an adoption.** It is about a copy this tool already
+  owns, where deleting most of it at once means the source is wrong. A directory being taken over
+  is neither, and most of what a hand-made checkout holds is exactly what that bound would count;
+  requiring it to be raised as well would make one deliberate decision into two.
+- **`--dry-run` shows the plan instead of refusing,** for a directory the tool did not create and
+  for one whose deletions are over the bound. A preview changes nothing, so there is nothing for
+  either refusal to protect — and the bound's own message says to run with `--dry-run` to see the
+  list it was until now refusing to show.
 - **The copy is created, with its parents,** when the declared `repositoryPath` is not there, so
   the first sync to a fresh host needs no hand-made clone. A path that exists and is not a
   directory, or that cannot be created, is a named failure — never a silent fallback to

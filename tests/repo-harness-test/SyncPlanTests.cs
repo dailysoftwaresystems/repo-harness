@@ -12,6 +12,26 @@ public sealed class SyncPlanTests
 {
     private static readonly SyncExclusions Default = new(new SyncConfig(), ".harness-config/worktrees");
 
+    /// <summary>
+    /// A file the copy already had, holding something else, is a loss; a file it never had is not.
+    /// Both are writes, and telling them apart is what lets a refusal say which is which.
+    /// </summary>
+    [Fact]
+    public void APathTheCopyAlreadyHeld_IsAnOverwrite_AndOneItNeverHadIsNot()
+    {
+        var source = Manifest(("kept.c", "one"), ("fresh.c", "two"));
+        var destination = Manifest(("kept.c", "something else"));
+
+        var plan = SyncPlan.Between(source, destination, Default);
+
+        Assert.Equal(["kept.c"], plan.Overwrites);
+        Assert.Contains(plan.Writes, entry => entry.Path == "fresh.c");
+        Assert.Equal(2, plan.Writes.Count);
+
+        // And the loss report names it as what it is, ahead of the deletions.
+        Assert.Contains("overwrite kept.c", plan.DescribeLoss());
+    }
+
     [Fact]
     public void AFileWithTheSameContent_IsNeitherWrittenNorDeleted()
     {
