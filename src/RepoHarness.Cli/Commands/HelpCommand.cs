@@ -548,7 +548,8 @@ internal static class HelpCommand
         builder.AppendLine("  .harness-config/sshItems/<name>/   ignored, and written by you, not init:");
         builder.AppendLine("                                     .env (address, user, port), .key, known_hosts");
         builder.AppendLine("  .harness-config/wslDistros/<name>/ ignored; .env (distribution, credential)");
-        builder.AppendLine("  .harness-config/worktrees/         contents ignored, .gitkeep tracked");
+        builder.AppendLine("  .harness-config/worktrees/         ignored whole, with no placeholder; made by the");
+        builder.AppendLine("                                     first create-worktree, not by init");
         builder.AppendLine("                                     (the default; worktrees.root moves it)");
         builder.AppendLine("  .harness-config/runs/              ignored; one directory of logs per run");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");

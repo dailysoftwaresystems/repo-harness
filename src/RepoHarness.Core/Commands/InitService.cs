@@ -28,10 +28,42 @@ public sealed class InitService(
     /// and for the directories holding connection data that means committing a private key.
     /// </summary>
     /// <remarks>
-    /// Contents are excluded while placeholders are kept, which is only possible by excluding each
-    /// directory's <em>contents</em> rather than the directory: git cannot re-include a file whose
-    /// parent directory is itself excluded. The worktrees root is taken from the configuration,
-    /// because a configured root that nothing ignores puts whole checkouts into <c>git status</c>.
+    /// <para>
+    /// Two shapes, for two kinds of directory.
+    /// </para>
+    /// <para>
+    /// The four slots — <c>sshItems</c>, <c>wslDistros</c>, <c>runner/.env</c> and
+    /// <c>runner/.secrets</c> — are small directories a person fills by hand, and keeping each one
+    /// in the repository is what tells that person where the file goes. So their <em>contents</em>
+    /// are excluded and a placeholder is kept, which is the only way to do both: git cannot
+    /// re-include a file whose parent directory is itself excluded.
+    /// </para>
+    /// <para>
+    /// The worktrees root is excluded whole, with no placeholder, because it is a different kind of
+    /// directory: it holds entire working trees, nobody fills it by hand, and the worktree commands
+    /// create it themselves the first time they need it. Excluding only its contents has a cost the
+    /// slots can afford and it cannot. Measured, in a throwaway repository:
+    /// </para>
+    /// <code>
+    /// query                          /wt/          /wt/* + !/wt/.gitkeep
+    /// check-ignore 'wt/'  absent     IGNORED       IGNORED
+    /// check-ignore 'wt'   absent     NOT-IGNORED   NOT-IGNORED
+    /// check-ignore 'wt/'  present    IGNORED       IGNORED, and NOT-IGNORED once .gitkeep is committed
+    /// check-ignore 'wt'   present    IGNORED       NOT-IGNORED
+    /// </code>
+    /// <para>
+    /// Excluding the contents makes the directory's own answer depend on a trailing slash, and it
+    /// fails toward not ignored. Worse, a directory holding any tracked file never reads as ignored
+    /// under either spelling, so a committed placeholder turns even the careful query wrong. For a
+    /// slot holding an address and a key that answer costs nothing; for a root holding checkouts it
+    /// is the difference between a clean sync and shipping every worktree to a remote host, asked
+    /// for in the most natural spelling and answered wrongly without a word. It also shows the
+    /// placeholder as untracked until it is committed, which is exactly what sync refuses on.
+    /// </para>
+    /// <para>
+    /// The root is taken from the configuration, because a configured root that nothing ignores
+    /// puts whole checkouts into <c>git status</c>.
+    /// </para>
     /// </remarks>
     private static string[] BuildIgnoreRules(WorktreeSettings worktrees)
     {
@@ -47,8 +79,8 @@ public sealed class InitService(
             // Run logs, which exist to be read after a run and never to be committed.
             $"/{root}/{HarnessLayout.RunsDirectoryName}/",
 
-            $"/{worktreesRoot}/*",
-            $"!/{worktreesRoot}/{keep}",
+            // The directory itself, never only its contents: see the remarks above.
+            $"/{worktreesRoot}/",
 
             // One directory per host, each holding an address, a user and a key. Nothing under
             // either may ever be tracked.
@@ -136,7 +168,8 @@ public sealed class InitService(
         // the ignore rules are written, because the rules depend on the configured worktrees root.
         var config = _configStore.Load(configFile);
 
-        EnsurePlaceholderDirectory(root, layout.WorktreesDirectoryUnder(config.Worktrees.Root), actions);
+        // No worktrees root here. The worktree commands create it the first time they need it, and a
+        // placeholder in it is what would make it read as not ignored (see BuildIgnoreRules).
         EnsurePlaceholderDirectory(root, layout.SshItemsDirectory, actions);
         EnsurePlaceholderDirectory(root, layout.WslDistrosDirectory, actions);
         // Described against the tree it is created in, not the main checkout. This one is tracked,
@@ -147,9 +180,13 @@ public sealed class InitService(
         EnsurePlaceholderDirectory(root, layout.RunnerSecretsDirectory, actions);
 
         var gitIgnorePath = Path.Combine(root, ".gitignore");
-        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, BuildIgnoreRules(config.Worktrees))
+        var ignoreRules = BuildIgnoreRules(config.Worktrees);
+
+        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, ignoreRules)
             ? $"updated {Describe(root, gitIgnorePath)}"
             : $"kept    {Describe(root, gitIgnorePath)} (rules already current)");
+
+        ReportOverlaps(root, gitIgnorePath, ignoreRules, actions);
 
         var registries = await _anchorRegistryLocator
             .LocateAsync(new HarnessContext(layout, config), cancellationToken)
@@ -185,6 +222,35 @@ public sealed class InitService(
 
         _fileSystem.WriteAllTextAtomic(registry.FullPath, AnchorRegistrySkeleton.Render(registry.Kind, settings));
         actions.Add($"created {shown}");
+    }
+
+    /// <summary>
+    /// Names each hand-written rule that states again, perhaps in another shape, a path the managed
+    /// block already rules on.
+    /// </summary>
+    /// <remarks>
+    /// Reported and never removed. The managed block leaves hand-written rules alone on purpose, so a
+    /// repository that already ignored one of these paths by hand keeps its own rule and gains a
+    /// second one — and two differently-shaped rules for one path is a state nothing else points
+    /// out. A whole-directory rule written by hand also silently cancels the managed block's
+    /// placeholder, since git cannot re-include a file inside an excluded directory. Read from the
+    /// file as it now is, so the line numbers are the ones a reader will find.
+    /// </remarks>
+    private void ReportOverlaps(string root, string gitIgnorePath, IReadOnlyList<string> rules, List<string> actions)
+    {
+        var shown = Describe(root, gitIgnorePath);
+
+        foreach (var overlap in _gitIgnoreManager.FindOverlaps(_fileSystem.ReadAllText(gitIgnorePath), rules))
+        {
+            var where = $"note    {shown} line {overlap.LineNumber} ('{overlap.Rule}')";
+
+            actions.Add(overlap.Contradicts
+                ? $"{where} {(overlap.ReIncludes ? "re-includes" : "ignores")} '{overlap.Path}', which the managed "
+                    + $"block {(overlap.ReIncludes ? "ignores" : "re-includes")}; whichever of the two comes later in "
+                    + "the file wins"
+                : $"{where} repeats the managed block's rule for '{overlap.Path}'; keep one of them so there is one "
+                    + "statement of what is ignored");
+        }
     }
 
     private void EnsureDirectory(string root, string path, List<string> actions)

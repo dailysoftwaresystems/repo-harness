@@ -95,7 +95,7 @@ in `config.json`.
 .harness-config/sshItems/<name>/.env         ignored; address, user, port
 .harness-config/sshItems/<name>/.key         ignored; the private key
 .harness-config/wslDistros/<name>/.env       ignored; the distribution and its credential
-.harness-config/worktrees/                   contents ignored, .gitkeep tracked
+.harness-config/worktrees/                   ignored whole, never a placeholder; created on first use
 .harness-config/runs/                        ignored; one directory of logs per run
 .harness-config/lock.json                    ignored; records in-progress runs
 .plans/_deferred-anchor-registry.md          tracked; live anchors

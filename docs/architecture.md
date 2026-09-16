@@ -129,6 +129,27 @@ that fits; a shorter root such as `.worktrees` buys those characters back. The b
 checked against the real path, so a shorter root never hides an overrun — it only makes one
 avoidable.
 
+**The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>/` for it and
+creates nothing there; `create-worktree` makes the directory the first time it needs it. The other
+harness directories a person fills by hand — `sshItems`, `wslDistros`, `runner/.env`,
+`runner/.secrets` — keep the opposite shape, their *contents* ignored and a `.gitkeep` tracked, so
+the directory itself tells that person where the file goes. The root cannot afford that shape.
+Measured: excluding only a directory's contents makes the directory's own `git check-ignore` answer
+depend on a trailing slash, and it fails toward *not ignored* — `<root>` without the slash reads as
+not ignored while worktrees sit inside it. A directory holding any tracked file never reads as
+ignored under either spelling, so a committed placeholder turns even `<root>/` wrong. For a slot
+holding an address and a key that answer costs nothing; for a root holding whole checkouts it is the
+difference between a clean sync and every worktree reaching a remote host. The placeholder also
+showed as untracked until committed, which is exactly the state sync's no-longer-ignored guard
+refuses.
+
+`init` leaves hand-written `.gitignore` rules alone, so a repository that already ignored one of
+these paths by hand keeps its rule beside the managed one. `init` reports each such pair as a note,
+naming the line and saying whether the two rules repeat each other or point opposite ways, since
+whichever of two contradicting rules comes later in the file wins. The comparison is by exact path
+after dropping a leading `!`, one anchoring `/`, a trailing `/*` and a trailing `/`; a rule that
+reaches a managed path only through a wildcard is not reported.
+
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
 with every commit made in it, so after the first one nothing else says what tree the lane started

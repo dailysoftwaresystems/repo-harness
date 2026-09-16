@@ -121,6 +121,94 @@ public sealed class GitIgnoreManager(IFileSystem fileSystem) : IGitIgnoreManager
         return true;
     }
 
+    public IReadOnlyList<GitIgnoreOverlap> FindOverlaps(string? content, IReadOnlyList<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+
+        if (string.IsNullOrEmpty(content))
+        {
+            return [];
+        }
+
+        // Each managed path has one direction: the block ignores a slot's contents and re-includes its
+        // placeholder, and those normalise to two different paths.
+        var managed = new Dictionary<string, bool>(StringComparer.Ordinal);
+
+        foreach (var rule in lines.Select(PathOf))
+        {
+            if (rule is { } named)
+            {
+                managed[named.Path] = named.ReIncludes;
+            }
+        }
+
+        var overlaps = new List<GitIgnoreOverlap>();
+        var inside = false;
+        var lineNumber = 0;
+
+        foreach (var line in content.Split('\n'))
+        {
+            lineNumber++;
+            var trimmed = line.Trim();
+
+            // The same pairing ApplyManagedBlock writes: after an update there is exactly one block,
+            // and everything between its markers is the harness's own.
+            if (trimmed == BeginMarker)
+            {
+                inside = true;
+                continue;
+            }
+
+            if (trimmed == EndMarker)
+            {
+                inside = false;
+                continue;
+            }
+
+            if (inside || PathOf(line) is not { } rule || !managed.TryGetValue(rule.Path, out var managedReIncludes))
+            {
+                continue;
+            }
+
+            overlaps.Add(new GitIgnoreOverlap(
+                lineNumber,
+                line.TrimEnd('\r').Trim(),
+                rule.Path,
+                rule.ReIncludes,
+                Contradicts: rule.ReIncludes != managedReIncludes));
+        }
+
+        return overlaps;
+    }
+
+    /// <summary>
+    /// The path a rule names once the parts that only change its shape are dropped, or
+    /// <see langword="null"/> for a blank line or a comment.
+    /// </summary>
+    /// <remarks>
+    /// <c>/x/</c>, <c>/x/*</c>, <c>x/</c> and <c>!/x/*</c> all name <c>x</c>: they differ in what they
+    /// match inside it and in which way, which is exactly the difference worth reporting when two of
+    /// them meet. Trailing whitespace is dropped because git ignores it; leading whitespace is kept
+    /// because git does not.
+    /// </remarks>
+    private static (string Path, bool ReIncludes)? PathOf(string rule)
+    {
+        var text = rule.TrimEnd('\r', ' ', '\t');
+
+        if (text.Length == 0 || text.StartsWith('#'))
+        {
+            return null;
+        }
+
+        var reIncludes = text.StartsWith('!');
+        text = reIncludes ? text[1..] : text;
+        text = text.StartsWith('/') ? text[1..] : text;
+        text = text.EndsWith("/*", StringComparison.Ordinal) ? text[..^2] : text;
+        text = text.EndsWith('/') ? text[..^1] : text;
+
+        return text.Length == 0 ? null : (text, reIncludes);
+    }
+
     private static string BuildBlock(IReadOnlyList<string> lines, string newline)
     {
         var builder = new StringBuilder();
