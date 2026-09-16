@@ -1,0 +1,234 @@
+using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
+using RepoHarness.Core.Repository;
+using RepoHarness.Core.Secrets;
+
+namespace RepoHarness.Core.Hosts;
+
+/// <summary>What opening a connection to one host found.</summary>
+public sealed record HostConnectionResult
+{
+    /// <summary>How programs are started there, or <see langword="null"/> when none can be.</summary>
+    public HostConnection? Connection { get; init; }
+
+    /// <summary>
+    /// The superuser credential the host's item declares, for an install that needs one; kept off the
+    /// connection so that it travels only to the one call that writes it to standard input.
+    /// </summary>
+    public HostCredential? Superuser { get; init; }
+
+    /// <summary>The host's operating system, when opening the connection measured it.</summary>
+    public string? Os { get; init; }
+
+    /// <summary>The host's processor, when opening the connection measured it.</summary>
+    public string? Processor { get; init; }
+
+    /// <summary>Why the host cannot be reached; empty when it can.</summary>
+    public string Problem { get; init; } = string.Empty;
+
+    /// <summary>A host that cannot be reached, and why.</summary>
+    /// <param name="problem">Why, as a lower-case fragment with its remedy after a semicolon.</param>
+    public static HostConnectionResult Refused(string problem) => new() { Problem = problem };
+}
+
+/// <summary>
+/// Opens a connection to a host: reads the host's own item, refuses before connecting when that item
+/// is not safe to use, establishes that its name resolves, measures which shell answers, and measures
+/// where the programs it will be asked to run actually are.
+/// </summary>
+/// <remarks>
+/// Separate from inspection because the two are needed apart: inspection then asks whether DssHarness
+/// can run there, while provisioning has to reach a host that cannot yet run DssHarness at all, which
+/// is the whole point of installing the SDK on it.
+/// </remarks>
+public interface IHostConnector
+{
+    /// <summary>Opens a connection to <paramref name="host"/>, or says why it cannot be opened.</summary>
+    /// <param name="context">The repository whose configuration and secrets declare the host.</param>
+    /// <param name="host">The host.</param>
+    /// <param name="programs">Programs whose place on the host is measured while the connection is open.</param>
+    /// <param name="cancellationToken">Stops the probes.</param>
+    Task<HostConnectionResult> ConnectAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyList<string> programs,
+        CancellationToken cancellationToken = default);
+}
+
+/// <inheritdoc cref="IHostConnector"/>
+public sealed class HostConnector(
+    IHostPlatform platform,
+    IProcessRunner processRunner,
+    IHostCommandRunner hostCommands,
+    IHostSecretsStore secrets,
+    IHostAddressResolver addresses,
+    IHostProgramResolver programs) : IHostConnector
+{
+    /// <summary>Longest one probe of a connected host may take.</summary>
+    public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
+
+    /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
+    private const int SshFailed = 255;
+
+    private readonly IHostPlatform _platform = platform;
+    private readonly IProcessRunner _processRunner = processRunner;
+    private readonly IHostCommandRunner _hostCommands = hostCommands;
+    private readonly IHostSecretsStore _secrets = secrets;
+    private readonly IHostAddressResolver _addresses = addresses;
+    private readonly IHostProgramResolver _programs = programs;
+
+    public Task<HostConnectionResult> ConnectAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyList<string> programs,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(programs);
+
+        return host.Kind switch
+        {
+            HostKind.Local => LocalAsync(programs, cancellationToken),
+            HostKind.Wsl => WslAsync(context, host, programs, cancellationToken),
+            _ => SshAsync(context, host, programs, cancellationToken),
+        };
+    }
+
+    private async Task<HostConnectionResult> LocalAsync(IReadOnlyList<string> wanted, CancellationToken cancellationToken)
+    {
+        var connection = await _programs
+            .ResolveAsync(new HostConnection { Host = HostId.Local }, wanted, ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new HostConnectionResult
+        {
+            Connection = connection,
+            Os = _platform.PlatformKey,
+            Processor = _platform.Processor,
+        };
+    }
+
+    private async Task<HostConnectionResult> WslAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyList<string> wanted,
+        CancellationToken cancellationToken)
+    {
+        if (_platform.Current != PlatformId.Windows)
+        {
+            return HostConnectionResult.Refused($"WSL exists only on Windows, and this machine runs {_platform.PlatformKey}");
+        }
+
+        if (_processRunner.FindExecutable(HostCommandRunner.WslProgram) is null)
+        {
+            return HostConnectionResult.Refused("wsl.exe was not found, so WSL is not installed on this machine");
+        }
+
+        var read = _secrets.ReadWslItem(context.Layout, host.Name);
+
+        if (read.Item is not { } item)
+        {
+            return HostConnectionResult.Refused(read.Problem);
+        }
+
+        // Running a program in the distribution is the test that it exists and starts; the program
+        // chosen also measures what the distribution is.
+        var connection = new HostConnection { Host = host, Distribution = item.Distribution };
+        var uname = await RunAsync(connection, "uname", ["-sm"], ProbeBudget, cancellationToken).ConfigureAwait(false);
+
+        if (!uname.Succeeded)
+        {
+            return HostConnectionResult.Refused(
+                HostProbes.IsMissingDistribution(uname.StandardOutput + uname.StandardError)
+                    ? $"WSL has no distribution named '{item.Distribution}'"
+                    : HostProbes.Failure("the distribution did not start a program", uname));
+        }
+
+        var (os, processor) = HostProbes.ReadUname(uname.StandardOutput);
+
+        return new HostConnectionResult
+        {
+            Connection = await _programs.ResolveAsync(connection, wanted, ProbeBudget, cancellationToken).ConfigureAwait(false),
+            Superuser = item.Superuser,
+            Os = os,
+            Processor = processor,
+        };
+    }
+
+    private async Task<HostConnectionResult> SshAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyList<string> wanted,
+        CancellationToken cancellationToken)
+    {
+        if (!context.Config.Hosts.Ssh.TryGetValue(host.Name, out var settings))
+        {
+            return HostConnectionResult.Refused("it is not declared under hosts.ssh");
+        }
+
+        var read = _secrets.ReadSshItem(context.Layout, host.Name);
+
+        if (read.Item is not { } item)
+        {
+            return HostConnectionResult.Refused(read.Problem);
+        }
+
+        if (_processRunner.FindExecutable(HostCommandRunner.SshProgram) is null)
+        {
+            return HostConnectionResult.Refused("ssh was not found on this machine");
+        }
+
+        var resolution = await _addresses.ResolveAsync(item.Address, cancellationToken).ConfigureAwait(false);
+
+        if (!resolution.Resolved)
+        {
+            return HostConnectionResult.Refused(HostAddressResolver.Unresolved(resolution));
+        }
+
+        var connection = new HostConnection
+        {
+            Host = host,
+            Address = item.Address,
+            User = item.User,
+            Port = item.Port,
+            KeyFile = item.KeyFile,
+            KnownHostsFile = item.KnownHostsFile,
+            ConnectTimeoutSeconds = settings.ConnectTimeoutSeconds,
+            KeepAliveSeconds = settings.KeepAliveSeconds,
+            LocalDirectory = context.Layout.MainCheckoutRoot,
+        };
+
+        var budget = TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds) + ProbeBudget;
+        var probe = await _hostCommands.ProbeShellAsync(connection, budget, cancellationToken).ConfigureAwait(false);
+
+        if (!probe.Succeeded)
+        {
+            return HostConnectionResult.Refused(probe switch
+            {
+                { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds",
+                { ExitCode: SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)}",
+                _ => HostProbes.Failure("its shell could not run echo", probe),
+            });
+        }
+
+        connection = connection with { Shell = RemoteCommandLine.ReadShellProbe(probe.StandardOutput) };
+
+        return new HostConnectionResult
+        {
+            Connection = await _programs.ResolveAsync(connection, wanted, budget, cancellationToken).ConfigureAwait(false),
+            Superuser = item.Superuser,
+        };
+    }
+
+    private Task<ProcessResult> RunAsync(
+        HostConnection connection,
+        string program,
+        IReadOnlyList<string> arguments,
+        TimeSpan budget,
+        CancellationToken cancellationToken)
+        => _hostCommands.RunAsync(
+            connection,
+            new HostCommand { Program = program, Arguments = arguments, Timeout = budget },
+            cancellationToken);
+}

@@ -6,6 +6,32 @@ public sealed class WorktreeSettings
     /// <summary>Longest worktree name permitted unless configured otherwise.</summary>
     public const int DefaultMaxNameLength = 10;
 
+    /// <summary>The worktrees root used when config.json names none.</summary>
+    public const string DefaultRoot = ".harness-config/worktrees";
+
+    /// <summary>
+    /// Where worktrees are created, relative to the main checkout. Configurable because the default
+    /// spends 22 characters of the Windows path budget before a worktree's own name, and a repository
+    /// whose build paths are long has no name left that fits; a shorter root is what buys those
+    /// characters back. The budget is still checked against the real path, so this never hides an
+    /// overrun, it only makes one avoidable.
+    /// </summary>
+    public string Root { get; init; } = DefaultRoot;
+
+    /// <summary>
+    /// Directories, relative to a worktree, holding measurements git does not track. Deleting a
+    /// worktree is refused while one of them holds anything, naming it, unless the deletion says to
+    /// delete the evidence too.
+    /// </summary>
+    /// <remarks>
+    /// Ignored files are otherwise deleted unchecked, as git deletes them. That is right for build
+    /// output and wrong for the only copy of a measurement: a lane's numbers live in an ignored
+    /// directory precisely because they are not source, and deleting the lane silently is how they
+    /// are lost. A refusal is preferred to preserving them file by file, which is more machinery and
+    /// more ways to be wrong about what it preserved.
+    /// </remarks>
+    public List<string> EvidenceRoots { get; init; } = [];
+
     /// <summary>
     /// Longest permitted worktree name. The default keeps a worktree's build tree inside
     /// the Windows path budget for a repository at a typical depth. The budget itself is

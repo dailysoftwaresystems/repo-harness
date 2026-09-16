@@ -13,7 +13,7 @@ internal static class InitCommand
     {
         var command = new Command(
             Name,
-            "Create .harness-config with its configuration, worktrees and ssh directories, and ignore rules.");
+            "Create .harness-config with its configuration, its worktrees, runner and connection-data directories, and the ignore rules that keep the untracked ones out of git.");
 
         GlobalOptions.AddTo(command);
 

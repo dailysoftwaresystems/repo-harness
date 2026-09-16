@@ -14,7 +14,38 @@ public sealed class RunnerConfig
     public List<string> Legs { get; init; } = [];
 
     /// <summary>Phases executed in order; a failing phase ends that leg.</summary>
+    /// <remarks>
+    /// A runner declares <see cref="Phases"/> or <see cref="Action"/>, never both. Two descriptions
+    /// of what a runner does would eventually disagree, and nothing could say which one ran.
+    /// </remarks>
     public List<RunnerPhase> Phases { get; init; } = [];
+
+    /// <summary>
+    /// The action file under <c>.harness-config/runner/actions</c> holding this runner's steps, in
+    /// place of <see cref="Phases"/>. Every field a phase carries is a key on a step, so nothing the
+    /// verdict contract depends on is lost by declaring one instead of the other.
+    /// </summary>
+    public string? Action { get; init; }
+
+    /// <summary>
+    /// Whether this runner needs the repository built first. A runner that says so has its leg's tree
+    /// synced when the leg is an ssh host or a WSL distribution, then built, and only then run: a
+    /// runner that calls a program the build produces otherwise runs against whatever was left there.
+    /// </summary>
+    public bool RequireBuild { get; init; }
+
+    /// <summary>
+    /// Seconds without output after which a phase of this runner is treated as hung, replacing
+    /// <c>defaults.stallSeconds</c>. A stall bound rather than a time budget: output cadence stays
+    /// stable even when total duration does not.
+    /// </summary>
+    public int? StallSeconds { get; init; }
+
+    /// <summary>
+    /// Failures this runner is allowed to produce, each with the outcome to report instead of an
+    /// unexplained failure, and each gated on the checks that confirm it.
+    /// </summary>
+    public List<ExpectedException> ExpectedExceptions { get; init; } = [];
 
     /// <summary>
     /// Directories under the leg's work directory to wipe before every run. Use for

@@ -1,11 +1,10 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
-using RepoHarness.Core.FileSystem;
-using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Core.Hosts;
 
@@ -67,19 +66,13 @@ public interface IHostInspector
 
 /// <inheritdoc cref="IHostInspector"/>
 public sealed class HostInspector(
-    IHostPlatform platform,
-    IProcessRunner processRunner,
     IHostCommandRunner hostCommands,
-    IFileSystem fileSystem,
-    IFilePermissions filePermissions,
+    IHostConnector connector,
     IToolIdentityProvider identity,
     HostAgentService agent) : IHostInspector
 {
-    /// <summary>The ssh configuration file's name, inside the harness's ssh directory.</summary>
-    public const string SshConfigFileName = "config";
-
-    /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
-    private const int SshFailed = 255;
+    /// <summary>The program every host needs before DssHarness can be installed or run there.</summary>
+    public const string DotnetProgram = "dotnet";
 
     /// <summary>Longest a probe of a connected host may take.</summary>
     private static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
@@ -87,11 +80,8 @@ public sealed class HostInspector(
     /// <summary>Longest installing or updating DssHarness may take, which includes downloading it.</summary>
     private static readonly TimeSpan InstallBudget = TimeSpan.FromMinutes(10);
 
-    private readonly IHostPlatform _platform = platform;
-    private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
-    private readonly IFileSystem _fileSystem = fileSystem;
-    private readonly IFilePermissions _filePermissions = filePermissions;
+    private readonly IHostConnector _connector = connector;
     private readonly IToolIdentityProvider _identity = identity;
     private readonly HostAgentService _agent = agent;
 
@@ -105,12 +95,9 @@ public sealed class HostInspector(
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(emulators);
 
-        return host.Kind switch
-        {
-            HostKind.Local => InspectLocalAsync(emulators, cancellationToken),
-            HostKind.Wsl => InspectWslAsync(host, emulators, cancellationToken),
-            _ => InspectSshAsync(context, host, emulators, cancellationToken),
-        };
+        return host.Kind == HostKind.Local
+            ? InspectLocalAsync(emulators, cancellationToken)
+            : InspectRemoteAsync(context, host, emulators, cancellationToken);
     }
 
     /// <summary>This machine is measured in-process: the build doing the measuring is the one that would run its legs.</summary>
@@ -122,144 +109,22 @@ public sealed class HostInspector(
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
     }
 
-    private async Task<HostReport> InspectWslAsync(
-        HostId host,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
-        CancellationToken cancellationToken)
-    {
-        if (_platform.Current != PlatformId.Windows)
-        {
-            return Unavailable(host, $"WSL exists only on Windows, and this machine runs {_platform.PlatformKey}");
-        }
-
-        if (_processRunner.FindExecutable(HostCommandRunner.WslProgram) is null)
-        {
-            return Unavailable(host, "wsl.exe was not found, so WSL is not installed on this machine");
-        }
-
-        // Running a program in the distribution is the test that it exists and starts; the program
-        // chosen also measures what the distribution is.
-        var connection = new HostConnection { Host = host };
-        var uname = await RunAsync(connection, "uname", ["-sm"], ProbeBudget, cancellationToken).ConfigureAwait(false);
-
-        if (!uname.Succeeded)
-        {
-            return Unavailable(host, HostProbes.IsMissingDistribution(uname.StandardOutput + uname.StandardError)
-                ? $"WSL has no distribution named '{host.Name}'"
-                : Failure("the distribution did not start a program", uname));
-        }
-
-        var (os, processor) = HostProbes.ReadUname(uname.StandardOutput);
-
-        return await PrepareAsync(
-            new HostReport { Host = host, Os = os, Processor = processor },
-            connection,
-            emulators,
-            cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<HostReport> InspectSshAsync(
+    /// <summary>
+    /// A WSL distribution or an ssh host is reached first, so that a host that cannot be reached at all
+    /// is reported as that, and never as a host missing something nobody could look for.
+    /// </summary>
+    private async Task<HostReport> InspectRemoteAsync(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         CancellationToken cancellationToken)
     {
-        if (!context.Config.Hosts.Ssh.TryGetValue(host.Name, out var settings))
-        {
-            return Unavailable(host, "it is not declared under hosts.ssh");
-        }
+        var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
+        var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
 
-        var configFile = Path.Combine(context.Layout.SshDirectory, SshConfigFileName);
-        var shownConfig = Show(context, configFile);
-
-        if (!_fileSystem.FileExists(configFile))
-        {
-            return Unavailable(host, $"{shownConfig} does not exist; declare 'Host {host.Name}' there, with its address, user and key");
-        }
-
-        string? problem;
-
-        try
-        {
-            problem = CheckSshFiles(context, host, configFile, shownConfig);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // This host's problem, not every host's: a file this user cannot read, or whose permissions cannot
-            // be read, stops only the hosts that depend on it.
-            problem = $"{shownConfig}, or a key it names, could not be read: {ex.Message}";
-        }
-
-        if (problem is not null)
-        {
-            return Unavailable(host, problem);
-        }
-
-        if (_processRunner.FindExecutable(HostCommandRunner.SshProgram) is null)
-        {
-            return Unavailable(host, "ssh was not found on this machine");
-        }
-
-        var connection = new HostConnection
-        {
-            Host = host,
-            SshConfigFile = configFile,
-            ConnectTimeoutSeconds = settings.ConnectTimeoutSeconds,
-            KeepAliveSeconds = settings.KeepAliveSeconds,
-            LocalDirectory = context.Layout.MainCheckoutRoot,
-        };
-
-        var budget = TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds) + ProbeBudget;
-        var probe = await _hostCommands.ProbeShellAsync(connection, budget, cancellationToken).ConfigureAwait(false);
-
-        if (!probe.Succeeded)
-        {
-            return Unavailable(host, probe switch
-            {
-                { TimedOut: true } => $"it did not answer within {budget.TotalSeconds:0} seconds",
-                { ExitCode: SshFailed } => $"ssh could not connect: {HostProbes.Excerpt(probe.StandardError)}",
-                _ => Failure("its shell could not run echo", probe),
-            });
-        }
-
-        return await PrepareAsync(
-            new HostReport { Host = host },
-            connection with { Shell = RemoteCommandLine.ReadShellProbe(probe.StandardOutput) },
-            emulators,
-            cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// What stops ssh from using <paramref name="configFile"/> for <paramref name="host"/> safely, or
-    /// <see langword="null"/> when nothing does. Checked before connecting, because what ssh itself says
-    /// about either file points nowhere near it.
-    /// </summary>
-    private string? CheckSshFiles(HarnessContext context, HostId host, string configFile, string shownConfig)
-    {
-        var entry = SshConfigFile.Find(_fileSystem.ReadAllText(configFile), host.Name);
-
-        if (entry is null)
-        {
-            return $"{shownConfig} has no 'Host {host.Name}' entry; ssh matches the name exactly, case included";
-        }
-
-        // ssh reads a file passed with -F whatever its permissions, and whoever can change that file can make
-        // ssh run any command as this user, so a file other users can change is refused here instead.
-        if (_filePermissions.IsWritableByOthers(configFile))
-        {
-            return $"other users can change {shownConfig}, and whoever can change it can make ssh run any command as you; {HowToProtect(configFile)}";
-        }
-
-        // A key other users can read, ssh ignores, with a warning that does not say what that does to the connection.
-        foreach (var key in entry.IdentityFiles.Select(file => ResolveKey(context, file)).OfType<string>())
-        {
-            if (_fileSystem.FileExists(key) && !_filePermissions.IsPrivate(key))
-            {
-                return $"other users can read the key {key}, so ssh ignores it; {HowToProtect(key)}";
-            }
-        }
-
-        return null;
+        return opened.Connection is { } connection
+            ? await PrepareAsync(found, connection, emulators, cancellationToken).ConfigureAwait(false)
+            : found with { Reason = opened.Problem };
     }
 
     /// <summary>Brings DssHarness on a reachable host to this machine's build, then asks it what the host is.</summary>
@@ -270,12 +135,15 @@ public sealed class HostInspector(
         CancellationToken cancellationToken)
     {
         var root = _identity.Current;
+        var dotnet = connection.Located(DotnetProgram);
 
-        var sdks = await RunAsync(connection, "dotnet", ["--list-sdks"], ProbeBudget, cancellationToken).ConfigureAwait(false);
+        var sdks = dotnet is { Present: true }
+            ? await RunAsync(connection, connection.Spell(DotnetProgram), ["--list-sdks"], ProbeBudget, cancellationToken).ConfigureAwait(false)
+            : null;
 
-        if (!sdks.Succeeded)
+        if (sdks is null || !sdks.Succeeded)
         {
-            return found with { Reason = DotnetMissing(connection, sdks) };
+            return found with { Reason = NoSdk(dotnet, sdks) };
         }
 
         var listed = HostProbes.ReadSdks(sdks.StandardOutput);
@@ -324,12 +192,16 @@ public sealed class HostInspector(
         ToolIdentity root,
         CancellationToken cancellationToken)
     {
-        var tools = await RunAsync(connection, "dotnet", ["tool", "list", "--global", "--format", "json"], ProbeBudget, cancellationToken)
-            .ConfigureAwait(false);
+        var tools = await RunAsync(
+            connection,
+            connection.Spell(DotnetProgram),
+            ["tool", "list", "--global", "--format", "json"],
+            ProbeBudget,
+            cancellationToken).ConfigureAwait(false);
 
         if (!tools.Succeeded || !HostProbes.TryReadToolVersion(tools.StandardOutput, ToolPackage.Id, out var installed))
         {
-            return (Failure("its global .NET tools could not be listed", tools), null);
+            return (HostProbes.Failure("its global .NET tools could not be listed", tools), null);
         }
 
         if (installed is null)
@@ -338,7 +210,7 @@ public sealed class HostInspector(
 
             return install.Succeeded
                 ? (null, $"installed {ToolPackage.Command} {root.Version}")
-                : (Failure($"installing {ToolPackage.Command} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
+                : (HostProbes.Failure($"installing {ToolPackage.Command} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
         }
 
         if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
@@ -371,14 +243,14 @@ public sealed class HostInspector(
 
         return update.Succeeded
             ? (null, $"updated {ToolPackage.Command} {installed} to {root.Version}")
-            : (Failure($"updating {ToolPackage.Command} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
+            : (HostProbes.Failure($"updating {ToolPackage.Command} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
     }
 
     /// <summary>Runs <c>dotnet tool install</c> or <c>update</c> for exactly <paramref name="version"/>, from nuget.org alone.</summary>
     private Task<ProcessResult> RunToolCommandAsync(HostConnection connection, string verb, string version, CancellationToken cancellationToken)
         => RunAsync(
             connection,
-            "dotnet",
+            connection.Spell(DotnetProgram),
             ["tool", verb, "--global", ToolPackage.Id, "--version", version, "--source", ToolPackage.Source],
             InstallBudget,
             cancellationToken);
@@ -415,7 +287,7 @@ public sealed class HostInspector(
 
         if (!answer.Succeeded)
         {
-            return found with { Reason = Failure($"{ToolPackage.Command} did not answer from {shownTool}, where global tools are installed", answer) };
+            return found with { Reason = HostProbes.Failure($"{ToolPackage.Command} did not answer from {shownTool}, where global tools are installed", answer) };
         }
 
         var start = answer.StandardOutput.IndexOf('{', StringComparison.Ordinal);
@@ -478,12 +350,46 @@ public sealed class HostInspector(
 
         if (!listing.Succeeded)
         {
-            return Failure("its running processes could not be listed, so DssHarness there was not updated", listing);
+            return HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing);
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
             ? $"{ToolPackage.Command} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
             : null;
+    }
+
+    /// <summary>
+    /// Why the host cannot run the SDK, told apart by what looking for <c>dotnet</c> established. "It is
+    /// not installed" and "it is installed where a command run without a login shell cannot see it" call
+    /// for different things to be done, and reporting the first for the second sends somebody to install
+    /// a second copy of what is already there.
+    /// </summary>
+    /// <param name="dotnet">Where <c>dotnet</c> was found, or <see langword="null"/> when it was never looked for.</param>
+    /// <param name="sdks">What running it did, or <see langword="null"/> when it was never run.</param>
+    private static string NoSdk(ProgramLocation? dotnet, ProcessResult? sdks)
+    {
+        var sdk = $"the .NET {ToolPackage.MinimumSdkMajor} SDK";
+
+        if (dotnet is null or { Found: ProgramFound.Unreadable })
+        {
+            return $"whether {sdk} is installed there could not be established: the host did not answer when asked "
+                + $"where 'dotnet' is; run again once it does, and see '{ToolPackage.Command} legs' for what answered";
+        }
+
+        if (dotnet.Found == ProgramFound.Nowhere)
+        {
+            return $"{sdk} is not installed there: 'dotnet' is neither on the PATH of a command run without a login "
+                + $"shell nor in any of the directories an installer uses; install it there, or run "
+                + $"'{ToolPackage.Command} {ToolProvisionService.CommandName}'";
+        }
+
+        // Reached only when dotnet was found and then would not run: a partial install, a broken
+        // permission, or an architecture the host cannot execute. What it said is the whole diagnosis.
+        var where = dotnet.Found == ProgramFound.OffPath
+            ? $"'dotnet' is installed at '{dotnet.Path}', off the PATH of a command run without a login shell, and did not run from there"
+            : "'dotnet' is on the PATH of a command run without a login shell there, and did not run";
+
+        return sdks is null ? where : HostProbes.Failure(where, sdks);
     }
 
     private Task<ProcessResult> RunAsync(
@@ -552,51 +458,4 @@ public sealed class HostInspector(
             return false;
         }
     }
-
-    /// <summary>
-    /// Where a key the ssh configuration names is, resolved the way ssh resolves it when started from the
-    /// main checkout; <see langword="null"/> for a path holding a token only ssh can expand.
-    /// </summary>
-    private string? ResolveKey(HarnessContext context, string file)
-    {
-        if (file.Contains('%', StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        if (file.StartsWith("~/", StringComparison.Ordinal))
-        {
-            return Path.GetFullPath(Path.Combine(_platform.HomeDirectory, file[2..]));
-        }
-
-        return Path.GetFullPath(file, context.Layout.MainCheckoutRoot);
-    }
-
-    private string HowToProtect(string path) => _platform.Current == PlatformId.Windows
-        ? $"make it private with: icacls \"{path}\" /inheritance:r /grant:r \"%USERNAME%:F\""
-        : $"make it private with: chmod 600 '{path}'";
-
-    private static string DotnetMissing(HostConnection connection, ProcessResult result)
-        => connection.Host.Kind == HostKind.Wsl
-            && HostProbes.IsMissingProgramInWsl(result.StandardOutput + result.StandardError, "dotnet")
-                ? $"the .NET {ToolPackage.MinimumSdkMajor} SDK is not installed in the distribution"
-                : Failure(
-                    $"dotnet did not run there; install the .NET {ToolPackage.MinimumSdkMajor} SDK so that dotnet is on the PATH of commands run without a login shell",
-                    result);
-
-    private static string Failure(string what, ProcessResult result)
-    {
-        if (result.TimedOut)
-        {
-            return $"{what}: there was no answer within {result.Duration.TotalSeconds:0} seconds";
-        }
-
-        var said = string.IsNullOrWhiteSpace(result.StandardError) ? result.StandardOutput : result.StandardError;
-        return $"{what} (exit {result.ExitCode}): {HostProbes.Excerpt(said)}";
-    }
-
-    private static HostReport Unavailable(HostId host, string reason) => new() { Host = host, Reason = reason };
-
-    private static string Show(HarnessContext context, string path)
-        => Path.GetRelativePath(context.Layout.MainCheckoutRoot, path).Replace('\\', '/');
 }

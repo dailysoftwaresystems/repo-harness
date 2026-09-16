@@ -71,6 +71,8 @@ public sealed class ConfigStoreTests
                 Wsl = { ["Ubuntu"] = new WslHostConfig { RepositoryPath = "~/src/repo" } },
                 Ssh = { ["vps"] = new SshHostConfig { RepositoryPath = "/home/dev/repo", BuildCores = 32, TestCores = 16 } },
             },
+            SshItems = ["vps"],
+            WslDistros = ["Ubuntu"],
             Emulators =
             {
                 ["qemu-arm64"] = new EmulatorConfig
@@ -167,6 +169,7 @@ public sealed class ConfigStoreTests
             {
               "toolchains": { "msvc": { "generator": "Ninja" } },
               "buildConfigs": { "debug": { "cmakeBuildType": "Debug" } },
+              "sshItems": ["vps"], "wslDistros": ["Ubuntu"],
               "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
               "emulators": { "qemu-arm64": {{QemuArm64}} },
               "legs": { "local-debug": { "os": "linux", "processor": "x86_64", "config": "debug" } },
@@ -336,6 +339,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid($$"""
             {
               "buildConfigs": { "debug": {} },
+              "sshItems": ["vps"], "wslDistros": ["Ubuntu"],
               "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
               "emulators": { "qemu-arm64": {{QemuArm64}} },
               "legs": { "x": {{leg}} }
@@ -413,7 +417,7 @@ public sealed class ConfigStoreTests
     [InlineData("D:/src/repo")]
     public void Load_AcceptsAnSshRepositoryPath_ThatNamesItsDirectory(string path)
     {
-        var config = LoadValid($$"""{ "hosts": { "ssh": { "vps": { "repositoryPath": "{{path}}" } } } }""");
+        var config = LoadValid($$"""{ "sshItems": ["vps"], "hosts": { "ssh": { "vps": { "repositoryPath": "{{path}}" } } } }""");
 
         Assert.True(config.Hosts.Ssh.ContainsKey("vps"));
     }
@@ -591,6 +595,7 @@ public sealed class ConfigStoreTests
                 ProcessSampleSeconds = 2,
             },
             Contention = new ContentionConfig { BuildTools = ["ninja"], SharedResourceTools = ["compiler-daemon"] },
+            SshItems = ["mac"],
             Hosts = new HostsConfig
             {
                 Ssh =

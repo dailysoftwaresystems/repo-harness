@@ -22,9 +22,22 @@ root.Subcommands.Add(SetAnchorCommand.Create());
 root.Subcommands.Add(ReadAnchorCommand.Create());
 root.Subcommands.Add(ReadAnchorsCommand.Create());
 root.Subcommands.Add(CheckAnchorBalanceCommand.Create());
+root.Subcommands.Add(CheckAnchorCitationsCommand.Create());
+root.Subcommands.Add(CheckRootLitterCommand.Create());
+root.Subcommands.Add(FixLineEndingsCommand.Create());
+root.Subcommands.Add(CheckCiLegsCommand.Create());
 root.Subcommands.Add(LegsCommand.Create());
+root.Subcommands.Add(InstallMissingToolsCommand.Create());
+root.Subcommands.Add(SyncCommand.Create());
+root.Subcommands.Add(BuildCommand.Create());
+root.Subcommands.Add(TestCommand.Create());
+root.Subcommands.Add(RunCommand.Create());
 root.Subcommands.Add(HostExecCommand.Create());
 root.Subcommands.Add(HelpCommand.Create());
+
+// Served on a host for the machine syncing to it, and never typed: every operation it performs is
+// one the machine asking already decided on.
+root.Subcommands.Add(SyncServeCommand.Create());
 
 // Served on a host, for the DssHarness on the machine that reaches it. A run request goes back
 // through this same parser, in the host's copy of the repository, which is why it is wired here.

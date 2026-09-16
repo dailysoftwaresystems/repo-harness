@@ -17,7 +17,14 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal(0, result.ExitCode);
 
-        foreach (var command in new[] { "init", "verify-git", "create-worktree", "delete-worktree", "list-worktree", "legs", "host-exec", "help" })
+        string[] commands =
+        [
+            "init", "verify-git", "create-worktree", "delete-worktree", "list-worktree",
+            "check-root-litter", "check-anchor-citations", "fix-line-endings", "check-ci-legs",
+            "legs", "install-missing-tools", "sync", "build", "test", "run", "host-exec", "help",
+        ];
+
+        foreach (var command in commands)
         {
             Assert.Contains(command, result.StandardOutput, StringComparison.Ordinal);
         }

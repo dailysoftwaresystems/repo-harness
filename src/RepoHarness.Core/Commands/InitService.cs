@@ -6,6 +6,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Core.Commands;
 
@@ -18,33 +19,49 @@ public sealed class InitService(
     IProjectDetector projectDetector,
     VerifyGitService verifyGitService,
     IAnchorRegistryLocator anchorRegistryLocator,
+    IToolProvisionService toolProvisionService,
     IHostPlatform platform)
 {
     /// <summary>
-    /// Ignore rules the harness owns. Contents of the worktrees and ssh directories
-    /// are excluded while their placeholders are kept, which is only possible by
-    /// excluding the directories' <em>contents</em> rather than the directories: git
-    /// cannot re-include a file whose parent directory is itself excluded.
+    /// Builds the ignore rules the harness owns, from the layout constants rather than by repeating
+    /// the literals. A renamed directory would otherwise leave the rules pointing at the old path,
+    /// and for the directories holding connection data that means committing a private key.
     /// </summary>
-    private static readonly string[] IgnoreRules = BuildIgnoreRules();
-
-    /// <summary>
-    /// Builds the rules from the layout constants rather than repeating the literals.
-    /// A renamed directory would otherwise leave the rules silently pointing at the
-    /// old path, and for the ssh directory that means committing private keys.
-    /// </summary>
-    private static string[] BuildIgnoreRules()
+    /// <remarks>
+    /// Contents are excluded while placeholders are kept, which is only possible by excluding each
+    /// directory's <em>contents</em> rather than the directory: git cannot re-include a file whose
+    /// parent directory is itself excluded. The worktrees root is taken from the configuration,
+    /// because a configured root that nothing ignores puts whole checkouts into <c>git status</c>.
+    /// </remarks>
+    private static string[] BuildIgnoreRules(WorktreeSettings worktrees)
     {
         var root = HarnessLayout.DirectoryName;
         var keep = HarnessLayout.GitKeepFileName;
+        var runner = $"{root}/{HarnessLayout.RunnerDirectoryName}";
+        var worktreesRoot = worktrees.Root.Replace('\\', '/').Trim('/');
 
         return
         [
             $"/{root}/{HarnessLayout.LockFileName}",
-            $"/{root}/{HarnessLayout.WorktreesDirectoryName}/*",
-            $"!/{root}/{HarnessLayout.WorktreesDirectoryName}/{keep}",
-            $"/{root}/{HarnessLayout.SshDirectoryName}/*",
-            $"!/{root}/{HarnessLayout.SshDirectoryName}/{keep}",
+
+            // Run logs, which exist to be read after a run and never to be committed.
+            $"/{root}/{HarnessLayout.RunsDirectoryName}/",
+
+            $"/{worktreesRoot}/*",
+            $"!/{worktreesRoot}/{keep}",
+
+            // One directory per host, each holding an address, a user and a key. Nothing under
+            // either may ever be tracked.
+            $"/{root}/{HarnessLayout.SshItemsDirectoryName}/*",
+            $"!/{root}/{HarnessLayout.SshItemsDirectoryName}/{keep}",
+            $"/{root}/{HarnessLayout.WslDistrosDirectoryName}/*",
+            $"!/{root}/{HarnessLayout.WslDistrosDirectoryName}/{keep}",
+
+            // Action files are tracked; the values they read are not.
+            $"/{runner}/{HarnessLayout.RunnerEnvDirectoryName}/*",
+            $"!/{runner}/{HarnessLayout.RunnerEnvDirectoryName}/{keep}",
+            $"/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/*",
+            $"!/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/{keep}",
         ];
     }
 
@@ -55,6 +72,7 @@ public sealed class InitService(
     private readonly IProjectDetector _projectDetector = projectDetector;
     private readonly VerifyGitService _verifyGitService = verifyGitService;
     private readonly IAnchorRegistryLocator _anchorRegistryLocator = anchorRegistryLocator;
+    private readonly IToolProvisionService _toolProvisionService = toolProvisionService;
     private readonly IHostPlatform _platform = platform;
 
     /// <summary>
@@ -96,9 +114,7 @@ public sealed class InitService(
         var root = layout.MainCheckoutRoot;
         var actions = new List<string>();
 
-        EnsureDirectory(Path.Combine(root, HarnessLayout.DirectoryName), actions);
-        EnsurePlaceholderDirectory(layout.WorktreesDirectory, actions);
-        EnsurePlaceholderDirectory(layout.SshDirectory, actions);
+        EnsureDirectory(root, Path.Combine(root, HarnessLayout.DirectoryName), actions);
 
         var configFile = Path.Combine(root, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
         if (_fileSystem.FileExists(configFile))
@@ -115,16 +131,23 @@ public sealed class InitService(
                 : $"created {Describe(root, configFile)} (detected {string.Join(", ", detected.Select(d => d.Type))}; legs for {_platform.PlatformKey} {_platform.Processor})");
         }
 
+        // Read back rather than assumed, so a configuration that already existed names the
+        // registries, the worktrees root and the hosts it declares, not the defaults. Read before
+        // the ignore rules are written, because the rules depend on the configured worktrees root.
+        var config = _configStore.Load(configFile);
+
+        EnsurePlaceholderDirectory(root, layout.WorktreesDirectoryUnder(config.Worktrees.Root), actions);
+        EnsurePlaceholderDirectory(root, layout.SshItemsDirectory, actions);
+        EnsurePlaceholderDirectory(root, layout.WslDistrosDirectory, actions);
+        EnsureDirectory(root, layout.RunnerActionsDirectory, actions);
+        EnsurePlaceholderDirectory(root, layout.RunnerEnvDirectory, actions);
+        EnsurePlaceholderDirectory(root, layout.RunnerSecretsDirectory, actions);
+
         var gitIgnorePath = Path.Combine(root, ".gitignore");
-        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, IgnoreRules)
+        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, BuildIgnoreRules(config.Worktrees))
             ? $"updated {Describe(root, gitIgnorePath)}"
             : $"kept    {Describe(root, gitIgnorePath)} (rules already current)");
 
-        // Read back rather than assumed, so a configuration that already existed names the
-        // registries, not the defaults. Each registry is created where every anchor command looks
-        // for it: one git tracks belongs to the branch, so it goes in the tree init runs in, and
-        // one git ignores goes in the main checkout.
-        var config = _configStore.Load(configFile);
         var registries = await _anchorRegistryLocator
             .LocateAsync(new HarnessContext(layout, config), cancellationToken)
             .ConfigureAwait(false);
@@ -133,6 +156,8 @@ public sealed class InitService(
         {
             EnsureAnchorRegistry(root, registry, config.Anchors, actions);
         }
+
+        await ProvisionAsync(root, config, actions, cancellationToken).ConfigureAwait(false);
 
         return CommandOutcome.Ok($"initialised {root}", actions);
     }
@@ -159,7 +184,7 @@ public sealed class InitService(
         actions.Add($"created {shown}");
     }
 
-    private void EnsureDirectory(string path, List<string> actions)
+    private void EnsureDirectory(string root, string path, List<string> actions)
     {
         if (_fileSystem.DirectoryExists(path))
         {
@@ -167,14 +192,14 @@ public sealed class InitService(
         }
 
         _fileSystem.CreateDirectory(path);
-        actions.Add($"created {Path.GetFileName(path)}/");
+        actions.Add($"created {Describe(root, path)}/");
     }
 
     /// <summary>
     /// Creates a directory whose contents are ignored, plus the placeholder that
     /// keeps the directory itself in the repository.
     /// </summary>
-    private void EnsurePlaceholderDirectory(string path, List<string> actions)
+    private void EnsurePlaceholderDirectory(string root, string path, List<string> actions)
     {
         _fileSystem.CreateDirectory(path);
 
@@ -185,7 +210,54 @@ public sealed class InitService(
         }
 
         _fileSystem.WriteAllTextAtomic(placeholder, string.Empty);
-        actions.Add($"created {Path.GetFileName(path)}/{HarnessLayout.GitKeepFileName}");
+        actions.Add($"created {Describe(root, placeholder)}");
+    }
+
+    /// <summary>
+    /// Installs or updates what each declared leg's host is missing, so a fresh clone is ready to run
+    /// rather than ready to be told what is missing.
+    /// </summary>
+    /// <remarks>
+    /// Nothing happens where no leg is declared, which is every first <c>init</c>: the configuration
+    /// it has just written names no host. Where hosts are declared, a failure here is reported and
+    /// never fatal — the harness directory exists either way, and a host that is switched off is a
+    /// normal state that must not leave a repository half-initialised.
+    /// </remarks>
+    private async Task ProvisionAsync(
+        string root,
+        HarnessConfig config,
+        List<string> actions,
+        CancellationToken cancellationToken)
+    {
+        if (config.Legs.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var report = await _toolProvisionService
+                .ProvisionAsync(root, legNames: null, cancellationToken)
+                .ConfigureAwait(false);
+
+            foreach (var leg in report.Legs)
+            {
+                actions.Add(leg.Unreachable is { } reason
+                    ? $"tools   {leg.Leg} on {leg.Host}: not checked, {reason}"
+                    : $"tools   {leg.Leg} on {leg.Host}: "
+                        + string.Join(", ", leg.Tools.Select(tool => $"{tool.Tool} {tool.StateName}")));
+            }
+
+            if (!report.Passed)
+            {
+                actions.Add(
+                    "tools   some legs are missing tools; run 'DssHarness install-missing-tools' for the detail");
+            }
+        }
+        catch (Exception ex) when (ex is HarnessException or ConfigException or Processes.ProgramStartException)
+        {
+            actions.Add($"tools   could not be checked: {ex.Message}");
+        }
     }
 
     private static string Describe(string root, string path)

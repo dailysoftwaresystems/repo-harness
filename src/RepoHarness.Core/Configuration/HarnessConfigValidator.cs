@@ -49,6 +49,10 @@ public static class HarnessConfigValidator
         ValidateCommit(config.Commit, problems);
         ValidateSync(config.Sync, problems);
         ValidateContention(config.Contention, problems);
+        ValidateSecretItems(config, problems);
+        ValidateTiming(config, problems);
+        ValidateLineEndings(config.LineEndings, problems);
+        ValidateCi(config.Ci, problems);
 
         return problems;
     }
@@ -117,6 +121,18 @@ public static class HarnessConfigValidator
     {
         RequireAtLeastOne(worktrees.MaxNameLength, "worktrees.maxNameLength", problems);
 
+        // A root outside the checkout would put worktrees where neither the ignore rules nor the
+        // path budget reach them, and one that is the checkout itself would make every worktree a
+        // sibling of the tree it came from.
+        RequireRelativePaths([worktrees.Root], "worktrees.root", problems);
+
+        if (worktrees.Root.Trim() is "" or "." or "./")
+        {
+            problems.Add("worktrees.root cannot be the repository root itself");
+        }
+
+        RequireRelativePaths(worktrees.EvidenceRoots, "worktrees.evidenceRoots", problems);
+
         // A negative reserve makes the path budget arithmetic always pass, silently
         // disabling the only guard against the Windows path limit.
         if (worktrees.PathBudgetReserve < 0)
@@ -163,6 +179,74 @@ public static class HarnessConfigValidator
         }
 
         RequireAtLeastOne(anchors.MinimumIdSegments, "anchors.minimumIdSegments", problems);
+
+        RequireRelativePaths(anchors.CitationRoots, "anchors.citationRoots", problems);
+    }
+
+    /// <summary>
+    /// Checks the directories holding connection data. They are named here and described nowhere:
+    /// a name reaches a directory path and an ssh command line, so anything that could leave the
+    /// harness directory or be read as an option is refused before it is used.
+    /// </summary>
+    private static void ValidateSecretItems(HarnessConfig config, List<string> problems)
+    {
+        CheckItemNames(config.SshItems, "sshItems", problems);
+        CheckItemNames(config.WslDistros, "wslDistros", problems);
+
+        // An ssh host reached by a name with no directory behind it has nowhere to find its address,
+        // and would fail at connect time with a message about ssh rather than about this file.
+        foreach (var host in config.Hosts.Ssh.Keys.Where(host => DeclaredName.In(config.SshItems, host) is null))
+        {
+            problems.Add(
+                $"host ssh '{host}' has no entry in sshItems, so nothing declares where its "
+                + "address, user and key are kept");
+        }
+
+        foreach (var distro in config.Hosts.Wsl.Keys.Where(distro => DeclaredName.In(config.WslDistros, distro) is null))
+        {
+            problems.Add($"host wsl '{distro}' has no entry in wslDistros");
+        }
+    }
+
+    private static void CheckItemNames(List<string> names, string setting, List<string> problems)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in names)
+        {
+            if (!seen.Add(name))
+            {
+                problems.Add($"{setting} declares '{name}' more than once; names are compared ignoring case");
+            }
+
+            CheckHostName(name, setting, problems);
+        }
+    }
+
+    private static void ValidateTiming(HarnessConfig config, List<string> problems)
+    {
+        foreach (var (pattern, index) in config.BuildTimingRegex.Select((pattern, index) => (pattern, index)))
+        {
+            CheckPattern(pattern, $"buildTimingRegex[{index}]", problems);
+        }
+
+        foreach (var (pattern, index) in config.RunTimingRegex.Select((pattern, index) => (pattern, index)))
+        {
+            CheckPattern(pattern, $"runTimingRegex[{index}]", problems);
+        }
+    }
+
+    private static void ValidateLineEndings(LineEndingSettings lineEndings, List<string> problems)
+        => RequireRelativePaths(lineEndings.Exclude, "lineEndings.exclude", problems);
+
+    private static void ValidateCi(CiSettings ci, List<string> problems)
+    {
+        RequireRelativePaths(ci.Workflows, "ci.workflows", problems);
+
+        if (ci.LegBudgetMinutes < 0)
+        {
+            problems.Add($"ci.legBudgetMinutes cannot be negative, found {ci.LegBudgetMinutes}");
+        }
     }
 
     /// <summary>Checks one registry path, and reports whether it is usable.</summary>
@@ -568,17 +652,37 @@ public static class HarnessConfigValidator
 
     private static void ValidateRunnersAndExec(HarnessConfig config, List<string> problems)
     {
-        foreach (var (name, runner) in config.Runners)
+        foreach (var (name, runner) in config.PredefinedRunners)
         {
             foreach (var leg in runner.Legs.Where(leg => !config.Legs.ContainsKey(leg)))
             {
-                problems.Add($"runner '{name}' names leg '{leg}', which is not declared");
+                problems.Add($"predefined runner '{name}' names leg '{leg}', which is not declared");
             }
 
-            if (runner.Phases.Count == 0)
+            // Two descriptions of what one runner does would eventually disagree, and nothing could
+            // say which of them ran.
+            var hasAction = !string.IsNullOrWhiteSpace(runner.Action);
+
+            if (hasAction && runner.Phases.Count > 0)
             {
-                problems.Add($"runner '{name}' declares no phases");
+                problems.Add($"predefined runner '{name}' declares both an action file and phases; it takes one or the other");
             }
+            else if (!hasAction && runner.Phases.Count == 0)
+            {
+                problems.Add($"predefined runner '{name}' declares neither an action file nor phases");
+            }
+
+            if (hasAction)
+            {
+                RequireRelativePaths([runner.Action!], $"predefined runner '{name}' action", problems);
+            }
+
+            if (runner.StallSeconds is { } runnerStall && runnerStall < 0)
+            {
+                problems.Add($"predefined runner '{name}' has a negative stallSeconds");
+            }
+
+            ValidateExpectedExceptions(config, name, runner, problems);
 
             foreach (var phase in runner.Phases)
             {
@@ -586,21 +690,165 @@ public static class HarnessConfigValidator
                 // anything: an empty command fails later as an empty file name.
                 if (IsBlankCommand(phase.Command))
                 {
-                    problems.Add($"runner '{name}' phase '{phase.Name}' has an empty command");
+                    problems.Add($"predefined runner '{name}' phase '{phase.Name}' has an empty command");
                 }
 
                 if (phase.StallSeconds is { } stall && stall < 0)
                 {
-                    problems.Add($"runner '{name}' phase '{phase.Name}' has a negative stallSeconds");
+                    problems.Add($"predefined runner '{name}' phase '{phase.Name}' has a negative stallSeconds");
                 }
 
-                CheckPattern(phase.SuccessPattern, $"runner '{name}' phase '{phase.Name}' successPattern", problems);
+                CheckPattern(phase.SuccessPattern, $"predefined runner '{name}' phase '{phase.Name}' successPattern", problems);
             }
         }
 
         foreach (var (name, _) in config.Exec.Where(entry => string.IsNullOrWhiteSpace(entry.Value.Command)))
         {
             problems.Add($"exec '{name}' has an empty command");
+        }
+    }
+
+    /// <summary>
+    /// Checks every excused failure a runner declares, and the checks that gate it.
+    /// </summary>
+    /// <remarks>
+    /// An excusal that nobody can audit stops being a record of a measured confound and becomes a
+    /// way to make a regression invisible, so an entry that does not show its work is refused rather
+    /// than trusted. Every measurement is biased toward ABSENT: where this cannot establish that an
+    /// entry is scoped and earned, it refuses the entry instead of giving it the benefit of the doubt.
+    /// </remarks>
+    private static void ValidateExpectedExceptions(
+        HarnessConfig config,
+        string name,
+        RunnerConfig runner,
+        List<string> problems)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (expected, index) in runner.ExpectedExceptions.Select((entry, index) => (entry, index)))
+        {
+            var owner = $"predefined runner '{name}' expectedExceptions[{index}]";
+
+            RequireText(expected.ExceptionType, $"{owner} exceptionType", problems);
+            RequireText(expected.Message, $"{owner} message", problems);
+            RequireText(expected.EarnedOn, $"{owner} earnedOn", problems);
+            RequireText(expected.EarnedAt, $"{owner} earnedAt", problems);
+            RequireText(expected.Mechanism, $"{owner} mechanism", problems);
+            RequireText(expected.Anchor, $"{owner} anchor", problems);
+
+            if (!string.IsNullOrWhiteSpace(expected.EarnedOn)
+                && !DateOnly.TryParseExact(expected.EarnedOn, "yyyy-MM-dd", out _))
+            {
+                problems.Add($"{owner} earnedOn '{expected.EarnedOn}' is not a date spelled yyyy-MM-dd");
+            }
+
+            if (expected.ResultCode < 0)
+            {
+                problems.Add($"{owner} has a negative resultCode, which no process reports");
+            }
+
+            // An entry matching nothing in particular excuses whatever happens to fail, which is the
+            // unconditional claim this lint exists to refuse: it hides the regression it was written
+            // to explain. An empty list and a pattern that matches the empty string are the same
+            // claim written two ways.
+            if (expected.Messages.Count == 0)
+            {
+                problems.Add(
+                    $"{owner} names no messages, so it would excuse every failure of that exception type; "
+                    + "name the wording it was measured against");
+            }
+
+            foreach (var (message, messageIndex) in expected.Messages.Select((message, i) => (message, i)))
+            {
+                var pattern = $"{owner} messages[{messageIndex}]";
+                RequireText(message, pattern, problems);
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    continue;
+                }
+
+                if (!TryCompile(message, pattern, problems, out var regex))
+                {
+                    continue;
+                }
+
+                if (regex.IsMatch(string.Empty))
+                {
+                    problems.Add($"{pattern} '{message}' matches any message, which is an unconditional excusal");
+                }
+            }
+
+            // Two entries matching the same thing make which outcome is reported depend on their
+            // order in the file, which nothing else in this schema depends on.
+            var identity = expected.ExceptionType + " " + string.Join(" ", expected.Messages);
+
+            if (!seen.Add(identity))
+            {
+                problems.Add($"{owner} repeats an earlier entry's exceptionType and messages");
+            }
+
+            foreach (var (check, checkIndex) in expected.RunChecks.Select((check, i) => (check, i)))
+            {
+                ValidateRunCheck(config, name, $"{owner} runChecks[{checkIndex}]", check, problems);
+            }
+        }
+    }
+
+    private static void ValidateRunCheck(
+        HarnessConfig config,
+        string runnerName,
+        string owner,
+        RunCheck check,
+        List<string> problems)
+    {
+        var target = DeclaredName.In(config.PredefinedRunners.Keys, check.PredefinedRunner);
+
+        if (target is null)
+        {
+            problems.Add($"{owner} names predefined runner '{check.PredefinedRunner}', which is not declared");
+        }
+        else if (SameName(target, runnerName))
+        {
+            problems.Add($"{owner} names the runner that carries it, so the check would confirm itself");
+        }
+        else if (config.PredefinedRunners[target].ExpectedExceptions.Any(entry => entry.RunChecks.Count > 0))
+        {
+            // One level deep, so a check can never recurse and a confirmation can never be
+            // confirmed by the thing it confirms.
+            problems.Add(
+                $"{owner} names predefined runner '{target}', which carries run checks of its own; "
+                + "a check is one level deep");
+        }
+
+        if (check.MinStepsInFailureWindow < 0)
+        {
+            problems.Add($"{owner} has a negative minStepsInFailureWindow");
+        }
+
+        if (!double.IsFinite(check.MinStepSeconds) || check.MinStepSeconds < 0)
+        {
+            problems.Add($"{owner} minStepSeconds must be zero or more, found {check.MinStepSeconds}");
+        }
+
+        if (check.MinStepsInFailureWindow > 0 && check.MinStepSeconds <= 0)
+        {
+            problems.Add(
+                $"{owner} counts steps in the failure window but gives no minStepSeconds, so every "
+                + "sample would count as a step");
+        }
+
+        if (check.Expects.ResultCode is { } resultCode && resultCode < 0)
+        {
+            problems.Add($"{owner} expects a negative resultCode, which no process reports");
+        }
+    }
+
+    private static void RequireText(string? value, string setting, List<string> problems)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            problems.Add($"{setting} is blank");
         }
     }
 
@@ -667,6 +915,31 @@ public static class HarnessConfigValidator
     {
         RequireRelativePaths(sync.Exclude, "sync.exclude", problems);
         RequireRelativePaths(sync.NeverTransfer, "sync.neverTransfer", problems);
+
+        if (!double.IsFinite(sync.MaxDeleteFraction) || sync.MaxDeleteFraction is < 0 or > 1)
+        {
+            problems.Add(
+                $"sync.maxDeleteFraction must be between 0 (no bound) and 1, found {sync.MaxDeleteFraction}");
+        }
+    }
+
+    /// <summary>
+    /// Compiles <paramref name="pattern"/>, reporting the failure rather than throwing, so a caller
+    /// can go on to ask what the compiled pattern matches.
+    /// </summary>
+    private static bool TryCompile(string pattern, string setting, List<string> problems, out Regex regex)
+    {
+        try
+        {
+            regex = new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(1));
+            return true;
+        }
+        catch (ArgumentException ex)
+        {
+            problems.Add($"{setting} is not a valid regular expression: {ex.Message}");
+            regex = null!;
+            return false;
+        }
     }
 
     /// <summary>Checks the parts of a test section that can be wrong without being malformed.</summary>

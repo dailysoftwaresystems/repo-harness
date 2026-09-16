@@ -33,8 +33,9 @@ public sealed class CommitVariable
 }
 
 /// <summary>
-/// Processes outside the harness that can corrupt a leg's result while it runs. Consumed by
-/// the leg runner, which is not implemented yet.
+/// Processes outside the harness that can corrupt a leg's result while it runs. Sampled by every
+/// leg-running command, machine-wide rather than over its own process tree: a lock cannot catch a
+/// tool somebody started by hand, because a tool started by hand never takes it.
 /// </summary>
 public sealed class ContentionConfig
 {
@@ -55,16 +56,15 @@ public sealed class ContentionConfig
     public List<string> SharedResourceTools { get; init; } = [];
 }
 
-/// <summary>
-/// What the tree mirror carries, and what it must never carry. Consumed by the sync
-/// command, which is not implemented yet: the section is validated now so that a
-/// configuration written today keeps working when that command arrives.
-/// </summary>
+/// <summary>What the tree mirror carries, what it must never carry, and how far a deletion may go.</summary>
 public sealed class SyncConfig
 {
+    /// <summary>The share of a host's copy a single sync may delete when none is configured.</summary>
+    public const double DefaultMaxDeleteFraction = 0.25;
+
     /// <summary>
     /// Paths sync must never transfer, whatever the configuration says: repository
-    /// metadata, and the harness's own state including its ssh secrets.
+    /// metadata, and the harness's own state including every host's connection data.
     /// </summary>
     /// <remarks>
     /// A constant rather than a default value. A default is replaced by whatever list a
@@ -84,7 +84,24 @@ public sealed class SyncConfig
     /// </summary>
     public List<string> NeverTransfer { get; init; } = ["build"];
 
-    /// <summary>The floor together with <see cref="NeverTransfer"/>: everything sync must withhold.</summary>
+    /// <summary>
+    /// The share of the files already in a host's copy that one sync may delete before it stops and
+    /// reports instead. Zero allows any deletion.
+    /// </summary>
+    /// <remarks>
+    /// Deletions must propagate, or a copy that only ever gains files stops being a copy: a deleted
+    /// source file keeps compiling and a renamed one exists twice, and the leg's verdict then
+    /// describes a tree that no longer exists. The bound is what keeps that from emptying a host when
+    /// a repository path is mistyped and the source appears, correctly, to contain nothing.
+    /// </remarks>
+    public double MaxDeleteFraction { get; init; } = DefaultMaxDeleteFraction;
+
+    /// <summary>
+    /// The floor together with <see cref="NeverTransfer"/>: everything sync must withhold, and
+    /// equally everything it must never delete. A path the harness will not write is one it cannot
+    /// know the source lacks, so deleting it would remove the host's own state — its git repository,
+    /// its harness configuration, and the build directories that make an incremental build possible.
+    /// </summary>
     [JsonIgnore]
     public IReadOnlyList<string> EffectiveNeverTransfer
         => [.. NeverTransferFloor.Concat(NeverTransfer).Distinct(StringComparer.Ordinal)];

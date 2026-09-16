@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Core.Hosts;
 
@@ -153,6 +154,27 @@ public static partial class HostProbes
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// How a program that did not do what was asked is reported: what failed, then how it failed, in
+    /// the program's own words. One helper so that every reason reads the same and none of them
+    /// silently drops what the program said, which is usually the only thing that identifies the fault.
+    /// </summary>
+    /// <param name="what">What was being done, as a lower-case fragment, with any remedy after a semicolon.</param>
+    /// <param name="result">What the program did.</param>
+    public static string Failure(string what, ProcessResult result)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(what);
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (result.TimedOut)
+        {
+            return $"{what}: there was no answer within {result.Duration.TotalSeconds:0} seconds";
+        }
+
+        var said = string.IsNullOrWhiteSpace(result.StandardError) ? result.StandardOutput : result.StandardError;
+        return $"{what} (exit {result.ExitCode}): {Excerpt(said)}";
     }
 
     /// <summary>

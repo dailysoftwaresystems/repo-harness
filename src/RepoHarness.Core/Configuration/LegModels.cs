@@ -104,6 +104,14 @@ public sealed class TestInvocation
     public string? FilterArg { get; init; }
 
     /// <summary>
+    /// Argument introducing a test exclusion, such as <c>-LE</c> for ctest, so one <c>--exclude</c>
+    /// option works everywhere. Declared per leg as well as per project, because a leg reached
+    /// through a transport legitimately runs a narrower suite than one running here: a guard that
+    /// checks this checkout has nothing to say about a host's copy of it.
+    /// </summary>
+    public string? ExcludeArg { get; init; }
+
+    /// <summary>
     /// Cores this invocation uses, replacing both the host's <c>testCores</c> and
     /// <c>defaults.testCores</c>.
     /// </summary>

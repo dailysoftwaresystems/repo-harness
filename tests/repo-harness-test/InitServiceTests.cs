@@ -77,7 +77,11 @@ public sealed class InitServiceTests
         Assert.True(outcome.Succeeded);
         Assert.True(File.Exists(temp.Combine(".harness-config", "config.json")));
         Assert.True(File.Exists(temp.Combine(".harness-config", "worktrees", ".gitkeep")));
-        Assert.True(File.Exists(temp.Combine(".harness-config", "ssh", ".gitkeep")));
+        Assert.True(File.Exists(temp.Combine(".harness-config", "sshItems", ".gitkeep")));
+        Assert.True(File.Exists(temp.Combine(".harness-config", "wslDistros", ".gitkeep")));
+        Assert.True(Directory.Exists(temp.Combine(".harness-config", "runner", "actions")));
+        Assert.True(File.Exists(temp.Combine(".harness-config", "runner", ".env", ".gitkeep")));
+        Assert.True(File.Exists(temp.Combine(".harness-config", "runner", ".secrets", ".gitkeep")));
         Assert.True(File.Exists(temp.Combine(".gitignore")));
     }
 
@@ -202,13 +206,18 @@ public sealed class InitServiceTests
         await harness.InitializeGitRepositoryAsync(temp.Path, TestContext.Current.CancellationToken);
         await harness.InitService.InitializeAsync(temp.Path, TestContext.Current.CancellationToken);
 
-        // Write the kinds of files that must never reach the repository: a lock, a
-        // worktree's contents, and an ssh secret.
+        // Write the kinds of files that must never reach the repository: a lock, a run's logs, a
+        // worktree's contents, a host's connection data, and a value a runner reads.
         File.WriteAllText(temp.Combine(".harness-config", "lock.json"), "{}");
+        Directory.CreateDirectory(temp.Combine(".harness-config", "runs", "20260916-101500-abcdef12", "leg"));
+        File.WriteAllText(temp.Combine(".harness-config", "runs", "20260916-101500-abcdef12", "leg", "build.log"), "x");
         Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "wt-a", "nested"));
         File.WriteAllText(temp.Combine(".harness-config", "worktrees", "wt-a", "nested", "file.txt"), "x");
-        Directory.CreateDirectory(temp.Combine(".harness-config", "ssh", "vps"));
-        File.WriteAllText(temp.Combine(".harness-config", "ssh", "vps", ".secret"), "secret");
+        Directory.CreateDirectory(temp.Combine(".harness-config", "sshItems", "probe-host"));
+        File.WriteAllText(temp.Combine(".harness-config", "sshItems", "probe-host", ".key"), "secret");
+        Directory.CreateDirectory(temp.Combine(".harness-config", "wslDistros", "probe-distro"));
+        File.WriteAllText(temp.Combine(".harness-config", "wslDistros", "probe-distro", ".env"), "secret");
+        File.WriteAllText(temp.Combine(".harness-config", "runner", ".secrets", "token.env"), "secret");
 
         await harness.RunGitAsync(temp.Path, ["add", "-A"], TestContext.Current.CancellationToken);
         var tracked = await harness.RunGitAsync(
@@ -220,11 +229,17 @@ public sealed class InitServiceTests
 
         Assert.Contains(".harness-config/config.json", files);
         Assert.Contains(".harness-config/worktrees/.gitkeep", files);
-        Assert.Contains(".harness-config/ssh/.gitkeep", files);
+        Assert.Contains(".harness-config/sshItems/.gitkeep", files);
+        Assert.Contains(".harness-config/wslDistros/.gitkeep", files);
+        Assert.Contains(".harness-config/runner/.env/.gitkeep", files);
+        Assert.Contains(".harness-config/runner/.secrets/.gitkeep", files);
 
         Assert.DoesNotContain(".harness-config/lock.json", files);
         Assert.DoesNotContain(files, file => file.Contains("wt-a", StringComparison.Ordinal));
-        Assert.DoesNotContain(files, file => file.EndsWith(".secret", StringComparison.Ordinal));
+        Assert.DoesNotContain(files, file => file.Contains("/runs/", StringComparison.Ordinal));
+        Assert.DoesNotContain(files, file => file.Contains("probe-host", StringComparison.Ordinal));
+        Assert.DoesNotContain(files, file => file.Contains("probe-distro", StringComparison.Ordinal));
+        Assert.DoesNotContain(files, file => file.EndsWith("token.env", StringComparison.Ordinal));
     }
 
     [Fact]

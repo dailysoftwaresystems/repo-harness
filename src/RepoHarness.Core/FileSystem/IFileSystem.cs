@@ -46,6 +46,28 @@ public interface IFileSystem
     string ReadAllText(string path);
 
     /// <summary>
+    /// Opens a file for reading its bytes. Streamed rather than read whole, because a tree sync
+    /// hashes every file in a repository and holding one in memory per file bounds nothing.
+    /// </summary>
+    /// <param name="path">The file to open.</param>
+    Stream OpenRead(string path);
+
+    /// <summary>
+    /// Writes bytes to a sibling temporary file and renames it over the target, so a reader never
+    /// observes a half-written file and an interruption never truncates one.
+    /// </summary>
+    /// <param name="path">The file to write.</param>
+    /// <param name="contents">The bytes to write.</param>
+    /// <param name="cancellationToken">Stops the write.</param>
+    /// <remarks>
+    /// A file whose content is unchanged is never rewritten by a caller, so its modification time
+    /// does not move: an incremental build decides what is stale by ordering timestamps, and a sync
+    /// that touched every file would either rebuild everything or, worse, leave a source looking
+    /// older than the object built from it.
+    /// </remarks>
+    Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Writes UTF-8 text, without a byte order mark, to a sibling temporary file and
     /// renames it over the target, so a reader never observes a half-written file and
     /// a crash never truncates one.

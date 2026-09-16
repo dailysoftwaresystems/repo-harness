@@ -1,0 +1,404 @@
+using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
+
+namespace RepoHarness.Core.Sync;
+
+/// <summary>How one sync should behave.</summary>
+/// <param name="DryRun">List what would be written and deleted, and change nothing.</param>
+public sealed record SyncOptions(bool DryRun = false);
+
+/// <summary>What one sync did.</summary>
+/// <param name="Host">The host whose copy was written.</param>
+/// <param name="Root">The copy's root on that host.</param>
+/// <param name="Plan">What the sync decided to do.</param>
+/// <param name="Verified">
+/// Whether the copy was confirmed equal to the source afterwards. A sync that cannot confirm its own
+/// result has not established that the leg about to run reads the tree it was asked about.
+/// </param>
+/// <param name="Created">Whether this sync created the copy.</param>
+public sealed record SyncResult(
+    string Host,
+    string Root,
+    SyncPlan Plan,
+    bool Verified,
+    bool Created);
+
+/// <summary>Putting a host's copy of the repository in step with this tree.</summary>
+public interface ISyncService
+{
+    /// <summary>
+    /// Syncs every host the selected legs need, and reports what each one did.
+    /// </summary>
+    /// <param name="directory">The directory the command was invoked in.</param>
+    /// <param name="legNames">The legs named with <c>--legs</c>, or null for every declared leg.</param>
+    /// <param name="options">How each sync should behave.</param>
+    /// <param name="pull">Paths to bring back from each copy instead of syncing to it.</param>
+    /// <param name="cancellationToken">Stops the work.</param>
+    /// <remarks>
+    /// One entry per host, not per leg: legs on one host share one tree, and syncing it once per leg
+    /// would have their copies racing over the same files.
+    /// </remarks>
+    Task<CommandOutcome> SyncHostsAsync(
+        string directory,
+        IReadOnlyList<string>? legNames,
+        SyncOptions options,
+        IReadOnlyList<string> pull,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Syncs <paramref name="sourceRoot"/> into a copy reached through <paramref name="transport"/>.</summary>
+    /// <param name="sourceRoot">The tree to sync from.</param>
+    /// <param name="transport">How the copy is reached.</param>
+    /// <param name="destinationRoot">Where the copy lives on the far side.</param>
+    /// <param name="options">How this sync should behave.</param>
+    /// <param name="cancellationToken">Stops the sync.</param>
+    Task<SyncResult> SyncAsync(
+        string sourceRoot,
+        ISyncTransport transport,
+        string destinationRoot,
+        SyncOptions options,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Brings named files back from a copy into this tree, verified against a manifest.</summary>
+    /// <param name="transport">How the copy is reached.</param>
+    /// <param name="sourceRoot">The copy's root on the far side.</param>
+    /// <param name="destinationRoot">Where the files land here.</param>
+    /// <param name="paths">The paths to bring back, relative to the copy's root.</param>
+    /// <param name="cancellationToken">Stops the transfer.</param>
+    Task<IReadOnlyList<string>> PullAsync(
+        ISyncTransport transport,
+        string sourceRoot,
+        string destinationRoot,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default);
+}
+
+/// <inheritdoc cref="ISyncService"/>
+public sealed class SyncService(
+    IHarnessContextLoader contextLoader,
+    IManifestBuilder manifestBuilder,
+    ISyncTransport localTransport,
+    ISyncTransportFactory transportFactory,
+    Legs.LegsService legsService,
+    Git.IGitClient gitClient,
+    IHarnessOutput output) : ISyncService
+{
+    /// <summary>The command this service reports under.</summary>
+    public const string CommandName = "sync";
+
+    private readonly IHarnessContextLoader _contextLoader = contextLoader;
+    private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
+    private readonly ISyncTransport _localTransport = localTransport;
+    private readonly ISyncTransportFactory _transportFactory = transportFactory;
+    private readonly Legs.LegsService _legsService = legsService;
+    private readonly Git.IGitClient _gitClient = gitClient;
+    private readonly IHarnessOutput _output = output;
+
+    /// <inheritdoc/>
+    public async Task<CommandOutcome> SyncHostsAsync(
+        string directory,
+        IReadOnlyList<string>? legNames,
+        SyncOptions options,
+        IReadOnlyList<string> pull,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(pull);
+
+        var report = await _legsService.CheckAsync(directory, legNames, cancellationToken).ConfigureAwait(false);
+
+        var hosts = report.Placements
+            .Where(placement => placement is { Runnable: true, Host: not null })
+            .Select(placement => placement.Host!)
+            .Where(host => host.Host.Kind != Hosts.HostKind.Local)
+            .DistinctBy(host => host.Host)
+            .ToList();
+
+        if (hosts.Count == 0)
+        {
+            return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+        }
+
+        var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
+        var details = new List<string>();
+        var unverified = false;
+
+        foreach (var host in hosts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var destination = RepositoryPathOf(context.Config, host);
+            var transport = _transportFactory.For(host);
+
+            if (pull.Count > 0)
+            {
+                var brought = await PullAsync(
+                        transport, destination, context.Layout.RepositoryRoot, pull, cancellationToken)
+                    .ConfigureAwait(false);
+
+                details.Add($"{host.Host}: brought back {brought.Count} file(s)");
+                continue;
+            }
+
+            var result = await SyncAsync(
+                    context.Layout.RepositoryRoot, transport, destination, options, cancellationToken)
+                .ConfigureAwait(false);
+
+            details.Add($"{host.Host}: {destination}");
+            details.AddRange(result.Plan.Describe(options.DryRun ? SyncVerb.Planned : SyncVerb.Done));
+
+            unverified |= !options.DryRun && !result.Verified;
+        }
+
+        return unverified
+            ? CommandOutcome.Failed(HarnessExit.CommandFailed, "a copy does not match this tree", details)
+            : CommandOutcome.Ok(
+                options.DryRun
+                    ? $"{hosts.Count} host(s) inspected; nothing was changed"
+                    : $"{hosts.Count} host(s) in step",
+                details);
+    }
+
+    /// <summary>
+    /// Where a host keeps its copy, as its own configuration declares it.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="host">The host.</param>
+    /// <exception cref="HarnessException">The host declares no repository path.</exception>
+    public static string RepositoryPathOf(Configuration.HarnessConfig config, Hosts.HostReport host)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(host);
+
+        var name = host.Host.Name;
+
+        Configuration.RemoteHostConfig? declared = host.Host.Kind == Hosts.HostKind.Wsl
+            ? config.Hosts.Wsl.GetValueOrDefault(name)
+            : config.Hosts.Ssh.GetValueOrDefault(name);
+
+        return declared?.RepositoryPath ?? throw new HarnessException(
+            HarnessExit.ConfigInvalid,
+            $"Host {host.Host} declares no repositoryPath, so there is nowhere to keep its copy.");
+    }
+
+    /// <inheritdoc/>
+    public async Task<SyncResult> SyncAsync(
+        string sourceRoot,
+        ISyncTransport transport,
+        string destinationRoot,
+        SyncOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var context = await _contextLoader.LoadAsync(sourceRoot, cancellationToken).ConfigureAwait(false);
+        var config = context.Config;
+        var exclusions = new SyncExclusions(config.Sync, config.Worktrees.Root);
+
+        // Before anything is read from the far side, because it is about this tree and costs nothing.
+        await exclusions
+            .RefuseWhenNoLongerIgnoredAsync(_gitClient, context.Layout.RepositoryRoot, cancellationToken)
+            .ConfigureAwait(false);
+
+        var created = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)
+            .ConfigureAwait(false);
+
+        var source = await _manifestBuilder
+            .BuildAsync(context.Layout.RepositoryRoot, exclusions.IsWithheldFromTransfer, cancellationToken)
+            .ConfigureAwait(false);
+
+        var destination = created
+            ? SyncManifest.Empty(destinationRoot)
+            : await transport
+                .ReadManifestAsync(destinationRoot, Withheld(exclusions), cancellationToken)
+                .ConfigureAwait(false);
+
+        var plan = SyncPlan.Between(source, destination, exclusions);
+
+        plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction);
+
+        if (options.DryRun)
+        {
+            return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
+        }
+
+        await ApplyAsync(context.Layout.RepositoryRoot, transport, destinationRoot, plan, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The copy is a git repository because the harness there finds everything through git. Done
+        // after the transfer, so a copy that failed part way is not left looking complete.
+        await transport.InitialiseRepositoryAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+
+        var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<string>> PullAsync(
+        ISyncTransport transport,
+        string sourceRoot,
+        string destinationRoot,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var brought = new List<string>();
+
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Checked against the hash the far side took before sending, inside ReadFileAsync: an
+            // artefact carried host to host is evidence that a binary built there runs here, and
+            // evidence nobody checked is not evidence.
+            var contents = await transport.ReadFileAsync(sourceRoot, path, cancellationToken).ConfigureAwait(false);
+            var expected = FileContentHash.Of(contents);
+
+            await _localTransport
+                .WriteFileAsync(destinationRoot, path, contents, cancellationToken)
+                .ConfigureAwait(false);
+
+            // And again after it is written, because a file that arrived intact and landed truncated
+            // is still not the artefact somebody is about to run.
+            var landed = await _localTransport.ReadFileAsync(destinationRoot, path, cancellationToken).ConfigureAwait(false);
+            var actual = FileContentHash.Of(landed);
+
+            if (!string.Equals(expected, actual, StringComparison.Ordinal))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"'{path}' did not land intact from {transport.Host}: it arrived as {expected} and "
+                    + $"was written as {actual}.");
+            }
+
+            brought.Add(path);
+        }
+
+        return brought;
+    }
+
+    /// <summary>
+    /// Makes sure there is a copy to write into, and that it is one the harness made.
+    /// </summary>
+    /// <returns>Whether this call created it.</returns>
+    private async Task<bool> PrepareCopyAsync(
+        ISyncTransport transport,
+        string destinationRoot,
+        bool dryRun,
+        CancellationToken cancellationToken)
+    {
+        if (!await transport.RootExistsAsync(destinationRoot, cancellationToken).ConfigureAwait(false))
+        {
+            if (dryRun)
+            {
+                _output.Info(CommandName, $"{transport.Host}: would create '{destinationRoot}'");
+                return true;
+            }
+
+            _output.Info(CommandName, $"{transport.Host}: creating '{destinationRoot}'");
+            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+
+            return true;
+        }
+
+        if (await transport.IsHarnessCopyAsync(destinationRoot, cancellationToken).ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        // Never adopted. Sync deletes whatever the source does not have, so adopting a checkout
+        // somebody made by hand would delete work nobody told the harness about, on a machine whose
+        // owner is not watching.
+        throw new HarnessException(
+            HarnessExit.Refused,
+            $"'{destinationRoot}' on {transport.Host} exists but the harness did not create it, so sync "
+            + "will not write into it: a sync deletes whatever the source does not have, and that "
+            + "directory may hold work nothing here knows about. Move it aside, and sync will create "
+            + "the copy itself.");
+    }
+
+    private async Task ApplyAsync(
+        string sourceRoot,
+        ISyncTransport transport,
+        string destinationRoot,
+        SyncPlan plan,
+        CancellationToken cancellationToken)
+    {
+        foreach (var entry in plan.Writes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var contents = await _localTransport
+                .ReadFileAsync(sourceRoot, entry.Path, cancellationToken)
+                .ConfigureAwait(false);
+
+            await transport
+                .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
+                .ConfigureAwait(false);
+
+            _output.Detail(CommandName, $"{transport.Host}: wrote {entry.Path}");
+        }
+
+        foreach (var path in plan.Deletes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await transport.DeleteFileAsync(destinationRoot, path, cancellationToken).ConfigureAwait(false);
+
+            // Reported at the level a reader sees by default, not behind --verbose: a deletion on
+            // another machine is the one thing running the command again cannot undo.
+            _output.Info(CommandName, $"{transport.Host}: deleted {path}");
+        }
+    }
+
+    /// <summary>
+    /// Confirms the copy now holds exactly what the source does.
+    /// </summary>
+    /// <remarks>
+    /// A remote tree's identity is its content manifest. Without this the leg that runs next reports
+    /// on a tree nobody established, and a transfer that dropped a file would be indistinguishable
+    /// from a source that never had it.
+    /// </remarks>
+    private async Task<bool> VerifyAsync(
+        ISyncTransport transport,
+        string destinationRoot,
+        SyncManifest source,
+        SyncExclusions exclusions,
+        CancellationToken cancellationToken)
+    {
+        var after = await transport
+            .ReadManifestAsync(destinationRoot, Withheld(exclusions), cancellationToken)
+            .ConfigureAwait(false);
+
+        var differences = SyncPlan.Between(source, after, exclusions);
+
+        if (differences.IsUpToDate)
+        {
+            return true;
+        }
+
+        var named = differences.Writes
+            .Select(entry => entry.Path)
+            .Concat(differences.Deletes)
+            .Take(5)
+            .ToList();
+
+        throw new HarnessException(
+            HarnessExit.CommandFailed,
+            $"The copy at '{destinationRoot}' on {transport.Host} does not match this tree after the "
+            + $"sync: {differences.Writes.Count + differences.Deletes.Count} file(s) still differ, "
+            + $"including {string.Join(", ", named)}. Nothing should be run against it.");
+    }
+
+    /// <summary>
+    /// What the far side must not walk. The withheld list only: an excluded path is still deleted
+    /// from a copy, so the copy's manifest has to report it.
+    /// </summary>
+    private static IReadOnlyList<string> Withheld(SyncExclusions exclusions) => exclusions.Withheld;
+}

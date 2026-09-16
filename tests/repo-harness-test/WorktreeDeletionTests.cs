@@ -20,14 +20,14 @@ public sealed class WorktreeDeletionTests
         var path = await CreateAsync(harness, temp, "locked");
         await harness.RunGitAsync(temp.Path, ["worktree", "lock", "--reason", "on a USB disk", path], cancellationToken);
 
-        var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "locked", force: false, cancellationToken);
+        var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "locked", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.Contains("it is locked: on a USB disk", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.Contains("git worktree unlock", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.True(Directory.Exists(path));
 
-        var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "locked", force: true, cancellationToken);
+        var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "locked", force: true, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(forced.Succeeded, forced.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -45,7 +45,7 @@ public sealed class WorktreeDeletionTests
         await harness.CommitAllAsync(path, "work", cancellationToken);
         var head = (await harness.GitClient.ResolveCommitAsync(path, "HEAD", cancellationToken))![..12];
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "detached", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "detached", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains($"1 commit(s) up to {head}", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -64,7 +64,7 @@ public sealed class WorktreeDeletionTests
         await harness.CommitAllAsync(path, "work", cancellationToken);
         var head = await harness.GitClient.ResolveCommitAsync(path, "HEAD", cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "onbranch", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "onbranch", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.Equal(head, await harness.GitClient.ResolveCommitAsync(temp.Path, "refs/heads/onbranch", cancellationToken));
@@ -82,7 +82,7 @@ public sealed class WorktreeDeletionTests
         var head = (await harness.GitClient.ResolveCommitAsync(path, "HEAD", cancellationToken))!;
         await harness.RunGitAsync(temp.Path, ["update-ref", "refs/remotes/origin/pushed", head], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "pushed", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "pushed", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
     }
@@ -100,7 +100,7 @@ public sealed class WorktreeDeletionTests
         File.WriteAllText(Path.Combine(path, "README.md"), "edited where status does not look");
         Assert.Empty(await harness.GitClient.GetStatusAsync(path, cancellationToken));
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "hidden", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "hidden", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("1 uncommitted change(s) that would be lost: README.md", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -118,7 +118,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(path, ["update-index", "--skip-worktree", "README.md"], cancellationToken);
         File.Delete(Path.Combine(path, "README.md"));
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "sparse", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "sparse", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -134,7 +134,7 @@ public sealed class WorktreeDeletionTests
         var cancellationToken = TestContext.Current.CancellationToken;
         var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "fresh");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "fresh", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "fresh", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -159,7 +159,7 @@ public sealed class WorktreeDeletionTests
             cancellationToken);
         await harness.CommitAllAsync(path, "record the submodule's commit", cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subcommit", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subcommit", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("submodule 'lib' holds 1 commit(s) no remote-tracking ref or tag contains", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -178,7 +178,7 @@ public sealed class WorktreeDeletionTests
         await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib"));
         await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinit", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinit", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("submodule 'lib' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -193,7 +193,7 @@ public sealed class WorktreeDeletionTests
         var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "deinitok");
         await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinitok", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "deinitok", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -211,7 +211,7 @@ public sealed class WorktreeDeletionTests
         await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib"));
         harness.FileSystem.DeleteDirectory(path);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subgone", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subgone", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("submodule 'lib' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -238,7 +238,7 @@ public sealed class WorktreeDeletionTests
             cancellationToken);
         await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib", "inner"));
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "nested", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "nested", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("submodule 'lib/inner' holds 1 commit(s)", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -258,7 +258,7 @@ public sealed class WorktreeDeletionTests
             ["-c", "user.email=harness@test.invalid", "-c", "user.name=Harness Test", "stash", "--quiet"],
             cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "substash", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "substash", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("submodule 'lib' holds a stash", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -284,7 +284,7 @@ public sealed class WorktreeDeletionTests
         var path = await CreateAsync(harness, temp, "tagged");
         await harness.RunGitAsync(path, ["-c", "protocol.file.allow=always", "submodule", "--quiet", "update", "--init"], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "tagged", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "tagged", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
     }
@@ -301,7 +301,7 @@ public sealed class WorktreeDeletionTests
         await harness.CommitAllAsync(temp.Path, "on a detached HEAD", cancellationToken);
         var path = await CreateAsync(harness, temp, "offmain");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "offmain", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "offmain", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -319,7 +319,7 @@ public sealed class WorktreeDeletionTests
         File.WriteAllText(Path.Combine(path, "work.txt"), "then changed and stashed");
         await harness.RunGitAsync(path, ["stash", "--quiet"], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "stashed", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "stashed", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.NotNull(await harness.GitClient.ResolveCommitAsync(temp.Path, "refs/stash", cancellationToken));
@@ -338,7 +338,7 @@ public sealed class WorktreeDeletionTests
         var path = await CreateAsync(harness, temp, "crlf");
         await harness.RunGitAsync(path, ["update-index", flag, "crlf.txt"], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
     }
@@ -355,7 +355,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(path, ["update-index", flag, "crlf.txt"], cancellationToken);
         File.WriteAllText(Path.Combine(path, "crlf.txt"), "edited\r\nwhere status does not look\r\n");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "crlf", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("1 uncommitted change(s) that would be lost: crlf.txt", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -370,7 +370,7 @@ public sealed class WorktreeDeletionTests
         var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "subdirty");
         File.WriteAllText(Path.Combine(path, "lib", "README.md"), "changed inside the submodule");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subdirty", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subdirty", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("1 uncommitted change(s) that would be lost: lib", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -388,7 +388,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(temp.Path, ["config", "submodule.lib.ignore", "all"], cancellationToken);
         File.WriteAllText(Path.Combine(path, "lib", "README.md"), "changed inside the submodule");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subhidden", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "subhidden", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("that would be lost: lib", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -407,7 +407,7 @@ public sealed class WorktreeDeletionTests
         File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
         await harness.RunGitAsync(temp.Path, ["worktree", "lock", path], cancellationToken);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "several", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "several", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
         var message = outcome.Outcome.Message;
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
@@ -427,7 +427,7 @@ public sealed class WorktreeDeletionTests
         var path = await CreateAsync(harness, temp, "gone");
         harness.FileSystem.DeleteDirectory(path);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "gone", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "gone", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         await AssertNotRegisteredAsync(harness, temp, path);
@@ -446,13 +446,13 @@ public sealed class WorktreeDeletionTests
         var path = HarnessFactory.WorktreePath(temp.Path, "clone");
         await harness.RunGitAsync(temp.Path, ["clone", "--quiet", temp.Path, path], cancellationToken);
 
-        var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "clone", force: false, cancellationToken);
+        var refused = await harness.WorktreeService.DeleteAsync(temp.Path, "clone", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.Contains("'clone' is not a worktree of this repository", refused.Outcome.Message, StringComparison.Ordinal);
         Assert.True(Directory.Exists(Path.Combine(path, ".git")));
 
-        var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "clone", force: true, cancellationToken);
+        var forced = await harness.WorktreeService.DeleteAsync(temp.Path, "clone", force: true, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(forced.Succeeded, forced.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -469,7 +469,7 @@ public sealed class WorktreeDeletionTests
         var path = await CreateAsync(harness, temp, "newline");
         File.WriteAllText(Path.Combine(path, "two\nlines.txt"), "never committed");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "newline", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "newline", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.DoesNotContain('\n', outcome.Outcome.Message);
@@ -538,7 +538,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(unborn, ["checkout", "--quiet", "--orphan", "never-committed"], cancellationToken);
         var path = await CreateAsync(harness, temp, "beside");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "beside", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "beside", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
@@ -554,7 +554,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(path, ["checkout", "--quiet", "--orphan", "never-committed"], cancellationToken);
         harness.FileSystem.DeleteDirectory(path);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "unborn", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "unborn", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         await AssertNotRegisteredAsync(harness, temp, path);
@@ -576,7 +576,7 @@ public sealed class WorktreeDeletionTests
         await harness.RunGitAsync(path, ["submodule", "--quiet", "deinit", "--force", "lib"], cancellationToken);
         File.WriteAllText(Path.Combine(repository, "HEAD"), string.Empty);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "corrupt", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "corrupt", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.CommandFailed, outcome.Outcome.ExitCode);
         Assert.Contains("git does not read", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -599,7 +599,7 @@ public sealed class WorktreeDeletionTests
         var before = IndexFiles(gitDirectory);
         Assert.Contains(before.Keys, file => file.StartsWith("sharedindex.", StringComparison.Ordinal));
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "split", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "split", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("that would be lost: README.md", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -620,7 +620,7 @@ public sealed class WorktreeDeletionTests
         Directory.CreateDirectory(Path.Combine(path, "outside"));
         File.WriteAllText(Path.Combine(path, "outside", "file.txt"), "edited outside the cone");
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "cone", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "cone", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains("outside/file.txt", outcome.Outcome.Message, StringComparison.Ordinal);
@@ -641,7 +641,7 @@ public sealed class WorktreeDeletionTests
         var moved = HarnessFactory.WorktreePath(temp.Path, "after");
         Directory.Move(original, moved);
 
-        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "after", force: false, cancellationToken);
+        var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "after", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains($"1 commit(s) up to {head}", outcome.Outcome.Message, StringComparison.Ordinal);

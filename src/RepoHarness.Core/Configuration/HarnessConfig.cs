@@ -6,9 +6,9 @@ namespace RepoHarness.Core.Configuration;
 /// compiled into the tool. A behaviour that cannot be expressed here is a defect.
 /// </summary>
 /// <remarks>
-/// Sections serve commands that arrive over several releases. A section whose command
-/// is not implemented yet is still parsed and validated, so a configuration written
-/// today keeps working when that command lands, but it has no effect until then.
+/// Every section here is read by a command. A section nothing reads is a key a file plainly
+/// appears to set and that changes nothing, which is the same defect as a misspelt one — and that
+/// is why an unknown key is refused when the file is read rather than passed over.
 /// </remarks>
 public sealed class HarnessConfig
 {
@@ -51,8 +51,12 @@ public sealed class HarnessConfig
     /// <summary>External tools this repository needs, verified and installed by name.</summary>
     public List<ToolConfig> Tools { get; init; } = [];
 
-    /// <summary>Multi-phase procedures such as a corpus build-and-test or a benchmark.</summary>
-    public Dictionary<string, RunnerConfig> Runners { get; init; } = Map<RunnerConfig>();
+    /// <summary>
+    /// Multi-phase procedures such as a corpus build-and-test or a benchmark, keyed by the name
+    /// <c>run</c> selects them by and a run check names them by. Keyed rather than listed because a
+    /// check selects one by name, and an unnamed entry could not be selected at all.
+    /// </summary>
+    public Dictionary<string, RunnerConfig> PredefinedRunners { get; init; } = Map<RunnerConfig>();
 
     /// <summary>Named commands invokable through <c>DssHarness exec</c>.</summary>
     public Dictionary<string, ExecConfig> Exec { get; init; } = Map<ExecConfig>();
@@ -71,6 +75,36 @@ public sealed class HarnessConfig
 
     /// <summary>The anchor registries: where they live, and how a new anchor id is spelled.</summary>
     public AnchorSettings Anchors { get; init; } = new();
+
+    /// <summary>
+    /// The directories under <c>.harness-config/sshItems</c> holding each ssh host's connection data,
+    /// named here rather than described here: an address, a user and a key are not the repository's
+    /// business, and the tracked configuration must never carry them.
+    /// </summary>
+    public List<string> SshItems { get; init; } = [];
+
+    /// <summary>
+    /// The directories under <c>.harness-config/wslDistros</c> holding each distribution's connection
+    /// data. Only a Windows machine has any.
+    /// </summary>
+    public List<string> WslDistros { get; init; } = [];
+
+    /// <summary>
+    /// Patterns whose every match is pulled out of a build's output when <c>build --time</c> runs, so
+    /// timings come from what the build itself reported rather than from the harness guessing which
+    /// part of the wall clock was the build. Configured with none, <c>--time</c> measures the phases
+    /// itself.
+    /// </summary>
+    public List<string> BuildTimingRegex { get; init; } = [];
+
+    /// <summary>Patterns whose every match is pulled out of a predefined run's output under <c>--time</c>.</summary>
+    public List<string> RunTimingRegex { get; init; } = [];
+
+    /// <summary>The repository's line-ending policy, and what stands outside it.</summary>
+    public LineEndingSettings LineEndings { get; init; } = new();
+
+    /// <summary>Continuous integration: the workflows that carry this repository's legs, and their budget.</summary>
+    public CiSettings Ci { get; init; } = new();
 
     private static Dictionary<string, TValue> Map<TValue>() => new(StringComparer.OrdinalIgnoreCase);
 }

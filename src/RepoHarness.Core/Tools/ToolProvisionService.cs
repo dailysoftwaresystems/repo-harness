@@ -1,0 +1,594 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Legs;
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
+using RepoHarness.Core.Repository;
+using RepoHarness.Core.Secrets;
+
+namespace RepoHarness.Core.Tools;
+
+/// <summary>
+/// Brings every tool a selected leg needs onto the host that leg runs on, and reports what it found.
+/// </summary>
+/// <remarks>
+/// The behaviour lives here rather than in the command so that <c>init</c> and the leg commands can
+/// use it too: a host that has to be provisioned before anything runs is exactly the host a build
+/// would otherwise fail on, with a message about a compiler rather than about a missing SDK.
+/// </remarks>
+public interface IToolProvisionService
+{
+    /// <summary>
+    /// Provisions the legs <paramref name="legNames"/> selects, or every declared leg when
+    /// <c>--legs</c> was left out and <paramref name="legNames"/> is <see langword="null"/>.
+    /// </summary>
+    /// <param name="directory">A directory in the repository whose configuration declares the legs.</param>
+    /// <param name="legNames">What <c>--legs</c> was given, or <see langword="null"/>.</param>
+    /// <param name="cancellationToken">Stops the run; a host already being installed on is left to finish its command.</param>
+    Task<ToolProvisionReport> ProvisionAsync(
+        string directory,
+        IReadOnlyList<string>? legNames,
+        CancellationToken cancellationToken = default);
+}
+
+/// <inheritdoc cref="IToolProvisionService"/>
+public sealed class ToolProvisionService(
+    IHarnessContextLoader contextLoader,
+    IHostConnector connector,
+    IHostCommandRunner hostCommands,
+    IHostProgramResolver programs,
+    IHarnessOutput output) : IToolProvisionService
+{
+    /// <summary>The command's name, which prefixes what it reports.</summary>
+    public const string CommandName = "install-missing-tools";
+
+    /// <summary>Longest one probe of a host may take.</summary>
+    public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Longest one install may take. Generous because it includes a download over whatever link the
+    /// host has, and a package manager that has to refresh its index first.
+    /// </summary>
+    public static readonly TimeSpan InstallBudget = TimeSpan.FromMinutes(30);
+
+    /// <summary>Longest a regular expression may spend reading a version out of a tool's own output.</summary>
+    private static readonly TimeSpan PatternBudget = TimeSpan.FromSeconds(2);
+
+    private readonly IHarnessContextLoader _contextLoader = contextLoader;
+    private readonly IHostConnector _connector = connector;
+    private readonly IHostCommandRunner _hostCommands = hostCommands;
+    private readonly IHostProgramResolver _programs = programs;
+    private readonly IHarnessOutput _output = output;
+
+    public async Task<ToolProvisionReport> ProvisionAsync(
+        string directory,
+        IReadOnlyList<string>? legNames,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+
+        var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
+        var config = context.Config;
+        var selection = LegSelection.Resolve(config, legNames);
+
+        // A leg is provisioned on the host it names, and on this machine when it names none: the first
+        // of its candidates is exactly that. Nothing has been measured yet, so the host a leg would
+        // fall through to cannot be known here, and installing on every candidate would install on
+        // machines the leg will never touch.
+        var placed = selection.Legs
+            .Select(leg => (Leg: leg, Host: LegPlacement.Candidates(config, leg.Leg)[0]))
+            .ToList();
+
+        var done = new Dictionary<HostId, LegProvision>();
+        var report = new List<LegProvision>();
+
+        foreach (var (leg, host) in placed)
+        {
+            if (!done.TryGetValue(host, out var provision))
+            {
+                provision = await ProvisionHostAsync(context, host, cancellationToken).ConfigureAwait(false);
+                done[host] = provision;
+            }
+
+            report.Add(provision with { Leg = leg.Name });
+        }
+
+        return new ToolProvisionReport(report);
+    }
+
+    /// <summary>Provisions one host, which may carry several legs.</summary>
+    private async Task<LegProvision> ProvisionHostAsync(HarnessContext context, HostId host, CancellationToken cancellationToken)
+    {
+        var config = context.Config;
+        var wanted = new List<string>();
+
+        if (host.Kind != HostKind.Local)
+        {
+            wanted.Add(HostInspector.DotnetProgram);
+        }
+
+        wanted.AddRange(config.Tools.Select(tool => tool.Name));
+
+        var opened = await _connector.ConnectAsync(context, host, wanted, cancellationToken).ConfigureAwait(false);
+
+        if (opened.Connection is not { } connection)
+        {
+            _output.Warn(CommandName, $"{host} could not be reached: {opened.Problem}");
+            return new LegProvision { Leg = string.Empty, Host = host, Unreachable = opened.Problem };
+        }
+
+        var outcomes = new List<ToolOutcome>();
+        var superuser = new Superuser(opened.Superuser, ItemEnvFile(context.Layout, host));
+
+        // .NET is the default tool on every host reached through a transport: a host that cannot run
+        // DssHarness is a host with no SDK, and every other command begins by running DssHarness there.
+        if (host.Kind != HostKind.Local)
+        {
+            var (outcome, updated) = await ProvisionDotnetAsync(host, connection, cancellationToken).ConfigureAwait(false);
+            connection = updated;
+            outcomes.Add(outcome);
+        }
+
+        var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
+
+        foreach (var tool in config.Tools)
+        {
+            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, superuser, cancellationToken)
+                .ConfigureAwait(false);
+
+            connection = updated;
+            outcomes.Add(outcome);
+        }
+
+        // Every reason a host gave is scrubbed at this one point rather than where it was built: a host
+        // that echoes what it was handed does so from whichever command it likes, and a credential that
+        // reached one report would be in every log that kept it.
+        return new LegProvision
+        {
+            Leg = string.Empty,
+            Host = host,
+            Tools = [.. outcomes.Select(outcome => outcome.Detail is { } detail
+                ? outcome with { Detail = superuser.Hide(detail) }
+                : outcome)],
+        };
+    }
+
+    /// <summary>
+    /// Installs the .NET SDK on a host that has none, into the home directory, where it needs no
+    /// superuser. The installer puts it where no login-free PATH names it, which is why every call
+    /// site spells the resolved path instead of the bare name.
+    /// </summary>
+    private async Task<(ToolOutcome Outcome, HostConnection Connection)> ProvisionDotnetAsync(
+        HostId host,
+        HostConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string Name = HostInspector.DotnetProgram;
+        var needed = $".NET {ToolPackage.MinimumSdkMajor}";
+
+        if (connection.Located(Name) is { Found: ProgramFound.Unreadable })
+        {
+            return (
+                new ToolOutcome(Name, ToolState.Unknown, null, $"the host did not answer when asked where '{Name}' is"),
+                connection);
+        }
+
+        if (await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false) is { } current)
+        {
+            return (new ToolOutcome(Name, ToolState.AlreadyCurrent, current), connection);
+        }
+
+        // The installer is a shell script, and a Windows host has no shell to run it. Said plainly
+        // rather than attempted: a half-run installer leaves a host worse than an untouched one.
+        if (connection.Shell == RemoteShell.Cmd)
+        {
+            return (
+                new ToolOutcome(Name, ToolState.Failed, null,
+                    $"the {needed} SDK is installed there with the Windows installer, which this command cannot run; "
+                    + $"install it on that host and run '{CommandName}' again"),
+                connection);
+        }
+
+        _output.Info(CommandName, $"{host}: installing the {needed} SDK under the home directory");
+
+        // The script travels on standard input, so no part of it has to survive a shell's word
+        // splitting on the way: an ssh command line carries only words every shell reads literally.
+        var install = await RunAsync(
+            connection,
+            "sh",
+            [],
+            InstallBudget,
+            cancellationToken,
+            InstallScript).ConfigureAwait(false);
+
+        if (!install.Succeeded)
+        {
+            return (
+                new ToolOutcome(Name, ToolState.Failed, null, HostProbes.Failure($"installing the {needed} SDK there failed", install)),
+                connection);
+        }
+
+        // Measured again rather than assumed: the installer's own directory is what the next command
+        // has to spell, and the run that put it there is the only one that can find out where it went.
+        connection = await _programs
+            .ResolveAsync(connection.Forget(Name), [Name], ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
+
+        var installed = await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false);
+
+        return installed is null
+            ? (new ToolOutcome(Name, ToolState.Failed, null,
+                $"the {needed} SDK installer reported success, and '{Name}' still does not list an SDK "
+                + $"{ToolPackage.MinimumSdkMajor} or newer there"), connection)
+            : (new ToolOutcome(Name, ToolState.Installed, installed), connection);
+    }
+
+    /// <summary>
+    /// The newest SDK on the host that is new enough to run DssHarness, or <see langword="null"/> when
+    /// there is none, <c>dotnet</c> is not there, or it would not run.
+    /// </summary>
+    private async Task<string?> HighestSdkAsync(HostConnection connection, CancellationToken cancellationToken)
+    {
+        if (connection.Located(HostInspector.DotnetProgram) is not { Present: true })
+        {
+            return null;
+        }
+
+        var sdks = await RunAsync(
+            connection,
+            connection.Spell(HostInspector.DotnetProgram),
+            ["--list-sdks"],
+            ProbeBudget,
+            cancellationToken).ConfigureAwait(false);
+
+        return sdks.Succeeded
+            ? HostProbes.ReadSdks(sdks.StandardOutput)
+                .Where(sdk => sdk.Major >= ToolPackage.MinimumSdkMajor)
+                .Select(sdk => sdk.Version)
+                .LastOrDefault()
+            : null;
+    }
+
+    /// <summary>Probes one declared tool, and installs or updates it when it declares how.</summary>
+    private async Task<(ToolOutcome Outcome, HostConnection Connection)> ProvisionToolAsync(
+        HostId host,
+        HostConnection connection,
+        ToolConfig tool,
+        string platformKey,
+        Superuser superuser,
+        CancellationToken cancellationToken)
+    {
+        var located = connection.Located(tool.Name);
+
+        if (located is null or { Found: ProgramFound.Unreadable })
+        {
+            return (
+                new ToolOutcome(tool.Name, ToolState.Unknown, null, $"the host did not answer when asked where '{tool.Name}' is"),
+                connection);
+        }
+
+        var install = InstallFor(tool, platformKey);
+
+        if (!located.Present)
+        {
+            // An entry with no install is an allowlist entry: it says the tool may be used, not how to
+            // obtain it, so it is reported rather than guessed at.
+            if (install is null)
+            {
+                return (new ToolOutcome(tool.Name, ToolState.Missing, null, Needed(tool, platformKey)), connection);
+            }
+
+            return await RunInstallAsync(host, connection, tool, install, superuser, update: false, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var (version, problem) = await ProbeVersionAsync(connection, tool, cancellationToken).ConfigureAwait(false);
+
+        if (problem is not null)
+        {
+            return (new ToolOutcome(tool.Name, ToolState.Unknown, version, problem), connection);
+        }
+
+        if (tool.MinVersion is not { Length: > 0 } minimum)
+        {
+            return (new ToolOutcome(tool.Name, ToolState.AlreadyCurrent, version), connection);
+        }
+
+        if (!SemanticVersion.TryParse(version, out var found) || !SemanticVersion.TryParse(minimum, out var least))
+        {
+            // Biased toward not knowing: reported rather than passed off as current, because a tool
+            // whose version could not be read is exactly the one whose age nobody can vouch for.
+            return (
+                new ToolOutcome(tool.Name, ToolState.Unknown, version,
+                    $"'{version ?? string.Empty}' there cannot be compared with the minVersion '{minimum}'; "
+                    + "give the tool's probe a regex whose first group is the version"),
+                connection);
+        }
+
+        if (SemanticVersion.Compare(found, least) >= 0)
+        {
+            return (new ToolOutcome(tool.Name, ToolState.AlreadyCurrent, version), connection);
+        }
+
+        if (install is null)
+        {
+            return (
+                new ToolOutcome(tool.Name, ToolState.Outdated, version,
+                    $"it is {version}, and at least {minimum} is needed; it declares no install, so update it there by hand"),
+                connection);
+        }
+
+        return await RunInstallAsync(host, connection, tool, install, superuser, update: true, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Runs one tool's install, then measures the host again rather than believing it.</summary>
+    private async Task<(ToolOutcome Outcome, HostConnection Connection)> RunInstallAsync(
+        HostId host,
+        HostConnection connection,
+        ToolConfig tool,
+        ToolInstall install,
+        Superuser superuser,
+        bool update,
+        CancellationToken cancellationToken)
+    {
+        if (ToolCommands.For(install, update) is not { Count: > 0 } command)
+        {
+            return (
+                new ToolOutcome(tool.Name, ToolState.Failed, null,
+                    $"its install declares neither a command nor a manager this build knows; known managers are "
+                    + $"{string.Join(", ", ToolCommands.KnownManagers)}"),
+                connection);
+        }
+
+        var privileged = await superuser.PrepareAsync(this, connection, command, cancellationToken).ConfigureAwait(false);
+
+        if (privileged.Problem is { } refused)
+        {
+            return (new ToolOutcome(tool.Name, ToolState.Failed, null, refused), connection);
+        }
+
+        _output.Info(CommandName, $"{host}: {(update ? "updating" : "installing")} '{tool.Name}' with {privileged.Command[0]}");
+
+        var result = await RunAsync(
+            connection,
+            privileged.Command[0],
+            [.. privileged.Command.Skip(1)],
+            InstallBudget,
+            cancellationToken,
+            privileged.Input).ConfigureAwait(false);
+
+        if (!result.Succeeded)
+        {
+            return (
+                new ToolOutcome(tool.Name, ToolState.Failed, null,
+                    superuser.Hide(HostProbes.Failure($"{(update ? "updating" : "installing")} '{tool.Name}' there failed", result))),
+                connection);
+        }
+
+        connection = await _programs
+            .ResolveAsync(connection.Forget(tool.Name), [tool.Name], ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (connection.Located(tool.Name) is not { Present: true })
+        {
+            return (
+                new ToolOutcome(tool.Name, ToolState.Failed, null,
+                    $"its install reported success, and '{tool.Name}' is still neither on the PATH of a command run "
+                    + "without a login shell nor in any of the directories an installer uses"),
+                connection);
+        }
+
+        var (version, _) = await ProbeVersionAsync(connection, tool, cancellationToken).ConfigureAwait(false);
+
+        return (new ToolOutcome(tool.Name, update ? ToolState.Updated : ToolState.Installed, version), connection);
+    }
+
+    /// <summary>Reads a tool's version the way its own configuration says to read it.</summary>
+    /// <returns>The version, and why it could not be read when it could not.</returns>
+    private async Task<(string? Version, string? Problem)> ProbeVersionAsync(
+        HostConnection connection,
+        ToolConfig tool,
+        CancellationToken cancellationToken)
+    {
+        if (tool.Probe is not { } probe)
+        {
+            return (null, null);
+        }
+
+        var result = await RunAsync(connection, connection.Spell(tool.Name), probe.Args, ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Succeeded)
+        {
+            return (null, HostProbes.Failure($"'{tool.Name}' would not report its version there", result));
+        }
+
+        var text = result.StandardOutput.Length > 0 ? result.StandardOutput : result.StandardError;
+
+        if (probe.Regex is not { Length: > 0 } pattern)
+        {
+            // With no pattern, the first word of the first line is the version a tool usually prints.
+            return (text.Split('\n').FirstOrDefault()?.Trim().Split(' ').LastOrDefault(), null);
+        }
+
+        try
+        {
+            var match = Regex.Match(text, pattern, RegexOptions.CultureInvariant, PatternBudget);
+
+            return match.Success
+                ? (match.Groups.Count > 1 ? match.Groups[1].Value : match.Value, null)
+                : (null, $"the probe regex of '{tool.Name}' matched nothing in what it printed: {HostProbes.Excerpt(text)}");
+        }
+        catch (Exception ex) when (ex is ArgumentException or RegexMatchTimeoutException)
+        {
+            return (null, $"the probe regex of '{tool.Name}' could not be used: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Which operating system's install entry applies. Measured rather than taken from this machine: an
+    /// ssh host is usually not the same system as the one reaching it, and the entry chosen decides
+    /// which package manager runs.
+    /// </summary>
+    private async Task<string> PlatformKeyAsync(HostConnection connection, string? measured, CancellationToken cancellationToken)
+    {
+        if (measured is { Length: > 0 })
+        {
+            return measured;
+        }
+
+        if (connection.Shell == RemoteShell.Cmd)
+        {
+            return PlatformNames.Windows;
+        }
+
+        var uname = await RunAsync(connection, "uname", ["-s"], ProbeBudget, cancellationToken).ConfigureAwait(false);
+
+        // uname is on every POSIX system; a host that does not have it is a Windows one running
+        // PowerShell, which is the only other shell an ssh server here hands a command to.
+        return (uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : null) ?? PlatformNames.Windows;
+    }
+
+    /// <summary>The install entry for one platform, falling back to the one declared for <c>all</c>.</summary>
+    private static ToolInstall? InstallFor(ToolConfig tool, string platformKey)
+        => tool.Install.TryGetValue(platformKey, out var forPlatform) ? forPlatform
+            : tool.Install.TryGetValue("all", out var forEvery) ? forEvery
+            : null;
+
+    /// <summary>What a tool that is not there, and cannot be installed, is reported as.</summary>
+    private static string Needed(ToolConfig tool, string platformKey)
+    {
+        var why = tool.Why is { Length: > 0 } purpose ? $" ({purpose})" : string.Empty;
+
+        return tool.Install.Count == 0
+            ? $"it is not installed there{why}; nothing declares how to install it, so install it by hand"
+            : $"it is not installed there{why}; its install declares nothing for '{platformKey}' or for 'all'";
+    }
+
+    private async Task<ProcessResult> RunAsync(
+        HostConnection connection,
+        string program,
+        IReadOnlyList<string> arguments,
+        TimeSpan budget,
+        CancellationToken cancellationToken,
+        string input = "")
+    {
+        try
+        {
+            return await _hostCommands.RunAsync(
+                connection,
+                new HostCommand
+                {
+                    Program = program,
+                    Arguments = arguments,
+                    Timeout = budget,
+                    StandardInput = input,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is ArgumentException or ExecutableNotFoundException)
+        {
+            // A token no shell reads literally, or a transport that is not installed here: reported as
+            // what the command did, because either way the program on the host never ran.
+            return new ProcessResult(-1, string.Empty, ex.Message, TimeSpan.Zero, TimedOut: false);
+        }
+    }
+
+    /// <summary>
+    /// The script that installs the .NET SDK under the home directory. Run by a shell reading it from
+    /// standard input, so nothing in it has to be a word an ssh command line can carry.
+    /// </summary>
+    private static string InstallScript => $"""
+        set -e
+        script="$HOME/.dotnet-install.sh"
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$script"
+        else
+          wget -qO "$script" https://dot.net/v1/dotnet-install.sh
+        fi
+        sh "$script" --channel {ToolPackage.MinimumSdkMajor.ToString(CultureInfo.InvariantCulture)}.0 --install-dir "$HOME/.dotnet" --no-path
+        rm -f "$script"
+
+        """;
+
+    /// <summary>
+    /// The <c>.env</c> a host's superuser credential belongs in, spelt as this repository spells it, or
+    /// <see langword="null"/> for this machine, which has no item and no credential to declare.
+    /// </summary>
+    private static string? ItemEnvFile(HarnessLayout layout, HostId host)
+    {
+        if (host.Kind == HostKind.Local)
+        {
+            return null;
+        }
+
+        var directory = host.Kind == HostKind.Wsl ? layout.WslDistroDirectory(host.Name) : layout.SshItemDirectory(host.Name);
+
+        return Path.GetRelativePath(layout.MainCheckoutRoot, Path.Combine(directory, HarnessLayout.ItemEnvFileName))
+            .Replace('\\', '/');
+    }
+
+    /// <summary>
+    /// How a privileged command is run on one host, measured once and then reused. The credential
+    /// travels on standard input and nowhere else: an argument list is visible in that host's own
+    /// process table to every user on it, and a log of one outlives the run.
+    /// </summary>
+    /// <param name="credential">The credential the host's item declares, when it declares one.</param>
+    /// <param name="itemEnvFile">Where a credential would be declared, named when one is needed and absent.</param>
+    private sealed class Superuser(HostCredential? credential, string? itemEnvFile)
+    {
+        private bool? _passwordless;
+
+        /// <summary>What a privileged command becomes, and what it is given on standard input.</summary>
+        /// <param name="service">The service, which owns how a command is run on a host.</param>
+        /// <param name="connection">The host.</param>
+        /// <param name="command">The command as the configuration declares it.</param>
+        /// <param name="cancellationToken">Stops the probe.</param>
+        public async Task<(IReadOnlyList<string> Command, string Input, string? Problem)> PrepareAsync(
+            ToolProvisionService service,
+            HostConnection connection,
+            IReadOnlyList<string> command,
+            CancellationToken cancellationToken)
+        {
+            if (!string.Equals(command[0], "sudo", StringComparison.Ordinal))
+            {
+                return (command, string.Empty, null);
+            }
+
+            if (credential is not null)
+            {
+                // -S makes sudo read the password from standard input instead of from a terminal, which
+                // a command started this way does not have at all.
+                return ([command[0], "-S", .. command.Skip(1)], credential.Reveal() + "\n", null);
+            }
+
+            _passwordless ??= (await service
+                .RunAsync(connection, "sudo", ["-n", "true"], ProbeBudget, cancellationToken)
+                .ConfigureAwait(false)).Succeeded;
+
+            if (_passwordless.Value)
+            {
+                return ([command[0], "-n", .. command.Skip(1)], string.Empty, null);
+            }
+
+            var declare = itemEnvFile is null
+                ? "let this user run sudo without a password, or install it by hand"
+                : $"add '{HostSecretsStore.SuperuserKey}' to '{itemEnvFile}', or let that user run sudo without a password";
+
+            return (command, string.Empty, $"it has to be installed by a superuser, and this run has no password for one; {declare}");
+        }
+
+        /// <summary>
+        /// Text with the credential taken out of it, applied to everything a host printed before it can
+        /// reach a report. sudo does not echo a password, and a command that logs its own input does.
+        /// </summary>
+        public string Hide(string text)
+            => credential is null || credential.Reveal().Length == 0
+                ? text
+                : text.Replace(credential.Reveal(), credential.ToString(), StringComparison.Ordinal);
+    }
+}

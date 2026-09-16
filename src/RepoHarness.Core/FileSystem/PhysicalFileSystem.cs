@@ -149,6 +149,50 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         }
     }
 
+    public Stream OpenRead(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        // Sequential, and sharing read access: a tree sync walks every file in a repository while
+        // other tools legitimately hold some of them open for reading.
+        return new FileStream(
+            path,
+            new FileStreamOptions
+            {
+                Mode = FileMode.Open,
+                Access = FileAccess.Read,
+                Share = FileShare.ReadWrite | FileShare.Delete,
+                Options = FileOptions.SequentialScan | FileOptions.Asynchronous,
+            });
+    }
+
+    public async Task WriteAllBytesAtomicAsync(
+        string path,
+        byte[] contents,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(contents);
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N")[..8];
+
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, contents, cancellationToken).ConfigureAwait(false);
+            ReplaceWith(temporary, path);
+        }
+        finally
+        {
+            TryDelete(temporary);
+        }
+    }
+
     public void ProtectSecretFile(string path) => _filePermissions.ProtectSecret(path);
 
     /// <summary>

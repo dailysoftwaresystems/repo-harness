@@ -7,16 +7,23 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Secrets;
 
 namespace RepoHarness.Tests;
 
 /// <summary>
 /// Inspection decides whether anything runs on a host, and changes what is installed there. Every
 /// command a host receives is answered by a script, so each rule is exercised exactly, and none of
-/// these tests needs WSL, ssh or a network.
+/// these tests needs WSL, ssh or a network. Every address, user and distribution here is fictitious.
 /// </summary>
 public sealed class HostInspectorTests
 {
+    private const string Distro = "lane-a";
+
+    private const string SshName = "build-box";
+
+    private const string Home = "/home/harness";
+
     private static readonly ToolIdentity Root = new("1.2.0", "roothash");
 
     private static readonly string[] ToolChanges = ["install", "update"];
@@ -24,7 +31,7 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task Local_IsMeasuredInProcess_WithoutRunningAnything()
     {
-        var fixture = new Fixture(PlatformId.Linux);
+        using var fixture = new Fixture(PlatformId.Linux);
 
         var report = await fixture.InspectAsync(HostId.Local);
 
@@ -37,47 +44,97 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task Wsl_IsUnavailable_OnAMachineThatIsNotWindows()
     {
-        var fixture = new Fixture(PlatformId.Linux);
+        using var fixture = new Fixture(PlatformId.Linux);
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("WSL exists only on Windows", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.Calls);
     }
 
     [Fact]
+    public async Task Wsl_IsUnavailable_WhenNoItemDeclaresWhichDistributionItIs()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, writeItems: false);
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains($".harness-config/wslDistros/{Distro}' does not exist", report.Reason, StringComparison.Ordinal);
+        Assert.Empty(fixture.Commands.Calls);
+    }
+
+    [Fact]
     public async Task Wsl_NamesADistributionThatDoesNotExist()
     {
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: (_, command) => command.Program == "uname"
                 ? HostResults.Failed(127, "Código de erro: Wsl/Service/WSL_E_DISTRO_NOT_FOUND")
                 : throw HostResults.Unexpected(command));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Debian"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
-        Assert.Equal("WSL has no distribution named 'Debian'", report.Reason);
+        Assert.Equal("WSL has no distribution named 'Example-Linux'", report.Reason);
     }
 
     [Fact]
-    public async Task Wsl_WithoutTheSdk_SaysTheSdkIsMissing()
+    public async Task AHostWithoutDotnetAnywhere_SaysTheSdkIsNotInstalled_AndHowToInstallIt()
     {
-        var fixture = new Fixture(
-            PlatformId.Windows,
-            respond: HostThat(listSdks: HostResults.Failed(1, "<3>WSL (708) ERROR: CreateProcessCommon:559: execvpe(dotnet) failed: No such file or directory")));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(dotnet: Where.Nowhere));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
-        Assert.Equal("the .NET 10 SDK is not installed in the distribution", report.Reason);
+        Assert.StartsWith("the .NET 10 SDK is not installed there", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("install-missing-tools", report.Reason, StringComparison.Ordinal);
         Assert.Equal("linux", report.Os);
+    }
+
+    [Fact]
+    public async Task AHostWhoseDotnetIsOffThePath_RunsItByItsAbsolutePath()
+    {
+        // Measured: ~/.dotnet is absent from the PATH of a command run with wsl.exe --exec, and
+        // /opt/homebrew/bin from an ssh command's PATH on macOS. Reported as "not installed", it sends
+        // somebody to install a second copy of what is already there.
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(dotnet: Where.OffPath));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.All(
+            fixture.Commands.Calls.Where(call => call.Command.Arguments.Contains("--list-sdks")),
+            call => Assert.Equal($"{Home}/.dotnet/dotnet", call.Command.Program));
+    }
+
+    [Fact]
+    public async Task AHostWhoseDotnetIsOffThePathAndWillNotRun_SaysWhereItWasFound()
+    {
+        using var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: HostThat(dotnet: Where.OffPath, listSdks: HostResults.Failed(126, "Permission denied")));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains($"'dotnet' is installed at '{Home}/.dotnet/dotnet'", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("off the PATH of a command run without a login shell", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("Permission denied", report.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AHostThatNeverAnsweredTheLookup_IsNotReportedAsMissingTheSdk()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: (_, _) => HostResults.Failed(255, "Connection reset"));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.Contains("could not be established", report.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task AnSdkOlderThanTheToolNeeds_IsNamed()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(sdks: "8.0.414 [/usr/lib/dotnet/sdk]\n"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(sdks: "8.0.414 [/usr/lib/dotnet/sdk]\n"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Equal("DssHarness needs the .NET 10 SDK there, and it has 8.0.414", report.Reason);
     }
@@ -85,9 +142,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AnSdkListingThatCannotBeRead_IsReportedAsUnreadable_RatherThanAsNoSdk()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(sdks: "Welcome to .NET! Telemetry is collected.\n"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(sdks: "Welcome to .NET! Telemetry is collected.\n"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.StartsWith("dotnet --list-sdks printed nothing this build can read as an SDK", report.Reason, StringComparison.Ordinal);
     }
@@ -95,9 +152,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AHostWithoutTheTool_GetsThisMachinesVersionInstalled_ThenAnswers()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: null));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: null));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(["installed DssHarness 1.2.0"], report.Actions);
@@ -112,9 +169,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task TheQuestionToTheHost_IsOneLine_WhoseInputStaysOpenUntilItIsAnswered()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat());
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat());
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.True(report.Available, report.Reason);
 
@@ -132,9 +189,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AHostThatIsBehind_IsUpdated_AndNeverWithADowngradeAllowed()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(["updated DssHarness 1.1.9 to 1.2.0"], report.Actions);
@@ -150,9 +207,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AHostThatIsBehind_IsNotUpdated_WhileDssHarnessRunsThere()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9", processes: "bash\nDssHarness\n"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.1.9", processes: "bash\nDssHarness\n"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("DssHarness is running there, so it was not updated", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
@@ -162,11 +219,11 @@ public sealed class HostInspectorTests
     public async Task AHostThatIsBehind_IsNotUpdated_WhenItsProcessesCannotBeListed()
     {
         // Read as "nothing is running", a listing that failed would replace a tool in the middle of a run.
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: HostThat(installed: "1.1.9", listProcesses: HostResults.Failed(127, "ps: command not found")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("its running processes could not be listed", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
@@ -176,9 +233,9 @@ public sealed class HostInspectorTests
     public async Task AToolListThatCannotBeRead_IsReported_AndNothingIsInstalled()
     {
         // Read as "not installed", it would install over a tool that may be newer, and skip the refusal.
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(toolList: HostResults.Ok("Tool list failed\n")));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(toolList: HostResults.Ok("Tool list failed\n")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("its global .NET tools could not be listed", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
@@ -187,9 +244,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AnInstalledVersionThatCannotBeCompared_IsReported_AndNothingIsInstalled()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "latest"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "latest"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("DssHarness latest there cannot be compared with 1.2.0 here", report.Reason, StringComparison.Ordinal);
         AssertToolUntouched(fixture);
@@ -198,9 +255,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AHostOnThisVersion_IsLeftAlone_EvenWhileDssHarnessRunsThere()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", processes: "DssHarness\n"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", processes: "DssHarness\n"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.True(report.Available, report.Reason);
         Assert.Empty(report.Actions);
@@ -211,9 +268,9 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AHostThatIsAhead_StopsEverything_WithTheCommandThatUpdatesThisMachine()
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.3.0"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.3.0"));
 
-        var exception = await Assert.ThrowsAsync<HarnessException>(() => fixture.InspectAsync(HostId.Wsl("Ubuntu")));
+        var exception = await Assert.ThrowsAsync<HarnessException>(() => fixture.InspectAsync(HostId.Wsl(Distro)));
 
         Assert.Equal(HarnessExit.Refused, exception.ExitCode);
         Assert.Contains("dotnet tool update --global DssHarness --version 1.3.0", exception.Message, StringComparison.Ordinal);
@@ -224,9 +281,9 @@ public sealed class HostInspectorTests
     public async Task AHostWithADifferentBuildOfTheSameVersion_IsUnavailable()
     {
         // A build from source reports the same version as the published package; only its bytes differ.
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", answeredHash: "otherhash"));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(installed: "1.2.0", answeredHash: "otherhash"));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("is a different build from this machine's", report.Reason, StringComparison.Ordinal);
         Assert.Null(report.Session);
@@ -236,11 +293,11 @@ public sealed class HostInspectorTests
     public async Task ADifferentBuild_IsReportedAsThat_ThoughItsAnswerHasFieldsThisBuildDoesNotKnow()
     {
         // Identified before the rest of the answer is read, so a build that answers in another shape still gets the remedy.
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: HostThat(agent: _ => HostResults.Ok("""{"version":"1.2.0","assemblySha256":"otherhash","os":"linux","processor":"x86_64","addedLater":true}""")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("is a different build from this machine's", report.Reason, StringComparison.Ordinal);
     }
@@ -248,11 +305,11 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AnAnswerFromThisBuild_ThatCannotBeRead_IsReportedAsUnreadable()
     {
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: HostThat(agent: _ => HostResults.Ok("""{"version":"1.2.0","assemblySha256":"roothash","os":"linux","processor":"x86_64","addedLater":true}""")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("answered in a form this build cannot read", report.Reason, StringComparison.Ordinal);
         Assert.Null(report.Session);
@@ -263,9 +320,9 @@ public sealed class HostInspectorTests
     [InlineData("Segmentation fault", "answered with no document")]
     public async Task AnAnswerThatIsNotFromThisBuild_LeavesTheHostUnavailable(string answer, string expected)
     {
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: _ => HostResults.Ok(answer)));
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: _ => HostResults.Ok(answer)));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains(expected, report.Reason, StringComparison.Ordinal);
         Assert.Null(report.Session);
@@ -285,7 +342,7 @@ public sealed class HostInspectorTests
             },
         };
 
-        var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
         {
             var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
 
@@ -299,7 +356,7 @@ public sealed class HostInspectorTests
                 HostAgentProtocol.JsonOptions));
         }));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"), emulators);
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro), emulators);
 
         Assert.True(report.Available, report.Reason);
         Assert.True(report.Emulators["QEMU-ARM64"].Available);
@@ -308,11 +365,11 @@ public sealed class HostInspectorTests
     [Fact]
     public async Task AnInstallThatFails_SaysAHostRunsOnlyPublishedVersions()
     {
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: HostThat(installed: null, install: HostResults.Failed(1, "error NU1101: Unable to find package DssHarness")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("a host runs only a version published on nuget.org", report.Reason, StringComparison.Ordinal);
         Assert.Contains("NU1101", report.Reason, StringComparison.Ordinal);
@@ -322,11 +379,11 @@ public sealed class HostInspectorTests
     public async Task AnUpdateThatFails_SaysAHostRunsOnlyPublishedVersions()
     {
         // A machine running a beta asks for a version nuget.org never had; an update says why, as an install does.
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Windows,
             respond: HostThat(installed: "1.1.9", install: HostResults.Failed(1, "error NU1102: Unable to find package DssHarness with version (= 1.2.0)")));
 
-        var report = await fixture.InspectAsync(HostId.Wsl("Ubuntu"));
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
 
         Assert.Contains("updating DssHarness 1.1.9 to 1.2.0 there failed", report.Reason, StringComparison.Ordinal);
         Assert.Contains("a host runs only a version published on nuget.org", report.Reason, StringComparison.Ordinal);
@@ -334,149 +391,92 @@ public sealed class HostInspectorTests
     }
 
     [Fact]
-    public async Task Ssh_IsUnavailable_WithoutTheHarnessSshConfiguration()
+    public async Task Ssh_IsUnavailable_WithoutTheHostsOwnItem()
     {
-        using var repository = new TempDirectory();
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
+        using var fixture = new Fixture(PlatformId.Linux, writeItems: false);
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
-        Assert.Contains(".harness-config/ssh/config does not exist", report.Reason, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task Ssh_IsUnavailable_WhenTheConfigurationDoesNotDeclareTheHost()
-    {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host other\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
-
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
-
-        Assert.Equal(".harness-config/ssh/config has no 'Host vps' entry; ssh matches the name exactly, case included", report.Reason);
-    }
-
-    [Fact]
-    public async Task Ssh_IsUnavailable_WhenTheConfigurationNamesTheHostInAnotherCase()
-    {
-        // ssh would not apply "Host VPS" to "ssh vps", and would connect wherever vps happened to resolve.
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host VPS\n  HostName vps.example\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
-
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
-
-        Assert.Contains("has no 'Host vps' entry", report.Reason, StringComparison.Ordinal);
+        Assert.Contains($".harness-config/sshItems/{SshName}' does not exist", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.ShellProbes);
     }
 
     [Fact]
-    public async Task Ssh_IsUnavailable_WhenOtherUsersCanChangeTheConfiguration_BeforeConnecting()
+    public async Task Ssh_IsUnavailable_WhenItIsNotDeclaredUnderHostsSsh()
     {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
-        fixture.Permissions.IsWritableByOthers(Arg.Any<string>()).Returns(true);
+        using var fixture = new Fixture(PlatformId.Linux);
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh("another-box"));
 
-        Assert.Contains("whoever can change it can make ssh run any command as you", report.Reason, StringComparison.Ordinal);
-        Assert.Contains("chmod 600", report.Reason, StringComparison.Ordinal);
-        Assert.Empty(fixture.Commands.ShellProbes);
-    }
-
-    [Fact]
-    public async Task Ssh_IsUnavailable_WhenThePermissionsOfItsFilesCannotBeRead()
-    {
-        // A problem of this host alone: it must not abort the measurement of every other host.
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
-        fixture.Permissions.IsWritableByOthers(Arg.Any<string>()).Returns(_ => throw new UnauthorizedAccessException("Access to the path is denied."));
-
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
-
-        Assert.Contains("could not be read: Access to the path is denied.", report.Reason, StringComparison.Ordinal);
+        Assert.Equal("it is not declared under hosts.ssh", report.Reason);
         Assert.Empty(fixture.Commands.ShellProbes);
     }
 
     [Fact]
     public async Task Ssh_IsUnavailable_WhenOtherUsersCanReadItsKey_BeforeConnecting()
     {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  IdentityFile .harness-config/ssh/vps_key\n");
-        repository.WriteFile(Path.Combine(".harness-config", "ssh", "vps_key"), "not really a key");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
+        using var fixture = new Fixture(PlatformId.Linux);
         fixture.Permissions.IsPrivate(Arg.Any<string>()).Returns(false);
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
-        Assert.Contains("other users can read the key", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("so ssh ignores it", report.Reason, StringComparison.Ordinal);
         Assert.Contains("chmod 600", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.ShellProbes);
         Assert.Empty(fixture.Commands.Calls);
     }
 
     [Fact]
-    public async Task Ssh_ChecksAKey_ThatAWildcardEntryGivesTheHost()
+    public async Task Ssh_IsUnavailable_WhenItsNameResolvesToNothing()
     {
-        // ssh offers every key whose Host entry selects the host, Host * included.
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n\nHost *\n  IdentityFile .harness-config/ssh/shared_key\n");
-        repository.WriteFile(Path.Combine(".harness-config", "ssh", "shared_key"), "not really a key");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
-        fixture.Permissions.IsPrivate(Arg.Any<string>()).Returns(false);
+        using var fixture = new Fixture(PlatformId.Linux, resolves: false);
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
-        Assert.Contains("other users can read the key", report.Reason, StringComparison.Ordinal);
-        Assert.Contains("shared_key", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("resolved to no address", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.ShellProbes);
     }
 
     [Fact]
     public async Task Ssh_ReportsWhatSshSaid_WhenItCannotConnect()
     {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path);
+        using var fixture = new Fixture(PlatformId.Linux);
         fixture.Commands.ShellProbe = HostResults.Failed(255, "Host key verification failed.\n");
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
-        Assert.Equal("ssh could not connect: Host key verification failed.", report.Reason);
+        Assert.Equal("the host could not be reached: ssh said Host key verification failed.", report.Reason);
     }
 
     [Fact]
-    public async Task Ssh_ConnectsWithTheHarnessesOwnConfiguration_AndTheHostsSettings()
+    public async Task Ssh_ConnectsWithTheHostsOwnItem_AndTheHostsSettings()
     {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(PlatformId.Linux, repository: repository.Path, respond: HostThat());
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat());
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
         Assert.True(report.Available, report.Reason);
 
         var connection = Assert.Single(fixture.Commands.ShellProbes);
-        PathAssert.Same(Path.Combine(repository.Path, ".harness-config", "ssh", "config"), connection.SshConfigFile!);
-        PathAssert.Same(repository.Path, connection.LocalDirectory!);
+        Assert.Equal("host.invalid", connection.Address);
+        Assert.Equal("harness", connection.User);
+        Assert.Equal(2222, connection.Port);
+        PathAssert.Same(fixture.Repository.Combine(".harness-config", "sshItems", SshName, ".key"), connection.KeyFile!);
+        PathAssert.Same(fixture.Repository.Combine(".harness-config", "sshItems", SshName, "known_hosts"), connection.KnownHostsFile!);
+        PathAssert.Same(fixture.Repository.Path, connection.LocalDirectory!);
         Assert.Equal(5, connection.ConnectTimeoutSeconds);
-        Assert.All(fixture.Commands.Calls, call => Assert.Equal(connection.SshConfigFile, call.Connection.SshConfigFile));
+        Assert.All(fixture.Commands.Calls, call => Assert.Equal(connection.Address, call.Connection.Address));
     }
 
     [Fact]
     public async Task Ssh_ToACmdShell_SpellsTheToolsPathWithBackslashes()
     {
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Linux,
-            repository: repository.Path,
             respond: HostThat(sdks: "10.0.100 [C:\\Program Files\\dotnet\\sdk]\n", answeredOs: "windows"));
         fixture.Commands.ShellProbe = HostResults.Ok("C:\\WINDOWS\\system32\\cmd.exe\r\n");
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(@".dotnet\tools\DssHarness.exe", report.Session?.ToolPath);
@@ -489,14 +489,11 @@ public sealed class HostInspectorTests
     {
         // PowerShell leaves %COMSPEC% unexpanded, as sh does, and runs on Windows all the same. Where the SDK
         // is installed says what the host is; the shell says only which separator a path takes.
-        using var repository = new TempDirectory();
-        WriteSshConfig(repository, "Host vps\n  HostName vps.example\n");
-        var fixture = new Fixture(
+        using var fixture = new Fixture(
             PlatformId.Linux,
-            repository: repository.Path,
             respond: HostThat(installed: "1.1.9", sdks: "10.0.100 [C:\\Program Files\\dotnet\\sdk]\n", answeredOs: "windows"));
 
-        var report = await fixture.InspectAsync(HostId.Ssh("vps"));
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(RemoteShell.Standard, report.Session?.Connection.Shell);
@@ -504,9 +501,18 @@ public sealed class HostInspectorTests
         Assert.Equal("tasklist", fixture.Commands.Single("/FO").Program);
     }
 
+    /// <summary>Where a host keeps <c>dotnet</c>, which decides how a command there has to spell it.</summary>
+    private enum Where
+    {
+        OnPath,
+        OffPath,
+        Nowhere,
+    }
+
     /// <summary>A host with the .NET 10 SDK that answers each probe as scripted.</summary>
     private static Func<HostConnection, HostCommand, ProcessResult> HostThat(
         string? installed = "1.2.0",
+        Where dotnet = Where.OnPath,
         ProcessResult? listSdks = null,
         string sdks = "10.0.100 [/usr/lib/dotnet/sdk]\n",
         ProcessResult? toolList = null,
@@ -516,18 +522,55 @@ public sealed class HostInspectorTests
         string answeredOs = "linux",
         ProcessResult? install = null,
         Func<HostCommand, ProcessResult>? agent = null)
-        => (_, command) => (command.Program, command.Arguments.FirstOrDefault()) switch
+    {
+        var dotnetPath = dotnet == Where.OffPath ? $"{Home}/.dotnet/dotnet" : "dotnet";
+
+        return (_, command) =>
         {
-            ("uname", _) => HostResults.Ok("Linux x86_64\n"),
-            ("dotnet", "--list-sdks") => listSdks ?? HostResults.Ok(sdks),
-            ("dotnet", "tool") when command.Arguments[1] == "list" => toolList ?? HostResults.Ok(ToolList(installed)),
-            ("dotnet", "tool") when command.Arguments[1] is "install" or "update" => install ?? HostResults.Ok("done"),
-            ("ps" or "tasklist", _) => listProcesses ?? HostResults.Ok(processes),
-            (_, HostAgentProtocol.CommandName) => agent?.Invoke(command) ?? HostResults.Ok(JsonSerializer.Serialize(
-                new HostAgentInfo { Version = Root.Version, AssemblySha256 = answeredHash, Os = answeredOs, Processor = "x86_64" },
-                HostAgentProtocol.JsonOptions)),
-            _ => throw HostResults.Unexpected(command),
+            // The lookup answers where dotnet is; every other program on these hosts is on the PATH.
+            if (Lookup(command) is { } name)
+            {
+                return name != "dotnet" || dotnet == Where.OnPath
+                    ? HostResults.Ok($"/usr/bin/{name}\n")
+                    : HostResults.Failed(1, string.Empty);
+            }
+
+            if (command.Program == "pwd")
+            {
+                return HostResults.Ok(Home + "\n");
+            }
+
+            if (command.Program == "ls")
+            {
+                var present = dotnet == Where.OffPath ? command.Arguments.Where(path => path == dotnetPath) : [];
+                return HostResults.Ok(string.Join('\n', present) + "\n");
+            }
+
+            var program = command.Program == dotnetPath ? "dotnet" : command.Program;
+
+            return (program, command.Arguments.FirstOrDefault()) switch
+            {
+                ("uname", _) => HostResults.Ok("Linux x86_64\n"),
+                ("dotnet", "--list-sdks") => listSdks ?? HostResults.Ok(sdks),
+                ("dotnet", "tool") when command.Arguments[1] == "list" => toolList ?? HostResults.Ok(ToolList(installed)),
+                ("dotnet", "tool") when command.Arguments[1] is "install" or "update" => install ?? HostResults.Ok("done"),
+                ("ps" or "tasklist", _) => listProcesses ?? HostResults.Ok(processes),
+                (_, HostAgentProtocol.CommandName) => agent?.Invoke(command) ?? HostResults.Ok(JsonSerializer.Serialize(
+                    new HostAgentInfo { Version = Root.Version, AssemblySha256 = answeredHash, Os = answeredOs, Processor = "x86_64" },
+                    HostAgentProtocol.JsonOptions)),
+                _ => throw HostResults.Unexpected(command),
+            };
         };
+    }
+
+    /// <summary>The program a PATH lookup asked about, or <see langword="null"/> when this is not one.</summary>
+    private static string? Lookup(HostCommand command) => (command.Program, command.Arguments.FirstOrDefault()) switch
+    {
+        ("command", "-v") => command.Arguments[1],
+        ("where", not null) => command.Arguments[0],
+        ("sh", "-c") => command.Arguments[1].Split(' ')[^1],
+        _ => null,
+    };
 
     private static string ToolList(string? installed) => installed is null
         ? """{"version":1,"data":[]}"""
@@ -537,14 +580,11 @@ public sealed class HostInspectorTests
     private static void AssertToolUntouched(Fixture fixture)
         => Assert.DoesNotContain(
             fixture.Commands.Calls,
-            call => call.Command.Program == "dotnet"
+            call => Path.GetFileName(call.Command.Program) == "dotnet"
                 && call.Command.Arguments.Count > 1
                 && ToolChanges.Contains(call.Command.Arguments[1]));
 
-    private static void WriteSshConfig(TempDirectory repository, string text)
-        => repository.WriteFile(Path.Combine(".harness-config", "ssh", HostInspector.SshConfigFileName), text);
-
-    private sealed class Fixture
+    private sealed class Fixture : IDisposable
     {
         private readonly HarnessContext _context;
         private readonly HostInspector _inspector;
@@ -552,8 +592,11 @@ public sealed class HostInspectorTests
         public Fixture(
             PlatformId platformId,
             Func<HostConnection, HostCommand, ProcessResult>? respond = null,
-            string? repository = null)
+            bool writeItems = true,
+            bool resolves = true)
         {
+            Repository = new TempDirectory();
+
             var platform = HostDoubles.Platform(platformId);
 
             var processRunner = Substitute.For<IProcessRunner>();
@@ -567,22 +610,40 @@ public sealed class HostInspectorTests
 
             Commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
 
-            var root = repository ?? TestHost.TemporaryRoot;
+            if (writeItems)
+            {
+                Repository.WriteFile(Path.Combine(".harness-config", "wslDistros", Distro, ".env"), "DISTRO=Example-Linux\n");
+                Repository.WriteFile(
+                    Path.Combine(".harness-config", "sshItems", SshName, ".env"),
+                    "ADDRESS=host.invalid\nUSER=harness\nPORT=2222\n");
+                Repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".key"), "not a real key");
+                Repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, "known_hosts"), "host.invalid ssh-ed25519 AAAA\n");
+            }
+
             var config = new HarnessConfig
             {
+                SshItems = { SshName },
+                WslDistros = { Distro },
                 Hosts = new HostsConfig
                 {
-                    Wsl = { ["Ubuntu"] = new WslHostConfig { RepositoryPath = "~/repo" } },
-                    Ssh = { ["vps"] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 } },
+                    Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } },
+                    Ssh = { [SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 } },
                 },
             };
 
-            _context = new HarnessContext(new HarnessLayout(root, root), config);
+            _context = new HarnessContext(new HarnessLayout(Repository.Path, Repository.Path), config);
 
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
             var agent = new HostAgentService(platform, identity, new EmulatorProbe(platform, processRunner, fileSystem), fileSystem);
-            _inspector = new HostInspector(platform, processRunner, Commands, fileSystem, Permissions, identity, agent);
+            var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
+            var addresses = new HostAddressResolver(new FixedLookup(resolves), TimeProvider.System, TimeSpan.Zero);
+            var programs = new HostProgramResolver(processRunner, Commands);
+            var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
+
+            _inspector = new HostInspector(Commands, connector, identity, agent);
         }
+
+        public TempDirectory Repository { get; }
 
         public ScriptedHostCommands Commands { get; }
 
@@ -594,5 +655,14 @@ public sealed class HostInspectorTests
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
                 TestContext.Current.CancellationToken);
+
+        public void Dispose() => Repository.Dispose();
+
+        /// <summary>A resolver that either answers for every name or for none, with no network involved.</summary>
+        private sealed class FixedLookup(bool resolves) : INameLookup
+        {
+            public Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken = default)
+                => Task.FromResult<IReadOnlyList<string>>(resolves ? ["192.0.2.10"] : []);
+        }
     }
 }

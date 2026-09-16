@@ -215,7 +215,17 @@ public sealed class HostExecServiceTests
             Host = host,
             Os = "linux",
             Processor = "x86_64",
-            Session = new HostSession(new HostConnection { Host = host, SshConfigFile = "config" }, ".dotnet/tools/DssHarness"),
+            Session = new HostSession(
+                new HostConnection
+                {
+                    Host = host,
+                    Distribution = "Example-Linux",
+                    Address = "host.invalid",
+                    User = "harness",
+                    KeyFile = "/repo/.key",
+                    KnownHostsFile = "/repo/known_hosts",
+                },
+                ".dotnet/tools/DssHarness"),
         }));
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
