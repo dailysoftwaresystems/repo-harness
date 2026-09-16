@@ -141,8 +141,21 @@ public sealed record ActionFile(
     public IEnumerable<ActionCommand> Commands => Steps.SelectMany(step => step.Commands);
 
     /// <summary>
+    /// The name of the directory this action owns, taken from where the file was read rather than
+    /// from its <see cref="Name"/> key.
+    /// </summary>
+    /// <remarks>
+    /// The layout requires the two to match, and this is the one the file system agrees with: a step
+    /// that runs in its action's own directory has to reach the directory that is actually there,
+    /// not the one a <c>name:</c> key claims it is.
+    /// </remarks>
+    public string DirectoryName
+        => System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(Path)) ?? string.Empty;
+
+    /// <summary>
     /// The file's steps as the phases the harness runs. A predefined action contributes none,
     /// because it is not a child process; the caller performs it.
     /// </summary>
-    public IReadOnlyList<RunnerPhase> ToPhases() => [.. Steps.SelectMany(step => step.ToPhases())];
+    public IReadOnlyList<RunnerPhase> ToPhases()
+        => [.. Steps.SelectMany(step => step.ToPhases(DirectoryName))];
 }

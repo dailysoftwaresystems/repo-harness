@@ -58,6 +58,15 @@ public sealed class HarnessConfig
     /// </summary>
     public Dictionary<string, RunnerConfig> PredefinedRunners { get; init; } = Map<RunnerConfig>();
 
+    /// <summary>
+    /// The action each runner that declares one names, keyed by the runner's name. A runner
+    /// declaring <c>phases</c> instead contributes nothing.
+    /// </summary>
+    public IEnumerable<KeyValuePair<string, string>> ActionsByRunner()
+        => PredefinedRunners
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Value.Action))
+            .Select(entry => new KeyValuePair<string, string>(entry.Key, entry.Value.Action!));
+
     /// <summary>Named commands invokable through <c>DssHarness exec</c>.</summary>
     public Dictionary<string, ExecConfig> Exec { get; init; } = Map<ExecConfig>();
 

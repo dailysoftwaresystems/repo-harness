@@ -139,8 +139,28 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// </remarks>
     public string RunnerDirectory => Path.Combine(HarnessDirectory, RunnerDirectoryName);
 
-    /// <summary>Where a runner's action files live. Tracked by git.</summary>
+    /// <summary>Where a runner's action directories live. Tracked by git.</summary>
     public string RunnerActionsDirectory => Path.Combine(RunnerDirectory, RunnerActionsDirectoryName);
+
+    /// <summary>
+    /// One action's own directory, holding its file and everything that file runs, relative to a
+    /// tree root.
+    /// </summary>
+    /// <remarks>
+    /// Relative on purpose. A step that runs in its action's directory is resolved against the leg's
+    /// own tree, which is a worktree whenever the leg names one; an absolute path built here would
+    /// be the tree the command was typed in, and every leg on a worktree would run the wrong copy.
+    /// </remarks>
+    /// <param name="name">The action's directory name.</param>
+    public static string RunnerActionDirectoryRelative(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        return Path.Combine(DirectoryName, RunnerDirectoryName, RunnerActionsDirectoryName, name);
+    }
+
+    /// <summary>The harness directory, relative to a tree root.</summary>
+    public static string HarnessDirectoryRelative => DirectoryName;
 
     /// <summary>
     /// Where the values actions read live, resolved against the main checkout because they are

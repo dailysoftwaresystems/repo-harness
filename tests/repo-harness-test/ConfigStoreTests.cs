@@ -801,6 +801,49 @@ public sealed class ConfigStoreTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every way a runner's action can be spelled wrong, refused when the file is read rather than
+    /// when a runner is finally invoked. The rule needs no file system, so it belongs here: a
+    /// configuration <c>legs</c> calls valid is one <c>run</c> can act on, and the promise that
+    /// every problem is listed at once covers this one too.
+    /// </summary>
+    [Theory]
+    [InlineData("corpus.yml", "corpus/corpus.yml")]
+    [InlineData("corpus.yaml", "corpus/corpus.yml")]
+    [InlineData("../outside.yml", "without '.' or '..'")]
+    [InlineData("a/../../outside.yml", "without '.' or '..'")]
+    [InlineData("./corpus/corpus.yml", "without '.' or '..'")]
+    [InlineData("/etc/passwd.yml", "absolute path")]
+    [InlineData("C:/windows/evil.yml", "absolute path")]
+    [InlineData("corpus/nested/corpus.yml", "each action owns one directory")]
+    [InlineData("corpus/steps.yml", "carries its directory's name")]
+    [InlineData("corpus/corpus.txt", "does not end in")]
+    public void Load_RejectsARunnerActionThatIsNotOneDirectoryPerAction(string action, string expected)
+    {
+        var exception = LoadInvalid($$"""
+            {
+              "predefinedRunners": { "corpus": { "action": {{System.Text.Json.JsonSerializer.Serialize(action)}} } }
+            }
+            """);
+
+        Assert.Contains("predefined runner 'corpus' action", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("corpus/corpus.yml")]
+    [InlineData("corpus/corpus.yaml")]
+    public void Load_AcceptsARunnerActionInItsOwnDirectory(string action)
+    {
+        var config = LoadValid($$"""
+            {
+              "predefinedRunners": { "corpus": { "action": {{System.Text.Json.JsonSerializer.Serialize(action)}} } }
+            }
+            """);
+
+        Assert.Equal(action, config.PredefinedRunners["corpus"].Action);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

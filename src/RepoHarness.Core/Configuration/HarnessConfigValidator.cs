@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Runners;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Core.Configuration;
@@ -673,9 +674,13 @@ public static class HarnessConfigValidator
                 problems.Add($"predefined runner '{name}' declares neither an action file nor phases");
             }
 
-            if (hasAction)
+            // The same rule the parser applies when it reads the file, so that a configuration
+            // 'legs' calls valid is one 'run' can act on. Applied here it is a problem listed with
+            // every other; left only to the parser it surfaced when a runner was finally invoked,
+            // which is exactly the late failure this file exists to prevent.
+            if (hasAction && ActionPath.Problem(runner.Action) is { } actionProblem)
             {
-                RequireRelativePaths([runner.Action!], $"predefined runner '{name}' action", problems);
+                problems.Add($"predefined runner '{name}' action {actionProblem}");
             }
 
             if (runner.StallSeconds is { } runnerStall && runnerStall < 0)

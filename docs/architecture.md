@@ -870,11 +870,36 @@ eventually disagree, and nothing could say which one ran. Every field a phase ca
 `workingDirectory`, `env`, `successPattern`, `stallSeconds`, `continueOnError` — is a key on a
 step, so nothing the verdict contract depends on is lost by declaring one instead of the other.
 
+**One directory per action.** An action lives at `actions/<name>/<name>.yml`, and everything its
+steps run — a program, a fixture, a data table — lives in that same directory. A `run` line is a
+program and its arguments with no shell, so anything that is not a one-liner has to be a file;
+a flat directory gives that file nowhere to live that is obviously owned by the action it belongs
+to, and two actions' supporting files would sit side by side with nothing saying which was whose.
+The file carries its directory's name so that neither can be renamed quietly into disagreeing.
+
+The rule is applied in two places on purpose. Its **spelling** — two segments, no `.` or `..`, not
+rooted, ending in `.yml` or `.yaml`, the file named for its directory — needs no file system, so
+`config.json` is refused for it when it is read, and `legs` and `run` therefore answer the same way
+about the same repository. Its **resolution** — that the file is there, and that no link along the
+path leads out of the actions directory once every link is followed — is what only the file system
+knows; `legs` and `run` both check it before a leg is placed, and the parser checks it again when
+it opens the file, because the last line of defence does not get to assume a caller validated
+first. Containment is compared with this platform's path rules and at a directory boundary, so a
+sibling directory whose name merely starts the same way is outside, not inside.
+
 - A step either `uses` a predefined action or carries a `run` block. There are two predefined
   actions, confirming the tree is at a named commit and reading inputs; an unknown one is refused
   naming what is available.
 - A `run` block is split on newlines and each line is trimmed, so indentation and blank lines
   cannot change what runs.
+- **A step runs at the leg's tree root unless it says otherwise.** That is measured behaviour and
+  it did not change with the layout above, which reads as though a step ran beside its own file.
+  `workingDirectoryRoot` names what `workingDirectory` starts from — `tree` (the leg's worktree or
+  the repository, the default), `harness` (`.harness-config`), or `action` (the action's own
+  directory) — and `workingDirectory` is a path under it, the root itself when absent. A step that
+  runs a program it ships says `workingDirectoryRoot: action` and names it `./probe.py`; a step
+  that builds or tests the repository says nothing and keeps the root it always had. The roots are
+  resolved relative to the leg's own tree, so a leg on a worktree reaches that worktree's copy.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

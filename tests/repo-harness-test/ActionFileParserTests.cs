@@ -361,38 +361,320 @@ public sealed class ActionFileParserTests
             """).ToPhases()).Name);
     }
 
+    /// <summary>
+    /// The measured default, kept: a step with neither key runs where every step ran before this
+    /// layout existed. The new directory reads as though a step ran beside its own file, and a
+    /// default that quietly became that would have broken every root-relative line already written.
+    /// </summary>
     [Fact]
-    public async Task LoadAsync_Refuses_AnActionNameThatIsAPath()
+    public void AStepThatNamesNoRoot_StillRunsAtTheTreeRoot()
     {
-        using var temp = new TempDirectory();
-        var parser = CreateParser();
+        var phase = Assert.Single(Parse("""
+            steps:
+              - name: build
+                run: cmake --build build
+            """).ToPhases());
 
-        var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => parser.LoadAsync(temp.Path, "../elsewhere/steal.yaml", TestContext.Current.CancellationToken));
-
-        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
-        Assert.Contains("is not a file name", exception.Message, StringComparison.Ordinal);
+        Assert.Null(phase.WorkingDirectory);
     }
 
     [Fact]
-    public async Task LoadAsync_ReadsTheFileFromTheActionsDirectory()
+    public void AStepThatNamesNoRoot_KeepsItsOwnPathRelativeToTheTree()
+    {
+        var phase = Assert.Single(Parse("""
+            steps:
+              - name: build
+                workingDirectory: sub
+                run: cmake --build build
+            """).ToPhases());
+
+        Assert.Equal("sub", phase.WorkingDirectory);
+    }
+
+    [Theory]
+    [InlineData("tree", null, null)]
+    [InlineData("tree", "sub", "sub")]
+    [InlineData("harness", null, ".harness-config")]
+    [InlineData("harness", "sub", ".harness-config/sub")]
+    [InlineData("action", null, ".harness-config/runner/actions/build")]
+    [InlineData("action", "lib", ".harness-config/runner/actions/build/lib")]
+    public void AStepResolvesItsWorkingDirectoryAgainstTheRootItNames(string root, string? path, string? expected)
+    {
+        var declared = path is null ? string.Empty : $"\n    workingDirectory: {path}";
+
+        var phase = Assert.Single(Parse($"""
+            steps:
+              - name: build
+                workingDirectoryRoot: {root}{declared}
+                run: cmake --build build
+            """).ToPhases());
+
+        // Compared with separators normalised: the value is built with the platform's own, and what
+        // matters is which directory it names, not which slash this machine writes it with.
+        Assert.Equal(expected, phase.WorkingDirectory?.Replace('\\', '/'));
+    }
+
+    /// <summary>
+    /// A rooted second argument makes <c>Path.Combine</c> discard the first, so a step could name a
+    /// root, be composed against it, and run somewhere else entirely with nothing refusing it.
+    /// </summary>
+    [Theory]
+    [InlineData("C:\\Windows\\System32", "absolute path")]
+    [InlineData("/etc", "absolute path")]
+    [InlineData("\\\\server\\share", "absolute path")]
+    [InlineData("../../../../Windows", "climbs out")]
+    [InlineData("lib/../../../elsewhere", "climbs out")]
+    public void Parse_Refuses_AWorkingDirectoryThatLeavesTheRootItNames(string path, string expected)
+    {
+        var exception = Refused($"""
+            steps:
+              - name: build
+                workingDirectoryRoot: action
+                workingDirectory: {path}
+                run: cmake --build build
+            """);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same rule with no root declared, where the default tree root is the one being left.
+    /// </summary>
+    [Fact]
+    public void Parse_Refuses_AWorkingDirectoryThatLeavesTheTreeRoot()
+    {
+        var exception = Refused("""
+            steps:
+              - name: build
+                workingDirectory: ../../elsewhere
+                run: cmake --build build
+            """);
+
+        Assert.Contains("climbs out", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A predefined action is performed by the harness, never started as a program, so it has no
+    /// working directory. Accepted silently, the key would be a rule nobody applied — the same
+    /// reason 'ref' is refused on an action that does not take one.
+    /// </summary>
+    [Theory]
+    [InlineData("workingDirectory: sub")]
+    [InlineData("workingDirectoryRoot: action")]
+    public void Parse_Refuses_AWorkingDirectoryOnAStepThatUsesAPredefinedAction(string declared)
+    {
+        var exception = Refused($"""
+            steps:
+              - name: checkout
+                uses: harness/checkout
+                ref: main
+                {declared}
+            """);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+        Assert.Contains("applies only to a step's 'run' block", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("harness/checkout", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parse_Refuses_AWorkingDirectoryRootThatIsNotOne_NamingWhatIsAvailable()
+    {
+        var exception = Refused("""
+            steps:
+              - name: build
+                workingDirectoryRoot: repository
+                run: cmake --build build
+            """);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+        Assert.Contains("'repository' is not a working directory root", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("'tree', 'harness', 'action'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ReadsAnActionFromItsOwnDirectory()
     {
         using var temp = new TempDirectory();
-        temp.WriteFile("build.yaml", "steps:\n  - name: build\n    run: cmake --build build\n");
+        temp.WriteFile(
+            Path.Combine("build", "build.yml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
 
-        var action = await CreateParser().LoadAsync(temp.Path, "build.yaml", TestContext.Current.CancellationToken);
+        var action = await CreateParser()
+            .LoadAsync(temp.Path, "build/build.yml", TestContext.Current.CancellationToken);
 
         Assert.Equal("build", Assert.Single(action.Steps).Name);
+        Assert.Equal("build", action.DirectoryName);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ReadsAnActionSpelledWithTheOtherExtension()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(
+            Path.Combine("build", "build.yaml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        var action = await CreateParser()
+            .LoadAsync(temp.Path, "build/build.yaml", TestContext.Current.CancellationToken);
+
+        Assert.Equal("build", Assert.Single(action.Steps).Name);
+    }
+
+    /// <summary>
+    /// The layout this replaced. Refused rather than accepted alongside the new one: two spellings
+    /// would mean two places to look for one action, and the supporting files a flat directory
+    /// cannot own are the reason the directory exists.
+    /// </summary>
+    [Fact]
+    public async Task LoadAsync_Refuses_TheFlatSpelling_NamingThePathItExpected()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile("build.yml", "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        var exception = await Refused(temp, "build.yml");
+
+        Assert.Contains("build/build.yml", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LoadAsync_Refuses_AFileThatDoesNotCarryItsDirectorysName_NamingBoth()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(
+            Path.Combine("probe", "steps.yml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        var exception = await Refused(temp, "probe/steps.yml");
+
+        Assert.Contains("'probe'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("'steps.yml'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("probe/probe.yml", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("../outside.yml")]
+    [InlineData("a/../../outside.yml")]
+    [InlineData("../actions-evil/x.yml")]
+    [InlineData("build/nested/build.yml")]
+    [InlineData("build/build.txt")]
+    [InlineData("./build/build.yml")]
+    public async Task LoadAsync_Refuses_APathThatDoesNotNameAnActionInsideTheDirectory(string action)
+    {
+        using var temp = new TempDirectory();
+
+        _ = await Refused(temp, action);
+    }
+
+    [Fact]
+    public async Task LoadAsync_Refuses_AnAbsolutePath()
+    {
+        using var temp = new TempDirectory();
+        var elsewhere = temp.WriteFile(
+            Path.Combine("elsewhere", "steal.yml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        _ = await Refused(temp, elsewhere);
+    }
+
+    /// <summary>
+    /// A sibling directory whose name merely starts with the actions directory's, reached the only
+    /// way a legal spelling can reach anything outside: through a link.
+    /// </summary>
+    /// <remarks>
+    /// Spelled with '..' this never reaches the containment check at all — the spelling rule refuses
+    /// it first, and the test would then pass with that check deleted. A link is what makes the
+    /// boundary do the work: 'actions-evil' shares every character of 'actions' and differs only
+    /// after it, so a prefix test that did not stop at a directory separator would call this file
+    /// contained, and it is one nobody reviewing the actions directory ever sees.
+    /// </remarks>
+    [Fact]
+    public async Task LoadAsync_Refuses_ALinkLeadingToASiblingDirectorySharingThePrefix()
+    {
+        using var temp = new TempDirectory();
+        var actions = temp.Combine("actions");
+        var outside = temp.WriteFile(
+            Path.Combine("actions-evil", "probe.yml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        Directory.CreateDirectory(Path.Combine(actions, "probe"));
+
+        try
+        {
+            File.CreateSymbolicLink(Path.Combine(actions, "probe", "probe.yml"), outside);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => CreateParser().LoadAsync(
+                actions,
+                "probe/probe.yml",
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+        Assert.Contains("actions-evil", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The spelling is legal and the file is where it should be; only following the link says
+    /// otherwise. Nothing but the file system knows this, which is why the check survives into the
+    /// parser rather than living only in the configuration reader.
+    /// </summary>
+    [Fact]
+    public async Task LoadAsync_Refuses_ALinkInsideTheDirectory_ThatLeadsOutOfIt()
+    {
+        using var temp = new TempDirectory();
+        var outside = temp.WriteFile(
+            Path.Combine("outside", "probe.yml"),
+            "steps:\n  - name: build\n    run: cmake --build build\n");
+
+        Directory.CreateDirectory(temp.Combine("actions", "probe"));
+
+        try
+        {
+            File.CreateSymbolicLink(temp.Combine("actions", "probe", "probe.yml"), outside);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => CreateParser().LoadAsync(
+                temp.Combine("actions"),
+                "probe/probe.yml",
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+        Assert.Contains("outside", exception.Message, StringComparison.Ordinal);
     }
 
     private static ActionFileParser CreateParser()
         => new(
             new PhysicalFileSystem(FilePermissionsFactory.Create()),
-            new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false));
+            new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false),
+            new HostPlatform());
 
     private static ActionFile Parse(string text)
-        => CreateParser().Parse("actions/build.yaml", text);
+        => CreateParser().Parse(Path.Combine("actions", "build", "build.yml"), text);
 
     private static HarnessException Refused(string text)
         => Assert.Throws<HarnessException>(() => Parse(text));
+
+    /// <summary>
+    /// Asserts <paramref name="action"/> is refused when read from <paramref name="temp"/>, and
+    /// returns the refusal so a caller can assert on what it said.
+    /// </summary>
+    private static async Task<HarnessException> Refused(TempDirectory temp, string action)
+    {
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => CreateParser().LoadAsync(temp.Path, action, TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, exception.ExitCode);
+
+        return exception;
+    }
 }

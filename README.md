@@ -89,7 +89,8 @@ in `config.json`.
 
 ```
 .harness-config/config.json                  tracked; the whole contract
-.harness-config/runner/actions/              tracked; a runner's steps, as YAML
+.harness-config/runner/actions/<name>/<name>.yml   tracked; one directory per action
+.harness-config/runner/actions/<name>/...          tracked; whatever its steps run
 .harness-config/runner/.env/                 contents ignored, .gitkeep tracked
 .harness-config/runner/.secrets/             contents ignored, .gitkeep tracked
 .harness-config/sshItems/<name>/.env         ignored; address, user, port
