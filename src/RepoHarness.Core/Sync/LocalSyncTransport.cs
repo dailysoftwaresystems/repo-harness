@@ -161,10 +161,18 @@ public sealed class LocalSyncTransport(
         var expanded = Home(root);
         var full = Path.GetFullPath(Path.Combine(expanded, relativePath));
 
+        // Every link along the way followed first. Path.GetFullPath resolves '..' and nothing else,
+        // so a directory somebody replaced with a link — an ordinary thing in a checkout made by
+        // hand, where a dependency or data directory often lives elsewhere — would carry a write to
+        // whatever it points at, outside the directory the reader named. The manifest never sees it:
+        // the walk skips links, so such a path arrives as an ordinary write.
+        var realRoot = Real(expanded);
+        var realFull = Real(full);
+
         // This machine's own comparison. Testing both would be no test at all: a path inside under
         // Ordinal is inside under OrdinalIgnoreCase too, so the pair reduces to the looser of them,
         // and on Linux a path differing only in case would escape the tree.
-        if (!PathContainment.IsStrictlyInside(expanded, full, _platform.PathComparison))
+        if (!PathContainment.IsStrictlyInside(realRoot, realFull, _platform.PathComparison))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
@@ -172,6 +180,41 @@ public sealed class LocalSyncTransport(
         }
 
         return full;
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> with every link along it followed. What does not exist yet is left as
+    /// it is spelled: only the part that exists can be resolved, and that is the part a link could
+    /// hide in.
+    /// </summary>
+    private static string Real(string path)
+    {
+        var parts = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var current = parts[0].Length == 0 ? Path.DirectorySeparatorChar.ToString() : parts[0] + Path.DirectorySeparatorChar;
+
+        foreach (var part in parts.Skip(1).Where(part => part.Length > 0))
+        {
+            current = Path.Combine(current, part);
+
+            try
+            {
+                FileSystemInfo? found = Directory.Exists(current) ? new DirectoryInfo(current)
+                    : File.Exists(current) ? new FileInfo(current)
+                    : null;
+
+                if (found?.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                {
+                    current = target.FullName;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Unreadable is not resolvable, and a path that cannot be followed is left spelled as
+                // it was: the containment test below then judges what the reader actually named.
+            }
+        }
+
+        return Path.GetFullPath(current);
     }
 
     /// <summary>

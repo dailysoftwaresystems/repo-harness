@@ -52,7 +52,19 @@ public sealed record LockEntry(string Host, string Tree, string? Variant, LockSc
 {
     /// <summary>The entry as a refusal names it.</summary>
     public string Describe()
-        => $"{Holder.Machine} pid {Holder.ProcessId}, run {Holder.RunId}, since {Holder.TakenUtc:u}, running '{Holder.Command}'";
+        => $"{Holder.Machine} pid {Holder.ProcessId}, run {Holder.RunId}, since {Holder.TakenUtc:u}, "
+            + $"running '{Holder.Command}'{Unstamped}";
+
+    /// <summary>
+    /// Said of an entry carrying no stamp, which is one an older build wrote. Such an entry is kept
+    /// while anything at all carries its id, so it can outlive its run once that id comes back around
+    /// to something else. Saying so is what tells the reader that <c>--force-lock</c> is the answer
+    /// here rather than waiting for a run that finished long ago.
+    /// </summary>
+    private string Unstamped
+        => Holder.ProcessStamp is { Length: > 0 }
+            ? string.Empty
+            : " (recorded by an older build, so a reused id cannot be told from it; --force-lock takes it)";
 }
 
 /// <summary>What a run asks to take.</summary>

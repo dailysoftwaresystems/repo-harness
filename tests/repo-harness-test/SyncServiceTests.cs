@@ -177,12 +177,136 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
-    /// Taking it over is one flag, and what it must not cost is a warm build directory: git ignores
-    /// it in the source, so it is withheld from the transfer and protected from the deletion alike.
-    /// That is what makes adopting a hand-made checkout cheaper than moving it aside and rebuilding.
+    /// Taking it over is one flag. What survives is what <c>sync.neverTransfer</c> names — <c>build</c>
+    /// by default — and not, as this test once claimed, whatever git ignores on that host: the ignore
+    /// list is read from this tree by listing the ignored files that exist <em>here</em>, so a
+    /// directory only the host has is ignored by nothing this side can see.
     /// </summary>
     [Fact]
-    public async Task ADirectoryTheHarnessDidNotCreate_IsTakenOverBy_Adopt_KeepingWhatGitIgnores()
+    public async Task ADirectoryTheHarnessDidNotCreate_IsTakenOverBy_Adopt_KeepingWhatNeverTransferNames()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // A checkout of the same repository, as somebody would really have made it: the same
+            // files, one of them stale, one stray file, and a warm build tree.
+            Directory.CreateDirectory(Path.Combine(copy, "src"));
+            Directory.CreateDirectory(Path.Combine(copy, "build"));
+            await File.WriteAllTextAsync(Path.Combine(copy, ".gitignore"), "build/\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "stale\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "b.c"), "b\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "stray.txt"), "x\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "build", "warm.o"), "object\n", cancellationToken);
+
+            var result = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken);
+
+            Assert.True(result.Verified);
+
+            Assert.Equal("a\n", await File.ReadAllTextAsync(Path.Combine(copy, "src", "a.c"), cancellationToken), StringComparer.Ordinal);
+            Assert.False(File.Exists(Path.Combine(copy, "stray.txt")));
+
+            // sync.neverTransfer names build, so the hours of output in it are still there.
+            Assert.True(File.Exists(Path.Combine(copy, "build", "warm.o")));
+
+            // Adopted for good: a second sync no longer has anything to refuse.
+            var again = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.True(again.Plan.IsUpToDate);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// The correction to what this feature once promised. Ignored paths are listed from the source by
+    /// asking git which ignored files exist <em>there</em>, so a directory only the host has is
+    /// protected by nothing and is deleted like any other file. It has to appear in the list a reader
+    /// decides on, and the remedy — naming it in <c>sync.neverTransfer</c> — has to be in the refusal.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryOnlyTheCopyHas_IsDeletedByAnAdoption_EvenWhenItsNameIsIgnoredHere()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // 'packages/' is ignored by the source's .gitignore, and the source has no such directory,
+            // so git lists nothing for it and nothing here knows to withhold it.
+            await File.AppendAllTextAsync(Path.Combine(temp.Path, ".gitignore"), "packages/\n", cancellationToken);
+            await harness.CommitAllAsync(temp.Path, "ignore packages", cancellationToken);
+
+            Directory.CreateDirectory(Path.Combine(copy, "packages"));
+            await File.WriteAllTextAsync(Path.Combine(copy, "packages", "warm.bin"), "hours\n", cancellationToken);
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken));
+
+            // Named as a deletion rather than quietly promised as safe, and the remedy named with it.
+            Assert.Contains("delete    packages/warm.bin", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("sync.neverTransfer", refusal.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A directory that exists and carries no marker is what a mistyped <c>repositoryPath</c> produces,
+    /// which is the case the deletion bound was written for. Adopting must not be a way around it.
+    /// </summary>
+    [Fact]
+    public async Task AnAdoptionThatWouldEmptyTheDirectory_IsStillRefusedByTheDeletionBound()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // What a home directory looks like when repositoryPath was meant to name a checkout
+            // underneath it: nothing of the source, everything of somebody's.
+            Directory.CreateDirectory(Path.Combine(copy, "other-project"));
+
+            for (var file = 0; file < 8; file++)
+            {
+                await File.WriteAllTextAsync(
+                    Path.Combine(copy, "other-project", $"work-{file}.txt"),
+                    "theirs\n",
+                    cancellationToken);
+            }
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains("maxDeleteFraction", refusal.Message, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(copy, "other-project", "work-0.txt")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// Somebody who reads <c>--adopt</c> in the help and types it straight away never sees a refusal,
+    /// and everything naming what taking a directory over costs used to live inside one.
+    /// </summary>
+    [Fact]
+    public async Task Adopting_SaysWhatItIsAboutToCost_EvenWhenNoRefusalEverRan()
     {
         using var temp = new TempDirectory();
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -192,26 +316,18 @@ public sealed class SyncServiceTests
         try
         {
             Directory.CreateDirectory(Path.Combine(copy, "src"));
-            Directory.CreateDirectory(Path.Combine(copy, "build"));
-            await File.WriteAllTextAsync(Path.Combine(copy, "stray.txt"), "x\n", cancellationToken);
-            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "stale\n", cancellationToken);
-            await File.WriteAllTextAsync(Path.Combine(copy, "build", "warm.o"), "object\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, ".gitignore"), "build/\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "months of uncommitted work\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "b.c"), "b\n", cancellationToken);
 
-            var result = await service.SyncAsync(
+            _ = await service.SyncAsync(
                 temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken);
 
-            Assert.True(result.Verified);
+            var said = harness.StandardError.ToString();
 
-            // The tree now matches the source, and the hours of build output are still there.
-            Assert.Equal("a\n", await File.ReadAllTextAsync(Path.Combine(copy, "src", "a.c"), cancellationToken), StringComparer.Ordinal);
-            Assert.False(File.Exists(Path.Combine(copy, "stray.txt")));
-            Assert.True(File.Exists(Path.Combine(copy, "build", "warm.o")));
-
-            // Adopted for good: a second sync no longer has anything to refuse.
-            var again = await service.SyncAsync(
-                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
-
-            Assert.True(again.Plan.IsUpToDate);
+            Assert.Contains("adopting", said, StringComparison.Ordinal);
+            Assert.Contains("overwrite src/a.c", said, StringComparison.Ordinal);
+            Assert.Contains("config.json", said, StringComparison.Ordinal);
         }
         finally
         {

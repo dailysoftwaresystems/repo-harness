@@ -30,6 +30,12 @@ public sealed class SyncPlanTests
 
         // And the loss report names it as what it is, ahead of the deletions.
         Assert.Contains("overwrite kept.c", plan.DescribeLoss());
+
+        // So does the listing a refusal sends the reader to for the whole of it. Spelled the same as
+        // a write there, the lossy half would arrive looking like the half that costs nothing.
+        var described = plan.Describe(SyncVerb.Planned);
+        Assert.Contains("would overwrite  kept.c", described);
+        Assert.Contains("would write  fresh.c", described);
     }
 
     [Fact]

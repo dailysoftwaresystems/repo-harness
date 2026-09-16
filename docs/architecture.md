@@ -888,18 +888,29 @@ directory here cannot drift apart.
 - **The refusal says what taking it over would cost.** It is worked out from the same manifest
   and plan a real sync uses, so the reader is told which files would be overwritten and which
   deleted, rather than only that the directory is not the tool's. An overwrite is named apart
-  from a write: a file the copy already had, holding an edit nobody committed, reads exactly like
-  a file the copy never had, and only one of the two loses anything.
-- **`--adopt` takes it over,** and marks it as the tool's once the copy is one — never before, so
-  a transfer that failed part way does not leave a directory claiming to be something it is not.
-  What git ignores there, its `.git` and every commit in it, and whatever `sync.neverTransfer`
-  names are withheld from the transfer and protected from the deletion alike, so a warm build
-  directory survives being adopted. That is what makes adopting cheaper than moving a checkout
-  aside and rebuilding it.
-- **`sync.maxDeleteFraction` does not bound an adoption.** It is about a copy this tool already
-  owns, where deleting most of it at once means the source is wrong. A directory being taken over
-  is neither, and most of what a hand-made checkout holds is exactly what that bound would count;
-  requiring it to be raised as well would make one deliberate decision into two.
+  from a write everywhere it is reported — in the refusal, in `--dry-run`, and while it happens —
+  because a file the copy already had, holding an edit nobody committed, reads exactly like a file
+  the copy never had, and only one of the two loses anything. For the same reason an overwrite is
+  reported by default rather than only under `--verbose`, as a deletion already was.
+- **`--adopt` takes it over,** and says what that is about to cost before it starts — not only in
+  the refusal, because somebody who reads the flag in the help and types it never sees a refusal.
+- **What survives an adoption is narrower than it looks.** Its `.git` and so every commit in it,
+  `.harness-config`, the worktrees root and whatever `sync.neverTransfer` names are protected from
+  the deletion. The ignore list is *not* read from that host: it is this tree's, listed by asking
+  git which ignored files exist **here**. A directory only the host has — a build tree under a name
+  `sync.neverTransfer` does not carry, a `node_modules`, a virtual environment — is ignored by
+  nothing this side can see and is deleted like any other file. It appears in the list the refusal
+  prints, which is why the list is the thing to read; name it in `sync.neverTransfer` first if it
+  should stay.
+- **`sync.maxDeleteFraction` bounds an adoption too.** A directory that exists and carries no marker
+  is exactly what a mistyped `repositoryPath` produces, which is the case that bound was written
+  for: the path meant to name a checkout names a home directory, and every other project under it
+  is what the source does not have. Two gates for that is the point of having one.
+- **The copy is marked before the transfer, not after.** Once an adoption starts deleting, the
+  directory is already neither the checkout it was nor a copy of this tree; marked, a transfer that
+  stopped part way is finished by the next run, where unmarked it would be refused again and the
+  refusal would report a smaller loss than the first one did, because what had already gone no
+  longer appears in a plan.
 - **`--dry-run` shows the plan instead of refusing,** for a directory the tool did not create and
   for one whose deletions are over the bound. A preview changes nothing, so there is nothing for
   either refusal to protect — and the bound's own message says to run with `--dry-run` to see the

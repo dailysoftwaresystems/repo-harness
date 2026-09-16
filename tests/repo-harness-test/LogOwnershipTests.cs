@@ -74,6 +74,32 @@ public sealed class LogOwnershipTests
         Assert.Contains("--force-lock was given", factory.StandardError.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The same upgrade for a log path: an owner file written before the stamp existed can only be
+    /// judged by whether anything carries its id, and says so rather than looking like a live run.
+    /// </summary>
+    [Fact]
+    public async Task AnOwnerFromAnOlderBuild_IsHeldWhileItsIdIsCarried_AndSaysWhy()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "from-before");
+
+        WriteLegacy(directory, Environment.MachineName, Environment.ProcessId);
+
+        var claim = await ownership.ClaimAsync(directory, RunId.New(), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.False(claim.Taken);
+        Assert.Contains("recorded by an older build", claim.Verdict()!.Detail, StringComparison.Ordinal);
+
+        // And the way out is the one the message names.
+        var forced = await ownership.ClaimAsync(
+            directory, RunId.New(), force: true, TestContext.Current.CancellationToken);
+
+        Assert.True(forced.Taken);
+    }
+
     [Fact]
     public async Task ALogPathOwnedByARunThatHasGone_IsReclaimed()
     {
@@ -129,6 +155,21 @@ public sealed class LogOwnershipTests
 
     /// <summary>This process's own stamp, which is what makes an owner written with it a live one.</summary>
     private static string? ProcessStart() => new ProcessIdentity(new HostPlatform()).Current;
+
+    /// <summary>One owner file exactly as the release before the process stamp wrote it.</summary>
+    private static void WriteLegacy(string logDirectory, string machine, int processId)
+    {
+        var file = LogOwnership.OwnerFile(logDirectory);
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+
+        var stamp = DateTimeOffset.UtcNow.AddHours(-1).ToString("O", CultureInfo.InvariantCulture);
+
+        File.WriteAllText(
+            file,
+            "{ \"machine\": \"" + machine + "\", \"processId\": " + processId.ToString(CultureInfo.InvariantCulture)
+            + ", \"processStartedUtc\": \"" + stamp + "\", \"runId\": \"20250101-120000-deadbeef\""
+            + ", \"takenUtc\": \"" + stamp + "\" }");
+    }
 
     private static void Write(string logDirectory, string machine, int processId, string? processStamp, string runId)
     {

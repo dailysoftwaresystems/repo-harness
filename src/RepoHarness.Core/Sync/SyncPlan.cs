@@ -147,10 +147,15 @@ public sealed record SyncPlan(
     {
         var lines = new List<string>();
         var (write, delete) = verb == SyncVerb.Planned ? ("would write", "would delete") : ("wrote", "deleted");
+        var over = verb == SyncVerb.Planned ? "would overwrite" : "overwrote";
+        var overwritten = new HashSet<string>(Overwrites, StringComparer.Ordinal);
 
+        // An overwrite is spelled apart from a write here too, not only in a refusal. This listing is
+        // what a refusal sends the reader to for the whole of it, and a file holding an edit nobody
+        // committed must not arrive looking like one the copy never had.
         foreach (var entry in Writes.OrderBy(entry => entry.Path, StringComparer.Ordinal))
         {
-            lines.Add($"{write}  {entry.Path}");
+            lines.Add(overwritten.Contains(entry.Path) ? $"{over}  {entry.Path}" : $"{write}  {entry.Path}");
         }
 
         // Deletions are always listed, never summarised: what a sync removed from a host is the one

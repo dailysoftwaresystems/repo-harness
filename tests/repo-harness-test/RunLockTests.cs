@@ -76,6 +76,58 @@ public sealed class RunLockTests
         Assert.Contains("no longer running", factory.StandardOutput.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A lock file this tool wrote before it stopped recording a wall-clock start time. The field it
+    /// held is gone and nothing replaces it, so the entry can only be judged by whether anything at
+    /// all carries its id — which is the check the stamp exists to retire. Kept while something does,
+    /// because taking what a live run holds is the worse of the two mistakes.
+    /// </summary>
+    [Fact]
+    public async Task AnEntryFromAnOlderBuild_IsKeptWhileItsIdIsCarried_AndSaysWhySoItCanBeForced()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, Environment.ProcessId));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+
+        // Told apart from an ordinary holder, because waiting for this one could mean waiting for a
+        // run that finished before the upgrade.
+        Assert.Contains("recorded by an older build", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("--force-lock", refusal.Message, StringComparison.Ordinal);
+
+        await using var forced = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync") with { Force = true },
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AnEntryFromAnOlderBuild_WhoseIdNothingCarries_IsStillReclaimed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, int.MaxValue - 1));
+
+        await using var taken = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("Reclaimed", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AHolderOnThisMachineThatStillReadsAlive_CanStillBeForced()
     {
@@ -323,6 +375,21 @@ public sealed class RunLockTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(layout.LockFile)!);
         File.WriteAllText(layout.LockFile, "[" + entry + "]");
+    }
+
+    /// <summary>
+    /// One entry exactly as the release before the process stamp wrote it: a wall-clock start time
+    /// under its old name, and no stamp at all.
+    /// </summary>
+    private static string LegacyEntry(string machine, int processId)
+    {
+        var stamp = DateTimeOffset.UtcNow.AddHours(-1).ToString("O", CultureInfo.InvariantCulture);
+        var id = processId.ToString(CultureInfo.InvariantCulture);
+
+        return "{ \"host\": \"local\", \"tree\": \"/repo\", \"scope\": \"TreeExclusive\", "
+            + "\"holder\": { \"machine\": \"" + machine + "\", \"processId\": " + id + ", "
+            + "\"processStartedUtc\": \"" + stamp + "\", \"runId\": \"20250101-120000-deadbeef\", "
+            + "\"takenUtc\": \"" + stamp + "\", \"command\": \"test\" } }";
     }
 
     private static string Entry(

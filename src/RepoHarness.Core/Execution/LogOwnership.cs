@@ -24,7 +24,17 @@ public sealed record LogOwner(
     DateTimeOffset TakenUtc)
 {
     /// <summary>The owner as a refusal names it.</summary>
-    public string Describe() => $"{Machine} pid {ProcessId}, run {RunId}, since {TakenUtc:u}";
+    public string Describe()
+        => $"{Machine} pid {ProcessId}, run {RunId}, since {TakenUtc:u}{Unstamped}";
+
+    /// <summary>
+    /// Said of an owner carrying no stamp, which is one an older build wrote. Kept while anything at
+    /// all carries its id, so it can outlive its run once that id comes back around to something else.
+    /// </summary>
+    private string Unstamped
+        => ProcessStamp is { Length: > 0 }
+            ? string.Empty
+            : " (recorded by an older build, so a reused id cannot be told from it; --force-lock takes it)";
 }
 
 /// <summary>What claiming a log directory found.</summary>

@@ -252,12 +252,11 @@ public sealed class SyncService(
         // message says to run with --dry-run to see the list, and until now that refused in exactly
         // the same words rather than showing it.
         //
-        // Nor while adopting. The bound is about a copy this harness already owns, where deleting
-        // most of it at once means the source is wrong. A directory being taken over is neither: it
-        // was somebody else's, the refusal above has already named every file adopting costs, and
-        // most of what is in a hand-made checkout is exactly what the bound would count. Asking for
-        // sync.maxDeleteFraction to be raised as well would turn one deliberate decision into two.
-        if (!options.DryRun && state != CopyState.Unclaimed)
+        // It does still bound an adoption. A directory that exists and carries no marker is exactly
+        // what a mistyped repositoryPath produces, which is the case this bound was written for: the
+        // path that was meant to be a checkout is a home directory, and every other project under it
+        // is what the source does not have. Two gates for that is the point of having one.
+        if (!options.DryRun)
         {
             plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction);
         }
@@ -275,6 +274,29 @@ public sealed class SyncService(
             return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
         }
 
+        // Said before it happens, and said whether or not a refusal ever ran. Somebody who reads
+        // --adopt in the help and types it on the first run never sees the refusal, and everything
+        // that names what taking a directory over costs was inside it.
+        if (state == CopyState.Unclaimed)
+        {
+            _output.Warn(CommandName, $"{transport.Host}: adopting '{destinationRoot}', which this harness did not create.");
+
+            foreach (var line in plan.DescribeLoss(int.MaxValue))
+            {
+                _output.Warn(CommandName, $"{transport.Host}:   {line}");
+            }
+
+            _output.Warn(CommandName, $"{transport.Host}:   replace  {HarnessLayout.DirectoryName}/config.json, with this tree's");
+
+            // Marked before the transfer, not after. Once this run starts deleting, the directory is
+            // already neither the checkout it was nor a copy of this tree, and a transfer that stops
+            // part way leaves it that way. Marked, the next run finishes the job; unmarked, it would
+            // refuse and report a smaller loss than the first one did, because what it had already
+            // destroyed no longer shows up in a plan.
+            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+            _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
+        }
+
         await ApplyAsync(context.Layout.RepositoryRoot, transport, destinationRoot, plan, cancellationToken)
             .ConfigureAwait(false);
 
@@ -287,15 +309,6 @@ public sealed class SyncService(
 
         var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
-
-        // Marked only once the copy is one: a directory claimed before the transfer finished would
-        // read as the harness's own work on the next run, and the refusal that protects it would not
-        // come back to say otherwise.
-        if (state == CopyState.Unclaimed)
-        {
-            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
-            _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
-        }
 
         return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
     }
@@ -446,19 +459,31 @@ public sealed class SyncService(
     /// </summary>
     /// <remarks>
     /// A sync deletes whatever the source does not have, so a checkout somebody made by hand may hold
-    /// work nothing here knows about. What it may not lose is said too: everything git ignores there,
-    /// its <c>.git</c> and so every commit in it, and whatever <c>sync.neverTransfer</c> names, are
-    /// withheld from the transfer and protected from the deletion alike.
+    /// work nothing here knows about. What survives is named exactly, and it is narrower than it
+    /// looks: <c>.git</c> and so every commit there, this tool's own directory, the worktrees root,
+    /// and whatever <c>sync.neverTransfer</c> names. What git ignores is read from <em>this</em>
+    /// tree, by listing the ignored files that exist here — so a build directory that exists only on
+    /// the host is ignored by nothing this side can see, and is counted among the deletions like any
+    /// other file. It appears in the list below, which is why the list is the thing to read.
     /// </remarks>
     private static string Unclaimed(ISyncTransport transport, string destinationRoot, SyncPlan plan)
     {
         var opening = $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
             + "so sync will not write into it on its own.";
 
+        var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
+            + "there with this tree's.";
+
+        var survives = $"Its .git and every commit in it, {HarnessLayout.DirectoryName}, the worktrees "
+            + "root and whatever sync.neverTransfer names are left alone. Nothing else is: a directory "
+            + "that only that host has, a build tree among them, is ignored by nothing this tree can "
+            + "see and is deleted like any other file. Name it in sync.neverTransfer first if it "
+            + "should stay.";
+
         if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0)
         {
-            return $"{opening} Taking it over would change nothing already there, so '--adopt' is all "
-                + "it needs. Nothing was changed.";
+            return $"{opening} Taking it over is '--adopt', and would remove nothing there. "
+                + $"{configuration} Nothing has been changed by this run.";
         }
 
         var counted = $"{plan.Overwrites.Count.ToString(CultureInfo.InvariantCulture)} file(s) would be "
@@ -466,8 +491,8 @@ public sealed class SyncService(
 
         return $"{opening} Taking it over is '--adopt', and {counted}:\n  "
             + string.Join("\n  ", plan.DescribeLoss())
-            + "\nIts .git, everything git ignores there and whatever sync.neverTransfer names are left "
-            + "alone either way. Run with '--dry-run' to see all of it. Nothing was changed.";
+            + $"\n{configuration} {survives} Run with '--dry-run' to see all of it. Nothing has been "
+            + "changed by this run.";
     }
 
     private async Task ApplyAsync(
@@ -477,6 +502,11 @@ public sealed class SyncService(
         SyncPlan plan,
         CancellationToken cancellationToken)
     {
+        // A write that replaces something is as unrecoverable as a deletion, and running the command
+        // again does not bring back an edit nobody committed either. Reported like one rather than
+        // only under --verbose, where a write that costs nothing belongs.
+        var overwritten = new HashSet<string>(plan.Overwrites, StringComparer.Ordinal);
+
         foreach (var entry in plan.Writes)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -489,7 +519,14 @@ public sealed class SyncService(
                 .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
                 .ConfigureAwait(false);
 
-            _output.Detail(CommandName, $"{transport.Host}: wrote {entry.Path}");
+            if (overwritten.Contains(entry.Path))
+            {
+                _output.Info(CommandName, $"{transport.Host}: overwrote {entry.Path}");
+            }
+            else
+            {
+                _output.Detail(CommandName, $"{transport.Host}: wrote {entry.Path}");
+            }
         }
 
         foreach (var path in plan.Deletes)
