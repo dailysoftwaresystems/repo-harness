@@ -1,8 +1,11 @@
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Tests;
 
@@ -137,6 +140,92 @@ public sealed class InitServiceTests
         Assert.True(File.Exists(temp.Combine("docs", "work-done.md")));
         Assert.False(Directory.Exists(temp.Combine(".plans")));
     }
+
+    /// <summary>
+    /// Provisioning is the last thing init does, and it can now stop there to ask for a superuser
+    /// password. Ctrl+C is how somebody without one answers, so what init had already written stays
+    /// written and is still listed; only the exit code reports that the last step was stopped.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_ReportsAnInterruptedToolCheck_WithoutLosingWhatItCreated()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        await harness.InitializeGitRepositoryAsync(temp.Path, TestContext.Current.CancellationToken);
+        harness.WriteConfig(temp.Path, OneLeg());
+
+        // Ctrl+C: the run's own token is cancelled, and the cancellation surfaces from provisioning.
+        using var interrupted = new CancellationTokenSource();
+
+        harness.ToolProvisionService
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .Returns<Task<ToolProvisionReport>>(_ =>
+            {
+                interrupted.Cancel();
+                throw new OperationCanceledException(interrupted.Token);
+            });
+
+        var outcome = await harness.InitService.InitializeAsync(temp.Path, interrupted.Token);
+
+        Assert.Equal(HarnessExit.Cancelled, outcome.ExitCode);
+        Assert.Contains(
+            outcome.Details!,
+            line => line.Contains("interrupted before finishing", StringComparison.Ordinal));
+
+        // The repository is initialised either way, and the list says so: the exit code is about the
+        // one step that stopped, not about the ones that finished.
+        Assert.True(File.Exists(temp.Combine(".harness-config", "config.json")));
+        Assert.Contains(outcome.Details!, line => line.Contains(".gitignore", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Tolerating an interruption must not become tolerating everything: a fault in provisioning is
+    /// still a fault, and is still reported rather than swallowed into a green init.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_StillFails_WhenTheToolCheckThrowsSomethingUnexpected()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        await harness.InitializeGitRepositoryAsync(temp.Path, TestContext.Current.CancellationToken);
+        harness.WriteConfig(temp.Path, OneLeg());
+
+        harness.ToolProvisionService
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .Throws(new InvalidOperationException("something nobody expected"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.InitService.InitializeAsync(temp.Path, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A budget inside provisioning cancels its own work and is a failure like any other. Excusing it
+    /// as an interruption would report a green init for a host that stopped answering, because both
+    /// arrive as the same exception type and only the run's own token tells them apart.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_StillFails_WhenTheToolCheckCancelsItsOwnWork()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        await harness.InitializeGitRepositoryAsync(temp.Path, TestContext.Current.CancellationToken);
+        harness.WriteConfig(temp.Path, OneLeg());
+
+        // Nobody pressed anything: the run's token is untouched.
+        harness.ToolProvisionService
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .Throws(new OperationCanceledException(new CancellationToken(canceled: true)));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => harness.InitService.InitializeAsync(temp.Path, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>A configuration with one leg, which is what makes init check tools at all.</summary>
+    private static HarnessConfig OneLeg() => new()
+    {
+        BuildConfigs = { ["debug"] = new BuildConfiguration() },
+        Legs = { ["here"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } },
+    };
 
     [Fact]
     public async Task InitializeAsync_IsIdempotent()

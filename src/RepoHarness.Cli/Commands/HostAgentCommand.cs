@@ -32,7 +32,11 @@ internal static class HostAgentCommand
 
         command.SetAction(async (parseResult, cancellationToken) =>
         {
-            await using var services = HarnessServices.Build(parseResult.GetValue(GlobalOptions.Verbose));
+            // Never prompting here is the point, not a default: this process serves another machine,
+            // its standard input already carries the request, and there is nobody at this end to ask.
+            await using var services = HarnessServices.Build(
+                parseResult.GetValue(GlobalOptions.Verbose),
+                prompting: false);
 
             // The request was written as UTF-8, and is read as such whatever the console's own input
             // encoding happens to be.

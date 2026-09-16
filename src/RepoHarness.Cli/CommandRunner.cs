@@ -40,7 +40,8 @@ internal static class CommandRunner
         return async (parseResult, cancellationToken) =>
         {
             var verbose = parseResult.GetValue(GlobalOptions.Verbose);
-            await using var services = HarnessServices.Build(verbose);
+            var prompting = !parseResult.GetValue(GlobalOptions.NoPrompt);
+            await using var services = HarnessServices.Build(verbose, prompting);
             var output = services.GetRequiredService<IHarnessOutput>();
 
             try

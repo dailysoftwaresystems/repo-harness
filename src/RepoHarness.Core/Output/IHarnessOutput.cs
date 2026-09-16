@@ -10,6 +10,14 @@ public interface IHarnessOutput
     /// <summary>Whether verbose detail is being shown.</summary>
     bool IsVerbose { get; }
 
+    /// <summary>
+    /// Whether a document is being written to standard output right now, as <see cref="DataOnly"/>
+    /// arranges it. Asked by anything that would otherwise interrupt one: a prompt written there
+    /// becomes part of what the reader parses, and the same prompt written anywhere else is a wait
+    /// with no visible reason for it.
+    /// </summary>
+    bool IsDataOnly { get; }
+
     /// <summary>Reports success: <c>&lt;command&gt;: OK - &lt;message&gt;</c>.</summary>
     void Ok(string command, string message);
 

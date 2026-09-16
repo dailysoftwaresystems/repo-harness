@@ -22,10 +22,21 @@ internal static class GlobalOptions
         Description = "Directory to operate in (default: current directory).",
     };
 
+    /// <summary>
+    /// Refuses a privileged install that has no password rather than asking for one at the terminal.
+    /// A run with no terminal refuses anyway; this lets a run that has one refuse too, which is what
+    /// a script driving this from a machine somebody is also sitting at wants.
+    /// </summary>
+    internal static Option<bool> NoPrompt { get; } = new("--no-prompt")
+    {
+        Description = "Never ask for a superuser password; refuse a privileged install that needs one.",
+    };
+
     /// <summary>Adds the global options to <paramref name="command"/>.</summary>
     internal static void AddTo(Command command)
     {
         command.Options.Add(Verbose);
         command.Options.Add(Directory);
+        command.Options.Add(NoPrompt);
     }
 }

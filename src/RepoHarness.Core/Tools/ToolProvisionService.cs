@@ -40,7 +40,8 @@ public sealed class ToolProvisionService(
     IHostConnector connector,
     IHostCommandRunner hostCommands,
     IHostProgramResolver programs,
-    IHarnessOutput output) : IToolProvisionService
+    IHarnessOutput output,
+    ISuperuserPrompt prompt) : IToolProvisionService
 {
     /// <summary>The command's name, which prefixes what it reports.</summary>
     public const string CommandName = "install-missing-tools";
@@ -62,6 +63,7 @@ public sealed class ToolProvisionService(
     private readonly IHostCommandRunner _hostCommands = hostCommands;
     private readonly IHostProgramResolver _programs = programs;
     private readonly IHarnessOutput _output = output;
+    private readonly ISuperuserPrompt _prompt = prompt;
 
     public async Task<ToolProvisionReport> ProvisionAsync(
         string directory,
@@ -121,7 +123,7 @@ public sealed class ToolProvisionService(
         }
 
         var outcomes = new List<ToolOutcome>();
-        var superuser = new Superuser(opened.Superuser, ItemEnvFile(context.Layout, host));
+        var superuser = new Superuser(host, opened.Superuser, ItemEnvFile(context.Layout, host));
 
         // .NET is the default tool on every host reached through a transport: a host that cannot run
         // DssHarness is a host with no SDK, and every other command begins by running DssHarness there.
@@ -634,11 +636,33 @@ public sealed class ToolProvisionService(
     /// travels on standard input and nowhere else: an argument list is visible in that host's own
     /// process table to every user on it, and a log of one outlives the run.
     /// </summary>
+    /// <param name="host">The host, named in the prompt so two of them are never confused.</param>
     /// <param name="credential">The credential the host's item declares, when it declares one.</param>
     /// <param name="itemEnvFile">Where a credential would be declared, named when one is needed and absent.</param>
-    private sealed class Superuser(HostCredential? credential, string? itemEnvFile)
+    private sealed class Superuser(HostId host, HostCredential? credential, string? itemEnvFile)
     {
+        /// <summary>
+        /// What sudo exits with when it read a password and would not accept it. Any other ending is
+        /// the check not happening rather than the password being wrong.
+        /// </summary>
+        private const int PasswordRefused = 1;
+
         private bool? _passwordless;
+        private HostCredential? _typed;
+        private HostCredential? _accepted;
+        private bool _asked;
+        private string? _settled;
+
+        /// <summary>
+        /// The ways this host could be given a password, or do without one. Running as root is named
+        /// last and always, because it is the answer for a run with nobody to ask: a job that installs
+        /// its own dependencies in an earlier step usually already runs that way.
+        /// </summary>
+        private string Declared => itemEnvFile is null
+            ? "let this user run sudo without a password, run the harness as root, which needs none, "
+                + "or install it by hand"
+            : $"add '{HostSecretsStore.SuperuserKey}' to '{itemEnvFile}', let that user run sudo without "
+                + "a password, or run the harness there as root, which needs none";
 
         /// <summary>What a privileged command becomes, and what it is given on standard input.</summary>
         /// <param name="service">The service, which owns how a command is run on a host.</param>
@@ -656,11 +680,20 @@ public sealed class ToolProvisionService(
                 return (command, string.Empty, null);
             }
 
-            if (credential is not null)
+            // One declared for this host, or one typed for it earlier in this run. Never one typed for
+            // another host: each host has its own Superuser, and there is no collection joining them.
+            if ((credential ?? _accepted) is { } known)
             {
                 // -S makes sudo read the password from standard input instead of from a terminal, which
                 // a command started this way does not have at all.
-                return ([command[0], "-S", .. command.Skip(1)], credential.Reveal() + "\n", null);
+                return ([command[0], "-S", .. command.Skip(1)], known.Reveal() + "\n", null);
+            }
+
+            // A password this host already rejected is not offered again for the next tool on it. One
+            // mistyped password should cost one failed authentication there, not one for every tool.
+            if (_settled is { } refused)
+            {
+                return (command, string.Empty, refused);
             }
 
             _passwordless ??= (await service
@@ -672,20 +705,103 @@ public sealed class ToolProvisionService(
                 return ([command[0], "-n", .. command.Skip(1)], string.Empty, null);
             }
 
-            var declare = itemEnvFile is null
-                ? "let this user run sudo without a password, or install it by hand"
-                : $"add '{HostSecretsStore.SuperuserKey}' to '{itemEnvFile}', or let that user run sudo without a password";
+            if (!_asked && service._prompt.Availability == PromptAvailability.Available)
+            {
+                // Asked once for this host however many tools on it need one, which is what makes a
+                // second privileged tool silent rather than a second interruption.
+                _asked = true;
 
-            return (command, string.Empty, $"it has to be installed by a superuser, and this run has no password for one; {declare}");
+                if (await TypedAsync(service, connection, cancellationToken).ConfigureAwait(false) is { } answer)
+                {
+                    return answer.Accepted
+                        ? ([command[0], "-S", .. command.Skip(1)], answer.Said, null)
+                        : (command, string.Empty, answer.Said);
+                }
+            }
+
+            return (
+                command,
+                string.Empty,
+                $"it has to be installed by a superuser, and this run has no password for one; {Declared}{Unasked(service)}");
         }
+
+        /// <summary>
+        /// Asks for a password and finds out whether this host accepts it, or <see langword="null"/>
+        /// when nothing was typed. Checked before an install that may run for half an hour rides on it,
+        /// and checked once: a second guess is a second failed authentication counted against that
+        /// account, and some hosts count those toward locking it.
+        /// </summary>
+        /// <returns>
+        /// Whether the host accepted it, and either what its standard input should carry or why the
+        /// tool is refused.
+        /// </returns>
+        private async Task<(bool Accepted, string Said)?> TypedAsync(
+            ToolProvisionService service,
+            HostConnection connection,
+            CancellationToken cancellationToken)
+        {
+            var typed = await service._prompt.ReadPasswordAsync(host, cancellationToken).ConfigureAwait(false);
+
+            if (typed.Length == 0)
+            {
+                return null;
+            }
+
+            // Kept whether or not it turns out to be right: a wrong one still travelled to the host, and
+            // Hide is what stops anything the host echoes back from carrying it into a report.
+            _typed = new HostCredential(typed);
+
+            var answer = await service
+                .RunAsync(connection, "sudo", ["-S", "-v"], ProbeBudget, cancellationToken, _typed.Reveal() + "\n")
+                .ConfigureAwait(false);
+
+            if (answer.Succeeded)
+            {
+                _accepted = _typed;
+                return (true, _accepted.Reveal() + "\n");
+            }
+
+            // A check that never finished is not a password the host refused. A probe that ran out of
+            // time, a host that stopped answering, a transport that failed: calling any of those a
+            // wrong password blames somebody's typing for a machine that went away, and this verdict
+            // is then remembered for every later tool on that host.
+            if (!answer.TimedOut && answer.ExitCode == PasswordRefused)
+            {
+                // What sudo said is deliberately not quoted back. It is the one message on this path
+                // that could hold the password itself, and a fixed refusal cannot.
+                _settled = $"it has to be installed by a superuser, and the password typed for {host} was not "
+                    + $"accepted there; run '{CommandName}' again to try another, or {Declared}";
+            }
+            else
+            {
+                _settled = Hide(HostProbes.Failure(
+                    $"it has to be installed by a superuser, and checking the password typed for {host} never finished",
+                    answer));
+            }
+
+            return (false, _settled);
+        }
+
+        /// <summary>Why nobody was asked, said only when somebody could have been.</summary>
+        private static string Unasked(ToolProvisionService service)
+            => service._prompt.Availability == PromptAvailability.Suppressed
+                ? "; without --no-prompt this would have asked for one"
+                : string.Empty;
 
         /// <summary>
         /// Text with the credential taken out of it, applied to everything a host printed before it can
         /// reach a report. sudo does not echo a password, and a command that logs its own input does.
         /// </summary>
-        public string Hide(string text)
-            => credential is null || credential.Reveal().Length == 0
+        public string Hide(string text) => Scrub(Scrub(text, credential), _typed);
+
+        /// <summary>
+        /// One secret taken out of text. A typed password is scrubbed even when this host rejected it:
+        /// it still reached that host on standard input, and a host that echoes what it was given does
+        /// not first check whether the password worked.
+        /// </summary>
+        private static string Scrub(string text, HostCredential? secret)
+            => secret is null || secret.Reveal().Length == 0
                 ? text
-                : text.Replace(credential.Reveal(), credential.ToString(), StringComparison.Ordinal);
+                : text.Replace(secret.Reveal(), secret.ToString(), StringComparison.Ordinal);
     }
 }

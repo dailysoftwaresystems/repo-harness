@@ -187,7 +187,12 @@ this machine's exact version: a host that is behind is updated, never downgraded
 released on GitHub rather than nuget.org, so only a stable build can bring a host to its
 version. `install-missing-tools` installs the .NET SDK, and everything `tools` declares an
 `install` for, on every configured leg's host; a `tools` entry with no `install` is an
-allowlist entry, reported when missing and never installed. An entry may name the platforms it
+allowlist entry, reported when missing and never installed. An install that needs a superuser
+takes the password from that host's own `.env`, as `SUDO_PASSWORD`, and asks for it at the
+terminal when none is declared — once per host, held in memory for that command alone and never
+written anywhere. A run with no terminal, a run answering with `--json`, and a run given
+`--no-prompt` all refuse instead, naming what would fix it; running the harness as root needs no
+password at all, which is usually the answer in CI. An entry may name the platforms it
 is needed on — `"platforms": ["windows"]` — and a host whose platform it does not name is never
 asked about it, so a repository can declare both a Windows compiler and a POSIX one. `sync` creates the host's copy
 of the repository at its `repositoryPath` and keeps it in step, deletions included. An

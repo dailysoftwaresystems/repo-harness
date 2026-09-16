@@ -22,6 +22,9 @@ public sealed class ToolProvisionServiceTests
 {
     private const string Distro = "lane-a";
 
+    /// <summary>A second distribution, so two hosts that each need a password can be told apart.</summary>
+    private const string OtherDistro = "lane-b";
+
     private const string Home = "/home/harness";
 
     private const string Credential = "not-a-real-password";
@@ -110,7 +113,9 @@ public sealed class ToolProvisionServiceTests
     [Fact]
     public async Task ATool_IsInstalledThroughItsManager_WithTheCredentialOnStandardInputAlone()
     {
-        using var fixture = new Fixture(tools: [Apt("ninja")]);
+        // Somebody is at the terminal, and must not be interrupted for a password this host already
+        // declares: the credential is looked for before anyone is asked, not after.
+        using var fixture = new Fixture(tools: [Apt("ninja")], prompting: PromptAvailability.Available);
 
         var report = await fixture.ProvisionAsync();
 
@@ -123,6 +128,7 @@ public sealed class ToolProvisionServiceTests
         // argument list is visible in that host's own process table to every user on it.
         Assert.Equal(["-S", "apt-get", "install", "-y", "ninja-build"], install.Arguments);
         Assert.Equal(Credential + "\n", install.StandardInput);
+        Assert.Empty(fixture.Prompt.Asked);
     }
 
     [Fact]
@@ -166,12 +172,318 @@ public sealed class ToolProvisionServiceTests
     [Fact]
     public async Task AHostWhereSudoNeedsNoPassword_IsUsedWithoutOne()
     {
-        using var fixture = new Fixture(tools: [Apt("ninja")], credential: null, passwordlessSudo: true);
+        // As above, for the other way a host needs no answer from anybody: whether sudo wants a
+        // password at all is measured before a person is interrupted for one.
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            passwordlessSudo: true,
+            prompting: PromptAvailability.Available);
 
         var report = await fixture.ProvisionAsync();
 
         Assert.Equal(ToolState.Installed, Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja").State);
         Assert.Contains(fixture.Host.Calls, call => call.Program == "sudo" && call.Arguments[0] == "-n" && call.Arguments.Contains("apt-get"));
+        Assert.Empty(fixture.Prompt.Asked);
+    }
+
+    /// <summary>
+    /// What holding one in memory is for: a host with two privileged tools is asked once, not once for
+    /// each of them.
+    /// </summary>
+    [Fact]
+    public async Task APromptedPassword_IsAskedOnceForAHost_ThenUsedForEveryToolOnIt()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja"), Apt("cmake")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => Credential);
+
+        var report = await fixture.ProvisionAsync();
+
+        var installed = Assert.Single(report.Legs).Tools.Where(tool => tool.Tool is "ninja" or "cmake").ToList();
+        Assert.Equal(2, installed.Count);
+        Assert.All(installed, tool => Assert.Equal(ToolState.Installed, tool.State));
+
+        Assert.Equal([$"wsl {Distro}"], fixture.Prompt.Asked);
+
+        // Checked against the host once, before either install ran on the strength of it.
+        Assert.Single(fixture.Host.Calls, call => call.Program == "sudo" && call.Arguments is ["-S", "-v"]);
+
+        // Both installs carried it, on standard input, exactly as a declared credential does.
+        var sudo = fixture.Host.Calls.Where(call => call.Program == "sudo" && call.Arguments.Contains("apt-get")).ToList();
+        Assert.Equal(2, sudo.Count);
+        Assert.All(sudo, call => Assert.Equal("-S", call.Arguments[0]));
+        Assert.All(sudo, call => Assert.Equal(Credential + "\n", call.StandardInput));
+    }
+
+    /// <summary>
+    /// Checked against the host before an install that may run for half an hour rides on it, and
+    /// checked once. Asking again for the next tool would spend a second failed authentication on the
+    /// same mistake, and a host may count those toward locking the account.
+    /// </summary>
+    [Fact]
+    public async Task AWrongPromptedPassword_RefusesTheTool_WithoutInstalling_AndWithoutAskingTwice()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja"), Apt("cmake")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => "not-what-that-host-has");
+
+        var report = await fixture.ProvisionAsync();
+
+        var refused = Assert.Single(report.Legs).Tools.Where(tool => tool.Tool is "ninja" or "cmake").ToList();
+        Assert.Equal(2, refused.Count);
+        Assert.All(refused, tool => Assert.Equal(ToolState.Failed, tool.State));
+        Assert.All(refused, tool => Assert.Contains("was not accepted", tool.Detail, StringComparison.Ordinal));
+
+        Assert.Single(fixture.Prompt.Asked);
+        Assert.Single(fixture.Host.Calls, call => call.Program == "sudo" && call.Arguments is ["-S", "-v"]);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Arguments.Contains("apt-get"));
+    }
+
+    /// <summary>
+    /// Answering with nothing is declining, and declining is an answer: the next tool on that host is
+    /// refused rather than asked the same question again.
+    /// </summary>
+    [Fact]
+    public async Task ADeclinedPrompt_IsNotPutAgainToTheSameHost()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja"), Apt("cmake")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => string.Empty);
+
+        var report = await fixture.ProvisionAsync();
+
+        var refused = Assert.Single(report.Legs).Tools.Where(tool => tool.Tool is "ninja" or "cmake").ToList();
+        Assert.Equal(2, refused.Count);
+        Assert.All(refused, tool => Assert.Equal(ToolState.Failed, tool.State));
+        Assert.All(refused, tool => Assert.Contains("no password for one", tool.Detail, StringComparison.Ordinal));
+
+        Assert.Single(fixture.Prompt.Asked);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "sudo" && call.Arguments is ["-S", "-v"]);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Arguments.Contains("apt-get"));
+    }
+
+    /// <summary>
+    /// The constraint the design turns on. A password belongs to the host it was typed for; two hosts
+    /// are two questions, because trying the first answer on the second spends somebody's failed-login
+    /// budget on a machine they never meant to touch.
+    /// </summary>
+    [Fact]
+    public async Task APasswordTypedForOneHost_IsNeverOfferedToAnother()
+    {
+        const string First = "password-for-the-first-distribution";
+        const string Second = "password-for-the-second-distribution";
+
+        // Each host has its own correct password, so both can succeed. A leak then shows up as a host
+        // installing with the other one's answer, not merely as one host failing.
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: host => host.Name == Distro ? First : Second,
+            secondDistro: true,
+            rootPassword: host => host.Name == Distro ? First : Second);
+
+        var report = await fixture.ProvisionAsync();
+
+        // Both got there, each on its own answer.
+        Assert.Equal(2, report.Legs.Count);
+        Assert.All(
+            report.Legs,
+            leg => Assert.Equal(ToolState.Installed, Assert.Single(leg.Tools, tool => tool.Tool == "ninja").State));
+
+        var installs = fixture.Host.Calls
+            .Where(call => call.Program == "sudo" && call.Arguments.Contains("apt-get"))
+            .ToDictionary(call => call.Host.ToString(), call => call.StandardInput, StringComparer.Ordinal);
+
+        Assert.Equal(First + "\n", installs[$"wsl {Distro}"]);
+        Assert.Equal(Second + "\n", installs[$"wsl {OtherDistro}"]);
+
+        // Each host was asked on its own account rather than one answer being reused for both.
+        Assert.Equal(2, fixture.Prompt.Asked.Count);
+        Assert.Contains($"wsl {Distro}", fixture.Prompt.Asked);
+        Assert.Contains($"wsl {OtherDistro}", fixture.Prompt.Asked);
+
+        var checks = fixture.Host.Calls
+            .Where(call => call.Program == "sudo" && call.Arguments is ["-S", "-v"])
+            .ToDictionary(call => call.Host.ToString(), call => call.StandardInput, StringComparer.Ordinal);
+
+        Assert.Equal(First + "\n", checks[$"wsl {Distro}"]);
+        Assert.Equal(Second + "\n", checks[$"wsl {OtherDistro}"]);
+
+        // Neither host ever saw the other's password, on any command at all.
+        Assert.DoesNotContain(
+            fixture.Host.Calls,
+            call => call.Host.Name == OtherDistro && call.StandardInput.Contains(First, StringComparison.Ordinal));
+
+        Assert.DoesNotContain(
+            fixture.Host.Calls,
+            call => call.Host.Name == Distro && call.StandardInput.Contains(Second, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A host that stopped answering is not somebody who mistyped. Told apart because the verdict is
+    /// remembered for every later tool on that host, and remembering the wrong one sends the reader
+    /// to check their typing while the machine is off.
+    /// </summary>
+    [Fact]
+    public async Task APasswordCheckThatNeverFinished_IsNotReportedAsAWrongPassword()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => Credential,
+            checkNeverFinishes: true);
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Failed, ninja.State);
+        Assert.Contains("never finished", ninja.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not accepted", ninja.Detail ?? string.Empty, StringComparison.Ordinal);
+
+        // Nothing was installed on the strength of a password nobody confirmed.
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Arguments.Contains("apt-get"));
+    }
+
+    /// <summary>
+    /// This machine has no item of its own and so can declare no credential at all. Before there was
+    /// anyone to ask, a privileged install here could only be done by hand, or by a user whose sudo
+    /// needs no password.
+    /// </summary>
+    [Fact]
+    public async Task TheLocalMachine_CanBeAskedForAPassword_WhereNoItemCouldEverDeclareOne()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            twoLegs: true,
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => Credential,
+            localPlatform: PlatformId.Linux);
+
+        var report = await fixture.ProvisionAsync(["only-local"]);
+
+        Assert.Equal(
+            ToolState.Installed,
+            Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja").State);
+
+        Assert.Equal(["local"], fixture.Prompt.Asked);
+
+        var install = Assert.Single(fixture.Host.Calls, call => call.Program == "sudo" && call.Arguments.Contains("apt-get"));
+        Assert.Equal(HostId.Local, install.Host);
+        Assert.Equal(Credential + "\n", install.StandardInput);
+    }
+
+    /// <summary>
+    /// A run with nobody to ask refuses as it always has, so what a script reads still parses — and is
+    /// told the remedy that suits it, which is to run as a user that needs no password at all.
+    /// </summary>
+    [Fact]
+    public async Task WithNobodyToAsk_TheRefusalStillNamesTheEnvFile_AndOffersRunningAsRoot()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Unavailable);
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Failed, ninja.State);
+        Assert.Contains("SUDO_PASSWORD", ninja.Detail, StringComparison.Ordinal);
+        Assert.Contains($"wslDistros/{Distro}/.env", ninja.Detail, StringComparison.Ordinal);
+        Assert.Contains("as root", ninja.Detail, StringComparison.Ordinal);
+
+        // Nobody was asked, nothing was attempted in place of asking, and no flag is blamed for it.
+        Assert.Empty(fixture.Prompt.Asked);
+        Assert.DoesNotContain("--no-prompt", ninja.Detail ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Arguments.Contains("apt-get"));
+    }
+
+    /// <summary>
+    /// Told apart from having nobody to ask: somebody is there, and a flag said not to. Naming it is
+    /// the difference between a message that explains itself and one that looks like a bug.
+    /// </summary>
+    [Fact]
+    public async Task WhenAskingIsRefusedByTheFlag_TheRefusalNamesTheFlag()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Suppressed);
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Failed, ninja.State);
+        Assert.Contains("--no-prompt", ninja.Detail, StringComparison.Ordinal);
+        Assert.Empty(fixture.Prompt.Asked);
+    }
+
+    /// <summary>
+    /// A typed password is a credential like any other, and reaches a report by exactly the same route
+    /// a declared one would: a host that echoes what it was given.
+    /// </summary>
+    [Fact]
+    public async Task APromptedPassword_ReachesNoLogOrReport_JustAsADeclaredOneDoes()
+    {
+        const string Typed = "typed-at-the-terminal";
+
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: _ => Typed,
+            rootPassword: _ => Typed,
+            installFails: $"sudo: a password was supplied: {Typed}");
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Failed, ninja.State);
+
+        var rendered = ToolProvisionReports.Render(report, json: true);
+        var everythingSaid = string.Join('\n', [.. rendered.Data, rendered.Message, fixture.Output.ToString(), fixture.Error.ToString()]);
+
+        // The host's own text reached the report, and only the password was taken out of it: absences
+        // alone would still hold if the detail had simply been blanked.
+        Assert.Contains("a password was supplied", ninja.Detail, StringComparison.Ordinal);
+
+        Assert.DoesNotContain(Typed, everythingSaid, StringComparison.Ordinal);
+        Assert.DoesNotContain(Typed, ninja.Detail ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            fixture.Host.Calls,
+            call => call.Arguments.Any(argument => argument.Contains(Typed, StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// Ctrl+C at the prompt stops the run. Turned into a refusal for that host instead, it would carry
+    /// on to the next one and ask again for an answer somebody has just declined to give.
+    /// </summary>
+    [Fact]
+    public async Task AnInterruptedPrompt_StopsTheRun_RatherThanMovingOnToTheNextHost()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            credential: null,
+            prompting: PromptAvailability.Available,
+            typed: host => host.Name == Distro
+                ? throw new OperationCanceledException()
+                : "never-asked-for",
+            secondDistro: true);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.ProvisionAsync());
+
+        // The host that was interrupted is the only one anybody was asked about.
+        Assert.Equal([$"wsl {Distro}"], fixture.Prompt.Asked);
     }
 
     [Fact]
@@ -386,7 +698,29 @@ public sealed class ToolProvisionServiceTests
     };
 
     /// <summary>One command a host was asked to run, and what it was given.</summary>
-    private sealed record HostCall(string Program, IReadOnlyList<string> Arguments, string StandardInput);
+    private sealed record HostCall(HostId Host, string Program, IReadOnlyList<string> Arguments, string StandardInput);
+
+    /// <summary>
+    /// Somebody at a terminal: what they would type for each host, and every host they were asked
+    /// about. A prompt that throws is how a test says they pressed Ctrl+C instead of answering.
+    /// </summary>
+    private sealed class FakePrompt(PromptAvailability availability, Func<HostId, string>? typed = null)
+        : ISuperuserPrompt
+    {
+        private readonly List<string> _asked = [];
+
+        public PromptAvailability Availability { get; } = availability;
+
+        /// <summary>Every host somebody was asked about, in order, named as the command line names it.</summary>
+        public IReadOnlyList<string> Asked => _asked;
+
+        public Task<string> ReadPasswordAsync(HostId host, CancellationToken cancellationToken)
+        {
+            _asked.Add(host.ToString());
+
+            return Task.FromResult(typed is null ? string.Empty : typed(host));
+        }
+    }
 
     /// <summary>
     /// A distribution that starts with no .NET SDK and no tools, and changes as commands are run on it,
@@ -398,46 +732,74 @@ public sealed class ToolProvisionServiceTests
         Dictionary<string, string> installs,
         bool passwordlessSudo,
         string? installFails,
-        string kernel)
+        string kernel,
+        Func<HostId, string> rootPassword,
+        bool checkNeverFinishes)
     {
+        private readonly Dictionary<string, Dictionary<string, string>> _present = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _dotnet = new(StringComparer.Ordinal);
+
         public List<HostCall> Calls { get; } = [];
 
-        public bool DotnetInstalled { get; private set; }
+        /// <summary>Whether one host has a program, which is not what another host has.</summary>
+        public bool Has(HostId host, string program) => Present(host).ContainsKey(program);
 
-        public ProcessResult Respond(HostCommand command)
+        public ProcessResult Respond(HostConnection connection, HostCommand command)
         {
-            Calls.Add(new HostCall(command.Program, command.Arguments, command.StandardInput));
+            var host = connection.Host;
+            Calls.Add(new HostCall(host, command.Program, command.Arguments, command.StandardInput));
 
-            if (!exists)
+            if (!exists && host.Kind != HostKind.Local)
             {
                 return HostResults.Failed(1, "Wsl/Service/WSL_E_DISTRO_NOT_FOUND");
             }
 
             if (Lookup(command) is { } name)
             {
-                return present.ContainsKey(name) ? HostResults.Ok($"/usr/bin/{name}\n") : HostResults.Failed(1, string.Empty);
+                return Has(host, name) ? HostResults.Ok($"/usr/bin/{name}\n") : HostResults.Failed(1, string.Empty);
             }
 
             var dotnetPath = $"{Home}/.dotnet/dotnet";
+            var dotnet = _dotnet.Contains(host.ToString());
 
             return (command.Program, command.Arguments.FirstOrDefault()) switch
             {
                 ("uname", _) => HostResults.Ok($"{kernel} x86_64\n"),
                 ("pwd", _) => HostResults.Ok(Home + "\n"),
-                ("ls", _) => HostResults.Ok(DotnetInstalled
+                ("ls", _) => HostResults.Ok(dotnet
                     ? string.Join('\n', command.Arguments.Where(path => path == dotnetPath)) + "\n"
                     : "\n"),
-                ("sh", null) => Install(dotnet: true),
+                ("sh", null) => Install(host, dotnet: true),
+
+                // Matched ahead of the install below, which is every other way sudo is reached: this is
+                // the one that only checks a password and installs nothing.
+                ("sudo", "-S") when command.Arguments is ["-S", "-v"] => checkNeverFinishes
+                    ? new ProcessResult(-1, string.Empty, string.Empty, TimeSpan.FromMinutes(2), TimedOut: true)
+                    : string.Equals(command.StandardInput, rootPassword(host) + "\n", StringComparison.Ordinal)
+                        ? HostResults.Ok(string.Empty)
+                        : HostResults.Failed(1, $"sudo: a password is required: {command.StandardInput.TrimEnd('\n')}"),
                 ("sudo", "-n") when command.Arguments.Count == 2 => passwordlessSudo
                     ? HostResults.Ok(string.Empty)
                     : HostResults.Failed(1, "sudo: a password is required"),
-                ("sudo", _) => Install(dotnet: false, command),
+                ("sudo", _) => Install(host, dotnet: false, command),
                 _ when command.Program == dotnetPath && command.Arguments.FirstOrDefault() == "--list-sdks" =>
-                    DotnetInstalled ? HostResults.Ok($"10.0.100 [{Home}/.dotnet/sdk]\n") : HostResults.Failed(1, "not found"),
-                _ when present.TryGetValue(Path.GetFileName(command.Program), out var version) =>
+                    dotnet ? HostResults.Ok($"10.0.100 [{Home}/.dotnet/sdk]\n") : HostResults.Failed(1, "not found"),
+                _ when Present(host).TryGetValue(Path.GetFileName(command.Program), out var version) =>
                     HostResults.Ok($"{Path.GetFileName(command.Program)} version {version}\n"),
                 _ => throw HostResults.Unexpected(command),
             };
+        }
+
+        /// <summary>What one host has, starting from whatever every host was said to have.</summary>
+        private Dictionary<string, string> Present(HostId host)
+        {
+            if (!_present.TryGetValue(host.ToString(), out var found))
+            {
+                found = new Dictionary<string, string>(present, StringComparer.Ordinal);
+                _present[host.ToString()] = found;
+            }
+
+            return found;
         }
 
         /// <summary>The program a PATH lookup asked about; a distribution is asked through a shell.</summary>
@@ -446,7 +808,7 @@ public sealed class ToolProvisionServiceTests
                 ? command.Arguments[1].Split(' ')[^1]
                 : null;
 
-        private ProcessResult Install(bool dotnet, HostCommand? command = null)
+        private ProcessResult Install(HostId host, bool dotnet, HostCommand? command = null)
         {
             if (installFails is { } said)
             {
@@ -455,14 +817,14 @@ public sealed class ToolProvisionServiceTests
 
             if (dotnet)
             {
-                DotnetInstalled = true;
+                _dotnet.Add(host.ToString());
                 return HostResults.Ok("dotnet-install: Installation finished.\n");
             }
 
             // The package id ends in -build; the program it installs is the tool's own name.
             var package = command!.Arguments[^1];
             var name = package[..^"-build".Length];
-            present[name] = installs[name];
+            Present(host)[name] = installs[name];
 
             return HostResults.Ok($"Setting up {package}\n");
         }
@@ -481,9 +843,17 @@ public sealed class ToolProvisionServiceTests
             string? credential = Credential,
             bool passwordlessSudo = false,
             string? installFails = null,
-            string kernel = "Linux")
+            string kernel = "Linux",
+            PromptAvailability prompting = PromptAvailability.Unavailable,
+            Func<HostId, string>? typed = null,
+            PlatformId localPlatform = PlatformId.Windows,
+            bool secondDistro = false,
+            Func<HostId, string>? rootPassword = null,
+            bool checkNeverFinishes = false)
         {
             var declared = tools ?? [];
+
+            Prompt = new FakePrompt(prompting, typed);
 
             Host = new FakeHost(
                 distributionExists,
@@ -491,11 +861,21 @@ public sealed class ToolProvisionServiceTests
                 declared.ToDictionary(tool => tool.Name, _ => InstalledVersion, StringComparer.Ordinal),
                 passwordlessSudo,
                 installFails,
-                kernel);
+                kernel,
+                rootPassword ?? (_ => Credential),
+                checkNeverFinishes);
 
             _repository.WriteFile(
                 Path.Combine(".harness-config", "wslDistros", Distro, ".env"),
                 $"DISTRO=Example-Linux\n{(credential is null ? string.Empty : $"SUDO_PASSWORD={credential}\n")}");
+
+            if (secondDistro)
+            {
+                // Declares no credential of its own, so it reaches the prompt exactly as the first does.
+                _repository.WriteFile(
+                    Path.Combine(".harness-config", "wslDistros", OtherDistro, ".env"),
+                    "DISTRO=Other-Linux\n");
+            }
 
             var config = new HarnessConfig
             {
@@ -513,15 +893,36 @@ public sealed class ToolProvisionServiceTests
                 config.Legs["only-local"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" };
             }
 
-            var platform = HostDoubles.Platform(PlatformId.Windows);
+            if (secondDistro)
+            {
+                config.WslDistros.Add(OtherDistro);
+                config.Hosts.Wsl[OtherDistro] = new WslHostConfig { RepositoryPath = "~/repo" };
+                config.Legs["on-other"] = new LegConfig
+                {
+                    Os = "linux",
+                    Processor = "x86_64",
+                    Config = "debug",
+                    Wsl = OtherDistro,
+                };
+            }
+
+            var platform = HostDoubles.Platform(localPlatform);
 
             var processRunner = Substitute.For<IProcessRunner>();
-            processRunner.FindExecutable(Arg.Any<string>()).Returns(call => "/usr/bin/" + call.Arg<string>());
+
+            // This machine finds every program, which is what keeps a local host out of the way of a
+            // test about a distribution. A test that provisions the local host itself says so with
+            // localPlatform, and then the lookup has to answer from what that host has, so that a tool
+            // is missing until this run installs it.
+            processRunner.FindExecutable(Arg.Any<string>()).Returns(call =>
+                localPlatform == PlatformId.Windows || Host.Has(HostId.Local, call.Arg<string>())
+                    ? "/usr/bin/" + call.Arg<string>()
+                    : null);
 
             var permissions = Substitute.For<IFilePermissions>();
             permissions.IsPrivate(Arg.Any<string>()).Returns(true);
 
-            var commands = new ScriptedHostCommands((_, command) => Host.Respond(command));
+            var commands = new ScriptedHostCommands(Host.Respond);
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
             var secrets = new HostSecretsStore(fileSystem, permissions, platform);
             var addresses = new HostAddressResolver(new NoLookup(), TimeProvider.System, TimeSpan.Zero);
@@ -533,10 +934,13 @@ public sealed class ToolProvisionServiceTests
                 connector,
                 commands,
                 programs,
-                new ConsoleHarnessOutput(Output, Error, verbose: false));
+                new ConsoleHarnessOutput(Output, Error, verbose: false),
+                Prompt);
         }
 
         public FakeHost Host { get; }
+
+        public FakePrompt Prompt { get; }
 
         public StringWriter Output { get; } = new();
 

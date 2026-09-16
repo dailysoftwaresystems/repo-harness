@@ -16,6 +16,26 @@ public sealed class ConsoleHarnessOutputTests
         Assert.Empty(Lines(standardError));
     }
 
+    /// <summary>
+    /// What anything that would interrupt a document asks before it does. A password prompt written
+    /// into standard output is read as part of the document a script is parsing; the same prompt is
+    /// also the one thing that must not be skipped silently, so the answer has to be exact.
+    /// </summary>
+    [Fact]
+    public void IsDataOnly_SaysWhetherADocumentIsBeingWritten_AndStopsSayingSoAfterwards()
+    {
+        var (output, _, _) = Create(verbose: false);
+
+        Assert.False(output.IsDataOnly);
+
+        using (output.DataOnly())
+        {
+            Assert.True(output.IsDataOnly);
+        }
+
+        Assert.False(output.IsDataOnly);
+    }
+
     [Fact]
     public void FailuresAndWarnings_GoToStandardError_SoOutputStaysPipeable()
     {

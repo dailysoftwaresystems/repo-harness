@@ -521,8 +521,33 @@ ready to be told what is missing.
   Without it a repository could not declare both a Windows compiler and a POSIX one: each was
   reported missing on the other's hosts, and no leg was ever fully provisioned.
 - **A privileged install takes its credential from that host's own item, on standard input
-  only.** It never reaches an argument list, a log or an error message, and redaction happens at
-  one place rather than at each call site: a failure excerpt was measured carrying one through.
+  only.** The item declares it as `SUDO_PASSWORD` in its `.env`, beside the address and user:
+  `.harness-config/sshItems/<name>/.env`, or `.harness-config/wslDistros/<distro>/.env`. It never
+  reaches an argument list, a log or an error message, and redaction happens at one place rather
+  than at each call site: a failure excerpt was measured carrying one through. Only the six system
+  package managers ask for one at all — `apt`, `apt-get`, `dnf`, `yum`, `apk`, `zypper` and
+  `pacman` install into system directories; `brew`, `winget`, `choco`, `scoop`, `npm`, `pip` and
+  `dotnet` never run under `sudo`.
+- **A host that declares no password is asked for one, once, at the terminal.** Where nothing
+  else can supply it, `install-missing-tools` and `init` ask whoever is running them, echoing
+  nothing. The answer is checked against that host with `sudo -S -v` before an install that may
+  run for half an hour rides on it, and a wrong one is refused on the spot rather than tried
+  again: a second guess is a second failed authentication counted against that account.
+  - **It is held per host, in memory, for that one command and no longer.** Each host owns its
+    own answer, so a password typed for one is never offered to another — which would spend
+    somebody's failed-login budget on a machine they never meant to touch. Nothing is written
+    anywhere: the next command asks again.
+  - **This machine can be asked too**, which is the one case an item could never cover: local
+    legs have no item and so can declare no credential at all.
+- **Nobody is asked where nobody is there.** A run whose standard input is not a terminal, and a
+  run answering with `--json`, both refuse exactly as a run with no credential always has, so
+  what a script reads keeps parsing. `--no-prompt` refuses the same way at a real terminal, and
+  says so in the refusal. The refusal names every remedy, including running the harness as root,
+  which needs no password: CI normally installs its dependencies in an earlier step and never
+  reaches this at all, and where it does, running as root is the answer that suits it.
+- **Interrupting the prompt stops the run.** Under `install-missing-tools` that is exit `130`,
+  as any interruption is. Under `init` it is also `130`, and everything already created is still
+  listed: the repository is initialised either way, and only the last step was stopped.
 - A second run reports "already current" and changes nothing. An unreachable host is named, and
   the other legs still go ahead.
 
@@ -1039,7 +1064,7 @@ with "the harness could not run", because the remedies differ.
 | 20 | The wrapped command ran and failed |
 | 21 | Ran with nothing failing, but a leg reached no verdict; it is not a pass |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
-| 130 | The run was interrupted before it finished; a deletion already under way says what it left |
+| 130 | The run was interrupted before it finished; what it had already done is still reported |
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,

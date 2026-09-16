@@ -32,6 +32,22 @@ public sealed partial class CliEndToEndTests
         }
     }
 
+    /// <summary>
+    /// <c>init</c> and <c>install-missing-tools</c> share one provisioning engine, and either of them
+    /// can stop to ask for a superuser password. The flag that refuses to ask therefore has to reach
+    /// both: declared on one command alone, the other would turn it away as an option it does not know.
+    /// </summary>
+    [Theory]
+    [InlineData("init")]
+    [InlineData("install-missing-tools")]
+    public async Task NoPrompt_IsOfferedByEveryCommandThatCanProvision(string command)
+    {
+        var result = await CliRunner.RunAsync([command, "--help"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("--no-prompt", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Version_IsReportedWithoutBuildMetadata()
     {

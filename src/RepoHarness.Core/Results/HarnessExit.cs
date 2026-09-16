@@ -93,7 +93,7 @@ public static class HarnessExit
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
             [nameof(Incomplete)] = "Ran with nothing failing, but a leg reached no verdict; it is not a pass.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",
-            [nameof(Cancelled)] = "The run was interrupted before it finished; a deletion already under way says what it left.",
+            [nameof(Cancelled)] = "The run was interrupted before it finished; what it had already done is still reported.",
         };
 
         return [.. typeof(HarnessExit)
