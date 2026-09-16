@@ -233,6 +233,77 @@ public sealed class ToolProvisionServiceTests
         Assert.False(report.Passed);
     }
 
+    /// <summary>
+    /// The two sides fail to parse for unrelated reasons and have unrelated remedies. One message
+    /// for both sent everyone who wrote a two-component minVersion — which this parser refuses,
+    /// because the field is a semantic version — to adjust a probe regex that had just worked.
+    /// </summary>
+    [Fact]
+    public async Task AMinVersionThatCannotBeParsed_BlamesTheMinVersion_NotTheProbe()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", minVersion: "1.12")],
+            present: new() { ["ninja"] = "1.12.0" });
+
+        var report = await fixture.ProvisionAsync();
+
+        var outcome = Assert.Single(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
+
+        Assert.Equal(ToolState.Unknown, outcome.State);
+        Assert.Contains("minVersion '1.12'", outcome.Detail ?? string.Empty, StringComparison.Ordinal);
+        Assert.Contains("major.minor.patch", outcome.Detail ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("probe", outcome.Detail ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AVersionTheProbeCouldNotRead_StillBlamesTheProbe()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", minVersion: "1.12.0", regex: "never matches this")],
+            present: new() { ["ninja"] = "1.10.0" });
+
+        var report = await fixture.ProvisionAsync();
+
+        var outcome = Assert.Single(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
+
+        Assert.Contains("probe", outcome.Detail ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A tool needed only on one platform is not probed on the others, so a repository declaring
+    /// both a Windows compiler and a POSIX one can have every leg provisioned. Before this, each
+    /// was reported missing on the other's hosts and no leg was ever green.
+    /// </summary>
+    [Fact]
+    public async Task AToolScopedToAnotherPlatform_IsNeitherProbedNorCountedAgainstTheLeg()
+    {
+        using var fixture = new Fixture(
+            tools:
+            [
+                new ToolConfig { Name = "cl", Platforms = ["windows"] },
+                Apt("ninja"),
+            ],
+            present: new() { ["ninja"] = "1.12.0" });
+
+        var report = await fixture.ProvisionAsync();
+        var tools = Assert.Single(report.Legs).Tools;
+
+        Assert.DoesNotContain(tools, entry => entry.Tool == "cl");
+        Assert.True(report.Passed, "a tool this platform does not need must not hold the leg back");
+    }
+
+    [Fact]
+    public async Task AToolScopedToThisPlatform_IsStillProbed()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", platforms: ["linux"])],
+            present: new() { ["ninja"] = "1.12.0" });
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Contains(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
+    }
+
     [Fact]
     public void RepositoryPath_IsRequiredOfEveryRemoteHost()
     {
@@ -251,11 +322,16 @@ public sealed class ToolProvisionServiceTests
     }
 
     /// <summary>A tool apt installs, whose package is named after it.</summary>
-    private static ToolConfig Apt(string name, string? minVersion = null, string regex = @"(\d+\.\d+\.\d+)") => new()
+    private static ToolConfig Apt(
+        string name,
+        string? minVersion = null,
+        string regex = @"(\d+\.\d+\.\d+)",
+        List<string>? platforms = null) => new()
     {
         Name = name,
         Probe = new ToolProbe { Args = ["--version"], Regex = regex },
         MinVersion = minVersion,
+        Platforms = platforms ?? [],
         Install = { ["linux"] = new ToolInstall { Manager = "apt", Id = name + "-build" } },
     };
 

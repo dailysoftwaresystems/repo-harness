@@ -223,6 +223,131 @@ public sealed class LedgerReportTests
     private static PhaseRecord Phase(string name, int seconds) => new(name, TimeSpan.FromSeconds(seconds), ClockStepped: false);
 
     /// <summary>
+    /// A leg that did no work is not a leg that passed. The verdict table already ranks a skip
+    /// above a pass so that a run carrying one summarises as the warning; the exit code has to
+    /// agree, or a gate reading it is told eight legs passed when none of them ran.
+    /// </summary>
+    [Fact]
+    public void ARunWhereALegReachedNoVerdict_IsIncomplete_NotSuccess()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(134), "412 tests"),
+            Entry("wsl-clang-asan", LegVerdict.SkippedUnavailable, TimeSpan.Zero, "wsl Ubuntu could not be reached"),
+        ],
+        durationWarningFactor: 0);
+
+        Assert.True(report.Passed, "nothing failed, so this is not a red run");
+        Assert.False(report.Complete);
+        Assert.Equal(HarnessExit.Incomplete, report.ExitCode);
+        Assert.Equal(1, report.Reported);
+        Assert.Equal("wsl-clang-asan", Assert.Single(report.WithoutVerdict).Leg);
+    }
+
+    [Fact]
+    public void ARunWhereEveryLegWasSkipped_IsNeverSuccess()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("a", LegVerdict.SkippedUnavailable, TimeSpan.Zero, "no host"),
+            Entry("b", LegVerdict.SkippedToolMissing, TimeSpan.Zero, "cmake is missing"),
+        ],
+        durationWarningFactor: 0);
+
+        Assert.Equal(HarnessExit.Incomplete, report.ExitCode);
+        Assert.Equal(0, report.Reported);
+    }
+
+    /// <summary>
+    /// An interrupted run is built from the legs that finished, so left to itself the ledger would
+    /// describe a run stopped after its first leg as a clean pass of one leg — while the process
+    /// exited 130. A script reading the document instead of the shell's status would take that for
+    /// a green run.
+    /// </summary>
+    [Fact]
+    public void TheJsonLedger_SaysARunWasInterrupted_RatherThanReportingThePartAsAWhole()
+    {
+        var report = LedgerReport.From(
+            [Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(10), "412 tests")],
+            durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: true, unfinished: ["b"]));
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.Cancelled, root.GetProperty("exitCode").GetInt32());
+        Assert.False(root.GetProperty("passed").GetBoolean());
+        Assert.False(root.GetProperty("complete").GetBoolean());
+        Assert.True(root.GetProperty("cancelled").GetBoolean());
+        Assert.Equal("b", Assert.Single(root.GetProperty("unfinished").EnumerateArray()).GetString());
+    }
+
+    /// <summary>
+    /// A leg still running when the rest finished is the same fact by another route: the run
+    /// reported on fewer legs than it was asked about, whatever its rows say.
+    /// </summary>
+    [Fact]
+    public void TheJsonLedger_IsNotComplete_WhenALegWasLeftUnfinished()
+    {
+        var report = LedgerReport.From(
+            [Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(10), "412 tests")],
+            durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: ["b"]));
+
+        Assert.False(document.RootElement.GetProperty("complete").GetBoolean());
+        Assert.True(document.RootElement.GetProperty("passed").GetBoolean());
+    }
+
+    [Fact]
+    public void TheJsonLedger_OfAnUninterruptedRun_SaysSo()
+    {
+        var report = LedgerReport.From(
+            [Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(10), "412 tests")],
+            durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson());
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.Success, root.GetProperty("exitCode").GetInt32());
+        Assert.True(root.GetProperty("complete").GetBoolean());
+        Assert.False(root.GetProperty("cancelled").GetBoolean());
+        Assert.Empty(root.GetProperty("unfinished").EnumerateArray());
+    }
+
+    [Fact]
+    public void AnAllGreenRun_IsUnchanged()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(10), "412 tests"),
+            Entry("b", LegVerdict.Passed, TimeSpan.FromSeconds(12), "412 tests"),
+        ],
+        durationWarningFactor: 0);
+
+        Assert.True(report.Complete);
+        Assert.Equal(HarnessExit.Success, report.ExitCode);
+        Assert.Empty(report.WithoutVerdict);
+    }
+
+    /// <summary>
+    /// A failure still decides the run. An incomplete result is what a run reports when nothing
+    /// failed; where something did, that is the more fundamental fact and it keeps its own code.
+    /// </summary>
+    [Fact]
+    public void AFailingLeg_StillDecidesTheRun_EvenBesideASkippedOne()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("a", LegVerdict.Failed, TimeSpan.FromSeconds(10), "3 tests failed"),
+            Entry("b", LegVerdict.SkippedUnavailable, TimeSpan.Zero, "no host"),
+        ],
+        durationWarningFactor: 0);
+
+        Assert.False(report.Passed);
+        Assert.Equal(HarnessExit.CommandFailed, report.ExitCode);
+    }
+
+    /// <summary>
     /// What a phase reported about its own timing is shown, and shown with the leg and phase that
     /// reported it. Collected under <c>--time</c> and, before this, never printed anywhere: the
     /// flag extracted the marks and discarded them, so it had no observable effect at all.

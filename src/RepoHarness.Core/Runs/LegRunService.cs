@@ -342,7 +342,7 @@ public sealed class LegRunService(
         {
             return CommandOutcome.Ok(string.Empty, null) with
             {
-                Data = [report.ToJson()],
+                Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
                 Quiet = true,
                 ExitCode = execution.Cancelled ? HarnessExit.Cancelled : report.ExitCode,
             };
@@ -365,11 +365,28 @@ public sealed class LegRunService(
                 details);
         }
 
-        return report.Passed
-            ? CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details)
-            : CommandOutcome.Failed(
+        if (!report.Passed)
+        {
+            return CommandOutcome.Failed(
                 report.ExitCode,
                 $"{Verdicts.Display(report.Verdict)}: {report.Lines.Count} leg(s) reported",
                 details);
+        }
+
+        // A leg that did no work is not a leg that passed. Nothing failed here, so this is not a
+        // red run; but reporting it as an unqualified success would put "OK - 8 leg(s) passed" in
+        // front of a reader when none of those eight ran, which is the one thing a gate reads. The
+        // legs are named, because which of them went unreported is the first thing to ask.
+        if (report.WithoutVerdict.Count > 0)
+        {
+            return CommandOutcome.Failed(
+                HarnessExit.Incomplete,
+                $"{report.Reported} of {report.Lines.Count} leg(s) passed; "
+                + $"{report.WithoutVerdict.Count} reached no verdict: "
+                + string.Join(", ", report.WithoutVerdict.Select(line => line.Leg)),
+                details);
+        }
+
+        return CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details);
     }
 }

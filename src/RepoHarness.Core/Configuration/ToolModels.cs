@@ -12,6 +12,18 @@ public sealed class ToolConfig
     /// <summary>Lowest acceptable version; below it the tool is updated.</summary>
     public string? MinVersion { get; init; }
 
+    /// <summary>
+    /// Platforms this tool is needed on (<c>windows</c>, <c>linux</c>, <c>macos</c>) or <c>all</c>.
+    /// </summary>
+    /// <remarks>
+    /// A host whose platform this does not name is never asked about the tool, so it is neither
+    /// probed there nor counted against that host's legs. Without it every tool was needed
+    /// everywhere: a repository declaring MSVC and a Linux compiler could not have both, because
+    /// each was reported missing on the other's hosts and no leg was ever fully provisioned. Left
+    /// out, a tool is needed on every platform, which is what every list written before this meant.
+    /// </remarks>
+    public List<string> Platforms { get; init; } = [];
+
     /// <summary>How to install or update it, keyed by platform or <c>all</c>.</summary>
     public Dictionary<string, ToolInstall> Install { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 

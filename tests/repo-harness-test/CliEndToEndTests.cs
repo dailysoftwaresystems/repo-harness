@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -356,6 +357,79 @@ public sealed partial class CliEndToEndTests
               "predefinedRunners": { "corpus": { "action": {{System.Text.Json.JsonSerializer.Serialize(action)}} } }
             }
             """);
+
+    /// <summary>
+    /// The line a migration's acceptance gate reads. A leg that reached no verdict used to be
+    /// counted among the legs that passed, so a run where nothing ran at all printed
+    /// "OK - n leg(s) passed" and exited 0 — which is the one number a gate compares.
+    /// </summary>
+    [Fact]
+    public async Task ARunWhereALegReachedNoVerdict_IsNotReportedAsPassed()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native,elsewhere", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Incomplete, result.ExitCode);
+        Assert.DoesNotContain("OK -", result.StandardOutput, StringComparison.Ordinal);
+
+        // Both halves are named: how many did report, and which ones did not.
+        Assert.Contains("1 of 2 leg(s) passed", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("elsewhere", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARunWhereEveryLegReported_IsStillReportedAsPassed()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("1 leg(s) passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A repository with one leg this machine can run and one no host can, and a runner that does
+    /// something trivial on whichever of them runs.
+    /// </summary>
+    private static async Task PrepareRunnerAsync(TempDirectory temp)
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs =
+            {
+                ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" },
+
+                // An operating system no declared host provides: this machine is the only host.
+                ["elsewhere"] = new LegConfig
+                {
+                    Os = platform.PlatformKey == PlatformNames.Linux ? PlatformNames.MacOs : PlatformNames.Linux,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                },
+            },
+            PredefinedRunners =
+            {
+                ["probe"] = new RunnerConfig { Action = "probe/probe.yml" },
+            },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
+    }
 
     /// <summary>An initialised repository whose path budget any temporary directory fits.</summary>
     private static Task PrepareRepositoryAsync(TempDirectory temp)

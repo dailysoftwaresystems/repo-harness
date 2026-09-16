@@ -204,11 +204,18 @@ public sealed class HostConnector(
 
         if (!probe.Succeeded)
         {
+            // The client is named in every one of these. Which ssh ran is decided by PATH order and
+            // is invisible in the failure itself: measured, a Windows machine carried three, and the
+            // in-box 9.5p2 could agree no key exchange with a 10.x server while a newer one sitting
+            // elsewhere on the same machine connected without trouble. "Could not be reached" sends
+            // the reader to the server; the client is what had changed.
+            var client = await SshClientAsync(cancellationToken).ConfigureAwait(false);
+
             return HostConnectionResult.Refused(probe switch
             {
-                { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds",
-                { ExitCode: SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)}",
-                _ => HostProbes.Failure("its shell could not run echo", probe),
+                { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
+                { ExitCode: SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
+                _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
             });
         }
 
@@ -219,6 +226,45 @@ public sealed class HostConnector(
             Connection = await _programs.ResolveAsync(connection, wanted, budget, cancellationToken).ConfigureAwait(false),
             Superuser = item.Superuser,
         };
+    }
+
+    /// <summary>
+    /// Which ssh this machine actually ran, and what version it is.
+    /// </summary>
+    /// <remarks>
+    /// Measured rather than assumed, and only when something has already failed: several ssh
+    /// clients commonly sit on one PATH and the first wins silently. Reported as best it can be —
+    /// a client that will not say its version still has its path named, which is the half that
+    /// tells a reader which one to replace.
+    /// </remarks>
+    private async Task<string> SshClientAsync(CancellationToken cancellationToken)
+    {
+        var path = _processRunner.FindExecutable(HostCommandRunner.SshProgram);
+
+        if (path is null)
+        {
+            return $"no '{HostCommandRunner.SshProgram}' on PATH";
+        }
+
+        try
+        {
+            var version = await _processRunner
+                .RunAsync(
+                    new ProcessRequest { FileName = path, Arguments = ["-V"] },
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            // ssh -V writes its banner to standard error, and has done for as long as it has had one.
+            var banner = HostProbes.Excerpt(
+                version.StandardError.Length > 0 ? version.StandardError : version.StandardOutput);
+
+            return banner.Length > 0 ? $"using {path}: {banner}" : $"using {path}";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Naming the client matters more than saying why it would not introduce itself.
+            return $"using {path}";
+        }
     }
 
     private Task<ProcessResult> RunAsync(

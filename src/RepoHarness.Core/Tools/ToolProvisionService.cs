@@ -134,7 +134,10 @@ public sealed class ToolProvisionService(
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
 
-        foreach (var tool in config.Tools)
+        // A tool this platform does not need is not probed here, rather than probed and excused.
+        // Probing costs a round trip to the host for an answer nothing would read, and an outcome
+        // recorded for it would have to be excused again by everything that counts outcomes.
+        foreach (var tool in config.Tools.Where(tool => PlatformScope.Applies(tool.Platforms, platformKey)))
         {
             var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, superuser, cancellationToken)
                 .ConfigureAwait(false);
@@ -302,9 +305,7 @@ public sealed class ToolProvisionService(
             // Biased toward not knowing: reported rather than passed off as current, because a tool
             // whose version could not be read is exactly the one whose age nobody can vouch for.
             return (
-                new ToolOutcome(tool.Name, ToolState.Unknown, version,
-                    $"'{version ?? string.Empty}' there cannot be compared with the minVersion '{minimum}'; "
-                    + "give the tool's probe a regex whose first group is the version"),
+                new ToolOutcome(tool.Name, ToolState.Unknown, version, Uncomparable(version, minimum)),
                 connection);
         }
 
@@ -486,11 +487,41 @@ public sealed class ToolProvisionService(
         return (uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : null) ?? PlatformNames.Windows;
     }
 
+    /// <summary>
+    /// Why a version and a minimum could not be compared, naming whichever of them failed to parse.
+    /// </summary>
+    /// <remarks>
+    /// The two fail for unrelated reasons and have unrelated remedies: what the host reported is
+    /// the probe's business, and the minimum is a string in this repository's own configuration.
+    /// One message for both sent every reader of a two-component minVersion — which this parser
+    /// refuses, because the field is a semantic version — to adjust a probe regex that had just
+    /// worked perfectly.
+    /// </remarks>
+    /// <param name="version">What the probe read from the host, if anything.</param>
+    /// <param name="minimum">The configured minVersion.</param>
+    private static string Uncomparable(string? version, string? minimum)
+    {
+        var foundParses = SemanticVersion.TryParse(version, out _);
+        var leastParses = SemanticVersion.TryParse(minimum, out _);
+
+        return (foundParses, leastParses) switch
+        {
+            (true, false) =>
+                $"the minVersion '{minimum}' is not a version this can compare; "
+                + "write it as major.minor.patch, such as '1.2.0'",
+            (false, true) =>
+                $"'{version ?? string.Empty}' is not a version this can compare with the minVersion "
+                + $"'{minimum}'; give the tool's probe a regex whose first group is the version",
+            _ =>
+                $"neither '{version ?? string.Empty}' nor the minVersion '{minimum}' is a version this "
+                + "can compare; the minVersion is written as major.minor.patch, and the probe's regex "
+                + "captures the version in its first group",
+        };
+    }
+
     /// <summary>The install entry for one platform, falling back to the one declared for <c>all</c>.</summary>
     private static ToolInstall? InstallFor(ToolConfig tool, string platformKey)
-        => tool.Install.TryGetValue(platformKey, out var forPlatform) ? forPlatform
-            : tool.Install.TryGetValue("all", out var forEvery) ? forEvery
-            : null;
+        => PlatformScope.Select(tool.Install, platformKey);
 
     /// <summary>What a tool that is not there, and cannot be installed, is reported as.</summary>
     private static string Needed(ToolConfig tool, string platformKey)
@@ -535,18 +566,36 @@ public sealed class ToolProvisionService(
     /// The script that installs the .NET SDK under the home directory. Run by a shell reading it from
     /// standard input, so nothing in it has to be a word an ssh command line can carry.
     /// </summary>
+    /// <remarks>
+    /// The outer script is plain POSIX and runs under whatever <c>/bin/sh</c> the host has.
+    /// <c>dotnet-install.sh</c> is not: it sets <c>-o pipefail</c>, which dash — <c>/bin/sh</c> on
+    /// Debian and Ubuntu — refuses, and the install then fails with "Illegal option -o pipefail"
+    /// rather than anything about a shell. So it is handed to <c>bash</c> by name, and a host
+    /// without bash is told that plainly instead of being shown that message.
+    /// </remarks>
     private static string InstallScript => $"""
         set -e
+        if ! command -v bash >/dev/null 2>&1; then
+          echo "{BashMissing}" >&2
+          exit 1
+        fi
         script="$HOME/.dotnet-install.sh"
         if command -v curl >/dev/null 2>&1; then
           curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$script"
         else
           wget -qO "$script" https://dot.net/v1/dotnet-install.sh
         fi
-        sh "$script" --channel {ToolPackage.MinimumSdkMajor.ToString(CultureInfo.InvariantCulture)}.0 --install-dir "$HOME/.dotnet" --no-path
+        bash "$script" --channel {ToolPackage.MinimumSdkMajor.ToString(CultureInfo.InvariantCulture)}.0 --install-dir "$HOME/.dotnet" --no-path
         rm -f "$script"
 
         """;
+
+    /// <summary>
+    /// What the host prints when it has no bash, quoted back by the refusal so the reader is told
+    /// what to install rather than shown a shell error about an option they never wrote.
+    /// </summary>
+    internal const string BashMissing =
+        "bash is required to install the .NET SDK (dotnet-install.sh uses bash features that /bin/sh may not have); install bash on this host and run install-missing-tools again";
 
     /// <summary>
     /// The <c>.env</c> a host's superuser credential belongs in, spelt as this repository spells it, or

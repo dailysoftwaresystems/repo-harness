@@ -1,4 +1,5 @@
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Platform;
 
 namespace RepoHarness.Core.Build;
 
@@ -73,9 +74,7 @@ public sealed record VariantKey(string Processor, string Toolchain, string Confi
         var project = ProjectFor(config, leg);
 
         var toolchain = leg.Toolchain
-            ?? (project is not null && project.DefaultToolchain.TryGetValue(platformKey, out var byPlatform)
-                ? byPlatform
-                : project?.DefaultToolchain.GetValueOrDefault("all"))
+            ?? PlatformScope.Select(project?.DefaultToolchain, platformKey)
             ?? NoToolchain;
 
         return new VariantKey(leg.Processor, toolchain, leg.Config, leg.Sanitizer);

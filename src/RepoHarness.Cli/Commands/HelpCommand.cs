@@ -103,6 +103,15 @@ internal static class HelpCommand
         builder.AppendLine("reported when missing, never installed. That is how a program shipping with the");
         builder.AppendLine("platform, or with the repository, is allowed to appear in a runner's steps.");
         builder.AppendLine();
+        builder.AppendLine("An entry may name the platforms it is needed on:");
+        builder.AppendLine();
+        builder.AppendLine("  { \"name\": \"cl\", \"platforms\": [\"windows\"] }");
+        builder.AppendLine();
+        builder.AppendLine("A host whose platform an entry does not name is never asked about it, so it is");
+        builder.AppendLine("neither probed there nor counted against that host's legs. Left out, a tool is");
+        builder.AppendLine("needed everywhere. Without this a repository could not declare both a Windows");
+        builder.AppendLine("compiler and a POSIX one: each was reported missing on the other's hosts.");
+        builder.AppendLine();
         builder.AppendLine("A privileged install takes its credential from that host's own item, on standard");
         builder.AppendLine("input only: it reaches no argument list, no log and no error message. A second run");
         builder.AppendLine("reports 'already current' and changes nothing. An unreachable host is named, and");
@@ -233,6 +242,10 @@ internal static class HelpCommand
         }
 
         builder.AppendLine();
+        builder.AppendLine($"A run where nothing failed but some leg reached no verdict exits {HarnessExit.Incomplete}, not 0, and");
+        builder.AppendLine("names the legs that did not report. A leg that never ran proves nothing about the");
+        builder.AppendLine("code, so counting it among the legs that passed reports evidence nobody gathered.");
+        builder.AppendLine();
         builder.AppendLine("When several apply the more fundamental one is reported, in the order above.");
         builder.AppendLine("A leg whose inputs moved is not reported as failed even when its tests failed,");
         builder.AppendLine("because what failed was a tree that never existed.");
@@ -352,6 +365,11 @@ internal static class HelpCommand
         builder.AppendLine("              processor; a leg naming one never runs natively, and a leg naming");
         builder.AppendLine("              none runs only natively");
         builder.AppendLine();
+        builder.AppendLine("A toolchain declares the platforms it exists on, and a leg naming one absent from");
+        builder.AppendLine("its own operating system is refused when config.json is read - not skipped later as");
+        builder.AppendLine("a missing compiler. Nothing about that needs measuring: a leg says which system it");
+        builder.AppendLine("needs, and it only ever runs on a host that provides it.");
+        builder.AppendLine();
         builder.AppendLine("Selected legs run at once and the command waits for all of them, reporting each");
         builder.AppendLine("live. Legs are chunked by the PHYSICAL machine they run on: this machine and every");
         builder.AppendLine("WSL distribution are one machine, because a distribution runs on it, and each ssh");
@@ -442,8 +460,12 @@ internal static class HelpCommand
         builder.AppendLine("Use --random to have one generated.");
         builder.AppendLine();
         builder.AppendLine("The length limit is not cosmetic. A worktree's build tree sits below");
-        builder.AppendLine("  .harness-config/worktrees/<name>");
-        builder.AppendLine("and on Windows that path plus the longest path the build system generates");
+        builder.AppendLine("  <worktrees.root>/<name>");
+        builder.AppendLine($"which is '{WorktreeSettings.DefaultRoot}' unless config.json names another. That");
+        builder.AppendLine("root is configurable precisely because it is spent before a worktree's own name:");
+        builder.AppendLine("a shorter one, such as '.worktrees', buys those characters back. Ask");
+        builder.AppendLine("list-worktree where a worktree actually is rather than assuming the default.");
+        builder.AppendLine("On Windows that path plus the longest path the build system generates");
         builder.AppendLine($"beneath it must stay under {HostPlatform.WindowsMaxPath} characters. Exceeding it does not fail as");
         builder.AppendLine("a path error: it appears as compile errors in files the worktree never touched.");
         builder.AppendLine();

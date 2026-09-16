@@ -445,7 +445,15 @@ public sealed class HostInspectorTests
 
         var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
-        Assert.Equal("the host could not be reached: ssh said Host key verification failed.", report.Reason);
+        Assert.StartsWith(
+            "the host could not be reached: ssh said Host key verification failed.",
+            report.Reason,
+            StringComparison.Ordinal);
+
+        // The client is named too. Which ssh ran is decided by PATH order and is invisible in the
+        // failure otherwise: an old client that cannot agree a key exchange with a newer server
+        // reads as an unreachable host until the reader is told which ssh was used.
+        Assert.Contains("using ", report.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

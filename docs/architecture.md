@@ -113,6 +113,14 @@ at once, with the line it concerns where the parser knows it:
 - References are resolved: a leg naming an undeclared host or emulator, an emulator that
   runs programs for another processor than the leg's, a success pattern that does not
   compile, a commit template placeholder no variable declares.
+- **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
+  toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
+  about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose
+  operating system equals it — emulation varies the processor, never the system. Skipping instead
+  would also make the run report a leg that reached no verdict, which is not a success, so a wrong
+  list would turn a green run non-zero rather than telling its author which line to fix. A
+  project's `defaultToolchain` is held to the same rule, against the platform its key names, or
+  against the operating systems its legs declare where the key is `all`.
 
 It is written with LF line endings and no byte order mark on every platform. The file
 is tracked, and its bytes must not depend on which machine ran `init`.
@@ -506,6 +514,12 @@ ready to be told what is missing.
   allowlist entry: probed where it declares a probe, reported when missing, never installed. That
   is how a program shipping with the platform, or with the repository, is allowed to appear in a
   runner's steps.
+- **A tool may name the platforms it is needed on**, with `platforms`, in the same words a
+  toolchain uses: `windows`, `linux`, `macos`, or `all`. A host whose platform an entry does not
+  name is never asked about it, so it is neither probed there nor counted against that host's legs.
+  Left out, a tool is needed everywhere, which is what every list written before this meant.
+  Without it a repository could not declare both a Windows compiler and a POSIX one: each was
+  reported missing on the other's hosts, and no leg was ever fully provisioned.
 - **A privileged install takes its credential from that host's own item, on standard input
   only.** It never reaches an argument list, a log or an error message, and redaction happens at
   one place rather than at each call site: a failure excerpt was measured carrying one through.
@@ -569,6 +583,14 @@ When several apply, the more fundamental one is reported: `poisoned`, then
 `unwitnessed`. A leg whose inputs moved is not reported as failed even if its tests
 failed, because what failed was a tree that never existed.
 
+**A leg that reached no verdict is never counted among the legs that passed.** A skip is not a
+failure — a switched-off machine is normal — but it is not a pass either, and a run carrying one
+exits `21` (`Incomplete`) rather than `0`, naming the legs that did not report. The verdict table
+already ranks a skip above a pass so that such a run summarises as the warning; the summary now
+reads that ranking instead of reporting the number of rows in the ledger as the number that
+passed. A gate comparing two runs reads exactly this line, and "8 leg(s) passed" for eight legs
+that never ran is the one number that must never be wrong.
+
 ## Parallel execution
 
 A command that selects several legs starts them together and waits for **every**
@@ -627,6 +649,14 @@ tool replaces, where a green result had quietly stopped meaning anything.
   when the file is read.
 - A build passes only if every file in the project's `buildOutputs` exists afterwards,
   so a build that exited 0 cannot hand its tests a binary left over from an earlier one.
+  An entry is a path, or a mapping of platform to path where the platforms disagree about what the
+  same target is called — a program CMake names `app` is `app.exe` on Windows, and a static library
+  differs by prefix as well as suffix. A bare string applies everywhere, so a list written before
+  this means what it always did. An entry that names no path for a platform some leg builds on is
+  refused when the file is read, naming the leg: a witness that is quietly not checked is the
+  failure `buildOutputs` exists to prevent, and the legs and their operating systems are all known
+  then. A suffix added automatically was the alternative and is weaker — it has to guess which
+  entries name programs, and cannot express a name differing by more than its suffix.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
 - Executables are resolved on the host before a leg starts, so a missing tool is
@@ -873,9 +903,14 @@ directory here cannot drift apart.
 A procedure specific to one repository — a corpus build-and-test, a benchmark, a round trip —
 lives in `predefinedRunners` rather than in the tool. `run <name>` executes one across the legs
 it declares, with the same isolation, locking, stall bounds, witnesses and reporting every other
-leg-running command gets. A runner that declares `requireBuild` has its leg's tree synced first
-when the leg is an ssh host or a WSL distribution, then built, and only then run: a runner that
-calls a program the build produces otherwise runs against whatever was left there.
+leg-running command gets. A runner that declares `requireBuild` has its leg built before it runs:
+a runner that calls a program the build produces otherwise runs against whatever was left there.
+
+**`requireBuild` gates the build, never the sync.** A leg on an ssh host or a WSL distribution runs
+from that host's own copy of the tree — the host reads `config.json` and the runner's action file
+from it — so the tree is put there whether or not anything is compiled. A runner that skipped the
+sync because it compiles nothing would find no configuration on the host and fail saying so.
+`--use-staged` is how a run says the copy there is already current.
 
 Runners are keyed by name because a name is how one is selected — by `run`, and by the checks
 below. An unnamed entry in a list could not be selected at all.

@@ -562,6 +562,19 @@ public sealed class RunnerRunService(
     /// The verdict and the outcome the leg reached, an expected exception applied only where its
     /// checks confirmed it.
     /// </summary>
+    /// <summary>
+    /// What this run's steps printed, in the order they ran, with every secret masked.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the outcome so a run check can be satisfied by a marker a step emits, which is
+    /// what an author asking for one plainly means. Redacted here rather than where it is compared:
+    /// the outcome reaches a ledger and a report, and a value that escaped once has escaped.
+    /// </remarks>
+    /// <param name="state">The run so far.</param>
+    /// <param name="values">Supplies the mask.</param>
+    private static string StepOutput(RunState state, ActionValues values)
+        => values.Redact(string.Join("\n", state.Phases.Select(phase => phase.Output)));
+
     private async Task<Decision> DecideAsync(
         RunnerRunRequest request,
         RunState state,
@@ -576,7 +589,9 @@ public sealed class RunnerRunService(
 
             return new Decision(
                 ReachedVerdict.Of(LegVerdict.Passed, detail),
-                RunOutcome.Ok(detail.Length > 0 ? detail : $"{state.Phases.Count} step(s) passed"),
+                RunOutcome.Ok(
+                    detail.Length > 0 ? detail : $"{state.Phases.Count} step(s) passed",
+                    StepOutput(state, values)),
                 null,
                 null);
         }

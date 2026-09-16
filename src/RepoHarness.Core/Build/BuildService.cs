@@ -306,10 +306,8 @@ public sealed class BuildService(
     {
         DateTime? newest = null;
 
-        foreach (var output in request.Project.BuildOutputs)
+        foreach (var path in ExpectedOutputs(request, buildDirectory))
         {
-            var path = Path.Combine(buildDirectory, output);
-
             if (!_fileSystem.FileExists(path))
             {
                 continue;
@@ -321,6 +319,23 @@ public sealed class BuildService(
 
         return newest;
     }
+
+    /// <summary>
+    /// Every file this build must produce, resolved for the platform it ran on.
+    /// </summary>
+    /// <remarks>
+    /// An entry naming no path for this platform contributes none, rather than contributing an
+    /// empty one that would be looked for at the build directory itself and found. Such an entry is
+    /// refused when the configuration is read, so reaching here means the leg's platform was never
+    /// measured; nothing is a safer answer than a path nobody named.
+    /// </remarks>
+    /// <param name="request">The build, carrying the platform it ran on.</param>
+    /// <param name="buildDirectory">The directory the paths are relative to.</param>
+    private static IEnumerable<string> ExpectedOutputs(BuildRequest request, string buildDirectory)
+        => request.Project.BuildOutputs
+            .Select(output => output.For(request.PlatformKey))
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.Combine(buildDirectory, path!));
 
     /// <summary>
     /// The first tracked source that changed without becoming newer than the build's newest output.
@@ -483,9 +498,16 @@ public sealed class BuildService(
         _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecordFileName), record.ToString());
     }
 
+    /// <summary>
+    /// The outputs this build was meant to produce and did not, as the paths that were looked for.
+    /// </summary>
+    /// <remarks>
+    /// The resolved path is reported, not the entry as written: an entry naming one file per
+    /// platform would otherwise report every platform's spelling, and the reader would have to work
+    /// out which of them this leg was actually missing.
+    /// </remarks>
     private List<string> MissingOutputs(BuildRequest request, string buildDirectory)
-        => [.. request.Project.BuildOutputs
-            .Where(output => !_fileSystem.FileExists(Path.Combine(buildDirectory, output)))];
+        => [.. ExpectedOutputs(request, buildDirectory).Where(path => !_fileSystem.FileExists(path))];
 
     /// <summary>
     /// The dependency report for a cmake build, or why it could not be produced.

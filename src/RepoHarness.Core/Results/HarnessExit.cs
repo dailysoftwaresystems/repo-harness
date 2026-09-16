@@ -43,6 +43,17 @@ public static class HarnessExit
     public const int CommandFailed = 20;
 
     /// <summary>
+    /// The work ran and nothing failed, but not every unit of it reached a verdict.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Success"/> because a leg that never ran is not a leg that passed,
+    /// and distinct from <see cref="CommandFailed"/> because nothing reported failure. A gate
+    /// comparing runs needs to tell "the tests passed" from "the tests never ran", and a single
+    /// zero for both is how a switched-off machine reads as a green build.
+    /// </remarks>
+    public const int Incomplete = 21;
+
+    /// <summary>
     /// The harness itself failed unexpectedly. Distinct from every other code
     /// because it means the tool has a defect, not that the request was wrong.
     /// </summary>
@@ -80,6 +91,7 @@ public static class HarnessExit
             [nameof(ToolMissing)] = "A required external tool is not installed, or could not be started.",
             [nameof(HostUnavailable)] = "A host could not be reached, or DssHarness could not run there; nothing ran on it.",
             [nameof(CommandFailed)] = "The wrapped command ran and reported failure.",
+            [nameof(Incomplete)] = "Ran with nothing failing, but a leg reached no verdict; it is not a pass.",
             [nameof(InternalError)] = "The harness itself failed unexpectedly; this is a defect in the tool.",
             [nameof(Cancelled)] = "The run was interrupted before it finished; a deletion already under way says what it left.",
         };

@@ -23,10 +23,19 @@ public class VariantOverlay
 public sealed class ToolchainConfig : VariantOverlay
 {
     /// <summary>
-    /// Platforms this toolchain exists on (<c>windows</c>, <c>linux</c>, <c>macos</c>)
-    /// or <c>all</c>. A leg naming a toolchain absent from its leg's operating system is
-    /// skipped with a stated reason rather than failing obscurely much later.
+    /// Platforms this toolchain exists on (<c>windows</c>, <c>linux</c>, <c>macos</c>) or
+    /// <c>all</c>. A leg naming a toolchain absent from its own operating system is refused when
+    /// the file is read, rather than attempted and failed later as a missing compiler.
     /// </summary>
+    /// <remarks>
+    /// Refused when read rather than skipped when placed, because nothing about it needs measuring:
+    /// a leg's <c>os</c> is required, and a leg only ever runs on a host whose operating system
+    /// equals it — emulation varies the processor, never the system — so the contradiction is
+    /// between two lines of this file and nothing else. Skipping instead would also make a run
+    /// report legs that reached no verdict, which is not a success, so a wrong list here would turn
+    /// a green run non-zero rather than telling its author to fix the line. <c>tools</c> carries a
+    /// list of the same shape, and both are read through <see cref="Platform.PlatformScope"/>.
+    /// </remarks>
     public List<string> Platforms { get; init; } = ["all"];
 
     /// <summary>Build system generator to request, such as <c>Ninja</c>.</summary>
@@ -69,7 +78,12 @@ public sealed class ProjectConfig : VariantOverlay
     /// as passed. A build tool can exit 0 having produced nothing, and handing the tests a
     /// stale binary from an earlier build is exactly the result that looks like success.
     /// </summary>
-    public List<string> BuildOutputs { get; init; } = [];
+    /// <remarks>
+    /// An entry is a path, or a mapping of platform to path where the platforms disagree about what
+    /// the same target is called — a program is <c>dsscp</c> on one and <c>dsscp.exe</c> on another.
+    /// A bare path applies everywhere, so a list written before this still means what it did.
+    /// </remarks>
+    public List<BuildOutput> BuildOutputs { get; init; } = [];
 
     /// <summary>Default toolchain per platform, used when a leg names none.</summary>
     public Dictionary<string, string> DefaultToolchain { get; init; } = new(StringComparer.OrdinalIgnoreCase);
