@@ -70,6 +70,9 @@ public static class SyncServe
     /// <summary>Deletes one file from the copy.</summary>
     public const string Delete = "delete";
 
+    /// <summary>Removes directories of the copy that a deletion left empty.</summary>
+    public const string Prune = "prune";
+
     /// <summary>Reads one file out of the copy.</summary>
     public const string Read = "read";
 
@@ -144,6 +147,19 @@ public sealed record SyncManifestAnswer(IReadOnlyList<SyncEntry> Entries)
     /// </remarks>
     public IReadOnlyList<string> Links { get; init; } = [];
 }
+
+/// <summary>One directory a deletion emptied, and what became of it.</summary>
+/// <param name="Path">Its path, relative to the copy's root.</param>
+/// <param name="Removed">Whether it was removed.</param>
+/// <param name="Held">
+/// What was still in it when it was not, by name, so a reader can see what kept it. Empty for one
+/// that went.
+/// </param>
+public sealed record EmptiedDirectory(string Path, bool Removed, IReadOnlyList<string> Held);
+
+/// <summary>What the far side did with the directories a deletion emptied.</summary>
+/// <param name="Directories">One entry per directory considered.</param>
+public sealed record SyncPruneAnswer(IReadOnlyList<EmptiedDirectory> Directories);
 
 /// <summary>What the far side's root looks like.</summary>
 /// <param name="Exists">Whether the root directory is there.</param>

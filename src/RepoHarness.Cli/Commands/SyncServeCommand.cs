@@ -98,6 +98,15 @@ internal static class SyncServeCommand
 
                     return Done();
 
+                case SyncServe.Prune:
+                    return Answer(new SyncPruneAnswer(
+                        await transport
+                            .RemoveEmptyDirectoriesAsync(
+                                root,
+                                Required(arguments, 1, operation).Split('\n', StringSplitOptions.RemoveEmptyEntries),
+                                cancellationToken)
+                            .ConfigureAwait(false)));
+
                 case SyncServe.Read:
                     var contents = await transport
                         .ReadFileAsync(root, Required(arguments, 1, operation), cancellationToken)

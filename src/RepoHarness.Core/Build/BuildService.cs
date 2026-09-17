@@ -57,6 +57,7 @@ public sealed class BuildService(
     BuildDirectoryGuard buildDirectoryGuard,
     NinjaDependencyCheck dependencyCheck,
     InputFingerprint fingerprints,
+    ProcessSampler processSampler,
     Git.IGitClient gitClient,
     IFileSystem fileSystem,
     IHarnessOutput output) : IBuildService
@@ -68,6 +69,7 @@ public sealed class BuildService(
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
     private readonly InputFingerprint _fingerprints = fingerprints;
+    private readonly ProcessSampler _processSampler = processSampler;
     private readonly Git.IGitClient _gitClient = gitClient;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
@@ -108,6 +110,38 @@ public sealed class BuildService(
 
         var phases = new List<PhaseResult>();
 
+        // Opened around the whole span, not around each phase. A build is configure and then build:
+        // guards on each separately would fingerprint around one, fingerprint around the other, and
+        // miss a file changed in the gap between them — the same moving tree, reported as a pass.
+        //
+        // Until now nothing watched a build at all. The tree was fingerprinted once, afterwards, to
+        // record what the directory had been built from; nothing asked whether it had held still
+        // while the compiler read it. A source edited mid-build produced a binary from a tree that
+        // never existed, and the leg said passed.
+        var (watched, unmeasurable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+
+        await using var guards = await LegGuards
+            .OpenAsync(
+                _fingerprints,
+                _processSampler,
+                new LegGuardRequest
+                {
+                    Leg = request.Leg,
+                    TreeRoot = request.TreeRoot,
+                    Inputs = watched,
+                    UnmeasurableInputs = unmeasurable,
+                    Contention = new ContentionRequest
+                    {
+                        Leg = request.Leg,
+                        BuildDirectory = buildDirectory,
+                        BuildTools = config.Contention.BuildTools,
+                        SharedResourceTools = config.Contention.SharedResourceTools,
+                        SampleSeconds = config.Defaults.ProcessSampleSeconds,
+                    },
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
         foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -127,7 +161,7 @@ public sealed class BuildService(
 
             if (!result.Passed)
             {
-                return new BuildResult(result.Verdict(), buildDirectory, phases, rebuilt, null);
+                return await FinishAsync(result.Verdict(), null).ConfigureAwait(false);
             }
         }
 
@@ -137,15 +171,13 @@ public sealed class BuildService(
             // often enough — a target filtered out, a generator writing somewhere else — that the
             // exit code alone is not evidence, and an empty list makes the check below vacuously
             // true rather than absent, which reads as a pass nobody performed.
-            return new BuildResult(
+            return await FinishAsync(
                 ReachedVerdict.Of(
                     LegVerdict.Unwitnessed,
                     $"project '{request.Project.Name}' declares no buildOutputs, so nothing established that "
                     + "this build produced anything; a zero exit code is not that evidence"),
-                buildDirectory,
-                phases,
-                rebuilt,
-                null);
+                null)
+                .ConfigureAwait(false);
         }
 
         var unresolved = request.Project.BuildOutputs
@@ -162,16 +194,14 @@ public sealed class BuildService(
             // builds on, and a leg only runs on a host whose system it matches, so reaching here
             // means one of those two stopped holding. Refused anyway: the cost of being wrong is a
             // green build nobody witnessed, which is the whole of what buildOutputs is for.
-            return new BuildResult(
+            return await FinishAsync(
                 ReachedVerdict.Of(
                     LegVerdict.Unwitnessed,
                     $"project '{request.Project.Name}' declares {unresolved.Count} buildOutput(s) naming no "
                     + $"path for '{request.PlatformKey}', so this build would be held to fewer files than "
                     + $"the configuration declares: {string.Join("; ", unresolved)}"),
-                buildDirectory,
-                phases,
-                rebuilt,
-                null);
+                null)
+                .ConfigureAwait(false);
         }
 
         var missing = ExpectedOutputs(request, buildDirectory)
@@ -183,14 +213,12 @@ public sealed class BuildService(
             // A build tool can exit 0 having produced nothing, and the tests then run against a
             // binary left over from an earlier build. Reported as unwitnessed rather than failed:
             // the build reported success, and what is missing is the evidence, not the exit code.
-            return new BuildResult(
+            return await FinishAsync(
                 ReachedVerdict.Of(
                     LegVerdict.Unwitnessed,
                     $"the build exited 0 and produced none of: {string.Join(", ", missing)}"),
-                buildDirectory,
-                phases,
-                rebuilt,
-                null);
+                null)
+                .ConfigureAwait(false);
         }
 
         var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, cancellationToken)
@@ -201,35 +229,81 @@ public sealed class BuildService(
             // Not a pass. The check exists because an object with no recorded headers is never
             // rebuilt when a header changes, and a check that could not run has established nothing
             // about that — which is what unmeasured means, and is a different fact from "clean".
-            return new BuildResult(
+            return await FinishAsync(
                 ReachedVerdict.Of(
                     LegVerdict.Unmeasured,
                     $"the build succeeded and its dependency records could not be read, so nothing "
                     + $"established that its objects record the headers they include: {unreadable}"),
-                buildDirectory,
-                phases,
-                rebuilt,
-                null);
+                null)
+                .ConfigureAwait(false);
         }
 
         if (dependencies is { IsClean: false })
         {
             // An object with no recorded header dependencies is never rebuilt when a header it
             // includes changes, so the next build links yesterday's object and reports success.
-            return new BuildResult(
+            return await FinishAsync(
                 ReachedVerdict.Of(
                     LegVerdict.Failed,
                     $"{dependencies.WithoutHeaders.Count} object(s) recorded no header dependencies, "
                     + $"including {string.Join(", ", dependencies.WithoutHeaders.Take(3))}"),
-                buildDirectory,
-                phases,
-                rebuilt,
-                dependencies);
+                dependencies)
+                .ConfigureAwait(false);
         }
 
-        await RecordInputsAsync(request, buildDirectory, phases, cancellationToken).ConfigureAwait(false);
+        return await FinishAsync(ReachedVerdict.Of(LegVerdict.Passed), dependencies).ConfigureAwait(false);
 
-        return new BuildResult(ReachedVerdict.Of(LegVerdict.Passed), buildDirectory, phases, rebuilt, dependencies);
+        // Closes the guards, folds what they saw into the verdict, and records what this build was
+        // built from. Local because every exit from this method has to do all three: a build that
+        // returned early without closing them would leave a sampler running and report a verdict
+        // nothing watched.
+        async Task<BuildResult> FinishAsync(ReachedVerdict reached, NinjaDependencyReport? dependencies)
+        {
+            var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
+            var verdict = seen.Decide(request.Leg, [reached]);
+
+            Report(request, seen.Contention!);
+
+            // Recorded only for a build that reached a verdict on its own terms, and marked as
+            // untrustworthy when the tree moved under it. The record is what the next build's
+            // staleness decision reads: written after a moving tree it would describe the tree as
+            // it ended up, and the next build would compare cleanly against objects compiled from
+            // the tree as it began.
+            if (verdict.Verdict == LegVerdict.Passed || seen.Inputs?.Verdict() is not null)
+            {
+                await RecordInputsAsync(request, buildDirectory, phases, seen, watched, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies);
+        }
+    }
+
+    /// <summary>
+    /// Says what sampling found besides a contender, and what it could not see. A clean report read
+    /// without its limits is read as more than it is.
+    /// </summary>
+    private void Report(BuildRequest request, ContentionReport contention)
+    {
+        foreach (var shared in contention.SharedResourceUsers)
+        {
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: {shared.Tool} (pid {shared.Process.Id}) ran outside this run, seen "
+                + $"{ContentionReport.Describe(shared.Seen)}; it shares state rather than this build directory.");
+        }
+
+        foreach (var unreadable in contention.Unreadable)
+        {
+            // Reported as unknown, never as nothing found: "no contender was running" and "nobody
+            // looked" are different facts and only one of them is evidence.
+            _output.Warn(CommandName, $"{request.Leg}: the process table was not read for one sample ({unreadable}).");
+        }
+
+        foreach (var limit in contention.Limits)
+        {
+            _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
+        }
     }
 
     /// <summary>
@@ -282,9 +356,17 @@ public sealed class BuildService(
     /// <remarks>
     /// Ninja, Make and MSBuild decide what is stale by ordering timestamps, which a stepped clock
     /// defeats without a word: an object stamped during a forward step looks newer than a source
-    /// edited just after it. Where the previous build spanned a clock step, or where a changed input
-    /// is not newer than the newest output, the variant is rebuilt from clean and the ledger says
-    /// why. A stale binary reported as a pass is the one price an incremental build must never pay.
+    /// edited just after it. Three conditions rebuild the variant from clean, and the ledger names
+    /// which: the previous build spanned a clock step; an input's content differs from what this
+    /// directory was built from; or a changed input is not newer than the newest output, which is
+    /// what a stepped clock does and what a build system comparing timestamps would miss. A stale
+    /// binary reported as a pass is the one price an incremental build must never pay.
+    /// <para>
+    /// The order matters and is the reason the input set can be narrowed at all. The clock step is
+    /// tested first, so a host whose clock moves rebuilds from clean whatever the set says; what is
+    /// left is builds where no step occurred, and there the build system's own dependency graph is
+    /// authoritative.
+    /// </para>
     /// </remarks>
     private async Task<string?> DecideCleanRebuildAsync(
         BuildRequest request,
@@ -302,7 +384,7 @@ public sealed class BuildService(
 
         if (previous.Contains(ClockStepMarker, StringComparison.Ordinal))
         {
-            return "the previous build spanned a clock step, so nothing it stamped can be ordered";
+            return "a clock step: the previous build spanned one, so nothing it stamped can be ordered";
         }
 
         // The content comparison first, because it holds whatever the clock did. A source whose
@@ -327,7 +409,8 @@ public sealed class BuildService(
 
         return stale is null
             ? null
-            : $"'{stale}' changed but is not newer than the newest output, which a stepped clock does";
+            : $"a timestamp a build system would miss: '{stale}' changed but is not newer than the "
+                + "newest output, which a stepped clock does";
     }
 
     private DateTime? NewestOutput(BuildRequest request, string buildDirectory)
@@ -383,7 +466,9 @@ public sealed class BuildService(
         DateTime newestOutput,
         CancellationToken cancellationToken)
     {
-        foreach (var relativePath in await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false))
+        var (scanned, _) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+
+        foreach (var relativePath in scanned)
         {
             var path = Path.Combine(request.TreeRoot, relativePath);
 
@@ -409,31 +494,58 @@ public sealed class BuildService(
     }
 
     /// <summary>
-    /// The files git tracks in the leg's tree, or an empty list when git could not be asked.
+    /// The tracked files whose content decides whether this variant's build directory can be kept,
+    /// or an empty list when git could not be asked.
     /// </summary>
     /// <remarks>
     /// An empty list makes both callers fail closed: the staleness scan finds nothing to clear the
     /// build, and the record written afterwards holds no fingerprint, so the next build cannot
     /// conclude the tree held still and rebuilds from clean.
+    /// <para>
+    /// Narrowed to the files that can actually affect this build, by what the project declares or
+    /// else by what its type reads. Every tracked file was the first answer and it is the safe one,
+    /// but it makes a documentation edit discard a warm build directory on every leg — measured on
+    /// a consumer's tree, one markdown file put two legs through a full rebuild. Why narrowing
+    /// cannot hand anybody a stale binary is set out on <see cref="BuildInputKinds"/>.
+    /// </para>
     /// </remarks>
-    private async Task<IReadOnlyList<string>> TrackedInputsAsync(
+    private async Task<(IReadOnlyList<string> Inputs, string? Unmeasurable)> TrackedInputsAsync(
         BuildRequest request,
         CancellationToken cancellationToken)
     {
+        IReadOnlyList<string> tracked;
+
         try
         {
             var index = await _gitClient.ListIndexAsync(request.TreeRoot, cancellationToken).ConfigureAwait(false);
 
-            return [.. index
+            tracked = [.. index
                 .Where(entry => entry.IsRegularFile)
                 .Select(entry => entry.Path)
                 .Distinct(StringComparer.Ordinal)];
         }
         catch (HarnessException ex)
         {
+            // Told apart from a set that is legitimately empty, which the caller reads as nothing
+            // to watch. Nobody asked git and git said nothing are different facts, and only one of
+            // them means the tree can be said to have held still.
             _output.Warn(CommandName, $"{request.Leg}: the files git tracks could not be listed: {ex.Message}");
-            return [];
+            return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
         }
+
+        // What the project says replaces what its type reads, and only when it says something:
+        // an empty list is a project that declared the key and left it blank, which is not a
+        // statement that nothing affects its build.
+        var kinds = request.Project.RebuildableFormats.Count > 0
+            ? new BuildInputKinds(request.Project.RebuildableFormats)
+            : BuildAdapters.For(request.Project.Type).InputKinds;
+
+        // Ordinal, as every other comparison of a tracked path here is: the names come from git's
+        // index, which records the spelling, and on Linux 'Makefile' and 'makefile' are two files.
+        // The extension half of the rule is case-insensitive on its own.
+        return kinds.Narrows
+            ? ([.. tracked.Where(path => kinds.Covers(path, StringComparison.Ordinal))], null)
+            : (tracked, null);
     }
 
     /// <summary>
@@ -452,23 +564,32 @@ public sealed class BuildService(
             // Either the record predates fingerprinting or nothing could be fingerprinted when it
             // was written. Neither says the tree held still, and reading it as though it did is how
             // a stepped clock gets to hand the tests yesterday's object.
-            return "the previous build recorded no input fingerprint, so nothing here can say the tree held still";
+            return "no record to compare: the previous build recorded no input fingerprint, so "
+                + "nothing here can say the tree held still";
+        }
+
+        var (compared, unlistable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+
+        if (unlistable is not null)
+        {
+            return $"no set to compare: {unlistable}";
         }
 
         var current = await _fingerprints
-            .TakeAsync(request.TreeRoot, await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false), cancellationToken)
+            .TakeAsync(request.TreeRoot, compared, cancellationToken)
             .ConfigureAwait(false);
 
         if (current.Unreadable.Count > 0)
         {
-            return $"'{current.Unreadable[0].Path}' could not be read, so nothing here can say the tree held still";
+            return $"an unreadable input: '{current.Unreadable[0].Path}' could not be read, so "
+                + "nothing here can say the tree held still";
         }
 
         foreach (var file in current.Files)
         {
             if (recorded.TryGetValue(file.Path, out var content) && !content.Equals(file.Content, StringComparison.Ordinal))
             {
-                return $"'{file.Path}' differs from what this directory was built from";
+                return $"changed content: '{file.Path}' differs from what this directory was built from";
             }
         }
 
@@ -511,10 +632,15 @@ public sealed class BuildService(
         BuildRequest request,
         string buildDirectory,
         IReadOnlyList<PhaseResult> phases,
+        LegGuardReport seen,
+        IReadOnlyList<string> inputs,
         CancellationToken cancellationToken)
     {
-        var stepped = phases.Any(phase => phase.ClockStepped);
-        var inputs = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+        // A tree that moved under the build is the same problem as a clock that stepped: what this
+        // directory holds was compiled from a tree the fingerprint below does not describe. The
+        // marker already means "nothing this build stamped can be ordered", and that is exactly
+        // what is true here, so the next build starts from clean and says why.
+        var stepped = phases.Any(phase => phase.ClockStepped) || seen.Inputs?.Verdict() is not null;
         var snapshot = await _fingerprints.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
 
         var record = new System.Text.StringBuilder()

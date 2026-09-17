@@ -95,7 +95,25 @@ public sealed class TestInvocation
     public string? Runner { get; init; }
 
     /// <summary>Arguments passed to the runner.</summary>
+    /// <remarks>
+    /// May name the directories a leg runs against — <c>{buildDir}</c>, <c>{treeDir}</c>,
+    /// <c>{harnessDir}</c> — which is how a project that builds out of source points its runner at
+    /// the tests: the build directory is derived per leg from the processor, the toolchain and the
+    /// configuration, so no tracked file can spell it.
+    /// </remarks>
     public List<string>? Args { get; init; }
+
+    /// <summary>
+    /// Where the runner starts, under the leg's tree root, or absent the tree root itself. May name
+    /// the same directories <see cref="Args"/> may.
+    /// </summary>
+    /// <remarks>
+    /// Beside <see cref="Args"/> rather than instead of it, because runners disagree about which
+    /// they want. ctest takes <c>--test-dir</c> and can be started anywhere; a runner that only ever
+    /// looks at the directory it was started in has no such argument, and one started in the build
+    /// directory would resolve a relative path in its own arguments against the wrong root.
+    /// </remarks>
+    public string? WorkingDirectory { get; init; }
 
     /// <summary>
     /// Argument introducing a test filter, such as <c>-R</c> for ctest or

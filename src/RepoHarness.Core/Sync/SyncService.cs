@@ -120,12 +120,17 @@ internal enum CopyState
 /// is nothing a caller could usefully do with a result that says so.
 /// </param>
 /// <param name="Created">Whether this sync created the copy.</param>
+/// <param name="RequiresAdoption">
+/// Whether a real run would refuse this copy for want of <c>--adopt</c>. Only a dry run answers
+/// yes: a real one raises instead.
+/// </param>
 public sealed record SyncResult(
     string Host,
     string Root,
     SyncPlan Plan,
     bool Verified,
-    bool Created);
+    bool Created,
+    bool RequiresAdoption = false);
 
 /// <summary>Putting a host's copy of the repository in step with this tree.</summary>
 public interface ISyncService
@@ -224,6 +229,7 @@ public sealed class SyncService(
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var details = new List<string>();
+        var needAdopting = new List<string>();
 
         // Before any host is reached, so a name that answers to nothing — or to two machines — is
         // refused while nothing has been deleted anywhere.
@@ -250,8 +256,28 @@ public sealed class SyncService(
                     context.Layout.RepositoryRoot, transport, destination, options, cancellationToken)
                 .ConfigureAwait(false);
 
+            if (result.RequiresAdoption)
+            {
+                needAdopting.Add(host.Host.ToString());
+            }
+
             details.Add($"{host.Host}: {destination}");
             details.AddRange(result.Plan.Describe(options.DryRun ? SyncVerb.Planned : SyncVerb.Done));
+        }
+
+        // A dry run exits as the run it previews would. Showing the cost and exiting zero makes
+        // 'this checkout needs taking over' indistinguishable from 'everything is in step' to
+        // anything reading the code, which is what a dry run is for reading. Both halves matter:
+        // the list is printed, which is what the refusal sends a reader here for, AND the code says
+        // what a real run would answer.
+        if (needAdopting.Count > 0)
+        {
+            return CommandOutcome.Failed(
+                HarnessExit.Refused,
+                $"{needAdopting.Count} host(s) hold a directory the harness did not create, so a run "
+                + $"would refuse them: {string.Join(", ", needAdopting)}. What taking each over would "
+                + "cost is listed above. Nothing was changed.",
+                details);
         }
 
         // Reaching here means every copy was confirmed: a copy that still differed raised from the
@@ -376,7 +402,13 @@ public sealed class SyncService(
                     Unclaimed(transport, destinationRoot, plan, state, destination.Links));
             }
 
-            return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
+            return new SyncResult(
+                transport.Host.ToString(),
+                destinationRoot,
+                plan,
+                Verified: false,
+                created,
+                RequiresAdoption: !mine && !adopting);
         }
 
         // Said before it happens, and said whether or not a refusal ever ran. Somebody who reads
@@ -692,6 +724,37 @@ public sealed class SyncService(
             // Reported at the level a reader sees by default, not behind --verbose: a deletion on
             // another machine is the one thing running the command again cannot undo.
             _output.Info(CommandName, $"{transport.Host}: deleted {path}");
+        }
+
+        // A manifest holds files, so deleting every file a directory had leaves the directory. It
+        // cannot be seen here: git rm takes a directory with its last file, so the tree this side
+        // looks right and only the host keeps the husk. Measured on a consumer's host after a wave
+        // of twenty deletions: ten directories left, eight of them holding nothing at all, and the
+        // checks that read that tree refused it for having a directory nothing in it answers to.
+        var emptied = plan.Deletes
+            .Select(path => path.Replace('\\', '/'))
+            .Select(path => path.LastIndexOf('/') is var cut and > 0 ? path[..cut] : string.Empty)
+            .Where(directory => directory.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        foreach (var directory in await transport
+            .RemoveEmptyDirectoriesAsync(destinationRoot, emptied, cancellationToken)
+            .ConfigureAwait(false))
+        {
+            if (directory.Removed)
+            {
+                _output.Info(CommandName, $"{transport.Host}: removed {directory.Path}/, which the deletion emptied");
+                continue;
+            }
+
+            // Warned, not passed over. The copy no longer matches this tree, and the only other way
+            // anybody learns is a check failing on that host later with nothing naming the cause.
+            _output.Warn(
+                CommandName,
+                $"{transport.Host}: {directory.Path}/ held only files this sync does not manage, so it "
+                + $"stayed although the deletion emptied it of everything else: {string.Join(", ", directory.Held)}. "
+                + "The copy there differs from this tree until somebody removes it.");
         }
     }
 

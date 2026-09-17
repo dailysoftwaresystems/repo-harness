@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
@@ -314,6 +315,30 @@ public static class HarnessConfigValidator
                 problems.Add(
                     $"project '{project.Name}' has type '{project.Type}'; "
                     + $"known types are {string.Join(", ", ProjectTypes)}");
+            }
+
+            foreach (var format in project.RebuildableFormats)
+            {
+                // A blank entry in a list that is otherwise a statement. Left alone it matches
+                // every file's extension against "." and nothing's name, which is neither what it
+                // says nor a safe reading of it.
+                if (string.IsNullOrWhiteSpace(format))
+                {
+                    problems.Add(
+                        $"project '{project.Name}' rebuildableFormats has a blank entry; each is an "
+                        + "extension or a whole file name, such as '.cpp' or 'CMakeLists.txt'");
+                }
+                else if (format.Contains('/', StringComparison.Ordinal)
+                    || format.Contains('\\', StringComparison.Ordinal)
+                    || format.Contains('*', StringComparison.Ordinal))
+                {
+                    // Said rather than ignored, because a path or a glob here looks like it works
+                    // and matches nothing: the entries are kinds of file, not places.
+                    problems.Add(
+                        $"project '{project.Name}' rebuildableFormats names '{format}', which is a "
+                        + "path or a pattern; entries are extensions or whole file names, such as "
+                        + "'.cpp' or 'CMakeLists.txt', and apply wherever such a file is tracked");
+                }
             }
 
             foreach (var (platform, toolchain) in project.DefaultToolchain)
@@ -1123,6 +1148,8 @@ public static class HarnessConfigValidator
     {
         RequireRelativePaths(sync.Exclude, "sync.exclude", problems);
         RequireRelativePaths(sync.NeverTransfer, "sync.neverTransfer", problems);
+        CheckSyncPatterns(sync.NeverTransfer, "sync.neverTransfer", problems);
+        CheckSyncPatterns(sync.Exclude, "sync.exclude", problems);
 
         if (!double.IsFinite(sync.MaxDeleteFraction) || sync.MaxDeleteFraction is < 0 or > 1)
         {
@@ -1205,6 +1232,17 @@ public static class HarnessConfigValidator
             {
                 problems.Add($"{setting}.coresEnv contains a blank variable name");
             }
+
+            // Here rather than when the leg runs. A name nothing fills in reaches the runner as the
+            // literal text it was written as, and what a runner makes of a directory that cannot
+            // exist is its own business: ctest reports no tests and exits 8, which reads as a suite
+            // that ran and found nothing. Found here it names the line to fix, and has cost nobody
+            // the build that would have preceded it.
+            CheckPlaceholders(invocation.Args, $"{setting}.args", problems);
+            CheckPlaceholders(
+                invocation.WorkingDirectory is null ? null : [invocation.WorkingDirectory],
+                $"{setting}.workingDirectory",
+                problems);
         }
 
         // What runs on a platform is its own section merged over 'all', field by field. Every
@@ -1397,6 +1435,46 @@ public static class HarnessConfigValidator
     /// phase that had nothing to do with it. An empty pattern matches any output at all, so as
     /// a witness it proves nothing while appearing to prove something.
     /// </summary>
+    /// <summary>
+    /// Records a problem for every configured string naming a directory this tool cannot fill in.
+    /// </summary>
+    /// <param name="values">The configured strings, or null when the setting is absent.</param>
+    /// <param name="setting">What to call the setting in the problem.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    private static void CheckPlaceholders(IReadOnlyList<string>? values, string setting, List<string> problems)
+    {
+        foreach (var value in values ?? [])
+        {
+            try
+            {
+                LegPathNames.RefuseUnknown(value, setting);
+            }
+            catch (HarnessException ex)
+            {
+                // Collected rather than thrown, so one read of the configuration reports every
+                // problem it has rather than the first.
+                problems.Add(ex.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records a problem for every sync entry that would match nothing it looks like it matches.
+    /// </summary>
+    /// <param name="patterns">The entries, as written.</param>
+    /// <param name="setting">What to call the setting in the problem.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    private static void CheckSyncPatterns(IReadOnlyList<string>? patterns, string setting, List<string> problems)
+    {
+        foreach (var pattern in patterns ?? [])
+        {
+            if (Sync.SyncPathPatterns.Problem(pattern) is { } problem)
+            {
+                problems.Add($"{setting} names '{pattern}', which {problem}");
+            }
+        }
+    }
+
     private static void CheckPattern(string? pattern, string setting, List<string> problems)
     {
         if (pattern is null)

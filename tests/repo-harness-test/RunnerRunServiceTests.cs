@@ -370,6 +370,9 @@ public sealed class RunnerRunServiceTests
             new RunCheckGate(factory.Output),
             new RunSegments(factory.FileSystem, factory.Output),
             new PredefinedActionRunner(factory.GitClient, factory.Output),
+            new InputFingerprint(factory.FileSystem, factory.Platform),
+            new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
+            factory.GitClient,
             factory.Platform,
             factory.FileSystem,
             factory.Output);

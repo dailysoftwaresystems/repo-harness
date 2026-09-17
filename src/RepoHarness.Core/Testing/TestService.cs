@@ -176,7 +176,12 @@ public sealed class TestService(
 
         var invocation = TestInvocationResolver.Resolve(settings, request.PlatformKey);
         var cores = CoreCounts.Resolve(invocation.Cores, request.HostTestCores, config.Defaults.TestCores);
-        var command = TestInvocationResolver.CommandFor(invocation, cores.Value, request.Filter, request.Excludes);
+        var command = TestInvocationResolver.CommandFor(
+            invocation,
+            cores.Value,
+            request.Filter,
+            request.Excludes,
+            new LegPaths(request.TreeRoot, request.BuildDirectory));
 
         // Compiled before anything starts, as the success pattern is: a pattern that is not a regular
         // expression is a mistake in tracked configuration, and finding it after the suite has run
@@ -188,24 +193,24 @@ public sealed class TestService(
 
         var elapsed = Stopwatch.StartNew();
 
-        // Before, during and after. Two snapshots alone cannot see an edit that was undone before
-        // the suite ended, which is the shape the measured failure took: a configuration file
-        // rewritten while the suite ran and restored before it finished.
-        var before = unmeasurable is null
-            ? await _inputFingerprint.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false)
-            : null;
-
-        using var watch = unmeasurable is null ? _inputFingerprint.Watch(request.TreeRoot, inputs) : null;
-
-        await using var sampling = await _processSampler
-            .StartAsync(
-                new ContentionRequest
+        await using var guards = await LegGuards
+            .OpenAsync(
+                _inputFingerprint,
+                _processSampler,
+                new LegGuardRequest
                 {
                     Leg = request.Leg,
-                    BuildDirectory = request.BuildDirectory,
-                    BuildTools = config.Contention.BuildTools,
-                    SharedResourceTools = config.Contention.SharedResourceTools,
-                    SampleSeconds = config.Defaults.ProcessSampleSeconds,
+                    TreeRoot = request.TreeRoot,
+                    Inputs = inputs,
+                    UnmeasurableInputs = unmeasurable,
+                    Contention = new ContentionRequest
+                    {
+                        Leg = request.Leg,
+                        BuildDirectory = request.BuildDirectory,
+                        BuildTools = config.Contention.BuildTools,
+                        SharedResourceTools = config.Contention.SharedResourceTools,
+                        SampleSeconds = config.Defaults.ProcessSampleSeconds,
+                    },
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -219,7 +224,13 @@ public sealed class TestService(
                     FileName = command.Program,
                     Arguments = command.Arguments,
                     LogFile = logFile,
-                    WorkingDirectory = request.TreeRoot,
+
+                    // Where the invocation said, and the tree root when it said nothing — which is
+                    // what every test phase written before this ran in. A project that builds out
+                    // of source has its tests in the build directory, which is derived per leg and
+                    // so cannot be written down: started at the tree root, ctest reports that it
+                    // found no tests, in a tree holding thousands.
+                    WorkingDirectory = command.WorkingDirectory ?? request.TreeRoot,
                     Environment = Environment(command),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
@@ -229,19 +240,13 @@ public sealed class TestService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var contention = await sampling.StopAsync(cancellationToken).ConfigureAwait(false);
-
-        var after = before is null
-            ? null
-            : await _inputFingerprint.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
-
-        var comparison = before is null || after is null
-            ? new InputComparison(InputChange.Unmeasured, [], unmeasurable ?? "the inputs were never fingerprinted")
-            : InputFingerprint.Compare(before, after, watch);
+        var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
+        var contention = seen.Contention!;
+        var comparison = seen.Inputs!;
 
         Report(request, contention);
 
-        var reached = Decide(request, comparison, contention, phase);
+        var reached = seen.Decide(request.Leg, [phase.Verdict()]);
         var entry = new LegEntry
         {
             Leg = request.Leg,
@@ -344,34 +349,6 @@ public sealed class TestService(
     /// failed was a tree that never existed. The order is <see cref="Verdicts.Worst"/>'s, so this
     /// command cannot rank the vocabulary differently from the two that share it.
     /// </remarks>
-    private static ReachedVerdict Decide(
-        TestRequest request,
-        InputComparison comparison,
-        ContentionReport contention,
-        PhaseResult phase)
-    {
-        var reached = new List<ReachedVerdict>();
-
-        if (comparison.Verdict() is { } moved)
-        {
-            reached.Add(moved);
-        }
-
-        if (contention.Verdict() is { } contended)
-        {
-            reached.Add(contended);
-        }
-
-        reached.Add(phase.Verdict());
-
-        var worst = Verdicts.Worst(reached.Select(candidate => candidate.Verdict));
-
-        return ReachedVerdict.OrPoisoned(
-            worst,
-            request.Leg,
-            reached.First(candidate => candidate.Verdict == worst).Detail);
-    }
-
     /// <summary>
     /// The inputs to fingerprint, and why they could not be established when they could not.
     /// </summary>

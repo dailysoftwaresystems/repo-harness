@@ -150,7 +150,7 @@ public sealed class LedgerReport
                     entry.Leg,
                     entry.Verdict,
                     entry.Duration,
-                    Detail(entry, notes),
+                    Detail(entry),
                     notes.Count > 0,
                     notes,
                     entry.CommandTime,
@@ -209,7 +209,7 @@ public sealed class LedgerReport
             line.Leg,
             Verdicts.Display(line.Verdict),
             FormatDuration(line.Duration),
-            line.Detail,
+            Marked(line.Detail, line.TimingNotes),
             leg,
             verdict,
             duration)));
@@ -412,22 +412,42 @@ public sealed class LedgerReport
         };
     }
 
-    private static string Detail(LegEntry entry, IReadOnlyList<string> notes)
-    {
-        // The count where the leg has one and nothing more urgent to say. A passing leg's detail is
-        // the evidence it passed on, and two legs running the same tests that report different
-        // counts are only comparable if the table shows both: one of them quietly skipped a group,
-        // and a blank column beside a green verdict hides exactly that.
-        var detail = entry.Detail.Length == 0 && entry.TestCount is { } count
+    /// <summary>
+    /// What one leg has to say for itself, as the leg said it.
+    /// </summary>
+    /// <param name="entry">The leg's entry.</param>
+    /// <remarks>
+    /// The count where the leg has one and nothing more urgent to say. A passing leg's detail is
+    /// the evidence it passed on, and two legs running the same tests that report different counts
+    /// are only comparable if the table shows both: one of them quietly skipped a group, and a
+    /// blank column beside a green verdict hides exactly that.
+    /// <para>
+    /// Deliberately without the timing mark. The notes travel beside the detail, not inside it, so
+    /// a reader that receives this ledger and reports it again — which is every remote leg, whose
+    /// host runs this same code and answers with <c>--json</c> — composes the mark once rather than
+    /// once per machine the answer passed through. Measured on a consumer's two-leg run: the whole
+    /// explanation appeared twice, concatenated, in the one column a reader actually looks at.
+    /// </para>
+    /// </remarks>
+    private static string Detail(LegEntry entry)
+        => entry.Detail.Length == 0 && entry.TestCount is { } count
             ? $"{count} test{(count == 1 ? string.Empty : "s")}"
             : entry.Detail;
 
+    /// <summary>
+    /// <paramref name="detail"/> with the timing mark, for the table that shows one line per leg.
+    /// </summary>
+    /// <param name="detail">What the leg said.</param>
+    /// <param name="notes">Why its timings are suspect, if they are.</param>
+    internal static string Marked(string detail, IReadOnlyList<string> notes)
+    {
         if (notes.Count == 0)
         {
             return detail;
         }
 
         var mark = "timings suspect: " + string.Join("; ", notes);
+
         return detail.Length == 0 ? mark : detail + "; " + mark;
     }
 

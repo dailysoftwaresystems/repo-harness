@@ -1,6 +1,7 @@
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Tests;
@@ -21,7 +22,7 @@ public sealed class BuildServiceTests
         // that passed when it is a check nobody performed.
         using var temp = new TempDirectory();
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(temp, outputs: []),
             TestContext.Current.CancellationToken);
@@ -38,7 +39,7 @@ public sealed class BuildServiceTests
         // so with a zero exit code, and the objects on disk are the previous build's.
         using var temp = new TempDirectory();
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(temp, outputs: ["bin/app.dll"]),
             TestContext.Current.CancellationToken);
@@ -58,7 +59,7 @@ public sealed class BuildServiceTests
         Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
         await File.WriteAllTextAsync(produced, "built", TestContext.Current.CancellationToken);
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             request,
             TestContext.Current.CancellationToken);
@@ -71,12 +72,195 @@ public sealed class BuildServiceTests
     {
         using var temp = new TempDirectory();
 
-        var result = await Service(new HarnessFactory(), exitCode: 2).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, exitCode: 2)).BuildAsync(
             Config(),
             Request(temp, outputs: []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.Failed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// The measurement that opened this: from a consumer's worktree, one markdown edit made two
+    /// legs rebuild from clean, discarding a warm build directory that had cost eleven minutes.
+    /// Neither named file is read by the build.
+    /// </summary>
+    [Fact]
+    public async Task ADocumentationEdit_KeepsTheWarmBuildDirectory()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+
+        // Edited after the build and dated after what it produced, so only the content comparison
+        // can have anything to say about it.
+        await TouchAsync(temp, "docs/guide.md", "rewritten\n", token);
+
+        var again = await BuildOnceAsync(factory, request, temp, token);
+
+        Assert.Null(again.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// The other half, which is the one that must never be lost: a file whose content differs from
+    /// what this directory was built from is stale however its timestamp reads.
+    /// </summary>
+    [Theory]
+    [InlineData("src/app.cpp")]
+    [InlineData("VERSION")]
+    public async Task AnEditToSomethingTheBuildReads_DiscardsIt_AndSaysWhichConditionFired(string edited)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+
+        await TouchAsync(temp, edited, "changed\n", token);
+
+        var again = await BuildOnceAsync(factory, request, temp, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.Contains(edited, again.RebuiltFromClean, StringComparison.Ordinal);
+
+        // Which of the three conditions fired, not only which file differed. A consumer measured
+        // their file against the timestamp rule, found it did not hold, and could not tell from the
+        // line whether the clock-step condition had fired instead.
+        Assert.Contains("changed content:", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Declared and non-empty, the project's own list replaces the one its type would use. Empty is
+    /// "say nothing", not "match nothing": a list matching nothing compares equal every time, which
+    /// is exactly the answer that keeps a stale binary.
+    /// </summary>
+    [Theory]
+    [InlineData(new string[0], false)]
+    [InlineData(new[] { ".md" }, true)]
+    public async Task RebuildableFormats_ReplaceTheLanguageSet_OnlyWhenTheySaySomething(
+        string[] formats,
+        bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token, formats);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+
+        await TouchAsync(temp, "docs/guide.md", "rewritten\n", token);
+
+        var again = await BuildOnceAsync(factory, request, temp, token);
+
+        Assert.Equal(rebuilds, again.RebuiltFromClean is not null);
+    }
+
+    /// <summary>
+    /// A tree git tracks, holding one source, one document and one extensionless file a build
+    /// reads, with a cmake project built out of source.
+    /// </summary>
+    private static async Task<(HarnessFactory Factory, BuildRequest Request)> TrackedTreeAsync(
+        TempDirectory temp,
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? formats = null)
+    {
+        var factory = new HarnessFactory();
+
+        Directory.CreateDirectory(temp.Combine("src"));
+        Directory.CreateDirectory(temp.Combine("docs"));
+        await File.WriteAllTextAsync(temp.Combine("src", "app.cpp"), "int main(){}\n", cancellationToken);
+        await File.WriteAllTextAsync(temp.Combine("docs", "guide.md"), "how to\n", cancellationToken);
+        await File.WriteAllTextAsync(temp.Combine("VERSION"), "1.0.0\n", cancellationToken);
+
+        await factory.InitializeHarnessAsync(temp.Path, cancellationToken, new HarnessConfig());
+        await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
+
+        var request = new BuildRequest(
+            Leg,
+            temp.Path,
+            new ProjectConfig
+            {
+                Name = "app",
+                Type = "cmake",
+                Path = ".",
+                BuildOutputs = [(BuildOutput)"bin/app"],
+                RebuildableFormats = [.. formats ?? []],
+            },
+            new VariantKey("x86_64", "gcc", "debug", null),
+            PlatformNames.Linux,
+            Cores: 2,
+            RunDirectory: temp.Combine(".harness-config", "runs", "20260916-100000-0a1b2c3d"));
+
+        return (factory, request);
+    }
+
+    /// <summary>
+    /// Builds once with the output present, so the build is witnessed and records what it was built
+    /// from, then dates every tracked file well before that output.
+    /// </summary>
+    /// <remarks>
+    /// The dates are the subject of a rule of their own: a changed input that is not newer than the
+    /// newest output is read as a stepped clock. Left at the times a test writes them, every file
+    /// in the tree sits inside that window and the timestamp condition fires before the one under
+    /// test can.
+    /// </remarks>
+    private static async Task<BuildResult> BuildOnceAsync(
+        HarnessFactory factory,
+        BuildRequest request,
+        TempDirectory temp,
+        CancellationToken cancellationToken)
+    {
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+        var produced = Path.Combine(buildDirectory, "bin", "app");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
+        await File.WriteAllTextAsync(produced, "built", cancellationToken);
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
+        var old = DateTime.UtcNow.AddHours(-1);
+
+        foreach (var file in Directory.EnumerateFiles(temp.Path, "*", SearchOption.AllDirectories))
+        {
+            if (!file.StartsWith(buildDirectory, StringComparison.Ordinal))
+            {
+                File.SetLastWriteTimeUtc(file, old);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Rewrites one tracked file and dates it after the build, so only content can matter.</summary>
+    private static async Task TouchAsync(
+        TempDirectory temp,
+        string relativePath,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(temp.Path, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+        await File.WriteAllTextAsync(path, content, cancellationToken);
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(1));
+    }
+
+    /// <summary>
+    /// A service whose tree git can be asked about. A build reads the tree while it runs, so a tree
+    /// nothing can list is a build nobody watched, and the leg is unmeasured rather than passed —
+    /// the same rule the test verb has always applied. Every build here needs a repository for that
+    /// reason and not because these tests are about git.
+    /// </summary>
+    private static async Task<BuildService> TrackedAsync(TempDirectory temp, CancellationToken cancellationToken, int exitCode = 0)
+    {
+        var factory = new HarnessFactory();
+
+        await factory.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        // A source the project's own type reads, so the guards are actually on in these tests: a
+        // tree tracking nothing this build reads has nothing to watch and would exercise none of it.
+        await File.WriteAllTextAsync(temp.Combine("src.cs"), "class App;" + Environment.NewLine, cancellationToken);
+        await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
+
+        return Service(factory, exitCode);
     }
 
     private static BuildService Service(HarnessFactory factory, int exitCode)
@@ -85,6 +269,7 @@ public sealed class BuildServiceTests
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
             new NinjaDependencyCheck(new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
+            new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
             factory.GitClient,
             factory.FileSystem,
             factory.Output);
@@ -107,7 +292,7 @@ public sealed class BuildServiceTests
     {
         using var temp = new TempDirectory();
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(
                 temp,
@@ -152,7 +337,7 @@ public sealed class BuildServiceTests
             ? [Keyed(("windows", "bin/app.exe")), (BuildOutput)"compile_commands.json"]
             : [Keyed(("windows", "bin/app.exe"))];
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(temp, outputs, "linux"),
             TestContext.Current.CancellationToken);
@@ -172,7 +357,7 @@ public sealed class BuildServiceTests
         Directory.CreateDirectory(build);
         File.WriteAllText(Path.Combine(build, "compile_commands.json"), "[]");
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(temp, [(BuildOutput)"compile_commands.json"], "macos"),
             TestContext.Current.CancellationToken);
@@ -188,7 +373,7 @@ public sealed class BuildServiceTests
         Directory.CreateDirectory(build);
         File.WriteAllText(Path.Combine(build, "app.exe"), "program");
 
-        var result = await Service(new HarnessFactory(), exitCode: 0).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
             Config(),
             Request(temp, [Keyed(("windows", "bin/app.exe"), ("all", "bin/app"))], "windows"),
             TestContext.Current.CancellationToken);

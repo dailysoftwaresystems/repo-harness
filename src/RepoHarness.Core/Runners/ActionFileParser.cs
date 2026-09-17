@@ -85,6 +85,8 @@ public sealed class ActionFileParser(
         "successPattern",
         "stallSeconds",
         "continueOnError",
+        "watchContention",
+        "requireInputsUnmoved",
     ];
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -375,6 +377,8 @@ public sealed class ActionFileParser(
         YamlNode? workingDirectoryNode = null;
         string? workingDirectoryKey = null;
         var workingDirectoryRoot = Runners.WorkingDirectoryRoot.Tree;
+        var watchContention = false;
+        var requireInputsUnmoved = false;
         string? successPattern = null;
         int? stallSeconds = null;
         var continueOnError = false;
@@ -412,6 +416,14 @@ public sealed class ActionFileParser(
                     workingDirectoryNode = valueNode;
                     workingDirectoryKey = key;
                     workingDirectory = ReadWorkingDirectory(valueNode, problems);
+                    break;
+
+                case "watchContention":
+                    watchContention = ReadFlag(valueNode, "watchContention", problems);
+                    break;
+
+                case "requireInputsUnmoved":
+                    requireInputsUnmoved = ReadFlag(valueNode, "requireInputsUnmoved", problems);
                     break;
 
                 case "workingDirectoryRoot":
@@ -479,6 +491,8 @@ public sealed class ActionFileParser(
             Commands = commands,
             WorkingDirectory = workingDirectory,
             WorkingDirectoryRoot = workingDirectoryRoot,
+            WatchContention = watchContention,
+            RequireInputsUnmoved = requireInputsUnmoved,
             Env = env,
             SuccessPattern = successPattern,
             StallSeconds = stallSeconds,
@@ -651,6 +665,35 @@ public sealed class ActionFileParser(
         }
 
         return path;
+    }
+
+    /// <summary>
+    /// A step's yes-or-no key, refused rather than guessed at when it says something else.
+    /// </summary>
+    /// <param name="node">The value as written.</param>
+    /// <param name="key">The key, which a refusal names.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <remarks>
+    /// Anything that is not exactly true or false is refused, rather than read as false. These keys
+    /// turn guards on, so a misspelling read as "off" is a step that looks guarded in the file and
+    /// is not — which is the failure the guards exist to make impossible.
+    /// </remarks>
+    private static bool ReadFlag(YamlNode node, string key, List<string> problems)
+    {
+        var value = RequireScalar(node, $"a step's {key}", problems);
+
+        if (value is null)
+        {
+            return false;
+        }
+
+        if (bool.TryParse(value, out var flag))
+        {
+            return flag;
+        }
+
+        problems.Add(At(node, $"'{value}' is not a value for {key}. Available: 'true', 'false'."));
+        return false;
     }
 
     private static WorkingDirectoryRoot ReadWorkingDirectoryRoot(YamlNode node, List<string> problems)

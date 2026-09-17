@@ -101,6 +101,38 @@ public sealed class RemoteSyncTransport(
         => AskAsync<object>(root, [SyncServe.Delete, root, relativePath], cancellationToken);
 
     /// <inheritdoc/>
+    public async Task<IReadOnlyList<EmptiedDirectory>> RemoveEmptyDirectoriesAsync(
+        string root,
+        IReadOnlyList<string> directories,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(directories);
+
+        if (directories.Count == 0)
+        {
+            return [];
+        }
+
+        var answer = await AskAsync<SyncPruneAnswer>(
+                root,
+                [SyncServe.Prune, root, string.Join('\n', directories)],
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // An answer that never arrived is refused rather than read as "nothing was removed": this
+        // reports what a sync did to a host, and a report that quietly under-states it is the one
+        // thing running the command again cannot put right.
+        if (answer is null)
+        {
+            throw new HarnessException(
+                HarnessExit.HostUnavailable,
+                $"{Host} did not answer which directories of '{root}' it removed.");
+        }
+
+        return answer.Directories;
+    }
+
+    /// <inheritdoc/>
     public async Task<byte[]> ReadFileAsync(
         string root,
         string relativePath,

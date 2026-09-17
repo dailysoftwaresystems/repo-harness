@@ -42,6 +42,12 @@ public sealed record RunnerRunRequest
     public string? WorkingDirectory { get; init; }
 
     /// <summary>
+    /// The leg's variant-keyed build directory, or <see langword="null"/> where this run reaches no
+    /// leg and so has none. What a step's <c>watchContention</c> watches.
+    /// </summary>
+    public string? BuildDirectory { get; init; }
+
+    /// <summary>
     /// The legs this run actually selected, for a runner whose own <c>legs</c> list is empty and
     /// therefore means the default set. Left out, an expected exception's scope is the runner alone,
     /// which is wider than the run intended.
@@ -141,10 +147,17 @@ public sealed class RunnerRunService(
     RunCheckGate runCheckGate,
     RunSegments runSegments,
     IPredefinedActionRunner predefinedActions,
+    InputFingerprint inputFingerprint,
+    ProcessSampler processSampler,
+    Git.IGitClient gitClient,
     Platform.IHostPlatform platform,
     IFileSystem fileSystem,
     IHarnessOutput output) : IRunnerRunService
 {
+    private readonly InputFingerprint _inputFingerprint = inputFingerprint;
+    private readonly ProcessSampler _processSampler = processSampler;
+    private readonly Git.IGitClient _gitClient = gitClient;
+
     /// <summary>The command this service reports under.</summary>
     public const string CommandName = "run";
 
@@ -213,6 +226,53 @@ public sealed class RunnerRunService(
             $"{request.Leg}: starting {steps.Phases.Count} step(s): "
             + string.Join(", ", steps.Phases.Select(phase => values.Redact(phase.Name))));
 
+        // One scope around every step, not one per step: an action of five steps has four gaps
+        // between them, and a file changed in a gap is the same moving tree as one changed inside a
+        // step. A sampler restarted per step loses a contender that spanned the join.
+        var watching = steps.Phases.Any(phase => phase.WatchContention);
+        var fingerprinting = steps.Phases.Any(phase => phase.RequireInputsUnmoved);
+
+        if (watching && string.IsNullOrEmpty(request.BuildDirectory))
+        {
+            // Refused rather than watched-as-nothing. A sample of no directory reports a clean one,
+            // which is the "nobody looked read as nothing found" this tool refuses everywhere. It
+            // cannot be caught when the file is read: an action file is tracked, and reading it
+            // cannot know whether the run that uses it will reach a leg.
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"a step of '{request.RunnerName}' asks for watchContention, and this run reaches no "
+                + "leg, so there is no build directory to watch. Run it for a leg, or take the key "
+                + "off the step.");
+        }
+
+        var (guarded, unmeasurable) = fingerprinting
+            ? await TrackedAsync(request, cancellationToken).ConfigureAwait(false)
+            : ((IReadOnlyList<string>?)null, null);
+
+        await using var guards = await LegGuards
+            .OpenAsync(
+                _inputFingerprint,
+                _processSampler,
+                new LegGuardRequest
+                {
+                    Leg = request.Leg,
+                    TreeRoot = request.TreeRoot,
+                    Inputs = guarded,
+                    UnmeasurableInputs = unmeasurable,
+                    Contention = watching
+                        ? new ContentionRequest
+                        {
+                            Leg = request.Leg,
+                            BuildDirectory = request.BuildDirectory!,
+                            BuildTools = config.Contention.BuildTools,
+                            SharedResourceTools = config.Contention.SharedResourceTools,
+                            SampleSeconds = config.Defaults.ProcessSampleSeconds,
+                        }
+                        : null,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
         foreach (var phase in steps.Phases)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -263,7 +323,12 @@ public sealed class RunnerRunService(
             .EndAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
             .ConfigureAwait(false);
 
+        var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
         var decided = await DecideAsync(request, state, values, cancellationToken).ConfigureAwait(false);
+
+        // What the guards saw is folded in the same way every other verb folds it, so a step whose
+        // tree moved reports the verdict a test leg would and not a sentence of its own.
+        decided = decided with { Verdict = seen.Decide(request.Leg, [decided.Verdict]) };
         var union = _runSegments.Load(request.Layout, request.RunId, request.Leg).Union;
 
         decided = Carried(decided, state, union);
@@ -417,6 +482,35 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>Runs one step, with the runner's bounds and the values it reads.</summary>
+    /// <summary>
+    /// The tracked files a guarded run watches, and why they could not be listed when they could
+    /// not.
+    /// </summary>
+    /// <param name="request">The run, carrying the tree.</param>
+    /// <param name="cancellationToken">Stops the listing.</param>
+    private async Task<(IReadOnlyList<string>? Inputs, string? Unmeasurable)> TrackedAsync(
+        RunnerRunRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var index = await _gitClient.ListIndexAsync(request.TreeRoot, cancellationToken).ConfigureAwait(false);
+
+            return (
+                [.. index
+                    .Where(entry => entry.IsRegularFile)
+                    .Select(entry => entry.Path)
+                    .Distinct(StringComparer.Ordinal)],
+                null);
+        }
+        catch (HarnessException ex)
+        {
+            // Unmeasured rather than clean: a step asked for its inputs to be held still, and
+            // nothing here can say whether they were.
+            return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
+        }
+    }
+
     private async Task<PhaseResult> RunPhaseAsync(
         HarnessConfig config,
         RunnerRunRequest request,

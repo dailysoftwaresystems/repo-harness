@@ -144,23 +144,7 @@ public sealed class SyncExclusions
     }
 
     private static bool Matches(string[] paths, string relativePath)
-    {
-        var candidate = Normalize(relativePath);
+        => SyncPathPatterns.Matches(paths, relativePath);
 
-        return paths.Any(path =>
-            string.Equals(candidate, path, StringComparison.Ordinal)
-            || candidate.StartsWith(path + "/", StringComparison.Ordinal));
-    }
-
-    /// <summary>
-    /// Puts a path in the one form both sides of a sync agree on: forward separators, no leading or
-    /// trailing separator, no <c>./</c> prefix. A Windows source and a Linux copy otherwise share no
-    /// spelling and every comparison misses.
-    /// </summary>
-    private static string Normalize(string path)
-    {
-        var normalized = (path ?? string.Empty).Replace('\\', '/').Trim('/');
-
-        return normalized.StartsWith("./", StringComparison.Ordinal) ? normalized[2..] : normalized;
-    }
+    private static string Normalize(string path) => SyncPathPatterns.Normalize(path);
 }
