@@ -17,22 +17,67 @@ namespace RepoHarness.Core.Sync;
 /// </param>
 public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Adopt = null)
 {
-    private readonly IReadOnlyList<string> _adopt = Adopt ?? [];
-
     /// <summary>Whether <paramref name="host"/> was named as one to take over.</summary>
     /// <param name="host">The host whose copy is being synced.</param>
     /// <remarks>
-    /// Matched on the name alone as well as on the whole spelling, so both <c>--adopt vps</c> and
-    /// <c>--adopt "ssh vps"</c> name the same machine and neither is a trap.
+    /// A whole spelling — <c>--adopt "ssh vps"</c> — names one host and nothing else. A bare name is
+    /// allowed too, and is checked against every declared host before anything runs, because
+    /// <c>hosts.wsl</c> and <c>hosts.ssh</c> are separate and nothing stops the same key appearing
+    /// in both: a bare name answering to two machines would take over both when somebody meant one,
+    /// which is the blanket permission naming hosts exists to end.
     /// </remarks>
     public bool Adopts(HostId host)
     {
         ArgumentNullException.ThrowIfNull(host);
 
-        return _adopt.Any(named =>
+        return (Adopt ?? []).Any(named =>
             string.Equals(named, host.ToString(), StringComparison.OrdinalIgnoreCase)
-            || (host.Name is { Length: > 0 } name && string.Equals(named, name, StringComparison.OrdinalIgnoreCase)));
+            || Named(named, host));
     }
+
+    /// <summary>
+    /// Refuses a name no declared host answers to, and a bare name more than one answers to. Called
+    /// once, before any host is reached, so a typo is learned before a directory is taken over
+    /// rather than never.
+    /// </summary>
+    /// <param name="declared">Every host this run would reach.</param>
+    /// <exception cref="HarnessException">A name matches nothing, or matches more than one host.</exception>
+    public void RefuseWhenNamingNoOneHost(IReadOnlyList<HostId> declared)
+    {
+        ArgumentNullException.ThrowIfNull(declared);
+
+        var spelled = string.Join(", ", declared.Select(host => $"'{host}'"));
+
+        foreach (var named in Adopt ?? [])
+        {
+            if (declared.Any(host => string.Equals(named, host.ToString(), StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            var answering = declared.Where(host => Named(named, host)).ToList();
+
+            if (answering.Count == 0)
+            {
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"--adopt names '{named}', and no host this run reaches is called that. "
+                    + $"The hosts are {spelled}. Nothing was changed.");
+            }
+
+            if (answering.Count > 1)
+            {
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"--adopt names '{named}', and {answering.Count} hosts are called that: "
+                    + $"{string.Join(", ", answering.Select(host => $"'{host}'"))}. Taking over the wrong "
+                    + "one deletes what it holds, so name the one you mean in full. Nothing was changed.");
+            }
+        }
+    }
+
+    private static bool Named(string named, HostId host)
+        => host.Name is { Length: > 0 } name && string.Equals(named, name, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>What was found where a host's copy should be.</summary>
@@ -46,6 +91,13 @@ internal enum CopyState
 
     /// <summary>It exists, the harness did not make it, and what it holds is nobody here's to assume about.</summary>
     Unclaimed,
+
+    /// <summary>
+    /// A takeover of it began and did not finish. Still nobody's to assume about, and worse than
+    /// untouched: part of what was there has already gone, so a plan built now reports less than the
+    /// first one did because it can only see what survived.
+    /// </summary>
+    Interrupted,
 }
 
 /// <summary>What one sync did.</summary>
@@ -164,6 +216,10 @@ public sealed class SyncService(
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var details = new List<string>();
 
+        // Before any host is reached, so a name that answers to nothing — or to two machines — is
+        // refused while nothing has been deleted anywhere.
+        options.RefuseWhenNamingNoOneHost([.. hosts.Select(host => host.Host)]);
+
         foreach (var host in hosts)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -261,14 +317,15 @@ public sealed class SyncService(
 
         var plan = SyncPlan.Between(source, destination, exclusions);
 
-        // Asked before the deletion bound. Whose directory this is comes first: told that a sync
-        // would remove all of a directory, the reader goes looking for a mistake in the source, when
-        // what is actually true is that this is not a copy of the source at all.
-        var adopting = options.Adopts(transport.Host);
+        // Whose directory this is comes first. Told that a sync would remove all of a directory, the
+        // reader goes looking for a mistake in the source, when what is actually true is that this is
+        // not a copy of the source at all.
+        var mine = state is CopyState.Created or CopyState.Harness;
+        var adopting = !mine && options.Adopts(transport.Host);
 
-        if (state == CopyState.Unclaimed && !adopting && !options.DryRun)
+        if (!mine && !adopting && !options.DryRun)
         {
-            throw new HarnessException(HarnessExit.Refused, Unclaimed(transport, destinationRoot, plan));
+            throw new HarnessException(HarnessExit.Refused, Unclaimed(transport, destinationRoot, plan, state, destination.Links));
         }
 
         // Not on a dry run, which changes nothing there is a bound to protect. The bound's own
@@ -281,12 +338,12 @@ public sealed class SyncService(
         // is what the source does not have. Two gates for that is the point of having one.
         if (!options.DryRun)
         {
-            plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction);
+            plan.RefuseWhenDeletingTooMuch(destination, config.Sync.MaxDeleteFraction, adopting);
         }
 
         if (options.DryRun)
         {
-            if (state == CopyState.Unclaimed && !adopting)
+            if (!mine && !adopting)
             {
                 _output.Info(
                     CommandName,
@@ -300,24 +357,26 @@ public sealed class SyncService(
         // Said before it happens, and said whether or not a refusal ever ran. Somebody who reads
         // --adopt in the help and types it on the first run never sees the refusal, and everything
         // that names what taking a directory over costs was inside it.
-        if (state == CopyState.Unclaimed)
+        if (adopting)
         {
             _output.Warn(CommandName, $"{transport.Host}: adopting '{destinationRoot}', which this harness did not create.");
 
-            foreach (var line in plan.DescribeLoss(int.MaxValue))
+            foreach (var line in plan.DescribeLoss(int.MaxValue, destination.Links))
             {
                 _output.Warn(CommandName, $"{transport.Host}:   {line}");
             }
 
             _output.Warn(CommandName, $"{transport.Host}:   replace  {HarnessLayout.DirectoryName}/config.json, with this tree's");
 
-            // Marked before the transfer, not after. Once this run starts deleting, the directory is
-            // already neither the checkout it was nor a copy of this tree, and a transfer that stops
-            // part way leaves it that way. Marked, the next run finishes the job; unmarked, it would
-            // refuse and report a smaller loss than the first one did, because what it had already
-            // destroyed no longer shows up in a plan.
-            await transport.CreateRootAsync(destinationRoot, adopted: true, cancellationToken).ConfigureAwait(false);
-            _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
+            // Marked as begun before anything is deleted, and marked as finished only once the copy
+            // is one. A takeover that stops part way is neither the checkout somebody had nor a copy
+            // of this tree, and both of the obvious markings are wrong about it: unmarked, the next
+            // run refuses and reports a smaller loss than this one did, because what has gone no
+            // longer shows up in a plan; marked complete, the next ordinary build or test — which
+            // never carries an adopt list — would quietly delete the rest with nobody asked at all.
+            await transport
+                .CreateRootAsync(destinationRoot, CopyMark.AdoptionStopped, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         await ApplyAsync(context.Layout.RepositoryRoot, transport, destinationRoot, plan, cancellationToken)
@@ -332,6 +391,15 @@ public sealed class SyncService(
 
         var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
+
+        if (adopting)
+        {
+            await transport
+                .CreateRootAsync(destinationRoot, CopyMark.Complete, cancellationToken)
+                .ConfigureAwait(false);
+
+            _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
+        }
 
         return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
     }
@@ -467,14 +535,17 @@ public sealed class SyncService(
             }
 
             _output.Info(CommandName, $"{transport.Host}: creating '{destinationRoot}'");
-            await transport.CreateRootAsync(destinationRoot, adopted: false, cancellationToken).ConfigureAwait(false);
+            await transport.CreateRootAsync(destinationRoot, CopyMark.Complete, cancellationToken).ConfigureAwait(false);
 
             return CopyState.Created;
         }
 
-        return await transport.IsHarnessCopyAsync(destinationRoot, cancellationToken).ConfigureAwait(false)
-            ? CopyState.Harness
-            : CopyState.Unclaimed;
+        return await transport.ReadMarkAsync(destinationRoot, cancellationToken).ConfigureAwait(false) switch
+        {
+            CopyMark.Complete => CopyState.Harness,
+            CopyMark.AdoptionStopped => CopyState.Interrupted,
+            _ => CopyState.Unclaimed,
+        };
     }
 
     /// <summary>
@@ -489,25 +560,38 @@ public sealed class SyncService(
     /// the host is ignored by nothing this side can see, and is counted among the deletions like any
     /// other file. It appears in the list below, which is why the list is the thing to read.
     /// </remarks>
-    private static string Unclaimed(ISyncTransport transport, string destinationRoot, SyncPlan plan)
+    private static string Unclaimed(
+        ISyncTransport transport,
+        string destinationRoot,
+        SyncPlan plan,
+        CopyState state,
+        IReadOnlyList<string> links)
     {
-        var opening = $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
-            + "so sync will not write into it on its own.";
+        // An interrupted takeover is worse than an untouched directory, and the difference has to be
+        // said: the list below is built from what is there now, and what an earlier run already
+        // removed is not in it and cannot be.
+        var opening = state == CopyState.Interrupted
+            ? $"'{destinationRoot}' on {transport.Host} was being taken over and the run stopped before "
+                + "it finished, so it is neither the checkout it was nor a copy of this tree. What that "
+                + "run had already removed is gone and is not in the list below."
+            : $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
+                + "so sync will not write into it on its own.";
 
         var take = $"'--adopt {transport.Host}'";
 
         var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
             + "there with this tree's.";
 
-        var survives = $"Its .git and every commit in it, {HarnessLayout.DirectoryName}, the worktrees "
-            + "root and whatever sync.neverTransfer names are left alone. Nothing else is: a directory "
-            + "that only that host has, a build tree among them, is ignored by nothing this tree can "
-            + "see and is deleted like any other file. Name it in sync.neverTransfer first if it "
-            + "should stay.";
+        var survives = $"Its .git and every commit in it, the rest of {HarnessLayout.DirectoryName}, "
+            + "the worktrees root and whatever sync.neverTransfer names are left alone. Nothing else "
+            + "is: a directory that only that host has, a build tree among them, is ignored by nothing "
+            + "this tree can see and is deleted like any other file. A link there is followed rather "
+            + "than kept, and what it points at is not in this list. Name anything that should stay "
+            + "in sync.neverTransfer first.";
 
-        if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0)
+        if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0 && links.Count == 0)
         {
-            return $"{opening} Taking it over is {take}, and would remove nothing there. "
+            return $"{opening} Finishing it is {take}, and would remove nothing further. "
                 + $"{configuration} Nothing has been changed by this run.";
         }
 
@@ -515,7 +599,7 @@ public sealed class SyncService(
             + $"overwritten and {plan.Deletes.Count.ToString(CultureInfo.InvariantCulture)} deleted there";
 
         return $"{opening} Taking it over is {take}, and {counted}:\n  "
-            + string.Join("\n  ", plan.DescribeLoss())
+            + string.Join("\n  ", plan.DescribeLoss(links: links))
             + $"\n{configuration} {survives} Run with '--dry-run' to see all of it. Nothing has been "
             + "changed by this run.";
     }
@@ -540,9 +624,25 @@ public sealed class SyncService(
                 .ReadFileAsync(sourceRoot, entry.Path, cancellationToken)
                 .ConfigureAwait(false);
 
-            await transport
-                .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                await transport
+                    .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (IOException ex)
+            {
+                // Almost always one shape: the copy holds a file where this tree holds a directory,
+                // or the other way about. Named here because the reader otherwise gets an unexpected
+                // IOException from somewhere inside a write, with neither the path nor the reason —
+                // and taking over a checkout somebody made by hand is where it is most likely.
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"'{entry.Path}' could not be written to '{destinationRoot}' on {transport.Host}: "
+                    + $"{ex.Message} This is usually a file where this tree has a directory, or a "
+                    + "directory where it has a file; remove it there and run the sync again.",
+                    ex);
+            }
 
             if (overwritten.Contains(entry.Path))
             {

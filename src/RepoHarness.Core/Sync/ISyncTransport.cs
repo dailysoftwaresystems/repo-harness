@@ -25,10 +25,10 @@ public interface ISyncTransport
     /// Creates the copy's root and every missing parent, and records that the harness made it.
     /// </summary>
     /// <param name="root">The copy's root.</param>
-    /// <param name="adopted">
-    /// Whether this took over a directory somebody else made, rather than creating one. Recorded in
-    /// the marker because the two are indistinguishable afterwards, and one of them deleted files
-    /// that were already there.
+    /// <param name="mark">
+    /// What to record about how this copy came to be. A takeover is marked before it starts and
+    /// again when it finishes, because the two are indistinguishable afterwards and one of them
+    /// deleted files that were already there.
     /// </param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <exception cref="Results.HarnessException">
@@ -36,16 +36,16 @@ public interface ISyncTransport
     /// to somewhere else: a sync that writes to a directory nobody named is worse than one that
     /// refuses, because the leg's verdict then describes a tree the reader cannot find.
     /// </exception>
-    Task CreateRootAsync(string root, bool adopted = false, CancellationToken cancellationToken = default);
+    Task CreateRootAsync(string root, CopyMark mark = CopyMark.Complete, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Whether the harness created this copy. A directory it did not create is never adopted,
-    /// because sync deletes whatever the source does not have and a checkout someone made by hand
-    /// holds work nobody told the harness about.
+    /// What the harness has recorded about this copy. A directory it did not make is never taken
+    /// over on its own, because sync deletes whatever the source does not have and a checkout
+    /// somebody made by hand holds work nobody told the harness about.
     /// </summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="cancellationToken">Stops the check.</param>
-    Task<bool> IsHarnessCopyAsync(string root, CancellationToken cancellationToken = default);
+    Task<CopyMark> ReadMarkAsync(string root, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Makes the copy a git repository, because the DssHarness on that host finds everything through

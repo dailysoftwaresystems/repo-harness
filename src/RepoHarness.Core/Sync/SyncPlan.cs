@@ -88,13 +88,19 @@ public sealed record SyncPlan(
     /// for a refusal somebody has to read and act on.
     /// </summary>
     /// <param name="most">How many paths to name before the rest are only counted.</param>
-    public IReadOnlyList<string> DescribeLoss(int most = 20)
+    /// <param name="links">
+    /// Links the copy holds, which no plan can speak for: a link is in no manifest, so a file
+    /// written at its name replaces it and reads as an ordinary write, and everything behind a
+    /// linked directory is outside every list this can build.
+    /// </param>
+    public IReadOnlyList<string> DescribeLoss(int most = 20, IReadOnlyList<string>? links = null)
     {
         // Overwrites first. A deleted file is obvious once it is named; a file whose content is
         // replaced looks like an ordinary write in every other report this command prints.
         var lost = new List<string>();
         lost.AddRange(Overwrites.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"overwrite {path}"));
         lost.AddRange(Deletes.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"delete    {path}"));
+        lost.AddRange((links ?? []).Select(path => $"through   {path} (a link; what it points at is not listed)"));
 
         if (lost.Count <= most)
         {
@@ -117,7 +123,11 @@ public sealed record SyncPlan(
     /// path is mistyped, because a source that is not there looks exactly like a source that deleted
     /// everything.
     /// </remarks>
-    public void RefuseWhenDeletingTooMuch(SyncManifest destination, double maxDeleteFraction)
+    /// <param name="adopting">
+    /// Whether this sync is taking over a directory it did not make, which changes what the reader
+    /// should check: not that the source is the tree they meant, but that the directory is.
+    /// </param>
+    public void RefuseWhenDeletingTooMuch(SyncManifest destination, double maxDeleteFraction, bool adopting = false)
     {
         ArgumentNullException.ThrowIfNull(destination);
 
@@ -133,12 +143,22 @@ public sealed record SyncPlan(
             return;
         }
 
+        // What to check differs by which of the two mistakes this is. A copy this tool already owns
+        // that suddenly loses most of itself means the source is wrong; a directory being taken over
+        // that loses most of itself means the directory is — which is what a mistyped repositoryPath
+        // looks like, and is the reason this bound applies to a takeover at all.
+        var check = adopting
+            ? "Nothing was changed. Confirm that is the directory you meant to take over — a "
+                + "repositoryPath naming a home directory rather than a checkout under it looks exactly "
+                + "like this — then run with --dry-run to see the list, or raise sync.maxDeleteFraction."
+            : "Nothing was changed. Confirm the source tree is the one you meant, then raise "
+                + "sync.maxDeleteFraction or run with --dry-run to see the list.";
+
         throw new HarnessException(
             HarnessExit.Refused,
             $"This sync would delete {Deletes.Count} of the {destination.Entries.Count} file(s) in "
             + $"'{destination.Root}', which is {share:P0} of it and over the {maxDeleteFraction:P0} "
-            + $"sync.maxDeleteFraction allows. Nothing was changed. Confirm the source tree is the one "
-            + "you meant, then raise sync.maxDeleteFraction or run with --dry-run to see the list.");
+            + $"sync.maxDeleteFraction allows. {check}");
     }
 
     /// <summary>The lines <c>--dry-run</c> prints, and the same lines a real sync reports afterwards.</summary>

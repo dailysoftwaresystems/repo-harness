@@ -143,7 +143,7 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
 
             foreach (var process in sample.Processes)
             {
-                var key = Identity(process, sample.Index);
+                var key = Identity(process);
 
                 if (!tracked.TryGetValue(key, out var entry))
                 {
@@ -198,13 +198,20 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
 
     /// <summary>
     /// How one process is told apart from another across samples: its id together with its start
-    /// time. A process whose start time could not be read is never merged with an entry from
-    /// another sample, because without it a recycled id and a long-running process look alike.
+    /// time.
+    /// <para>
+    /// Where a start time could not be read at all, the id alone has to serve. Keeping the samples
+    /// apart instead — which is what naming the sample did — turns one process into one entry per
+    /// sample, and a contender that never left is then reported as having come at the start and
+    /// again at the end. On a host where nothing can publish a start time that is every process in
+    /// every report, which is a worse and far more likely wrong answer than an id coming back around
+    /// to a different process inside one leg.
+    /// </para>
     /// </summary>
-    private static string Identity(SampledProcess process, int sampleIndex)
+    private static string Identity(SampledProcess process)
         => process.StartedUtc is { } started
             ? string.Create(CultureInfo.InvariantCulture, $"{process.Id}@{started.UtcTicks}")
-            : string.Create(CultureInfo.InvariantCulture, $"{process.Id}@?{sampleIndex}");
+            : string.Create(CultureInfo.InvariantCulture, $"{process.Id}@?");
 
     private static ProcessSeen Seen(IReadOnlySet<int> samples, int first, int last)
     {

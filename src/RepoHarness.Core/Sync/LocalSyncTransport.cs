@@ -37,7 +37,7 @@ public sealed class LocalSyncTransport(
         => Task.FromResult(_fileSystem.DirectoryExists(Home(root)));
 
     /// <inheritdoc/>
-    public Task CreateRootAsync(string root, bool adopted = false, CancellationToken cancellationToken = default)
+    public Task CreateRootAsync(string root, CopyMark mark = CopyMark.Complete, CancellationToken cancellationToken = default)
     {
         // A file where the directory should be is named rather than worked around. Creating the
         // copy somewhere else would leave a leg reporting on a tree nobody can find.
@@ -62,15 +62,42 @@ public sealed class LocalSyncTransport(
         _fileSystem.WriteAllTextAtomic(
             MarkerPath(root),
             JsonSerializer.Serialize(
-                new SyncedCopyMarker(DateTimeOffset.UtcNow.ToString("O"), Environment.MachineName, adopted),
+                new SyncedCopyMarker(
+                    DateTimeOffset.UtcNow.ToString("O"),
+                    Environment.MachineName,
+                    Adopted: mark != CopyMark.Complete || Adopted(root),
+                    Completed: mark != CopyMark.AdoptionStopped),
                 MarkerOptions));
 
         return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
-    public Task<bool> IsHarnessCopyAsync(string root, CancellationToken cancellationToken = default)
-        => Task.FromResult(_fileSystem.FileExists(MarkerPath(root)));
+    public Task<CopyMark> ReadMarkAsync(string root, CancellationToken cancellationToken = default)
+    {
+        var path = MarkerPath(root);
+
+        if (!_fileSystem.FileExists(path))
+        {
+            return Task.FromResult(CopyMark.None);
+        }
+
+        try
+        {
+            // An unfinished takeover is told apart from a finished copy, because only one of them
+            // still needs somebody to say go ahead. A marker this build cannot read at all is a
+            // marker it wrote, so the copy is one: refusing here would strand a working tree.
+            var marker = JsonSerializer.Deserialize<SyncedCopyMarker>(_fileSystem.ReadAllText(path), MarkerOptions);
+
+            return Task.FromResult(marker is { Adopted: true, Completed: false }
+                ? CopyMark.AdoptionStopped
+                : CopyMark.Complete);
+        }
+        catch (JsonException)
+        {
+            return Task.FromResult(CopyMark.Complete);
+        }
+    }
 
     /// <inheritdoc/>
     public async Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default)
@@ -161,18 +188,17 @@ public sealed class LocalSyncTransport(
         var expanded = Home(root);
         var full = Path.GetFullPath(Path.Combine(expanded, relativePath));
 
-        // Every link along the way followed first. Path.GetFullPath resolves '..' and nothing else,
-        // so a directory somebody replaced with a link — an ordinary thing in a checkout made by
-        // hand, where a dependency or data directory often lives elsewhere — would carry a write to
-        // whatever it points at, outside the directory the reader named. The manifest never sees it:
-        // the walk skips links, so such a path arrives as an ordinary write.
-        var realRoot = Real(expanded);
-        var realFull = Real(full);
-
+        // Compared as spelled, deliberately. Following links here looked like a stronger guard and
+        // was a worse one: a build directory pointed at another volume is ordinary and withheld by
+        // default for exactly that reason, and resolving it refused '--pull build/...' — a path the
+        // reader named, inside the tree they named — with a message about leaving the tree. A link
+        // the copy holds is disclosed where the reader can act on it, in the list an adoption prints,
+        // rather than guarded here where it cannot be told from a path somebody meant.
+        //
         // This machine's own comparison. Testing both would be no test at all: a path inside under
         // Ordinal is inside under OrdinalIgnoreCase too, so the pair reduces to the looser of them,
         // and on Linux a path differing only in case would escape the tree.
-        if (!PathContainment.IsStrictlyInside(realRoot, realFull, _platform.PathComparison))
+        if (!PathContainment.IsStrictlyInside(expanded, full, _platform.PathComparison))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
@@ -180,41 +206,6 @@ public sealed class LocalSyncTransport(
         }
 
         return full;
-    }
-
-    /// <summary>
-    /// <paramref name="path"/> with every link along it followed. What does not exist yet is left as
-    /// it is spelled: only the part that exists can be resolved, and that is the part a link could
-    /// hide in.
-    /// </summary>
-    private static string Real(string path)
-    {
-        var parts = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var current = parts[0].Length == 0 ? Path.DirectorySeparatorChar.ToString() : parts[0] + Path.DirectorySeparatorChar;
-
-        foreach (var part in parts.Skip(1).Where(part => part.Length > 0))
-        {
-            current = Path.Combine(current, part);
-
-            try
-            {
-                FileSystemInfo? found = Directory.Exists(current) ? new DirectoryInfo(current)
-                    : File.Exists(current) ? new FileInfo(current)
-                    : null;
-
-                if (found?.ResolveLinkTarget(returnFinalTarget: true) is { } target)
-                {
-                    current = target.FullName;
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Unreadable is not resolvable, and a path that cannot be followed is left spelled as
-                // it was: the containment test below then judges what the reader actually named.
-            }
-        }
-
-        return Path.GetFullPath(current);
     }
 
     /// <summary>
@@ -252,7 +243,35 @@ public sealed class LocalSyncTransport(
     /// have, rather than creating an empty one. Afterwards the two are indistinguishable, and only
     /// one of them destroyed something.
     /// </param>
-    private sealed record SyncedCopyMarker(string CreatedUtc, string CreatedBy, bool Adopted);
+    /// <param name="Completed">
+    /// Whether the run that made it got to the end. A takeover that stopped part way is marked but
+    /// not complete, which is neither the checkout somebody had nor a copy of the source.
+    /// </param>
+    private sealed record SyncedCopyMarker(string CreatedUtc, string CreatedBy, bool Adopted, bool Completed);
+
+    /// <summary>
+    /// Whether the marker already there says this copy was taken over. Read when one is being
+    /// written to say a takeover finished, so finishing does not erase how the copy came to be.
+    /// </summary>
+    private bool Adopted(string root)
+    {
+        var path = MarkerPath(root);
+
+        if (!_fileSystem.FileExists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<SyncedCopyMarker>(_fileSystem.ReadAllText(path), MarkerOptions)
+                is { Adopted: true };
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>A withheld-path test built once, rather than re-parsed for every file in a tree.</summary>
     private sealed class PathSet(IReadOnlyList<string> paths)

@@ -30,19 +30,20 @@ public static class SyncServe
     /// <summary>Makes the copy a git repository, which the harness there needs to find anything.</summary>
     public const string InitRepository = "init-repository";
 
-    /// <summary>
-    /// What <see cref="Create"/> carries to say it took over a directory rather than making one.
-    /// Passed as a word rather than as a flag because this protocol is positional arguments.
-    /// </summary>
-    public const string Adopted = "adopted";
-
-    /// <summary>Whether a <see cref="Create"/> request says it took over a directory.</summary>
+    /// <summary>What mark a <see cref="Create"/> request asks for, spelled as the enum's own name.</summary>
     /// <param name="arguments">The request's arguments, the copy's root first.</param>
-    public static bool SaysAdopted(IReadOnlyList<string> arguments)
+    /// <remarks>
+    /// A request naming no mark, or one this build does not know, is a complete copy: that is what
+    /// every request meant before a mark was carried, and reading it as anything else would turn a
+    /// finished copy into one that still needs somebody's permission.
+    /// </remarks>
+    public static CopyMark MarkIn(IReadOnlyList<string> arguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
 
-        return arguments.Count > 1 && string.Equals(arguments[1], Adopted, StringComparison.Ordinal);
+        return arguments.Count > 1 && Enum.TryParse<CopyMark>(arguments[1], ignoreCase: false, out var mark)
+            ? mark
+            : CopyMark.Complete;
     }
 
     /// <summary>Writes one file into the copy.</summary>
@@ -108,8 +109,25 @@ public sealed record SyncManifestAnswer(IReadOnlyList<SyncEntry> Entries);
 
 /// <summary>What the far side's root looks like.</summary>
 /// <param name="Exists">Whether the root directory is there.</param>
-/// <param name="HarnessCopy">Whether the harness created it.</param>
-public sealed record SyncInspectAnswer(bool Exists, bool HarnessCopy);
+/// <param name="Mark">What the harness has recorded about it.</param>
+public sealed record SyncInspectAnswer(bool Exists, CopyMark Mark);
+
+/// <summary>What a copy's marker says about how it came to be.</summary>
+public enum CopyMark
+{
+    /// <summary>There is no marker: whatever is there, this tool did not make it.</summary>
+    None,
+
+    /// <summary>A copy this tool made, and finished making.</summary>
+    Complete,
+
+    /// <summary>
+    /// A copy this tool began taking over and did not finish. Neither the checkout somebody had nor
+    /// a copy of the source: some of what was there is already gone, and what is left is not what a
+    /// plan would now report, because a plan can only see what survived.
+    /// </summary>
+    AdoptionStopped,
+}
 
 /// <summary>One file's bytes, base64 encoded so they survive a line of text intact.</summary>
 /// <param name="Content">The file's bytes.</param>

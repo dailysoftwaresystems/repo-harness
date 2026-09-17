@@ -194,6 +194,24 @@ public sealed class ProcessSamplerTests
         Assert.Contains(report.Contenders, found => found.Seen == ProcessSeen.AtTheEnd);
     }
 
+    /// <summary>
+    /// Where no start time can be read the id alone has to serve, and it has to serve across the
+    /// whole set. Telling the samples apart instead turns one process into one entry per sample: a
+    /// contender that never left is then reported twice, as having come at the start and again at
+    /// the end. On a host where nothing publishes a start time that is every process in every
+    /// report.
+    /// </summary>
+    [Fact]
+    public void AProcessWithNoStartTimeAtAll_IsStillOneProcessAcrossTheSamples()
+    {
+        var ninja = new SampledProcess(4242, ParentId: 9999, "ninja", StartedUtc: null, $"ninja -C {BuildDirectory} all");
+
+        var report = Classify([Sample(0, ninja), Sample(1, ninja), Sample(2, ninja)]);
+
+        var contender = Assert.Single(report.Contenders);
+        Assert.Equal(ProcessSeen.Throughout, contender.Seen);
+    }
+
     [Fact]
     public void ALegNoSampleCouldReadTheTableFor_IsUnmeasured_AndNeverPassed()
     {

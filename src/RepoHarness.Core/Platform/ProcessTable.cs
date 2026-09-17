@@ -318,28 +318,6 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
         return processes;
     }
 
-    private static DateTimeOffset? LinuxBootTime()
-    {
-        try
-        {
-            foreach (var line in File.ReadLines("/proc/stat"))
-            {
-                if (line.StartsWith("btime ", StringComparison.Ordinal)
-                    && long.TryParse(line[6..].Trim(), CultureInfo.InvariantCulture, out var seconds))
-                {
-                    return DateTimeOffset.FromUnixTimeSeconds(seconds);
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Without the boot time no start time can be computed, so every process in this sample
-            // carries an unknown one and is never merged across samples.
-        }
-
-        return null;
-    }
-
     private static string? ReadCommandLine(string path)
     {
         try

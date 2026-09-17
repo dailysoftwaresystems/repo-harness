@@ -908,8 +908,9 @@ directory here cannot drift apart.
   same directory, and only one of them deleted somebody's files; the marker is the only thing left
   that can say so.
 - **What survives an adoption is narrower than it looks.** Its `.git` and so every commit in it,
-  `.harness-config`, the worktrees root and whatever `sync.neverTransfer` names are protected from
-  the deletion. The ignore list is *not* read from that host: it is this tree's, listed by asking
+  the rest of `.harness-config`, the worktrees root and whatever `sync.neverTransfer` names are
+  protected from the deletion — though `config.json` there is replaced with this tree's, which the
+  refusal says. The ignore list is *not* read from that host: it is this tree's, listed by asking
   git which ignored files exist **here**. A directory only the host has — a build tree under a name
   `sync.neverTransfer` does not carry, a `node_modules`, a virtual environment — is ignored by
   nothing this side can see and is deleted like any other file. It appears in the list the refusal
@@ -919,11 +920,18 @@ directory here cannot drift apart.
   is exactly what a mistyped `repositoryPath` produces, which is the case that bound was written
   for: the path meant to name a checkout names a home directory, and every other project under it
   is what the source does not have. Two gates for that is the point of having one.
-- **The copy is marked before the transfer, not after.** Once an adoption starts deleting, the
-  directory is already neither the checkout it was nor a copy of this tree; marked, a transfer that
-  stopped part way is finished by the next run, where unmarked it would be refused again and the
-  refusal would report a smaller loss than the first one did, because what had already gone no
-  longer appears in a plan.
+- **A takeover is marked as begun before anything is deleted, and as finished only once the copy is
+  one.** Both of the obvious markings are wrong about a run that stopped part way: unmarked, the
+  next run refuses and reports a smaller loss than the first did, because what has gone no longer
+  appears in a plan; marked complete, the next ordinary `build` or `test` — which never carries an
+  adopt list — would quietly delete the rest with nobody asked at all. So a stopped takeover is its
+  own state: it still needs `--adopt <host>`, and its refusal says plainly that what the earlier run
+  removed is not in the list.
+- **A link the copy holds is named too.** A link sits in no manifest — the walk refuses to follow
+  one — so a file written at its name replaces it and reads as an ordinary write, and everything
+  behind a linked directory is outside any list a plan can build. Reported rather than guarded
+  against: a build directory pointed at another volume is ordinary, and refusing to write through
+  one would refuse `--pull build/...` — a path the reader named, inside the tree they named.
 - **`--dry-run` shows the plan instead of refusing,** for a directory the tool did not create and
   for one whose deletions are over the bound. A preview changes nothing, so there is nothing for
   either refusal to protect — and the bound's own message says to run with `--dry-run` to see the

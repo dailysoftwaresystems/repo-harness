@@ -243,6 +243,47 @@ public sealed class SyncServiceTests
         => Assert.False(new SyncOptions().Adopts(HostId.Local));
 
     /// <summary>
+    /// hosts.wsl and hosts.ssh are separate maps and nothing stops the same key in both, so a bare
+    /// name can answer to two machines. Taking over the one somebody did not mean deletes what it
+    /// holds, and that is the blanket permission naming hosts exists to end — let back in through
+    /// the convenience of a short name.
+    /// </summary>
+    [Fact]
+    public void Adopt_RefusesABareNameTwoHostsAnswerTo_AndNamesBothSpellings()
+    {
+        var declared = new[] { HostId.Wsl("dev"), HostId.Ssh("dev") };
+
+        var refusal = Assert.Throws<HarnessException>(
+            () => new SyncOptions(Adopt: ["dev"]).RefuseWhenNamingNoOneHost(declared));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Contains("wsl dev", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh dev", refusal.Message, StringComparison.Ordinal);
+
+        // Spelled in full it is never ambiguous, and takes only the one it names.
+        var whole = new SyncOptions(Adopt: ["wsl dev"]);
+        whole.RefuseWhenNamingNoOneHost(declared);
+
+        Assert.True(whole.Adopts(HostId.Wsl("dev")));
+        Assert.False(whole.Adopts(HostId.Ssh("dev")));
+    }
+
+    /// <summary>
+    /// A name no host answers to is a typo, and a typo nobody is told about is learned when the host
+    /// somebody meant to take over is refused instead — or never, if it was already a copy.
+    /// </summary>
+    [Fact]
+    public void Adopt_RefusesANameNoHostAnswersTo_AndSaysWhichHostsThereAre()
+    {
+        var refusal = Assert.Throws<HarnessException>(
+            () => new SyncOptions(Adopt: ["vsp"]).RefuseWhenNamingNoOneHost([HostId.Ssh("vps")]));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Contains("'vsp'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh vps", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A host that was not named is still refused, and the refusal names the flag that would take
     /// that host in particular rather than a flag that would take every one of them.
     /// </summary>
@@ -265,6 +306,136 @@ public sealed class SyncServiceTests
             Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
             Assert.Contains("--adopt local", refusal.Message, StringComparison.Ordinal);
             Assert.True(File.Exists(Path.Combine(copy, "theirs.txt")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A takeover that stopped part way is neither the checkout somebody had nor a copy of this
+    /// tree. Marked complete it would be taken for this tool's own, and the next ordinary build or
+    /// test — which never carries an adopt list — would delete the rest with nobody asked. So it
+    /// still needs somebody to say go ahead, and the refusal says the earlier run already removed
+    /// things the list below cannot show.
+    /// </summary>
+    [Fact]
+    public async Task AnAdoptionThatStoppedPartWay_StillNeedsSayingSoAgain()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // Exactly what a run leaves behind when it marks the takeover and then dies part way:
+            // some of this tree already written, some of theirs still there.
+            Directory.CreateDirectory(Path.Combine(copy, HarnessLayout.DirectoryName));
+            Directory.CreateDirectory(Path.Combine(copy, "src"));
+            await File.WriteAllTextAsync(Path.Combine(copy, ".gitignore"), "build/\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "a.c"), "a\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "b.c"), "b\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "theirs.txt"), "x\n", cancellationToken);
+            await File.WriteAllTextAsync(
+                Marker(copy),
+                "{ \"CreatedUtc\": \"2026-01-01T00:00:00.0000000+00:00\", \"CreatedBy\": \"somewhere\", "
+                + "\"Adopted\": true, \"Completed\": false }",
+                cancellationToken);
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains("stopped before it finished", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("is not in the list below", refusal.Message, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(copy, "theirs.txt")));
+
+            // Said again, it finishes, and is a copy from then on.
+            var finished = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            Assert.True(finished.Verified);
+            Assert.Contains("\"Completed\": true", await File.ReadAllTextAsync(Marker(copy), cancellationToken), StringComparison.Ordinal);
+            Assert.Contains("\"Adopted\": true", await File.ReadAllTextAsync(Marker(copy), cancellationToken), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A link sits in no manifest — the walk refuses to follow one — so a file written at its name
+    /// replaces it and reads as an ordinary write, and everything behind a linked directory is
+    /// outside every list a plan can build. Somebody deciding whether to hand this tool a directory
+    /// has no other way to see them.
+    /// </summary>
+    [Fact]
+    public async Task ALinkInTheCopy_IsNamedInWhatAdoptingWouldCost_BecauseNoPlanCanSpeakForIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "Creating a link needs no privilege only here.");
+
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+        var elsewhere = Path.Combine(temp.Path, "..", "elsewhere-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(copy);
+            Directory.CreateDirectory(elsewhere);
+            await File.WriteAllTextAsync(Path.Combine(elsewhere, "theirs.txt"), "x\n", cancellationToken);
+            Directory.CreateSymbolicLink(Path.Combine(copy, "data"), elsewhere);
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken));
+
+            Assert.Contains("through   data", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("a link", refusal.Message, StringComparison.Ordinal);
+
+            // And what it points at is untouched, because a refusal changed nothing.
+            Assert.True(File.Exists(Path.Combine(elsewhere, "theirs.txt")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+            DeleteIfPresent(elsewhere);
+        }
+    }
+
+    /// <summary>
+    /// The bound fires before anything is taken over, so its remedy has to be the one that applies:
+    /// check the directory, not the source tree the reader never doubted.
+    /// </summary>
+    [Fact]
+    public async Task TheDeletionBound_TellsAnAdopterToCheckTheDirectory_NotTheSource()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(copy, "other-project"));
+
+            for (var file = 0; file < 8; file++)
+            {
+                await File.WriteAllTextAsync(
+                    Path.Combine(copy, "other-project", $"work-{file}.txt"),
+                    "theirs\n",
+                    cancellationToken);
+            }
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken));
+
+            Assert.Contains("directory you meant to take over", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("repositoryPath", refusal.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("source tree is the one", refusal.Message, StringComparison.Ordinal);
         }
         finally
         {
