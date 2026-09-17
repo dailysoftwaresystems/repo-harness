@@ -48,9 +48,10 @@ public sealed record LockHolder(
     /// clock steps, which is why it stopped being what identifies a process.
     /// </summary>
     /// <remarks>
-    /// Declared rather than skipped so that every other unknown member can be refused, as this tool
-    /// refuses one everywhere else it reads JSON. Never written back: an entry rewritten by this
-    /// build carries a stamp instead.
+    /// Declared rather than skipped so that every other unknown member can be refused. Not written
+    /// by this build: an entry it records carries a stamp instead. An entry it only keeps — another
+    /// machine's, which it has no business rewriting — is written back as it was read, this member
+    /// among it, so that machine's own build still finds what it wrote.
     /// </remarks>
     [JsonPropertyName("processStartedUtc")]
     public DateTimeOffset? LegacyStartedUtc { get; init; }
@@ -139,10 +140,11 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new JsonStringEnumConverter() },
 
-        // A shape this build does not recognise is a hard failure rather than silent data loss, as it
-        // is everywhere else this tool reads JSON. The one field an older build wrote and this one no
-        // longer uses is declared on the holder, so upgrading reads its own lock file rather than
-        // refusing it.
+        // A shape this build does not recognise is a hard failure rather than silent data loss, as
+        // it is wherever this tool reads JSON that decides something: the configuration, the owner
+        // file, the sync marker and the host protocol. The one field an older build wrote and this
+        // one no longer uses is declared on the holder, so upgrading reads its own lock file rather
+        // than refusing it.
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 

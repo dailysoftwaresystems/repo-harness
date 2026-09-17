@@ -60,9 +60,25 @@ public sealed class RemoteSyncTransport(
                 cancellationToken)
             .ConfigureAwait(false);
 
+        // An answer that never arrived is refused rather than read as an empty copy. Empty is the
+        // most dangerous thing this could return: it disables the deletion bound, which measures
+        // against what the copy holds, and it makes a refusal report that taking the directory over
+        // would remove nothing — advice somebody acts on, after which the manifest read succeeds and
+        // everything the host held goes.
+        if (answer is null)
+        {
+            throw new HarnessException(
+                HarnessExit.HostUnavailable,
+                $"{Host} did not answer with what '{root}' holds, so what a sync would delete there "
+                + "is unknown and nothing was changed.");
+        }
+
         return new SyncManifest(
             root,
-            (answer?.Entries ?? []).ToDictionary(entry => entry.Path, entry => entry, StringComparer.Ordinal));
+            answer.Entries.ToDictionary(entry => entry.Path, entry => entry, StringComparer.Ordinal))
+        {
+            Links = answer.Links,
+        };
     }
 
     /// <inheritdoc/>
@@ -117,7 +133,8 @@ public sealed class RemoteSyncTransport(
                 + $"and arrived as {arrived}.");
     }
 
-    private async Task<SyncInspectAnswer> InspectAsync(string root, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    public async Task<SyncInspectAnswer> InspectAsync(string root, CancellationToken cancellationToken = default)
         => await AskAsync<SyncInspectAnswer>(root, [SyncServe.Inspect, root], cancellationToken).ConfigureAwait(false)
             ?? throw new HarnessException(
                 HarnessExit.HostUnavailable,

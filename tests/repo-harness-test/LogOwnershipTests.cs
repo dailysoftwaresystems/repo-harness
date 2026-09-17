@@ -1,5 +1,6 @@
 using System.Globalization;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Platform;
 
 namespace RepoHarness.Tests;
@@ -185,4 +186,35 @@ public sealed class LogOwnershipTests
             + ", " + stampField + "\"runId\": \"" + runId
             + "\", \"takenUtc\": \"" + taken + "\" }");
     }
+    /// <summary>
+    /// The owner file was hardened alongside the lock file, and needs the same proof. A member this
+    /// build does not know means the file was written by one that did, and reading the rest of it
+    /// while dropping that member decides who owns a log directory from a partial record.
+    /// </summary>
+    [Fact]
+    public async Task AnOwnerFileWithAMemberThisBuildDoesNotKnow_IsRefused_RatherThanPartlyRead()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "shared");
+
+        Write(directory, Environment.MachineName, Environment.ProcessId, ProcessStart(), "20250101-120000-deadbeef");
+
+        var file = LogOwnership.OwnerFile(directory);
+
+        await File.WriteAllTextAsync(
+            file,
+            (await File.ReadAllTextAsync(file, TestContext.Current.CancellationToken)).Replace(
+                "\"runId\"",
+                "\"somethingNobodyDeclared\": 1, \"runId\"",
+                StringComparison.Ordinal),
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
+            directory,
+            RunId.New(),
+            cancellationToken: TestContext.Current.CancellationToken));
+    }
+
 }

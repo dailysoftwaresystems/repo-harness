@@ -22,8 +22,8 @@ public sealed record SyncManifest(string Root, IReadOnlyDictionary<string, SyncE
     /// <summary>
     /// Every link the walk refused to follow, by relative path. Not content, and never compared with
     /// anything: a link is neither transferred nor deleted. Recorded because a reader deciding
-    /// whether to let this tool take a directory over cannot see them any other way — a link sits in
-    /// no manifest, so a file written at its name replaces it and is reported as an ordinary write,
+    /// whether to let this tool take a directory over cannot see them any other way — a link is in
+    /// no entry, so a file written at its name replaces it and is reported as an ordinary write,
     /// and a directory behind one hides everything under it from the list entirely.
     /// </summary>
     public IReadOnlyList<string> Links { get; init; } = [];

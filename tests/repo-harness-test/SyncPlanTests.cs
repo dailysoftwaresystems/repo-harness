@@ -118,6 +118,12 @@ public sealed class SyncPlanTests
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("would delete 7", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("Nothing was changed", refusal.Message, StringComparison.Ordinal);
+
+        // Which of the two mistakes this is decides what to check. For a copy this tool already
+        // owns, the source is what is wrong; the takeover's remedy would send the reader to inspect
+        // a tree they never doubted.
+        Assert.Contains("source tree is the one", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("directory you meant to take over", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

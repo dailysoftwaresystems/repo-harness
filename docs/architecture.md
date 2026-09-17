@@ -971,7 +971,8 @@ directory here cannot drift apart.
   is indistinguishable from a source that deleted everything, and without the bound that empties
   a host. A first sync into an empty copy has nothing to measure and is never over it.
 - **Deletion stays inside the tree.** Every path is resolved against the copy's declared root and
-  refused if it leaves by `..`, by an absolute path, or through a link.
+  refused if it leaves by `..` or by being absolute. Links are compared as spelled rather than
+  followed, for the reason the takeover bullet above gives, and are disclosed instead.
 - **What was deleted is reported** by name, at the level a reader sees by default rather than
   behind `--verbose`: what a sync removed from another machine is the one thing running it again
   cannot recover. `--dry-run` lists every write and every deletion and changes nothing.

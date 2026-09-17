@@ -132,6 +132,17 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
         var lastIndex = samples[^1].Index;
         var tracked = new Dictionary<string, Tracked>(StringComparer.Ordinal);
 
+        // An id any sample failed to read a start time for is keyed by its id alone in every
+        // sample, not only in the ones that failed. Keyed both ways it splits in two — one entry
+        // seen at the start and one at the end, which is the double report this exists to avoid —
+        // and the platform's own source failing for one reading out of several is ordinary: the
+        // table falls back to what the runtime alone can see, which publishes no start time.
+        var unstamped = samples
+            .SelectMany(sample => sample.Processes)
+            .Where(process => process.StartedUtc is null)
+            .Select(process => process.Id)
+            .ToHashSet();
+
         foreach (var sample in samples)
         {
             var byId = new Dictionary<int, SampledProcess>();
@@ -143,15 +154,15 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
 
             foreach (var process in sample.Processes)
             {
-                var key = Identity(process);
+                var key = Identity(process, unstamped);
 
                 if (!tracked.TryGetValue(key, out var entry))
                 {
-                    entry = new Tracked(process, ProcessSampler.InHarnessTree(process, byId, harnessId));
+                    entry = new Tracked(process);
                     tracked[key] = entry;
                 }
 
-                entry.Samples.Add(sample.Index);
+                entry.Saw(process, ProcessSampler.InHarnessTree(process, byId, harnessId), sample.Index);
             }
         }
 
@@ -188,6 +199,16 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
             limits.Add("no command line could be read on this machine, so nothing was matched against the build directory");
         }
 
+        // Said rather than left for the reader to infer. Without a start time an id is all there is
+        // to go on, so an id freed and handed to something else inside one leg is reported as one
+        // process that ran throughout.
+        if (unstamped.Count > 0)
+        {
+            limits.Add(
+                "no start time could be read for some processes on this machine, so a process id "
+                + "reused during the leg is reported as one process");
+        }
+
         return new ContentionReport(
             samples,
             [.. contenders.OrderBy(found => found.Process.Id)],
@@ -199,17 +220,23 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
     /// <summary>
     /// How one process is told apart from another across samples: its id together with its start
     /// time.
-    /// <para>
-    /// Where a start time could not be read at all, the id alone has to serve. Keeping the samples
-    /// apart instead — which is what naming the sample did — turns one process into one entry per
-    /// sample, and a contender that never left is then reported as having come at the start and
-    /// again at the end. On a host where nothing can publish a start time that is every process in
-    /// every report, which is a worse and far more likely wrong answer than an id coming back around
-    /// to a different process inside one leg.
-    /// </para>
     /// </summary>
-    private static string Identity(SampledProcess process)
-        => process.StartedUtc is { } started
+    /// <param name="process">The process to name.</param>
+    /// <param name="unstamped">
+    /// Ids no start time could be read for in at least one sample, which are named by id alone in
+    /// every sample. Naming one both ways would split it in two, which is the answer this avoids.
+    /// </param>
+    /// <remarks>
+    /// Where a start time could not be read, the id alone has to serve. Adding the sample's own
+    /// number to keep the readings apart turns one process into one entry per sample, and a
+    /// contender that never left is then reported as having come at the start and again at the end.
+    /// On a host where nothing can publish a start time that is every process in every report,
+    /// which is a worse and far likelier wrong answer than an id coming back around to a different
+    /// process inside one leg — and that case is what <see cref="Tracked.Saw"/> and the limit about
+    /// reused ids are for.
+    /// </remarks>
+    private static string Identity(SampledProcess process, IReadOnlySet<int> unstamped)
+        => process.StartedUtc is { } started && !unstamped.Contains(process.Id)
             ? string.Create(CultureInfo.InvariantCulture, $"{process.Id}@{started.UtcTicks}")
             : string.Create(CultureInfo.InvariantCulture, $"{process.Id}@?");
 
@@ -264,12 +291,44 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
             || commandLine.Contains(directory.Replace('/', '\\'), pathComparison);
     }
 
-    private sealed class Tracked(SampledProcess process, bool inside)
+    /// <summary>
+    /// One process across every sample that saw it.
+    /// </summary>
+    /// <param name="process">The sighting that created the entry.</param>
+    /// <remarks>
+    /// Refreshed on each sighting rather than frozen at the first. Where no start time can be read,
+    /// one id can cover a short-lived child of the harness and, later in the same leg, an outside
+    /// tool that took its number: keeping the first sighting's answer would mark the entry as the
+    /// harness's own and drop that tool out of the report altogether, and the leg would pass over a
+    /// build directory somebody else was writing into.
+    /// </remarks>
+    private sealed class Tracked(SampledProcess process)
     {
-        public SampledProcess Process { get; } = process;
+        /// <summary>The sighting a report should describe, which is one from outside where there is one.</summary>
+        public SampledProcess Process { get; private set; } = process;
 
-        public bool Inside { get; } = inside;
+        /// <summary>Whether every sighting of this id was inside the harness's own tree.</summary>
+        public bool Inside { get; private set; } = true;
 
+        /// <summary>Which samples saw it.</summary>
         public HashSet<int> Samples { get; } = [];
+
+        /// <summary>Records one sighting.</summary>
+        /// <param name="sighting">The process as this sample saw it.</param>
+        /// <param name="inside">Whether this sighting was inside the harness's own tree.</param>
+        /// <param name="sampleIndex">Which sample saw it.</param>
+        public void Saw(SampledProcess sighting, bool inside, int sampleIndex)
+        {
+            Samples.Add(sampleIndex);
+
+            // An id seen outside the tree even once is reported, and reported as what was outside:
+            // that sighting's name and command line are the ones somebody has to act on.
+            if (!inside)
+            {
+                Process = sighting;
+            }
+
+            Inside &= inside;
+        }
     }
 }

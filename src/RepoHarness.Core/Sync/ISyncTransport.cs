@@ -48,6 +48,19 @@ public interface ISyncTransport
     Task<CopyMark> ReadMarkAsync(string root, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Whether the copy's root is there and what the harness has recorded about it, in one answer.
+    /// </summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="cancellationToken">Stops the question.</param>
+    /// <remarks>
+    /// Asked as one question rather than as <see cref="RootExistsAsync"/> and then
+    /// <see cref="ReadMarkAsync"/>. Over ssh those are two round trips for something the far side
+    /// answers in one, and between them the directory can change — so the mark that decides whether
+    /// a sync may delete could describe a directory other than the one found.
+    /// </remarks>
+    Task<SyncInspectAnswer> InspectAsync(string root, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Makes the copy a git repository, because the DssHarness on that host finds everything through
     /// git. Does nothing when it already is one.
     /// </summary>

@@ -286,8 +286,9 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
     }
 
     /// <summary>
-    /// What the runtime alone can see: ids, names, and a start time for each process this user may
-    /// open. Used only when the platform's own source failed, and reported with the limit it carries.
+    /// What the runtime alone can see: the id and the name of each process this user may open, and
+    /// no start time for any of them. Used only when the platform's own source failed, and reported
+    /// with the limit that carries.
     /// </summary>
     private static IReadOnlyList<SampledProcess> FromDiagnostics()
     {
@@ -297,12 +298,12 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
         {
             try
             {
-                // No start time at all, rather than one worked out from the clock. This runs only
-                // where /proc could not be read, and Process.StartTime on Linux is ticks since boot
-                // added to a boot time derived from the clock as it is now — so a clock that steps
-                // would hand the same process a new identity between two samples and split one
-                // contender into two. Left unknown, an entry is simply never merged across samples,
-                // which is the honest answer and the one this table already has a shape for.
+                // No start time at all, rather than one worked out from the clock. Process.StartTime
+                // on Linux is ticks since boot added to a boot time derived from the clock as it is
+                // now, so a clock that steps hands the same process a new identity between two
+                // samples and splits one contender into two. Unknown is the honest answer, and what
+                // reads these knows what to do with it: ProcessSamplingSession names such a process
+                // by its id alone in every sample and says so among the report's limits.
                 processes.Add(new SampledProcess(process.Id, null, CleanName(process.ProcessName), null, null));
             }
             catch (InvalidOperationException)

@@ -89,9 +89,9 @@ public sealed record SyncPlan(
     /// </summary>
     /// <param name="most">How many paths to name before the rest are only counted.</param>
     /// <param name="links">
-    /// Links the copy holds, which no plan can speak for: a link is in no manifest, so a file
-    /// written at its name replaces it and reads as an ordinary write, and everything behind a
-    /// linked directory is outside every list this can build.
+    /// Links the copy holds, which no plan can speak for: a link is in no entry, so a file written
+    /// at its name replaces it and reads as an ordinary write, and everything behind a linked
+    /// directory is outside every list this can build.
     /// </param>
     public IReadOnlyList<string> DescribeLoss(int most = 20, IReadOnlyList<string>? links = null)
     {
@@ -100,14 +100,42 @@ public sealed record SyncPlan(
         var lost = new List<string>();
         lost.AddRange(Overwrites.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"overwrite {path}"));
         lost.AddRange(Deletes.OrderBy(path => path, StringComparer.Ordinal).Select(path => $"delete    {path}"));
-        lost.AddRange((links ?? []).Select(path => $"through   {path} (a link; what it points at is not listed)"));
 
-        if (lost.Count <= most)
-        {
-            return lost;
-        }
+        var named = lost.Count <= most
+            ? lost
+            : [.. lost.Take(most), $"...and {(lost.Count - most).ToString(CultureInfo.InvariantCulture)} more"];
 
-        return [.. lost.Take(most), $"...and {(lost.Count - most).ToString(CultureInfo.InvariantCulture)} more"];
+        // Links are never among what the bound cuts. There are few of them, each stands for an
+        // unknown amount that no other line can show, and appended after the cut they would be the
+        // first thing dropped — in exactly the copy that has the most hidden behind them.
+        return
+        [
+            .. named,
+            .. (links ?? []).Select(path => $"through   {path} (a link; what it points at is not listed)"),
+        ];
+    }
+
+    /// <summary>
+    /// The links among <paramref name="links"/> that this plan would write through, so a write
+    /// landing outside the copy can be said before it happens.
+    /// </summary>
+    /// <param name="links">Links the copy holds, as the manifest walk recorded them.</param>
+    /// <remarks>
+    /// A link is in no entry, so a file written beneath a linked directory reads as an ordinary
+    /// write to a path inside the copy while the kernel puts it wherever the link points. Only the
+    /// links something is actually written through are returned: a linked directory nothing is
+    /// written into costs nobody anything, and saying so every sync would train the reader to skip
+    /// the line that matters.
+    /// </remarks>
+    public IReadOnlyList<string> WritesThrough(IReadOnlyList<string> links)
+    {
+        ArgumentNullException.ThrowIfNull(links);
+
+        return
+        [
+            .. links.Where(link => Writes.Any(entry =>
+                entry.Path.StartsWith(link + "/", StringComparison.Ordinal))),
+        ];
     }
 
     /// <summary>
@@ -115,6 +143,10 @@ public sealed record SyncPlan(
     /// </summary>
     /// <param name="destination">The copy as it stands, which is what the share is measured against.</param>
     /// <param name="maxDeleteFraction">The share one sync may delete; zero allows any deletion.</param>
+    /// <param name="adopting">
+    /// Whether this sync is taking over a directory it did not make, which changes what the reader
+    /// should check: not that the source is the tree they meant, but that the directory is.
+    /// </param>
     /// <exception cref="HarnessException">The plan is over the bound, and nothing is changed.</exception>
     /// <remarks>
     /// Deletions have to propagate, or a copy that only ever gains files stops being a copy of the
@@ -123,10 +155,6 @@ public sealed record SyncPlan(
     /// path is mistyped, because a source that is not there looks exactly like a source that deleted
     /// everything.
     /// </remarks>
-    /// <param name="adopting">
-    /// Whether this sync is taking over a directory it did not make, which changes what the reader
-    /// should check: not that the source is the tree they meant, but that the directory is.
-    /// </param>
     public void RefuseWhenDeletingTooMuch(SyncManifest destination, double maxDeleteFraction, bool adopting = false)
     {
         ArgumentNullException.ThrowIfNull(destination);

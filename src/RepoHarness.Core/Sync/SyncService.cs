@@ -59,10 +59,19 @@ public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Ado
 
             if (answering.Count == 0)
             {
+                // A host is two words, and --adopt takes more than one name, so 'ssh vps' typed
+                // without quotes arrives as 'ssh' and 'vps'. Said here because this is where that
+                // mistake lands, and 'no host is called ssh' does not point at it.
+                var unquoted = string.Equals(named, "ssh", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(named, "wsl", StringComparison.OrdinalIgnoreCase)
+                    ? " A host's full name is two words and --adopt takes several names, so quote it: "
+                        + $"--adopt \"{named} <name>\"."
+                    : string.Empty;
+
                 throw new HarnessException(
                     HarnessExit.UsageError,
                     $"--adopt names '{named}', and no host this run reaches is called that. "
-                    + $"The hosts are {spelled}. Nothing was changed.");
+                    + $"The hosts are {spelled}.{unquoted} Nothing was changed.");
             }
 
             if (answering.Count > 1)
@@ -328,6 +337,19 @@ public sealed class SyncService(
             throw new HarnessException(HarnessExit.Refused, Unclaimed(transport, destinationRoot, plan, state, destination.Links));
         }
 
+        // Said on every sync, not only on a takeover. A copy this tool made can gain a link
+        // afterwards — a build script pointing a directory at scratch space is the ordinary way —
+        // and from then on every build and every test writes through it, to a place outside the
+        // directory anybody named, reported as an ordinary write. The takeover list covers the
+        // first sync into somebody else's directory; this covers all the rest.
+        foreach (var link in plan.WritesThrough(destination.Links))
+        {
+            _output.Warn(
+                CommandName,
+                $"{transport.Host}: writing through '{link}', which is a link: what it points at is "
+                + $"outside '{destinationRoot}' and is not in any list this command can build.");
+        }
+
         // Not on a dry run, which changes nothing there is a bound to protect. The bound's own
         // message says to run with --dry-run to see the list, and until now that refused in exactly
         // the same words rather than showing it.
@@ -343,12 +365,15 @@ public sealed class SyncService(
 
         if (options.DryRun)
         {
+            // The same words the refusal uses, because this is where the refusal sends the reader
+            // for the whole of it. A stopped takeover told apart from an untouched directory
+            // matters most here: the plan below is built from what survived, and a dry run that
+            // called it an untouched directory would present that plan as the whole cost.
             if (!mine && !adopting)
             {
                 _output.Info(
                     CommandName,
-                    $"{transport.Host}: '{destinationRoot}' exists and the harness did not create it; "
-                    + $"syncing into it needs '--adopt {transport.Host}'.");
+                    Unclaimed(transport, destinationRoot, plan, state, destination.Links));
             }
 
             return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
@@ -389,9 +414,14 @@ public sealed class SyncService(
         await PlaceConfigurationAsync(context.Layout, transport, destinationRoot, cancellationToken)
             .ConfigureAwait(false);
 
-        var verified = await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
+        // Throws when the copy does not match, so reaching the next line is what verified means.
+        await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
 
+        // Marked finished only once the copy has been shown to be one, which is why this sits after
+        // the verification and not before it. A takeover whose verification failed never reaches
+        // here, so the mark still says it stopped part way and the next run asks again rather than
+        // treating a directory whose content nobody could confirm as this tool's own.
         if (adopting)
         {
             await transport
@@ -401,7 +431,7 @@ public sealed class SyncService(
             _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
         }
 
-        return new SyncResult(transport.Host.ToString(), destinationRoot, plan, verified, created);
+        return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: true, created);
     }
 
     /// <summary>
@@ -526,7 +556,13 @@ public sealed class SyncService(
         bool dryRun,
         CancellationToken cancellationToken)
     {
-        if (!await transport.RootExistsAsync(destinationRoot, cancellationToken).ConfigureAwait(false))
+        // Both halves in one question. Asked separately they are two round trips over ssh for
+        // something the far side answers in one, and the directory can change between them — so the
+        // mark that decides whether this may delete could be describing a directory other than the
+        // one that was found to exist.
+        var found = await transport.InspectAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+
+        if (!found.Exists)
         {
             if (dryRun)
             {
@@ -540,7 +576,7 @@ public sealed class SyncService(
             return CopyState.Created;
         }
 
-        return await transport.ReadMarkAsync(destinationRoot, cancellationToken).ConfigureAwait(false) switch
+        return found.Mark switch
         {
             CopyMark.Complete => CopyState.Harness,
             CopyMark.AdoptionStopped => CopyState.Interrupted,
@@ -554,7 +590,8 @@ public sealed class SyncService(
     /// <remarks>
     /// A sync deletes whatever the source does not have, so a checkout somebody made by hand may hold
     /// work nothing here knows about. What survives is named exactly, and it is narrower than it
-    /// looks: <c>.git</c> and so every commit there, this tool's own directory, the worktrees root,
+    /// looks: <c>.git</c> and so every commit there, the rest of this tool's own directory — though
+    /// the <c>config.json</c> in it is replaced with this tree's — the worktrees root,
     /// and whatever <c>sync.neverTransfer</c> names. What git ignores is read from <em>this</em>
     /// tree, by listing the ignored files that exist here — so a build directory that exists only on
     /// the host is ignored by nothing this side can see, and is counted among the deletions like any
@@ -577,7 +614,7 @@ public sealed class SyncService(
             : $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
                 + "so sync will not write into it on its own.";
 
-        var take = $"'--adopt {transport.Host}'";
+        var take = $"'--adopt \"{transport.Host}\"'";
 
         var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
             + "there with this tree's.";
@@ -585,20 +622,28 @@ public sealed class SyncService(
         var survives = $"Its .git and every commit in it, the rest of {HarnessLayout.DirectoryName}, "
             + "the worktrees root and whatever sync.neverTransfer names are left alone. Nothing else "
             + "is: a directory that only that host has, a build tree among them, is ignored by nothing "
-            + "this tree can see and is deleted like any other file. A link there is followed rather "
-            + "than kept, and what it points at is not in this list. Name anything that should stay "
-            + "in sync.neverTransfer first.";
+            + "this tree can see and is deleted like any other file. A link there is never followed "
+            + "and never deleted, so nothing behind one is in this list — but a file this tree has "
+            + "under a linked directory is written where that link points, outside the directory "
+            + "named here. Name anything that should stay in sync.neverTransfer first.";
+
+        // Which verb is true depends on whether a takeover was ever begun, exactly as the opening
+        // does. Told that finishing is all that is left, somebody looking at a checkout nothing has
+        // touched goes hunting for the run that started on it.
+        var (verb, cost) = state == CopyState.Interrupted
+            ? ("Finishing it", "would remove nothing further")
+            : ("Taking it over", "would remove nothing that is there");
 
         if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0 && links.Count == 0)
         {
-            return $"{opening} Finishing it is {take}, and would remove nothing further. "
+            return $"{opening} {verb} is {take}, and {cost}. "
                 + $"{configuration} Nothing has been changed by this run.";
         }
 
         var counted = $"{plan.Overwrites.Count.ToString(CultureInfo.InvariantCulture)} file(s) would be "
             + $"overwritten and {plan.Deletes.Count.ToString(CultureInfo.InvariantCulture)} deleted there";
 
-        return $"{opening} Taking it over is {take}, and {counted}:\n  "
+        return $"{opening} {verb} is {take}, and {counted}:\n  "
             + string.Join("\n  ", plan.DescribeLoss(links: links))
             + $"\n{configuration} {survives} Run with '--dry-run' to see all of it. Nothing has been "
             + "changed by this run.";
@@ -624,25 +669,9 @@ public sealed class SyncService(
                 .ReadFileAsync(sourceRoot, entry.Path, cancellationToken)
                 .ConfigureAwait(false);
 
-            try
-            {
-                await transport
-                    .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (IOException ex)
-            {
-                // Almost always one shape: the copy holds a file where this tree holds a directory,
-                // or the other way about. Named here because the reader otherwise gets an unexpected
-                // IOException from somewhere inside a write, with neither the path nor the reason —
-                // and taking over a checkout somebody made by hand is where it is most likely.
-                throw new HarnessException(
-                    HarnessExit.CommandFailed,
-                    $"'{entry.Path}' could not be written to '{destinationRoot}' on {transport.Host}: "
-                    + $"{ex.Message} This is usually a file where this tree has a directory, or a "
-                    + "directory where it has a file; remove it there and run the sync again.",
-                    ex);
-            }
+            await transport
+                .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
+                .ConfigureAwait(false);
 
             if (overwritten.Contains(entry.Path))
             {
@@ -669,12 +698,17 @@ public sealed class SyncService(
     /// <summary>
     /// Confirms the copy now holds exactly what the source does.
     /// </summary>
+    /// <exception cref="HarnessException">
+    /// The copy does not match. Raised rather than answered, so returning at all is what being
+    /// verified means: there is nothing a caller could usefully do with a copy a leg must not run
+    /// against, and everything that happens after this point is allowed to assume it matched.
+    /// </exception>
     /// <remarks>
     /// A remote tree's identity is its content manifest. Without this the leg that runs next reports
     /// on a tree nobody established, and a transfer that dropped a file would be indistinguishable
     /// from a source that never had it.
     /// </remarks>
-    private async Task<bool> VerifyAsync(
+    private async Task VerifyAsync(
         ISyncTransport transport,
         string destinationRoot,
         SyncManifest source,
@@ -689,7 +723,7 @@ public sealed class SyncService(
 
         if (differences.IsUpToDate)
         {
-            return true;
+            return;
         }
 
         var named = differences.Writes

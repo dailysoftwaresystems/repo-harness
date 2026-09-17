@@ -75,7 +75,10 @@ internal static class SyncServeCommand
                         .ReadManifestAsync(root, withheld, cancellationToken)
                         .ConfigureAwait(false);
 
-                    return Answer(new SyncManifestAnswer([.. manifest.Paths.Select(path => manifest.Entries[path])]));
+                    return Answer(new SyncManifestAnswer([.. manifest.Paths.Select(path => manifest.Entries[path])])
+                    {
+                        Links = manifest.Links,
+                    });
 
                 case SyncServe.Write:
                     await transport

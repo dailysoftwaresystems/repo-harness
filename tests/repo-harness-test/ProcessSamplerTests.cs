@@ -212,6 +212,46 @@ public sealed class ProcessSamplerTests
         Assert.Equal(ProcessSeen.Throughout, contender.Seen);
     }
 
+    /// <summary>
+    /// The platform's own source failing for one reading out of several is ordinary: the table then
+    /// falls back to what the runtime alone can see, which publishes no start time. Keyed one way in
+    /// the samples that read it and another in the sample that did not, one process splits in two —
+    /// reported as having come at the start and again at the end, which is the very answer this is
+    /// meant to prevent.
+    /// </summary>
+    [Fact]
+    public void AProcessWhoseStartTimeOnlySomeSamplesCouldRead_IsStillOneProcess()
+    {
+        var known = Process(4242, "ninja", $"ninja -C {BuildDirectory} all", parent: 9999, started: DateTimeOffset.UnixEpoch);
+        var unknown = new SampledProcess(4242, ParentId: 9999, "ninja", StartedUtc: null, $"ninja -C {BuildDirectory} all");
+
+        var report = Classify([Sample(0, known), Sample(1, unknown), Sample(2, known)]);
+
+        var contender = Assert.Single(report.Contenders);
+
+        Assert.Equal(ProcessSeen.Throughout, contender.Seen);
+        Assert.Contains(report.Limits, limit => limit.Contains("reused during the leg", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The cost of naming a process by its id alone: an id freed and handed to something else inside
+    /// one leg reads as one process. Accepted, because the alternative reports every process twice
+    /// on any host that publishes no start time — but an id seen outside the harness's tree even
+    /// once is still reported, rather than being taken for the harness's own child it was first.
+    /// </summary>
+    [Fact]
+    public void AnIdThatWasTheHarnessesAndThenSomebodyElses_IsStillReported()
+    {
+        var mine = new SampledProcess(4242, ParentId: Environment.ProcessId, "ninja", StartedUtc: null, "ninja -C mine");
+        var theirs = new SampledProcess(4242, ParentId: 9999, "ninja", StartedUtc: null, $"ninja -C {BuildDirectory} all");
+
+        var report = Classify([Sample(0, mine), Sample(1, theirs)]);
+
+        var contender = Assert.Single(report.Contenders);
+
+        Assert.Contains(BuildDirectory, contender.Process.CommandLine, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ALegNoSampleCouldReadTheTableFor_IsUnmeasured_AndNeverPassed()
     {

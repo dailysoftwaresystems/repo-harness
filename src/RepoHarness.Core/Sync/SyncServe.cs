@@ -32,18 +32,36 @@ public static class SyncServe
 
     /// <summary>What mark a <see cref="Create"/> request asks for, spelled as the enum's own name.</summary>
     /// <param name="arguments">The request's arguments, the copy's root first.</param>
+    /// <exception cref="HarnessException">The request names a mark this build cannot serve.</exception>
     /// <remarks>
-    /// A request naming no mark, or one this build does not know, is a complete copy: that is what
-    /// every request meant before a mark was carried, and reading it as anything else would turn a
-    /// finished copy into one that still needs somebody's permission.
+    /// A request naming no mark is a complete copy: that is what every request meant before a mark
+    /// was carried, and reading it as anything else would turn a finished copy into one that still
+    /// needs somebody's permission.
+    /// <para>
+    /// A mark that is spelled and is not one of the two a copy can carry is refused rather than
+    /// read as complete. <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/> answers yes to
+    /// any number, so <c>"7"</c> and <c>"0"</c> both parse, and both would be written down as a
+    /// copy that was taken over and finished. It means the two ends are different builds, which the
+    /// version check should already have refused — the same reason an unknown operation is named
+    /// rather than passed over.
+    /// </para>
     /// </remarks>
     public static CopyMark MarkIn(IReadOnlyList<string> arguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
 
-        return arguments.Count > 1 && Enum.TryParse<CopyMark>(arguments[1], ignoreCase: false, out var mark)
-            ? mark
-            : CopyMark.Complete;
+        if (arguments.Count <= 1 || arguments[1].Length == 0)
+        {
+            return CopyMark.Complete;
+        }
+
+        return Enum.TryParse<CopyMark>(arguments[1], ignoreCase: false, out var mark)
+            && mark is CopyMark.Complete or CopyMark.AdoptionStopped
+                ? mark
+                : throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"'{arguments[1]}' is not a mark this build can record, so how '{arguments[0]}' "
+                    + "came to be would be written down wrong. The two ends are different builds.");
     }
 
     /// <summary>Writes one file into the copy.</summary>
@@ -61,6 +79,13 @@ public static class SyncServe
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+
+        // An enum crosses as its name, the same spelling a request carries it in. As a number it
+        // would be two spellings of one thing on one wire, and its meaning would depend on the
+        // order the members happen to be declared in — so inserting one would silently change what
+        // every older answer means. A name this build does not know fails the read, which is what
+        // the two ends being different builds should do.
+        Converters = { new JsonStringEnumConverter() },
 
         // A shape one end does not recognise is a hard failure rather than silent data loss, as it
         // is everywhere else this tool reads JSON.
@@ -105,7 +130,20 @@ public static class SyncServe
 
 /// <summary>What the far side holds, as a manifest.</summary>
 /// <param name="Entries">Every transferable file in the copy.</param>
-public sealed record SyncManifestAnswer(IReadOnlyList<SyncEntry> Entries);
+public sealed record SyncManifestAnswer(IReadOnlyList<SyncEntry> Entries)
+{
+    /// <summary>
+    /// Every link the far side's walk refused to follow, by relative path. Carried because it is
+    /// the only way the asking machine can learn of them: every host a sync reaches is a far side,
+    /// so a manifest that drops these leaves the list an adoption prints silent about exactly the
+    /// paths no plan can speak for.
+    /// </summary>
+    /// <remarks>
+    /// An answer from a build that did not send these leaves it empty rather than failing. Missing
+    /// is legal here, unknown is not — <see cref="SyncServe.JsonOptions"/> refuses a member it does not know.
+    /// </remarks>
+    public IReadOnlyList<string> Links { get; init; } = [];
+}
 
 /// <summary>What the far side's root looks like.</summary>
 /// <param name="Exists">Whether the root directory is there.</param>

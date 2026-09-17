@@ -11,6 +11,13 @@ public interface IProcessRunner
     /// The executable named by <see cref="ProcessRequest.FileName"/> is not installed
     /// or not on PATH. Distinct from a non-zero exit code: the tool never ran.
     /// </exception>
+    /// <remarks>
+    /// An implementation must invoke <see cref="ProcessRequest.OnStarted"/> once the child is
+    /// running, and before any output line. It is how a caller tells this tool's own time apart
+    /// from the child's silence: until it is called, a phase is held to the bound on starting
+    /// rather than the bound on silence, so one that never calls it has every child judged by how
+    /// long it took to start rather than by how long it said nothing.
+    /// </remarks>
     Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>

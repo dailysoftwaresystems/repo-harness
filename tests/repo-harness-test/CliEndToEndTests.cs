@@ -56,10 +56,19 @@ public sealed partial class CliEndToEndTests
     [Fact]
     public async Task Adopt_RefusesToBeABareYes_AndMustNameItsHosts()
     {
-        var result = await CliRunner.RunAsync(["sync", "--adopt"], TestContext.Current.CancellationToken);
+        // In a directory of its own, deliberately. Without one the real command line runs with this
+        // process's working directory, which is inside this repository: were the option's arity ever
+        // to allow none, this test would sync against whatever hosts this tree declares.
+        using var temp = new TempDirectory();
 
-        Assert.NotEqual(0, result.ExitCode);
+        var result = await CliRunner.RunAsync(
+            ["sync", "--adopt"],
+            TestContext.Current.CancellationToken,
+            workingDirectory: temp.Path);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
         Assert.Contains("--adopt", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("argument", result.StandardError, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -102,9 +102,10 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
 
-        // As above and as everywhere else this tool reads JSON: a shape it does not recognise is a
-        // hard failure, not silent data loss. The one field an older build wrote is declared, so
-        // upgrading reads its own owner file rather than refusing it.
+        // As the lock file, the configuration, the sync marker and the host protocol are read: a
+        // shape this build does not recognise is a hard failure, not silent data loss. The one
+        // field an older build wrote is declared, so upgrading reads its own owner file rather than
+        // refusing it.
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
