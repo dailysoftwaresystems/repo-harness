@@ -255,10 +255,10 @@ public sealed class RunnerRunService(
                 _processSampler,
                 new LegGuardRequest
                 {
-                    Leg = request.Leg,
                     TreeRoot = request.TreeRoot,
-                    Inputs = guarded,
-                    UnmeasurableInputs = unmeasurable,
+                    Inputs = unmeasurable is not null
+                        ? LegInputs.Unmeasured(unmeasurable)
+                        : LegInputs.Watch(guarded ?? []),
                     Contention = watching
                         ? new ContentionRequest
                         {
@@ -328,7 +328,20 @@ public sealed class RunnerRunService(
 
         // What the guards saw is folded in the same way every other verb folds it, so a step whose
         // tree moved reports the verdict a test leg would and not a sentence of its own.
-        decided = decided with { Verdict = seen.Decide(request.Leg, [decided.Verdict]) };
+        //
+        // Into the outcome as well as the verdict, because the outcome is what a run check reads:
+        // RunCheckGate tests Success and ResultCode and nothing else, so a check run whose own tree
+        // moved would otherwise confirm an expected failure on the evidence of a run that measured
+        // nothing. Carried() a few lines down already updates both; this is the same rule.
+        var folded = seen.Decide(request.Leg, [decided.Verdict]);
+
+        decided = folded.Verdict == decided.Verdict.Verdict
+            ? decided with { Verdict = folded }
+            : decided with
+            {
+                Verdict = folded,
+                Outcome = RunOutcome.Failed(Verdicts.ExitCodeFor(folded.Verdict), folded.Detail),
+            };
         var union = _runSegments.Load(request.Layout, request.RunId, request.Leg).Union;
 
         decided = Carried(decided, state, union);
@@ -490,9 +503,12 @@ public sealed class RunnerRunService(
     /// <param name="file">The action as it was read.</param>
     /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
     /// <remarks>
-    /// The same vocabulary a project's test invocation uses, refused the same way. Left unchecked a
-    /// brace reaches the interpreter as a literal path segment, which a consumer measured: a run
-    /// line naming <c>{treeDir}</c> produced a path holding the braces and an Errno 2, from a step
+    /// The same vocabulary a project's test invocation uses, but not the same policy. A run line is a
+    /// program's own text, where <c>${HOME}</c> and <c>awk '{print}'</c> are ordinary, so a brace
+    /// group this tool does not own is left for whoever does. What is still refused here, over the
+    /// whole file and before the first program starts, is a name that is one of this vocabulary's
+    /// spelled differently — <c>{builddir}</c> for <c>{buildDir}</c> — because that one reaches the
+    /// interpreter as a literal path segment, which a consumer measured as an Errno 2 from a step
     /// that looked exactly like the configuration that works.
     /// </remarks>
     private static void RefuseUnknownNames(ActionFile file)
@@ -503,10 +519,18 @@ public sealed class RunnerRunService(
         {
             foreach (var argument in step.Commands.SelectMany(command => command.Arguments))
             {
-                LegPathNames.RefuseUnknown(argument, $"'{step.Name}' run line", declared);
+                LegPathNames.RefuseUnknown(
+                    argument,
+                    $"'{step.Name}' run line",
+                    PlaceholderPolicy.LeaveAsWritten,
+                    declared);
             }
 
-            LegPathNames.RefuseUnknown(step.WorkingDirectory, $"'{step.Name}' workingDirectory", declared);
+            LegPathNames.RefuseUnknown(
+                step.WorkingDirectory,
+                $"'{step.Name}' workingDirectory",
+                PlaceholderPolicy.LeaveAsWritten,
+                declared);
         }
     }
 
@@ -549,18 +573,28 @@ public sealed class RunnerRunService(
         // The leg's directories and the action's own values, through the one expander a project's
         // test invocation uses. A step that builds out of source has no other way to name where its
         // build went: the directory is derived per leg and no tracked file can spell it.
-        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory ?? request.TreeRoot);
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory);
         var supplied = values.Supplied;
 
         var arguments = phase.Command
             .Skip(1)
-            .Select(argument => LegPathNames.Expand(argument, paths, $"'{phase.Name}' run line", supplied))
+            .Select(argument => LegPathNames.Expand(
+                argument,
+                paths,
+                $"'{phase.Name}' run line",
+                PlaceholderPolicy.LeaveAsWritten,
+                supplied))
             .ToList();
 
         var working = Path.GetFullPath(Path.Combine(
             request.WorkingDirectory ?? request.TreeRoot,
             phase.WorkingDirectory is { Length: > 0 } declared
-                ? LegPathNames.Expand(declared, paths, $"'{phase.Name}' workingDirectory", supplied)
+                ? LegPathNames.Expand(
+                    declared,
+                    paths,
+                    $"'{phase.Name}' workingDirectory",
+                    PlaceholderPolicy.LeaveAsWritten,
+                    supplied)
                 : "."));
 
         var result = await _phaseRunner
@@ -569,7 +603,12 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    FileName = LegPathNames.Expand(phase.Command[0], paths, $"'{phase.Name}' run line", supplied),
+                    FileName = LegPathNames.Expand(
+                        phase.Command[0],
+                        paths,
+                        $"'{phase.Name}' run line",
+                        PlaceholderPolicy.LeaveAsWritten,
+                        supplied),
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),
@@ -938,16 +977,10 @@ public sealed class RunnerRunService(
             environment[name] = value;
         }
 
-        return new RunnerPhase
-        {
-            Name = phase.Name,
-            Command = phase.Command,
-            WorkingDirectory = phase.WorkingDirectory,
-            Env = environment,
-            SuccessPattern = phase.SuccessPattern,
-            StallSeconds = phase.StallSeconds,
-            ContinueOnError = phase.ContinueOnError,
-        };
+        // A copy with one field changed. Written out member by member this dropped
+        // WatchContention and RequireInputsUnmoved, so an action that declared inputs ran with both
+        // guards off while its own text said they were on.
+        return phase with { Env = environment };
     }
 
     /// <summary>The steps a runner declares, and the predefined actions performed before they ran.</summary>

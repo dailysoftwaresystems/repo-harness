@@ -1223,9 +1223,11 @@ public static class HarnessConfigValidator
             CheckCountPattern(invocation.CountPattern, $"{setting}.countPattern", problems);
 
             if (invocation.CoresArgs is { Count: > 0 } coresArgs
-                && !coresArgs.Any(argument => argument.Contains("{cores}", StringComparison.Ordinal)))
+                && !coresArgs.Any(argument => argument.Contains(CoreCounts.Placeholder, StringComparison.Ordinal)))
             {
-                problems.Add($"{setting}.coresArgs never uses {{cores}}, so the core count never reaches the runner");
+                problems.Add(
+                    $"{setting}.coresArgs never uses {CoreCounts.Placeholder}, so the core count never "
+                    + "reaches the runner");
             }
 
             if (invocation.CoresEnv is { } coresEnv && coresEnv.Any(string.IsNullOrWhiteSpace))
@@ -1243,6 +1245,15 @@ public static class HarnessConfigValidator
                 invocation.WorkingDirectory is null ? null : [invocation.WorkingDirectory],
                 $"{setting}.workingDirectory",
                 problems);
+
+            // The one setting where the core count's own name belongs. It is spliced by the rule that
+            // owns it and only into these, so the same name in 'args' reaches the runner as literal
+            // text: checked here rather than left to disagree with what expands them.
+            CheckPlaceholders(
+                invocation.CoresArgs,
+                $"{setting}.coresArgs",
+                problems,
+                [CoreCounts.PlaceholderName]);
         }
 
         // What runs on a platform is its own section merged over 'all', field by field. Every
@@ -1430,24 +1441,26 @@ public static class HarnessConfigValidator
     }
 
     /// <summary>
-    /// Rejects a pattern that does not compile, or that is empty. Found at load, a typo in a
-    /// success pattern is a clear message; found in the middle of a run, it is a crash in a
-    /// phase that had nothing to do with it. An empty pattern matches any output at all, so as
-    /// a witness it proves nothing while appearing to prove something.
-    /// </summary>
-    /// <summary>
     /// Records a problem for every configured string naming a directory this tool cannot fill in.
     /// </summary>
     /// <param name="values">The configured strings, or null when the setting is absent.</param>
     /// <param name="setting">What to call the setting in the problem.</param>
     /// <param name="problems">Where problems are collected.</param>
-    private static void CheckPlaceholders(IReadOnlyList<string>? values, string setting, List<string> problems)
+    /// <param name="extra">
+    /// Names that are legal in this setting beyond the leg's directories, such as the core count's
+    /// own name in <c>coresArgs</c>.
+    /// </param>
+    private static void CheckPlaceholders(
+        IReadOnlyList<string>? values,
+        string setting,
+        List<string> problems,
+        IReadOnlyCollection<string>? extra = null)
     {
         foreach (var value in values ?? [])
         {
             try
             {
-                LegPathNames.RefuseUnknown(value, setting);
+                LegPathNames.RefuseUnknown(value, setting, PlaceholderPolicy.Refuse, extra);
             }
             catch (HarnessException ex)
             {
@@ -1475,6 +1488,12 @@ public static class HarnessConfigValidator
         }
     }
 
+    /// <summary>
+    /// Rejects a pattern that does not compile, or that is empty. Found at load, a typo in a
+    /// success pattern is a clear message; found in the middle of a run, it is a crash in a
+    /// phase that had nothing to do with it. An empty pattern matches any output at all, so as
+    /// a witness it proves nothing while appearing to prove something.
+    /// </summary>
     private static void CheckPattern(string? pattern, string setting, List<string> problems)
     {
         if (pattern is null)

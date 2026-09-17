@@ -56,18 +56,39 @@ public interface IBuildAdapter
 /// <summary>
 /// The kinds of file whose content can change what a build produces.
 /// </summary>
-/// <param name="Entries">
-/// Extensions and whole file names in one list, each as configuration spells it: <c>.cpp</c>,
-/// <c>cpp</c> and <c>CMakeLists.txt</c> all mean what they look like.
-/// </param>
 /// <remarks>
+/// Extensions and whole file names go in one list, each as configuration spells it: <c>.cpp</c>,
+/// <c>cpp</c> and <c>CMakeLists.txt</c> all mean what they look like.
+/// <para>
 /// Kinds rather than globs: the question is what kind of file this is, and a glob would have to be
 /// written per directory layout by every repository that has one. One list rather than extensions
 /// beside names, because a project overriding this writes the same shape the adapters do, and two
 /// lists would mean a project that declared only formats silently lost its build system's own files.
+/// </para>
 /// </remarks>
-public sealed record BuildInputKinds(IReadOnlyList<string> Entries)
+public sealed record BuildInputKinds
 {
+    /// <summary>The kinds, blank entries removed.</summary>
+    public IReadOnlyList<string> Entries { get; }
+
+    /// <summary>Builds the kinds from what an adapter or a project declared.</summary>
+    /// <param name="entries">The kinds as written.</param>
+    /// <remarks>
+    /// Blank entries are dropped here rather than trusted to have been refused upstream. A blank one
+    /// kept would make <see cref="Narrows"/> true while matching nothing, so a project whose list was
+    /// <c>[""]</c> would narrow every tracked file away: an empty input set, no moving-tree guard,
+    /// and a comparison that finds the tree unchanged on every build. The direction to fail in is
+    /// the wide one.
+    /// </remarks>
+    public BuildInputKinds(IReadOnlyList<string> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        Entries = [.. entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry))
+            .Select(entry => entry.Trim())];
+    }
+
     /// <summary>An adapter that cannot say, whose builds compare over every tracked file.</summary>
     public static BuildInputKinds Everything { get; } = new([]);
 
@@ -76,7 +97,6 @@ public sealed record BuildInputKinds(IReadOnlyList<string> Entries)
 
     /// <summary>Whether <paramref name="relativePath"/> is a file of one of these kinds.</summary>
     /// <param name="relativePath">A path relative to the tree root, spelled with either separator.</param>
-    /// <param name="comparison">How this platform compares paths.</param>
     /// <remarks>
     /// A file with no extension at all is covered, whatever the entries say. An extension is the
     /// signal this reads, and a file carrying none carries no signal — so the safe reading is that
@@ -89,8 +109,14 @@ public sealed record BuildInputKinds(IReadOnlyList<string> Entries)
     /// An entry matches a file's whole name or its extension, with or without the leading dot, so
     /// one list carries both questions and nobody has to know which kind of entry they wrote.
     /// </para>
+    /// <para>
+    /// Both halves compare without case, and deliberately not by how the platform compares paths.
+    /// The question here is what kind of file this is, not which file it is: <c>NuGet.Config</c> is
+    /// the file NuGet's own documentation names and Visual Studio writes, and on a case-sensitive
+    /// filesystem an Ordinal name test would decide it is not a build input at all.
+    /// </para>
     /// </remarks>
-    public bool Covers(string relativePath, StringComparison comparison)
+    public bool Covers(string relativePath)
     {
         if (!Narrows)
         {
@@ -107,7 +133,7 @@ public sealed record BuildInputKinds(IReadOnlyList<string> Entries)
 
         foreach (var entry in Entries)
         {
-            if (name.Equals(entry, comparison))
+            if (name.Equals(entry, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -187,15 +213,19 @@ public sealed class CMakeAdapter : IBuildAdapter
     /// Sources and headers, the build system's own files, and the templates <c>configure_file</c>
     /// reads. Assembly and the CUDA and Objective-C families are here because a project that has
     /// them compiles them; listing only C and C++ would leave a repository that builds a <c>.S</c>
-    /// deciding a changed one cannot affect its build.
+    /// deciding a changed one cannot affect its build. C++20 module interface units are here for the
+    /// same reason: CMake builds them under ninja, and a module interface is as much a source as a
+    /// header is.
     /// </remarks>
     public BuildInputKinds InputKinds { get; } = new(
         [
             ".c", ".cc", ".cpp", ".cxx", ".c++", ".m", ".mm", ".cu", ".cuh",
             ".h", ".hh", ".hpp", ".hxx", ".h++", ".inc", ".ipp", ".tcc", ".def",
+            ".ixx", ".cppm", ".ccm", ".cxxm",
             ".s", ".asm", ".rc", ".manifest",
             ".cmake", ".in", ".ninja", ".make", ".mk", ".pc",
-            "CMakeLists.txt", "Makefile", "makefile", "GNUmakefile", "meson.build", "conanfile.txt", "conanfile.py", "vcpkg.json",
+            "CMakeLists.txt", "Makefile", "GNUmakefile", "meson.build", "conanfile.txt", "conanfile.py", "vcpkg.json",
+            "CMakePresets.json", "CMakeUserPresets.json",
         ]);
 
     /// <inheritdoc/>
@@ -290,8 +320,8 @@ public sealed class DotnetAdapter : IBuildAdapter
         [
             ".cs", ".vb", ".fs", ".fsi", ".fsx", ".razor", ".cshtml", ".xaml",
             ".csproj", ".vbproj", ".fsproj", ".shproj", ".projitems", ".sln", ".slnx", ".slnf",
-            ".props", ".targets", ".resx", ".settings", ".ruleset", ".editorconfig", ".json",
-            "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "nuget.config", "NuGet.config", "global.json",
+            ".props", ".targets", ".resx", ".settings", ".ruleset", ".editorconfig", ".json", ".config",
+            "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "nuget.config", "global.json",
         ]);
 
     /// <inheritdoc/>

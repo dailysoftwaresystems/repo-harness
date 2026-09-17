@@ -64,7 +64,14 @@ public sealed class RunnerConfig
 }
 
 /// <summary>One phase of a runner.</summary>
-public sealed class RunnerPhase
+/// <remarks>
+/// A record so that a phase derived from another is written as a copy with the one field changed,
+/// rather than rebuilt member by member. Rebuilt, every field added later has to be remembered at
+/// every rebuild site, and the one that is forgotten is silently false: this shipped once, and what
+/// it dropped was <see cref="WatchContention"/> and <see cref="RequireInputsUnmoved"/> — two
+/// guards, off, in exactly the action files that declared inputs.
+/// </remarks>
+public sealed record RunnerPhase
 {
     /// <summary>Name, used in progress output and to name this phase's log file.</summary>
     public required string Name { get; init; }

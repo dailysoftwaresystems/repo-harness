@@ -19,8 +19,16 @@ public sealed record CoreCount(int Value, string Source);
 /// </remarks>
 public static class CoreCounts
 {
+    /// <summary>The name a <c>coresArgs</c> element spells inside braces where the number goes.</summary>
+    /// <remarks>
+    /// Named once and read by the other vocabulary rather than copied into it. Copied, the two drift
+    /// apart the first time either is changed, and what drifting looks like is one of them refusing
+    /// a string the other was about to fill in.
+    /// </remarks>
+    public const string PlaceholderName = "cores";
+
     /// <summary>The placeholder a <c>coresArgs</c> element carries where the number goes.</summary>
-    public const string Placeholder = "{cores}";
+    public const string Placeholder = "{" + PlaceholderName + "}";
 
     /// <summary>
     /// The core count for a phase: the invocation's own <c>cores</c>, else the host's

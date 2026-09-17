@@ -204,6 +204,13 @@ public sealed class LocalSyncTransport(
             var full = Resolve(root, directory);
             var relative = directory;
 
+            // Only the directory the plan emptied is answered for. The walk continues upward to take
+            // parents the removal has just emptied in turn, but a parent that still holds something
+            // is the ordinary case — it is where the tree keeps its other files — and reporting it
+            // as a copy that diverges would put a false warning on almost every sync that deletes a
+            // nested directory.
+            var emptiedHere = true;
+
             while (PathContainment.IsStrictlyInside(expanded, full, _platform.PathComparison))
             {
                 // Files and subdirectories both, and links among them: EnumerateFiles lists a link
@@ -226,16 +233,20 @@ public sealed class LocalSyncTransport(
 
                 if (held.Count > 0)
                 {
-                    // Answered for rather than passed over. This is the shape a consumer measured:
-                    // a directory whose every managed file the plan deleted, kept alive by bytecode
-                    // that sync.neverTransfer protects, so the checkout diverges from this tree and
-                    // the next structural check on that host fails with nothing naming the cause.
-                    answered.Add(new EmptiedDirectory(relative.Replace('\\', '/'), Removed: false, held!));
+                    if (emptiedHere)
+                    {
+                        // Answered for rather than passed over. This is the shape a consumer measured:
+                        // a directory whose every managed file the plan deleted, kept alive by bytecode
+                        // that sync.neverTransfer protects, so the checkout diverges from this tree and
+                        // the next structural check on that host fails with nothing naming the cause.
+                        answered.Add(EmptiedDirectory.Kept(relative.Replace('\\', '/'), held!));
+                    }
+
                     break;
                 }
 
                 _fileSystem.DeleteDirectory(full);
-                answered.Add(new EmptiedDirectory(relative.Replace('\\', '/'), Removed: true, []));
+                answered.Add(EmptiedDirectory.Gone(relative.Replace('\\', '/')));
 
                 if (Path.GetDirectoryName(full) is not { Length: > 0 } parent)
                 {
@@ -244,6 +255,7 @@ public sealed class LocalSyncTransport(
 
                 full = parent;
                 relative = ManifestBuilder.Relative(expanded, parent);
+                emptiedHere = false;
             }
         }
 

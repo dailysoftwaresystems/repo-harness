@@ -275,11 +275,18 @@ public sealed class InputWatch : IDisposable
     /// </summary>
     private const int BufferBytes = 64 * 1024;
 
+    /// <summary>
+    /// How many directories are watched separately before one watch over the whole tree is taken
+    /// instead. A tree with more top-level directories than this is not the shape this optimisation
+    /// is for, and a watch per directory would spend handles to no purpose.
+    /// </summary>
+    private const int MostDirectoriesWatched = 64;
+
     private readonly Lock _gate = new();
     private readonly Dictionary<string, string> _tracked;
     private readonly HashSet<string> _changed = new(StringComparer.Ordinal);
     private readonly string _root;
-    private readonly FileSystemWatcher? _watcher;
+    private readonly List<FileSystemWatcher> _watchers = [];
     private string? _failure;
 
     internal InputWatch(string root, IEnumerable<string> inputs, StringComparer comparer)
@@ -292,27 +299,108 @@ public sealed class InputWatch : IDisposable
             _tracked[input] = input;
         }
 
+        if (!Directory.Exists(_root))
+        {
+            // Nothing to watch and nothing watched. Left unsaid this would answer every question
+            // about the span with "nothing changed", which is the one answer it has not earned.
+            _failure = $"'{_root}' is not a directory, so nothing about it could be watched";
+            return;
+        }
+
         try
         {
-            _watcher = new FileSystemWatcher(_root)
+            foreach (var (directory, recursive) in Targets())
             {
-                IncludeSubdirectories = true,
-                InternalBufferSize = BufferBytes,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
-            };
+                var watcher = new FileSystemWatcher(directory)
+                {
+                    IncludeSubdirectories = recursive,
+                    InternalBufferSize = BufferBytes,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+                };
 
-            _watcher.Changed += OnChanged;
-            _watcher.Created += OnChanged;
-            _watcher.Deleted += OnChanged;
-            _watcher.Renamed += OnRenamed;
-            _watcher.Error += OnError;
-            _watcher.EnableRaisingEvents = true;
+                watcher.Changed += OnChanged;
+                watcher.Created += OnChanged;
+                watcher.Deleted += OnChanged;
+                watcher.Renamed += OnRenamed;
+                watcher.Error += OnError;
+                watcher.EnableRaisingEvents = true;
+
+                _watchers.Add(watcher);
+            }
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
             // A machine that cannot watch this tree — one out of inotify watches, say — leaves the
             // question open. It never leaves it answered "nothing changed".
             _failure = ex.Message;
+        }
+
+        if (_watchers.Count == 0)
+        {
+            _failure ??= $"no directory holding any of the {_tracked.Count} input(s) is present under "
+                + $"'{_root}', so nothing about them could be watched";
+        }
+    }
+
+    /// <summary>
+    /// The directories to watch, and whether each is watched all the way down: one per top-level
+    /// directory that holds a tracked input, plus the root itself for the files directly in it.
+    /// </summary>
+    /// <remarks>
+    /// Not one watch over the whole tree. A build writes its objects into <c>build/&lt;variant&gt;</c>,
+    /// which is inside the tree and is not tracked, so a recursive watch on the root receives every
+    /// object file, dependency file and generated header the build emits. That overflows the
+    /// operating system's buffer, and an overflow is reported as a watch that cannot be trusted —
+    /// so the build that triggered it reports <c>unmeasured</c>, marks its own directory
+    /// untrustworthy, and the next build starts from clean. A guard that turns a working build into
+    /// a permanent full rebuild is worse than the one it replaced.
+    /// <para>
+    /// Watching only where the inputs are excludes the build directory, <c>.git</c> and every other
+    /// untracked directory by construction, rather than by a list of names that would have to be
+    /// kept correct.
+    /// </para>
+    /// </remarks>
+    private IEnumerable<(string Directory, bool Recursive)> Targets()
+    {
+        var directories = new HashSet<string>(StringComparer.Ordinal);
+        var rootFiles = false;
+
+        foreach (var input in _tracked.Keys)
+        {
+            var at = input.IndexOf('/', StringComparison.Ordinal);
+
+            if (at <= 0)
+            {
+                rootFiles = true;
+                continue;
+            }
+
+            directories.Add(input[..at]);
+        }
+
+        if (directories.Count > MostDirectoriesWatched)
+        {
+            yield return (_root, true);
+            yield break;
+        }
+
+        if (rootFiles)
+        {
+            // Not recursive: the files directly in the root, and nothing under a directory that has
+            // its own watch or no tracked input at all.
+            yield return (_root, false);
+        }
+
+        foreach (var directory in directories.Order(StringComparer.Ordinal))
+        {
+            var full = Path.Combine(_root, directory);
+
+            // A directory that is not there cannot be watched. Its inputs are absent, which the
+            // fingerprints on either side of the work report on their own.
+            if (Directory.Exists(full))
+            {
+                yield return (full, true);
+            }
         }
     }
 
@@ -343,14 +431,17 @@ public sealed class InputWatch : IDisposable
     /// <summary>Stops watching. The changes already recorded stay readable.</summary>
     public void Dispose()
     {
-        try
+        foreach (var watcher in _watchers)
         {
-            _watcher?.Dispose();
-        }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
-        {
-            // Already gone, or the platform tore the watch down first; either way nothing is lost,
-            // because what it recorded is held here rather than in the watcher.
+            try
+            {
+                watcher.Dispose();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // Already gone, or the platform tore the watch down first; either way nothing is
+                // lost, because what it recorded is held here rather than in the watcher.
+            }
         }
     }
 

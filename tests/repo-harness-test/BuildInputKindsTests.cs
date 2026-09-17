@@ -27,7 +27,7 @@ public sealed class BuildInputKindsTests
     [InlineData(".claude/skills/x/SKILL.md", false)]
     [InlineData("README.rst", false)]
     public void ACMakeBuild_ComparesOverWhatItCompiles(string path, bool covered)
-        => Assert.Equal(covered, Kinds("cmake").Covers(path, StringComparison.Ordinal));
+        => Assert.Equal(covered, Kinds("cmake").Covers(path));
 
     /// <summary>
     /// The same question has a different answer per language, which is the whole reason the set
@@ -44,7 +44,7 @@ public sealed class BuildInputKindsTests
     [InlineData("dart", "pubspec.yaml", true)]
     [InlineData("dart", "docs/guide.md", false)]
     public void EachLanguageComparesOverItsOwnKinds(string type, string path, bool covered)
-        => Assert.Equal(covered, Kinds(type).Covers(path, StringComparison.Ordinal));
+        => Assert.Equal(covered, Kinds(type).Covers(path));
 
     /// <summary>
     /// A file with no extension is covered whatever the entries say. Measured on a consumer's tree:
@@ -59,11 +59,11 @@ public sealed class BuildInputKindsTests
     [InlineData("src/generated/manifest")]
     public void AFileWithNoExtension_IsAlwaysABuildInput(string path)
     {
-        Assert.True(Kinds("cmake").Covers(path, StringComparison.Ordinal));
+        Assert.True(Kinds("cmake").Covers(path));
 
         // Including against a list somebody wrote themselves, which is the case that matters: an
         // override narrow enough to exclude it would rest the guarantee on their build system.
-        Assert.True(new BuildInputKinds([".cpp"]).Covers(path, StringComparison.Ordinal));
+        Assert.True(new BuildInputKinds([".cpp"]).Covers(path));
     }
 
     /// <summary>
@@ -79,7 +79,7 @@ public sealed class BuildInputKindsTests
     [InlineData("CMakeLists.txt", "src/app.txt", false)]
     [InlineData(".cpp", "src/app.h", false)]
     public void AnEntryMatchesAnExtensionOrAWholeName(string entry, string path, bool covered)
-        => Assert.Equal(covered, new BuildInputKinds([entry]).Covers(path, StringComparison.Ordinal));
+        => Assert.Equal(covered, new BuildInputKinds([entry]).Covers(path));
 
     /// <summary>
     /// Saying nothing is not saying "nothing matters". A set that narrowed to nothing would compare
@@ -89,7 +89,7 @@ public sealed class BuildInputKindsTests
     public void AnEmptySet_ComparesOverEverything()
     {
         Assert.False(BuildInputKinds.Everything.Narrows);
-        Assert.True(BuildInputKinds.Everything.Covers("docs/guide.md", StringComparison.Ordinal));
-        Assert.True(BuildInputKinds.Everything.Covers("anything at all.xyz", StringComparison.Ordinal));
+        Assert.True(BuildInputKinds.Everything.Covers("docs/guide.md"));
+        Assert.True(BuildInputKinds.Everything.Covers("anything at all.xyz"));
     }
 }

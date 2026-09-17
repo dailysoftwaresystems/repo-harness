@@ -190,6 +190,7 @@ public sealed class SyncService(
     Legs.LegsService legsService,
     Git.IGitClient gitClient,
     IFileSystem fileSystem,
+    Platform.IHostPlatform platform,
     IHarnessOutput output) : ISyncService
 {
     /// <summary>The command this service reports under.</summary>
@@ -202,6 +203,7 @@ public sealed class SyncService(
     private readonly ISyncTransportFactory _transportFactory = transportFactory;
     private readonly Legs.LegsService _legsService = legsService;
     private readonly Git.IGitClient _gitClient = gitClient;
+    private readonly Platform.IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
     /// <inheritdoc/>
@@ -340,14 +342,29 @@ public sealed class SyncService(
         // A rule somebody believes is protecting something, doubted before a deletion rests on it.
         // A rooted entry that matches nothing here while the name exists deeper reads, to any
         // reader, as evidence that name is protected.
-        foreach (var name in exclusions
-            .RootedEntriesMatchingNothing(_fileSystem, context.Layout.RepositoryRoot, cancellationToken))
+        var rooted = exclusions.RootedEntriesMatchingNothing(
+            _fileSystem,
+            context.Layout.RepositoryRoot,
+            _platform.PathComparison,
+            cancellationToken);
+
+        foreach (var name in rooted.MatchingNothing)
         {
             _output.Warn(
                 CommandName,
                 $"sync.neverTransfer names '{name}', which is not in this tree's root though the name "
-                + $"does exist deeper in it, so this entry protects nothing. Write '**/{name}' to "
-                + "cover that name wherever it appears.");
+                + $"does exist deeper in it, so this entry protects nothing. Write "
+                + $"'{SyncPathPatterns.AnyDepth}{name}' to cover that name wherever it appears.");
+        }
+
+        if (rooted.Incomplete is { } unread)
+        {
+            // Said rather than swallowed. The entries this would have named are exactly the ones a
+            // reader believes are protecting something, so "it found none" and "it stopped looking"
+            // must not read the same.
+            _output.Warn(
+                CommandName,
+                $"sync.neverTransfer entries could not all be checked against this tree: {unread}");
         }
 
         var state = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)

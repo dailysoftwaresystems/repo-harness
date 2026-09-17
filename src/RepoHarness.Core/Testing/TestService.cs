@@ -97,7 +97,11 @@ public sealed record TestRequest
 /// while a regex can still read it.
 /// </param>
 /// <param name="Phase">What running the invocation produced.</param>
-/// <param name="Inputs">Whether the files the tests read held still, moved, or could not be measured.</param>
+/// <param name="Inputs">
+/// Whether the files the tests read held still, moved, or could not be measured, or
+/// <see langword="null"/> where there were none to watch. Null rather than a clean comparison,
+/// because a leg with nothing to fingerprint has not established that its tree held still.
+/// </param>
 /// <param name="Contention">What sampling the process table during the leg found.</param>
 /// <param name="Cores">How many cores the run was given, and what decided it.</param>
 /// <param name="Command">The invocation as it was started, for a reader and for a refusal that quotes it.</param>
@@ -106,7 +110,7 @@ public sealed record TestLegResult(
     LegEntry Entry,
     string LogFile,
     PhaseResult Phase,
-    InputComparison Inputs,
+    InputComparison? Inputs,
     ContentionReport Contention,
     CoreCount Cores,
     TestCommand Command);
@@ -199,10 +203,8 @@ public sealed class TestService(
                 _processSampler,
                 new LegGuardRequest
                 {
-                    Leg = request.Leg,
                     TreeRoot = request.TreeRoot,
-                    Inputs = inputs,
-                    UnmeasurableInputs = unmeasurable,
+                    Inputs = unmeasurable is null ? LegInputs.Watch(inputs) : LegInputs.Unmeasured(unmeasurable),
                     Contention = new ContentionRequest
                     {
                         Leg = request.Leg,
@@ -242,7 +244,7 @@ public sealed class TestService(
 
         var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
         var contention = seen.Contention!;
-        var comparison = seen.Inputs!;
+        var comparison = seen.Inputs;
 
         Report(request, contention);
 

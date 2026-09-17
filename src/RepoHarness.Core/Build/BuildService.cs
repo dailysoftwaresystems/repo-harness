@@ -126,10 +126,8 @@ public sealed class BuildService(
                 _processSampler,
                 new LegGuardRequest
                 {
-                    Leg = request.Leg,
                     TreeRoot = request.TreeRoot,
-                    Inputs = watched,
-                    UnmeasurableInputs = unmeasurable,
+                    Inputs = unmeasurable is null ? LegInputs.Watch(watched) : LegInputs.Unmeasured(unmeasurable),
                     Contention = new ContentionRequest
                     {
                         Leg = request.Leg,
@@ -264,12 +262,19 @@ public sealed class BuildService(
 
             Report(request, seen.Contention!);
 
-            // Recorded only for a build that reached a verdict on its own terms, and marked as
-            // untrustworthy when the tree moved under it. The record is what the next build's
-            // staleness decision reads: written after a moving tree it would describe the tree as
-            // it ended up, and the next build would compare cleanly against objects compiled from
-            // the tree as it began.
-            if (verdict.Verdict == LegVerdict.Passed || seen.Inputs?.Verdict() is not null)
+            // Recorded for a build that reached a verdict on its own terms, and marked as
+            // untrustworthy when anything doubted it. The record is what the next build's staleness
+            // decision reads: written after a moving tree it would describe the tree as it ended up,
+            // and the next build would compare cleanly against objects compiled from the tree as it
+            // began.
+            //
+            // Contention counts as doubt for the same reason. A build that shared its directory with
+            // another one wrote no record at all until now, so the previous build's clean record
+            // survived it and the obvious next step — run it again, having changed nothing — built
+            // incrementally on top of objects this tool had just called untrustworthy.
+            if (verdict.Verdict == LegVerdict.Passed
+                || seen.Inputs?.Verdict() is not null
+                || seen.Contention?.Verdict() is not null)
             {
                 await RecordInputsAsync(request, buildDirectory, phases, seen, watched, cancellationToken)
                     .ConfigureAwait(false);
@@ -466,7 +471,14 @@ public sealed class BuildService(
         DateTime newestOutput,
         CancellationToken cancellationToken)
     {
-        var (scanned, _) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+        var (scanned, unlistable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+
+        if (unlistable is not null)
+        {
+            // The set this would have scanned could not be established, so "nothing is newer" is an
+            // answer about no files. Handled as the content comparison handles it, and not discarded.
+            return $"no set to scan: {unlistable}";
+        }
 
         foreach (var relativePath in scanned)
         {
@@ -540,12 +552,32 @@ public sealed class BuildService(
             ? new BuildInputKinds(request.Project.RebuildableFormats)
             : BuildAdapters.For(request.Project.Type).InputKinds;
 
-        // Ordinal, as every other comparison of a tracked path here is: the names come from git's
-        // index, which records the spelling, and on Linux 'Makefile' and 'makefile' are two files.
-        // The extension half of the rule is case-insensitive on its own.
-        return kinds.Narrows
-            ? ([.. tracked.Where(path => kinds.Covers(path, StringComparison.Ordinal))], null)
-            : (tracked, null);
+        if (!kinds.Narrows)
+        {
+            return (tracked, null);
+        }
+
+        var narrowed = tracked.Where(kinds.Covers).ToList();
+
+        // A narrowing that removes every tracked file leaves nothing to watch, and nothing to watch
+        // is reported as a span with nothing to say about it. That is right for a repository that
+        // genuinely tracks none of its language's files and wrong for a list with a typo in it, and
+        // the two are indistinguishable from here — so it is said rather than decided. Said, because
+        // a guard that is off must never be off quietly.
+        if (narrowed.Count == 0 && tracked.Count > 0)
+        {
+            var source = request.Project.RebuildableFormats.Count > 0
+                ? "this project's rebuildableFormats"
+                : $"the kinds a '{request.Project.Type}' project reads";
+
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: none of the {tracked.Count} tracked file(s) is a build input by "
+                + $"{source}, so nothing was watched while this built and nothing here can say the "
+                + "tree held still.");
+        }
+
+        return (narrowed, null);
     }
 
     /// <summary>
@@ -640,8 +672,16 @@ public sealed class BuildService(
         // directory holds was compiled from a tree the fingerprint below does not describe. The
         // marker already means "nothing this build stamped can be ordered", and that is exactly
         // what is true here, so the next build starts from clean and says why.
-        var stepped = phases.Any(phase => phase.ClockStepped) || seen.Inputs?.Verdict() is not null;
         var snapshot = await _fingerprints.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
+
+        // An input that could not be read leaves no line in the record, and a path the next build
+        // cannot find in the record is one its content comparison skips — so the file that was
+        // unreadable here is exactly the file that would go unchecked there. Marked instead, which
+        // costs one clean rebuild and cannot hand anybody a stale object.
+        var stepped = phases.Any(phase => phase.ClockStepped)
+            || seen.Inputs?.Verdict() is not null
+            || seen.Contention?.Verdict() is not null
+            || snapshot.Unreadable.Count > 0;
 
         var record = new System.Text.StringBuilder()
             .Append(stepped ? ClockStepMarker : "clean").Append('\n')

@@ -103,10 +103,14 @@ public sealed class SyncExclusionsReachTests
             worktreesRoot: ".worktrees");
 
         var named = exclusions.RootedEntriesMatchingNothing(
-            harness.FileSystem, temp.Path, TestContext.Current.CancellationToken);
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            TestContext.Current.CancellationToken);
 
         // '.secrets' protects nothing and is named; 'build' is at the root and is not.
-        Assert.Equal([".secrets"], named);
+        Assert.Equal([".secrets"], named.MatchingNothing);
+        Assert.Null(named.Incomplete);
     }
 
     /// <summary>
@@ -126,6 +130,9 @@ public sealed class SyncExclusionsReachTests
             worktreesRoot: ".worktrees");
 
         Assert.Empty(exclusions.RootedEntriesMatchingNothing(
-            harness.FileSystem, temp.Path, TestContext.Current.CancellationToken));
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            TestContext.Current.CancellationToken).MatchingNothing);
     }
 }

@@ -149,13 +149,40 @@ public sealed record SyncManifestAnswer(IReadOnlyList<SyncEntry> Entries)
 }
 
 /// <summary>One directory a deletion emptied, and what became of it.</summary>
-/// <param name="Path">Its path, relative to the copy's root.</param>
-/// <param name="Removed">Whether it was removed.</param>
-/// <param name="Held">
-/// What was still in it when it was not, by name, so a reader can see what kept it. Empty for one
-/// that went.
-/// </param>
-public sealed record EmptiedDirectory(string Path, bool Removed, IReadOnlyList<string> Held);
+/// <remarks>
+/// Built through <see cref="Removed"/> and <see cref="Kept"/> rather than by naming both fields, so
+/// the two states that mean something are the only two that can be written. Removed-with-names and
+/// kept-with-nothing are both readable as a sentence and neither is true of anything.
+/// <para>
+/// <see cref="Held"/> defaults to a list for the same reason <see cref="SyncManifestAnswer.Links"/>
+/// does: a far side answering without the member at all deserialises it as null, and null here is
+/// dereferenced while composing the warning that names what kept the directory.
+/// </para>
+/// </remarks>
+public sealed record EmptiedDirectory
+{
+    /// <summary>Its path, relative to the copy's root.</summary>
+    public required string Path { get; init; }
+
+    /// <summary>Whether it was removed.</summary>
+    public bool Removed { get; init; }
+
+    /// <summary>
+    /// What was still in it when it was not, by name, so a reader can see what kept it. Empty for
+    /// one that went, and never null however the far side spelled its answer.
+    /// </summary>
+    public IReadOnlyList<string> Held { get; init; } = [];
+
+    /// <summary>A directory the deletion emptied and this removed.</summary>
+    /// <param name="path">Its path, relative to the copy's root.</param>
+    public static EmptiedDirectory Gone(string path) => new() { Path = path, Removed = true };
+
+    /// <summary>A directory that stayed, and what was still in it.</summary>
+    /// <param name="path">Its path, relative to the copy's root.</param>
+    /// <param name="held">What kept it, by name.</param>
+    public static EmptiedDirectory Kept(string path, IReadOnlyList<string> held) =>
+        new() { Path = path, Removed = false, Held = held };
+}
 
 /// <summary>What the far side did with the directories a deletion emptied.</summary>
 /// <param name="Directories">One entry per directory considered.</param>

@@ -3,6 +3,63 @@ using RepoHarness.Core.Results;
 namespace RepoHarness.Core.Execution;
 
 /// <summary>
+/// The files a span of work wants fingerprinted, or why it cannot have them.
+/// </summary>
+/// <remarks>
+/// One member holding three states rather than a list beside a reason, because the two written
+/// separately can say a fourth thing that is true of nothing — a set <em>and</em> a reason it could
+/// not be established — and, worse, can leave the reason off. An empty list and a forgotten reason
+/// are indistinguishable at the call site, and they mean opposite things: one is work with nothing
+/// to watch, the other is work nobody watched.
+/// <para>
+/// Built through the three names so the fourth cannot be written. <see cref="Watch"/> of an empty
+/// list is <see cref="None"/>, deliberately: a set that is genuinely empty has nothing to say, while
+/// a set that could not be established has something to say and says it through
+/// <see cref="Unmeasured"/>.
+/// </para>
+/// </remarks>
+public sealed record LegInputs
+{
+    private LegInputs(IReadOnlyList<string> paths, string? unmeasurable)
+    {
+        Paths = paths;
+        Unmeasurable = unmeasurable;
+    }
+
+    /// <summary>The files to fingerprint. Empty when there are none, or when there could be none.</summary>
+    public IReadOnlyList<string> Paths { get; }
+
+    /// <summary>
+    /// Why the set could not be established, or <see langword="null"/> when nothing prevented it.
+    /// </summary>
+    public string? Unmeasurable { get; }
+
+    /// <summary>Whether there is anything here to fingerprint.</summary>
+    public bool Watching => Unmeasurable is null && Paths.Count > 0;
+
+    /// <summary>Nothing to watch, and nothing preventing it. Contributes no verdict.</summary>
+    public static LegInputs None { get; } = new([], null);
+
+    /// <summary>The files to fingerprint, or <see cref="None"/> when there are none.</summary>
+    /// <param name="paths">The files, relative to the tree root.</param>
+    public static LegInputs Watch(IReadOnlyList<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        return paths.Count == 0 ? None : new LegInputs(paths, null);
+    }
+
+    /// <summary>A set that could not be established, and why.</summary>
+    /// <param name="why">What stopped it, in the words a report will carry.</param>
+    public static LegInputs Unmeasured(string why)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(why);
+
+        return new LegInputs([], why);
+    }
+}
+
+/// <summary>
 /// What a span of work wants watched while it runs.
 /// </summary>
 /// <remarks>
@@ -12,24 +69,14 @@ namespace RepoHarness.Core.Execution;
 /// </remarks>
 public sealed record LegGuardRequest
 {
-    /// <summary>The leg, so a report says whose work this was.</summary>
-    public required string Leg { get; init; }
-
     /// <summary>The tree the inputs are resolved against.</summary>
     public required string TreeRoot { get; init; }
 
     /// <summary>
-    /// The files to fingerprint before, during and after, or <see langword="null"/> to fingerprint
-    /// nothing.
+    /// The files to fingerprint before, during and after, why they could not be established, or
+    /// nothing to fingerprint.
     /// </summary>
-    public IReadOnlyList<string>? Inputs { get; init; }
-
-    /// <summary>
-    /// Why the input set could not be established, when it could not. Carried rather than left as an
-    /// empty list: an empty list fingerprints cleanly, and "nothing moved" is exactly the answer
-    /// work nobody watched must not give.
-    /// </summary>
-    public string? UnmeasurableInputs { get; init; }
+    public LegInputs Inputs { get; init; } = LegInputs.None;
 
     /// <summary>What to watch the process table for, or <see langword="null"/> to watch nothing.</summary>
     public ContentionRequest? Contention { get; init; }
@@ -153,16 +200,16 @@ public sealed class LegGuards : IAsyncDisposable
 
         // Watched only where the set is known. Where it is not, the reason is carried through to
         // the report, which is what keeps an unmeasured span from reading as a clean one.
-        var watching = request.Inputs is { Count: > 0 } && request.UnmeasurableInputs is null;
+        var watching = request.Inputs.Watching;
 
         var before = watching
-            ? await fingerprints.TakeAsync(request.TreeRoot, request.Inputs!, cancellationToken).ConfigureAwait(false)
+            ? await fingerprints.TakeAsync(request.TreeRoot, request.Inputs.Paths, cancellationToken).ConfigureAwait(false)
             : null;
 
         // Before, during and after. Two snapshots alone cannot see an edit that was undone before
         // the work ended, which is the shape the measured failure took: a configuration file
         // rewritten while a suite ran and restored before it finished.
-        var watch = watching ? fingerprints.Watch(request.TreeRoot, request.Inputs!) : null;
+        var watch = watching ? fingerprints.Watch(request.TreeRoot, request.Inputs.Paths) : null;
 
         var sampling = request.Contention is null
             ? null
@@ -189,7 +236,7 @@ public sealed class LegGuards : IAsyncDisposable
 
         InputComparison? inputs = null;
 
-        if (_request.UnmeasurableInputs is { } why)
+        if (_request.Inputs.Unmeasurable is { } why)
         {
             // Asked for and not answerable. Unmeasured rather than clean, because a set that could
             // not be established says nothing about whether the tree held still.
@@ -198,7 +245,7 @@ public sealed class LegGuards : IAsyncDisposable
         else if (_before is not null)
         {
             var after = await _fingerprints
-                .TakeAsync(_request.TreeRoot, _request.Inputs!, cancellationToken)
+                .TakeAsync(_request.TreeRoot, _request.Inputs.Paths, cancellationToken)
                 .ConfigureAwait(false);
 
             inputs = InputFingerprint.Compare(_before, after, _watch);
