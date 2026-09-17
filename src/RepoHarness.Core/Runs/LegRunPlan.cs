@@ -79,6 +79,63 @@ public sealed record PlacedLeg(
                 + $"toolchain for {Host.Os}.");
     }
 
+    /// <summary>
+    /// Who this leg is, in the words a configured command can spell.
+    /// </summary>
+    /// <param name="runId">The run this work belongs to.</param>
+    /// <remarks>
+    /// Derived here and nowhere else, so a benchmark's label and a build directory's name cannot
+    /// come to disagree about which processor a leg targets. The processor is the leg's own, not the
+    /// host's: under emulation those differ, and what a measurement was taken *of* is the target.
+    /// </remarks>
+    public Execution.LegIdentity IdentityFor(string runId) => new(
+        Leg: Name,
+        Os: Host.Os ?? Leg.Os,
+        Processor: Variant.Processor,
+        Toolchain: Variant.Toolchain,
+        Config: Variant.Config,
+        Variant: Variant.DirectoryName,
+        Host: Host.Host.ToString(),
+        RunId: runId);
+
+    /// <summary>
+    /// The one file this leg's build is declared to produce, and why there is none when there is
+    /// not.
+    /// </summary>
+    /// <remarks>
+    /// A single answer or none. <c>buildOutputs</c> is a list, every entry of which must exist for a
+    /// build to be witnessed, so "the product" is a well-formed question only where the list holds
+    /// exactly one path for this platform. Where it holds several, this returns the reason instead
+    /// of a guess: an instrument pointed at the wrong one of three binaries measures something
+    /// nobody asked about and reports it as a success.
+    /// </remarks>
+    public (string? Path, string? Problem) ProductFor()
+    {
+        if (Project is null)
+        {
+            return (null, $"leg '{Name}' builds nothing, so it has no product");
+        }
+
+        var platform = Host.Os ?? Leg.Os;
+
+        var declared = Project.BuildOutputs
+            .Select(output => output.For(platform))
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path!)
+            .ToList();
+
+        return declared.Count switch
+        {
+            1 => (Path.Combine(BuildDirectory, declared[0]), null),
+            0 => (null, $"project '{Project.Name}' declares no buildOutputs for {platform}"),
+            _ => (
+                null,
+                $"project '{Project.Name}' declares {declared.Count} buildOutputs for {platform} "
+                + $"({string.Join(", ", declared)}), so which one is 'the product' is not something "
+                + "this tool can decide"),
+        };
+    }
+
     /// <summary>What the executor needs to schedule this leg.</summary>
     /// <remarks>
     /// A local leg carries no tree key, because it needs no sync: the executor announces a transfer

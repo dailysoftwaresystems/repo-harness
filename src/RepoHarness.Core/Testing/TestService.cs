@@ -45,6 +45,18 @@ public sealed record TestRequest
     public required string PlatformKey { get; init; }
 
     /// <summary>
+    /// Who this leg is, for a test invocation that names <c>{leg}</c>, <c>{os}</c> and the rest, or
+    /// <see langword="null"/> for a caller with no leg in hand.
+    /// </summary>
+    public Execution.LegIdentity? Identity { get; init; }
+
+    /// <summary>The one file this leg's build is declared to produce, when there is exactly one.</summary>
+    public string? Product { get; init; }
+
+    /// <summary>Why there is no product, for a refusal that can say which case it is.</summary>
+    public string? ProductProblem { get; init; }
+
+    /// <summary>
     /// The host's <c>testCores</c>, when it declares one. A remote host rarely has the same core
     /// count as the machine that wrote the configuration, so its own value outranks the default.
     /// </summary>
@@ -185,7 +197,12 @@ public sealed class TestService(
             cores.Value,
             request.Filter,
             request.Excludes,
-            new LegPaths(request.TreeRoot, request.BuildDirectory));
+            new LegPaths(request.TreeRoot, request.BuildDirectory)
+            {
+                Identity = request.Identity,
+                Product = request.Product,
+                ProductProblem = request.ProductProblem,
+            });
 
         // Compiled before anything starts, as the success pattern is: a pattern that is not a regular
         // expression is a mistake in tracked configuration, and finding it after the suite has run

@@ -32,12 +32,16 @@ public sealed class HarnessContextLoader(
     IRepositoryLocator repositoryLocator,
     IConfigStore configStore,
     IGitClient gitClient,
-    IFileSystem fileSystem) : IHarnessContextLoader
+    IFileSystem fileSystem,
+    Platform.IHostPlatform platform,
+    Output.IHarnessOutput output) : IHarnessContextLoader
 {
     private readonly IRepositoryLocator _repositoryLocator = repositoryLocator;
     private readonly IConfigStore _configStore = configStore;
     private readonly IGitClient _gitClient = gitClient;
     private readonly IFileSystem _fileSystem = fileSystem;
+    private readonly Platform.IHostPlatform _platform = platform;
+    private readonly Output.IHarnessOutput _output = output;
 
     public async Task<HarnessContext> LoadAsync(
         string startDirectory,
@@ -61,17 +65,39 @@ public sealed class HarnessContextLoader(
                 $"'{startDirectory}' is not inside a git repository.");
         }
 
-        // Configuration is read from the main checkout. A worktree carries its own
-        // copy through git, but the main checkout's is the one the harness maintains.
-        var configFile = Path.Combine(
-            layout.MainHarnessDirectory,
-            HarnessLayout.ConfigFileName);
+        // Read from the tree being acted on, which for a worktree is that worktree. config.json
+        // is tracked, so a worktree has its own and a branch may legitimately change it: a leg it
+        // adds, a runner it declares, a project it renames. Read from the main checkout instead —
+        // which is what this did — a lane could not run anything it had just written, and nothing
+        // said so: the tree's own file was read by nobody and no message named the file that was.
+        //
+        // State stays where it was. Runs, locks and connection data are gitignored and shared, so
+        // they resolve against MainCheckoutRoot through the layout and are unaffected by this. The
+        // rule is the one the runner directory already follows: what git tracks belongs to the tree,
+        // what git ignores belongs to the checkout that owns the repository.
+        var configFile = layout.ConfigFile;
 
         if (!_fileSystem.FileExists(configFile))
         {
+            // A worktree of a branch that predates the harness has no tracked copy to read. The
+            // main checkout's is then the only configuration there is, and using it silently would
+            // be the same silence this rule exists to end.
+            var fallback = Path.Combine(layout.MainHarnessDirectory, HarnessLayout.ConfigFileName);
+
+            if (layout.IsWorktree(_platform) && _fileSystem.FileExists(fallback))
+            {
+                _output.Warn(
+                    "config",
+                    $"this worktree has no '{HarnessLayout.DirectoryName}/{HarnessLayout.ConfigFileName}', "
+                    + $"so the main checkout's is being used: '{fallback}'. Anything this tree changes "
+                    + "about its configuration is not what is running.");
+
+                return new HarnessContext(layout, _configStore.Load(fallback));
+            }
+
             throw new HarnessException(
                 HarnessExit.NotInitialized,
-                $"No harness configuration in '{layout.MainCheckoutRoot}'. Run '{ToolPackage.Command} init' first.");
+                $"No harness configuration at '{configFile}'. Run '{ToolPackage.Command} init' first.");
         }
 
         return new HarnessContext(layout, _configStore.Load(configFile));

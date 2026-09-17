@@ -42,7 +42,8 @@ public sealed class HarnessFactory
         VerifyGitService = new VerifyGitService(GitClient);
 
         PathBudget = new PathBudget(Platform);
-        ContextLoader = new HarnessContextLoader(RepositoryLocator, ConfigStore, GitClient, FileSystem);
+        ContextLoader = new HarnessContextLoader(
+            RepositoryLocator, ConfigStore, GitClient, FileSystem, Platform, Output);
         WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform, Output);
 
         AnchorRegistryLocator = new AnchorRegistryLocator(GitClient);

@@ -1,3 +1,5 @@
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
 using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
@@ -118,27 +120,71 @@ public sealed class HarnessContextLoaderTests
         _configStore.DidNotReceiveWithAnyArgs().Load(default!);
     }
 
+    /// <summary>
+    /// config.json is tracked, so a worktree has its own and a branch may legitimately change it.
+    /// Read from the main checkout — which is what this did — a lane could not run anything it had
+    /// just written, and nothing said so. Measured by a consumer: a worktree's config replaced with
+    /// text that is not JSON left the survey answering normally, from inside the worktree and with
+    /// an explicit --directory alike.
+    /// </summary>
     [Fact]
-    public async Task LoadAsync_ReadsTheMainCheckoutsConfiguration_EvenFromInsideAWorktree()
+    public async Task LoadAsync_ReadsTheWorktreesOwnConfiguration_NotTheMainCheckouts()
     {
-        // A worktree carries its own checked-out copy of config.json, which is not the one
-        // the harness maintains.
         var layout = new HarnessLayout(Worktree, Main);
+        var worktreeConfig = Path.Combine(Worktree, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
         var mainConfig = Path.Combine(Main, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
         var config = new HarnessConfig();
 
         _locator.LocateAsync(Worktree, Arg.Any<CancellationToken>()).Returns(Task.FromResult<HarnessLayout?>(layout));
+        _fileSystem.FileExists(worktreeConfig).Returns(true);
         _fileSystem.FileExists(mainConfig).Returns(true);
-        _configStore.Load(mainConfig).Returns(config);
+        _configStore.Load(worktreeConfig).Returns(config);
 
         var context = await Load(Worktree);
 
         Assert.Same(layout, context.Layout);
         Assert.Same(config, context.Config);
-        _configStore.Received(1).Load(mainConfig);
+        _configStore.Received(1).Load(worktreeConfig);
+        _configStore.DidNotReceive().Load(mainConfig);
     }
 
+    /// <summary>
+    /// A worktree of a branch that predates the harness has no tracked copy to read. The main
+    /// checkout's is then the only configuration there is, and using it without a word would be the
+    /// same silence the rule above exists to end.
+    /// </summary>
+    [Fact]
+    public async Task AWorktreeWithNoConfigurationOfItsOwn_FallsBackToTheMainCheckout_AndSaysSo()
+    {
+        var layout = new HarnessLayout(Worktree, Main);
+        var worktreeConfig = Path.Combine(Worktree, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
+        var mainConfig = Path.Combine(Main, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
+        var config = new HarnessConfig();
+
+        _locator.LocateAsync(Worktree, Arg.Any<CancellationToken>()).Returns(Task.FromResult<HarnessLayout?>(layout));
+        _fileSystem.FileExists(worktreeConfig).Returns(false);
+        _fileSystem.FileExists(mainConfig).Returns(true);
+        _configStore.Load(mainConfig).Returns(config);
+
+        var context = await Load(Worktree);
+
+        Assert.Same(config, context.Config);
+        _configStore.Received(1).Load(mainConfig);
+        Assert.Contains(
+            "no '.harness-config/config.json'",
+            _errors.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    private readonly StringWriter _errors = new();
+
     private Task<HarnessContext> Load(string directory)
-        => new HarnessContextLoader(_locator, _configStore, _git, _fileSystem)
+        => new HarnessContextLoader(
+                _locator,
+                _configStore,
+                _git,
+                _fileSystem,
+                new HostPlatform(),
+                new ConsoleHarnessOutput(new StringWriter(), _errors, verbose: false))
             .LoadAsync(directory, TestContext.Current.CancellationToken);
 }

@@ -57,6 +57,18 @@ public sealed record RunnerRunRequest
     /// <summary>Whether to pull <c>runTimingRegex</c> out of every step's output.</summary>
     public bool Time { get; init; }
 
+    /// <summary>
+    /// Who this leg is, for a run line that names <c>{leg}</c>, <c>{os}</c> and the rest, or
+    /// <see langword="null"/> where this run reaches no leg.
+    /// </summary>
+    public Execution.LegIdentity? Identity { get; init; }
+
+    /// <summary>The one file this leg's build is declared to produce, when there is exactly one.</summary>
+    public string? Product { get; init; }
+
+    /// <summary>Why there is no product, for a refusal that can say which case it is.</summary>
+    public string? ProductProblem { get; init; }
+
     /// <summary>Whether the leg runs under emulation, which decides what its timings are compared with.</summary>
     public bool Emulated { get; init; }
 
@@ -203,10 +215,15 @@ public sealed class RunnerRunService(
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
 
-        var steps = await StepsAsync(config, request, cancellationToken).ConfigureAwait(false);
+        // Read before the steps, because an action's declared inputs resolve from these and the
+        // resolved values have to be the same ones a run line names and the environment carries. Two
+        // resolutions of one declaration is how they come to disagree, which is what happened when
+        // the refusal knew a name the expansion could not fill in.
         var values = await _valuesReader
             .ReadAsync(request.Layout.RunnerEnvDirectory, request.Layout.RunnerSecretsDirectory, cancellationToken)
             .ConfigureAwait(false);
+
+        var steps = await StepsAsync(config, request, values, cancellationToken).ConfigureAwait(false);
 
         Refuse(request, steps.Phases, values);
 
@@ -288,7 +305,8 @@ public sealed class RunnerRunService(
 
             _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
 
-            var result = await RunPhaseAsync(config, request, phase, values, cancellationToken).ConfigureAwait(false);
+            var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, cancellationToken)
+                .ConfigureAwait(false);
             Record(state, phase, result, values);
 
             _output.Info(
@@ -429,11 +447,13 @@ public sealed class RunnerRunService(
     private async Task<RunnerSteps> StepsAsync(
         HarnessConfig config,
         RunnerRunRequest request,
+        ActionValues values,
         CancellationToken cancellationToken)
     {
         var runner = request.Runner;
         IReadOnlyList<RunnerPhase> phases;
         IReadOnlyList<string> performed = [];
+        IReadOnlyDictionary<string, string> inputs = new Dictionary<string, string>(StringComparer.Ordinal);
 
         if (runner.Action is { Length: > 0 } action)
         {
@@ -444,13 +464,15 @@ public sealed class RunnerRunService(
             // Before anything starts, and over the whole file rather than step by step: a file whose
             // last step names an undeclared program is refused with its first step not yet run.
             _toolPolicy.Enforce(file, config, request.TreeRoot);
-            RefuseUnknownNames(file);
+
+            inputs = ResolveInputs(file, values);
+            RefuseUnknownNames(file, inputs.Keys);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
             // would already have written into the wrong one.
             var actions = await _predefinedActions
-                .PerformAsync(file, request.TreeRoot, cancellationToken)
+                .PerformAsync(file, request.TreeRoot, inputs, cancellationToken)
                 .ConfigureAwait(false);
 
             Clean(request);
@@ -492,7 +514,7 @@ public sealed class RunnerRunService(
             _output.Detail(CommandName, $"{request.Leg}: performed '{name}'");
         }
 
-        return new RunnerSteps(phases, performed);
+        return new RunnerSteps(phases, performed, inputs);
     }
 
     /// <summary>
@@ -500,36 +522,37 @@ public sealed class RunnerRunService(
     /// first program starts.
     /// </summary>
     /// <param name="file">The action as it was read.</param>
+    /// <param name="fillable">
+    /// The names this run can supply beyond the built-in vocabulary: the action's declared inputs,
+    /// already resolved, so the check refuses exactly what the expansion would not fill in.
+    /// </param>
     /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
     /// <remarks>
-    /// The same vocabulary a project's test invocation uses, but not the same policy. A run line is a
-    /// program's own text, where <c>${HOME}</c> and <c>awk '{print}'</c> are ordinary, so a brace
-    /// group this tool does not own is left for whoever does. What is still refused here, over the
-    /// whole file and before the first program starts, is a name that is one of this vocabulary's
-    /// spelled differently — <c>{builddir}</c> for <c>{buildDir}</c> — because that one reaches the
-    /// interpreter as a literal path segment, which a consumer measured as an Errno 2 from a step
-    /// that looked exactly like the configuration that works.
+    /// Over the whole file and before the first program starts, so a file whose last step names
+    /// something nothing can fill in is refused with its first step not yet run.
+    /// <para>
+    /// A name nothing supplies is refused rather than passed through. Passed through it reaches the
+    /// program as the literal text it was written as and the step exits zero having done something
+    /// nobody asked for: a consumer measured a run line naming <c>{greeting}</c> arriving as those
+    /// nine characters, with the leg reporting passed. <c>${HOME}</c> is another expander's syntax
+    /// and is never touched, and a brace meant literally is written <c>{{</c>.
+    /// </para>
     /// </remarks>
-    private static void RefuseUnknownNames(ActionFile file)
+    private static void RefuseUnknownNames(ActionFile file, IEnumerable<string> fillable)
     {
-        var declared = file.Inputs.Select(input => input.Name).ToList();
+        var declared = fillable.ToList();
 
         foreach (var step in file.Steps)
         {
             foreach (var argument in step.Commands.SelectMany(command => command.Arguments))
             {
-                LegPathNames.RefuseUnknown(
-                    argument,
-                    $"'{step.Name}' run line",
-                    PlaceholderPolicy.LeaveAsWritten,
-                    declared);
+                LegPathNames.RefuseUnknown(argument, $"'{step.Name}' run line", extra: declared);
             }
 
             LegPathNames.RefuseUnknown(
                 step.WorkingDirectory,
                 $"'{step.Name}' workingDirectory",
-                PlaceholderPolicy.LeaveAsWritten,
-                declared);
+                extra: declared);
         }
     }
 
@@ -568,13 +591,24 @@ public sealed class RunnerRunService(
         RunnerRunRequest request,
         RunnerPhase phase,
         ActionValues values,
+        IReadOnlyDictionary<string, string> inputs,
         CancellationToken cancellationToken)
     {
         // The leg's directories and the action's own values, through the one expander a project's
         // test invocation uses. A step that builds out of source has no other way to name where its
         // build went: the directory is derived per leg and no tracked file can spell it.
-        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory);
-        var supplied = values.Supplied;
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory)
+        {
+            Identity = request.Identity,
+            Product = request.Product,
+            ProductProblem = request.ProductProblem,
+        };
+        // The runner's own values, and the action's declared inputs over them. One map, because the
+        // check that refuses an unfillable name is given this same set: fed from two places they
+        // disagree, and a name the check accepted reached the program as literal text.
+        var supplied = inputs.Count == 0
+            ? values.Supplied
+            : Namable(values.Supplied, inputs);
 
         var arguments = phase.Command
             .Skip(1)
@@ -984,7 +1018,83 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>The steps a runner declares, and the predefined actions performed before they ran.</summary>
-    private sealed record RunnerSteps(IReadOnlyList<RunnerPhase> Phases, IReadOnlyList<string> PerformedActions);
+    private sealed record RunnerSteps(
+        IReadOnlyList<RunnerPhase> Phases,
+        IReadOnlyList<string> PerformedActions,
+        IReadOnlyDictionary<string, string> Inputs);
+
+    /// <summary>What a run line may name: the runner's values, with the action's inputs over them.</summary>
+    /// <param name="values">What the runner value directories supply.</param>
+    /// <param name="inputs">The action's declared inputs, already resolved.</param>
+    private static IReadOnlyDictionary<string, string> Namable(
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyDictionary<string, string> inputs)
+    {
+        var namable = new Dictionary<string, string>(values, StringComparer.Ordinal);
+
+        foreach (var (name, value) in inputs)
+        {
+            namable[name] = value;
+        }
+
+        return namable;
+    }
+
+    /// <summary>
+    /// The value of every input the action declares: what the runner value directories supply under
+    /// that name, else the input's own default.
+    /// </summary>
+    /// <param name="file">The action as it was read.</param>
+    /// <param name="values">What the runner value directories hold.</param>
+    /// <exception cref="HarnessException">A required input has no value anywhere.</exception>
+    /// <remarks>
+    /// Resolved once, here, and handed to everything that needs it: the run lines that name an input
+    /// and the environment a <c>harness/read-inputs</c> step fills. Resolved twice they drift, which
+    /// is exactly what shipped — the load-time check knew the declared names while the expansion was
+    /// looking somewhere else entirely, so a step naming a declared input passed the check, reached
+    /// the program as the literal text '{name}', and the leg reported passed.
+    /// <para>
+    /// Secrets are deliberately not a source. A value spliced into a command line reaches the
+    /// process table, where anything on the machine can read it; a secret reaches a step through the
+    /// environment, which is what <c>.secrets</c> is for.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyDictionary<string, string> ResolveInputs(ActionFile file, ActionValues values)
+    {
+        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
+        var missing = new List<string>();
+
+        foreach (var input in file.Inputs)
+        {
+            if (values.Supplied.TryGetValue(input.Name, out var supplied))
+            {
+                resolved[input.Name] = supplied;
+                continue;
+            }
+
+            if (input.Default is { } fallback)
+            {
+                resolved[input.Name] = fallback;
+                continue;
+            }
+
+            if (input.Required)
+            {
+                missing.Add(input.Name);
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"'{file.Path}' requires input(s) {string.Join(", ", missing)} and neither declares a "
+                + "default for them nor finds one in the runner value directories, so its steps would "
+                + "run with nothing where a value belongs.");
+        }
+
+        return resolved;
+    }
 
     /// <summary>The step whose failure ended the run, with what it reported.</summary>
     private sealed record FailedStep(string Phase, ReachedVerdict Verdict, string Output);

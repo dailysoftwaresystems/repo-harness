@@ -208,6 +208,10 @@ internal static class RunCommand
             }
         }
 
+        // Derived once from the placed leg, so a run line naming {product} and the witness the
+        // build checked are talking about the same file.
+        var (product, productProblem) = leg.ProductFor();
+
         var result = await runners
             .RunAsync(
                 config,
@@ -225,6 +229,9 @@ internal static class RunCommand
                     TreeRoot = leg.TreeRoot,
                     WorkingDirectory = leg.TreeRoot,
                     BuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot),
+                    Identity = leg.IdentityFor(work.RunId.Value),
+                    Product = product,
+                    ProductProblem = productProblem,
                     ResolvedLegs = [leg.Name],
                     Time = work.Time,
                     Emulated = leg.Emulated,
@@ -257,6 +264,7 @@ internal static class RunCommand
         CancellationToken cancellationToken)
     {
         var leg = work.Leg;
+        var (confirmProduct, confirmProductProblem) = leg.ProductFor();
 
         var result = await runners
             .RunAsync(
@@ -272,6 +280,9 @@ internal static class RunCommand
                     TreeRoot = leg.TreeRoot,
                     WorkingDirectory = leg.TreeRoot,
                     BuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot),
+                    Identity = leg.IdentityFor(work.RunId.Value),
+                    Product = confirmProduct,
+                    ProductProblem = confirmProductProblem,
                     ResolvedLegs = [leg.Name],
                     Emulated = leg.Emulated,
                     InvokeRunner = null,

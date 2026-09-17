@@ -20,6 +20,10 @@ public interface IPredefinedActionRunner
     /// <summary>Performs every predefined action in <paramref name="file"/>, before any step runs.</summary>
     /// <param name="file">The action file.</param>
     /// <param name="treeRoot">The tree the runner acts on.</param>
+    /// <param name="inputs">
+    /// The value of every declared input, already resolved by the caller so that what a run line
+    /// names and what the environment carries are the same value.
+    /// </param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <exception cref="HarnessException">
     /// A required input has no value, or the tree is not at the commit a checkout names.
@@ -27,6 +31,7 @@ public interface IPredefinedActionRunner
     Task<PredefinedActionResult> PerformAsync(
         ActionFile file,
         string treeRoot,
+        IReadOnlyDictionary<string, string> inputs,
         CancellationToken cancellationToken = default);
 }
 
@@ -49,9 +54,11 @@ public sealed class PredefinedActionRunner(IGitClient gitClient, IHarnessOutput 
     public async Task<PredefinedActionResult> PerformAsync(
         ActionFile file,
         string treeRoot,
+        IReadOnlyDictionary<string, string> inputs,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(inputs);
 
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var performed = new List<string>();
@@ -66,7 +73,7 @@ public sealed class PredefinedActionRunner(IGitClient gitClient, IHarnessOutput 
             switch (step.Uses)
             {
                 case PredefinedAction.ReadInputs:
-                    ReadInputs(file, environment);
+                    ReadInputs(inputs, environment);
                     performed.Add($"{step.Name} ({PredefinedActions.Spell(step.Uses)})");
                     break;
 
@@ -94,30 +101,24 @@ public sealed class PredefinedActionRunner(IGitClient gitClient, IHarnessOutput 
     /// step reading an empty variable runs with whatever that means to it, and a corpus driver given
     /// an empty path walks the current directory.
     /// </remarks>
-    private static void ReadInputs(ActionFile file, Dictionary<string, string> environment)
+    /// <summary>
+    /// Puts every resolved input into the environment later steps run with, as
+    /// <c>INPUT_&lt;NAME&gt;</c>.
+    /// </summary>
+    /// <param name="inputs">The values the caller resolved, by declared name.</param>
+    /// <param name="environment">Where the variables are collected.</param>
+    /// <remarks>
+    /// The values arrive resolved rather than being read from the file here. Reading them here as
+    /// well is how the environment and the run lines came to disagree about what an input is worth,
+    /// and a missing required one is refused before this runs rather than discovered by a step.
+    /// </remarks>
+    private static void ReadInputs(
+        IReadOnlyDictionary<string, string> inputs,
+        Dictionary<string, string> environment)
     {
-        var missing = new List<string>();
-
-        foreach (var input in file.Inputs)
+        foreach (var (name, value) in inputs)
         {
-            if (input.Default is { } value)
-            {
-                environment[InputPrefix + input.Name.ToUpperInvariant()] = value;
-                continue;
-            }
-
-            if (input.Required)
-            {
-                missing.Add(input.Name);
-            }
-        }
-
-        if (missing.Count > 0)
-        {
-            throw new HarnessException(
-                HarnessExit.ConfigInvalid,
-                $"'{file.Path}' requires input(s) {string.Join(", ", missing)} and declares no default "
-                + "for them, so its steps would run with nothing where a value belongs.");
+            environment[InputPrefix + name.ToUpperInvariant()] = value;
         }
     }
 
