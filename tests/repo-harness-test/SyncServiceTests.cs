@@ -1261,6 +1261,60 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// One sync reaches every host, and one <c>--adopt</c> list is put to each of them in turn. The
+    /// list has to select: naming one host must take over that host's directory and leave every
+    /// other refused, because a flag that meant "go ahead" would pre-authorise taking over whatever
+    /// unexpected directory sits at another host's repositoryPath, a mistyped one included.
+    /// </summary>
+    [Fact]
+    public async Task OneAdoptList_TakesOverTheHostItNames_AndRefusesTheOneItDoesNot()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var named = Path.Combine(temp.Path, "..", "named-" + Guid.NewGuid().ToString("N")[..8]);
+        var other = Path.Combine(temp.Path, "..", "other-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            foreach (var copy in new[] { named, other })
+            {
+                await MirrorAsync(temp.Path, copy, cancellationToken);
+                await File.WriteAllTextAsync(Path.Combine(copy, "theirs.txt"), "x\n", cancellationToken);
+            }
+
+            // The one list a whole run carries, put to each host exactly as the loop does.
+            var options = new SyncOptions(Adopt: ["ssh one"]);
+
+            var taken = await service.SyncAsync(
+                temp.Path,
+                new RecordingTransport(Transport(harness), reports: HostId.Ssh("one")),
+                named,
+                options,
+                cancellationToken);
+
+            Assert.True(taken.Verified);
+            Assert.False(File.Exists(Path.Combine(named, "theirs.txt")), "the named host was not taken over");
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path,
+                new RecordingTransport(Transport(harness), reports: HostId.Ssh("two")),
+                other,
+                options,
+                cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains("--adopt \"ssh two\"", refusal.Message, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(other, "theirs.txt")), "a host nobody named lost files");
+        }
+        finally
+        {
+            DeleteIfPresent(named);
+            DeleteIfPresent(other);
+        }
+    }
+
+    /// <summary>
     /// A copy is created as a finished one or as a takeover that has begun, and never as unmarked.
     /// Unmarked means there is no marker at all; written down it becomes a marker claiming the copy
     /// was both taken over and finished, which is the most permissive thing the file can say about a
@@ -1326,7 +1380,14 @@ public sealed class SyncServiceTests
     /// </summary>
     /// <param name="inner">The transport that does the work.</param>
     /// <param name="losesAFileWhenVerifying">Whether to drop a file from the verification's manifest.</param>
-    private sealed class RecordingTransport(LocalSyncTransport inner, bool losesAFileWhenVerifying = false) : ISyncTransport
+    /// <param name="reports">
+    /// The host to answer as, since the local transport is always <c>local</c> and the one thing
+    /// <c>--adopt</c> decides is which host a directory belongs to.
+    /// </param>
+    private sealed class RecordingTransport(
+        LocalSyncTransport inner,
+        bool losesAFileWhenVerifying = false,
+        HostId? reports = null) : ISyncTransport
     {
         private int _manifests;
 
@@ -1339,7 +1400,7 @@ public sealed class SyncServiceTests
         /// <summary>How many times the mark was asked on its own.</summary>
         public int MarksAsked { get; private set; }
 
-        public HostId Host => inner.Host;
+        public HostId Host => reports ?? inner.Host;
 
         public Task<bool> RootExistsAsync(string root, CancellationToken cancellationToken = default)
         {
