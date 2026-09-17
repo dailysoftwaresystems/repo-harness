@@ -68,24 +68,27 @@ public static class ActionPath
                 + $"'{Expected("<name>")}', without '.' or '..'";
         }
 
-        if (segments.Length != 2)
+        if (segments.Length < 2)
         {
-            // One segment is the flat spelling this layout replaced; three or more is a directory
-            // deeper than the one directory an action owns. Both get the same remedy, built from
-            // whatever the author was trying to name.
+            // One segment is the flat spelling this layout replaced: a file with no directory of
+            // its own. The remedy is built from whatever the author was trying to name.
             var name = NameFrom(segments);
 
             return $"'{action}' is not an action file; each action owns one directory, so its file "
                 + $"is '{Expected(name)}'";
         }
 
-        var directory = segments[0];
-        var file = segments[1];
+        // Everything above the last two segments groups actions and is the author's to arrange.
+        // What identifies an action is the file carrying its own directory's name, so the two
+        // segments that decide that are the last two, whatever is above them.
+        var directory = segments[^2];
+        var file = segments[^1];
+        var grouping = string.Join('/', segments[..^2]);
 
         if (!Extensions.Any(extension => file.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
         {
             return $"'{action}' does not end in '{string.Join("' or '", Extensions)}'; it is "
-                + $"'{Expected(directory)}'";
+                + $"'{Under(grouping, Expected(directory))}'";
         }
 
         var stem = Path.GetFileNameWithoutExtension(file);
@@ -93,7 +96,8 @@ public static class ActionPath
         return string.Equals(stem, directory, StringComparison.Ordinal)
             ? null
             : $"'{action}' names directory '{directory}' but file '{file}'; an action's file carries "
-                + $"its directory's name, so it is '{Expected(directory)}' or '{Expected(stem)}'";
+                + $"its directory's name, so it is '{Under(grouping, Expected(directory))}' or "
+                + $"'{Under(grouping, Expected(stem))}'";
     }
 
     /// <summary>
@@ -105,6 +109,35 @@ public static class ActionPath
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
 
         return $"{name}/{name}{Extension}";
+    }
+
+    /// <summary>
+    /// A suggested spelling kept where the author put it, so a remedy for a nested action does not
+    /// silently propose moving it to the top of the actions directory.
+    /// </summary>
+    /// <param name="grouping">The directories above the action's own, or empty.</param>
+    /// <param name="expected">The action's own two segments.</param>
+    private static string Under(string grouping, string expected)
+        => grouping.Length == 0 ? expected : $"{grouping}/{expected}";
+
+    /// <summary>
+    /// The action's own directory, relative to the actions directory, for a configured
+    /// <paramref name="action"/> whose spelling has been accepted.
+    /// </summary>
+    /// <param name="action">The value of a runner's <c>action</c> key.</param>
+    /// <remarks>
+    /// Everything but the file name. A step that runs in its action's own directory has to reach
+    /// the directory that is actually there, which for a grouped action is several segments deep;
+    /// taking only the last one would send it to a directory at the top of the actions tree that
+    /// nothing created.
+    /// </remarks>
+    public static string DirectoryOf(string action)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+
+        var segments = action.Split('/', '\\');
+
+        return string.Join('/', segments[..^1]);
     }
 
     /// <summary>
@@ -180,6 +213,8 @@ public static class ActionPath
             throw new HarnessException(HarnessExit.ConfigInvalid, $"'{path}' does not exist.");
         }
 
+        RefuseNesting(root, path, action, fileSystem, comparison);
+
         return path;
     }
 
@@ -231,6 +266,58 @@ public static class ActionPath
         throw new HarnessException(
             HarnessExit.ConfigInvalid,
             $"{problems.Count} runner action(s) could not be read:{Environment.NewLine}{detail}");
+    }
+
+    /// <summary>
+    /// Refuses an action whose own directory is inside another action's directory.
+    /// </summary>
+    /// <param name="root">The resolved actions directory.</param>
+    /// <param name="path">The resolved action file.</param>
+    /// <param name="action">The value of a runner's <c>action</c> key, for the refusal.</param>
+    /// <param name="fileSystem">Looks for the ancestor's own file.</param>
+    /// <param name="comparison">How this platform compares paths.</param>
+    /// <exception cref="HarnessException">An ancestor directory is itself an action.</exception>
+    /// <remarks>
+    /// Directories above an action group actions and are the author's to arrange. What they may not
+    /// be is actions themselves: an action owns its directory, and everything beside its file is
+    /// what that action ships. A directory that is both would have two owners, and a step running
+    /// in "its action's directory" would have two answers.
+    /// </remarks>
+    private static void RefuseNesting(
+        string root,
+        string path,
+        string action,
+        IFileSystem fileSystem,
+        StringComparison comparison)
+    {
+        var directory = Path.GetDirectoryName(path);
+
+        // From the action's own parent upward, stopping at the actions directory itself.
+        for (var ancestor = Path.GetDirectoryName(directory);
+            ancestor is { Length: > 0 } && PathContainment.IsStrictlyInside(root, ancestor, comparison);
+            ancestor = Path.GetDirectoryName(ancestor))
+        {
+            var name = Path.GetFileName(ancestor);
+
+            if (name is not { Length: > 0 })
+            {
+                break;
+            }
+
+            foreach (var extension in Extensions)
+            {
+                if (fileSystem.FileExists(Path.Combine(ancestor, name + extension)))
+                {
+                    throw new HarnessException(
+                        HarnessExit.ConfigInvalid,
+                        $"A runner's action '{action}' is inside '{name}', which is itself an action: "
+                        + $"'{Path.Combine(ancestor, name + extension)}' is there. An action owns its "
+                        + "directory and everything beside its file belongs to it, so one cannot "
+                        + "contain another. Directories that only group actions carry no file of "
+                        + "their own name.");
+                }
+            }
+        }
     }
 
     /// <summary>

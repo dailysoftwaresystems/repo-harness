@@ -141,16 +141,30 @@ public sealed record ActionFile(
     public IEnumerable<ActionCommand> Commands => Steps.SelectMany(step => step.Commands);
 
     /// <summary>
-    /// The name of the directory this action owns, taken from where the file was read rather than
-    /// from its <see cref="Name"/> key.
+    /// The action's own directory, relative to the actions directory, as the runner's <c>action</c>
+    /// key spelled it. Null where the file was parsed without one, and then the leaf is used.
     /// </summary>
     /// <remarks>
-    /// The layout requires the two to match, and this is the one the file system agrees with: a step
-    /// that runs in its action's own directory has to reach the directory that is actually there,
-    /// not the one a <c>name:</c> key claims it is.
+    /// Carried rather than re-derived from <see cref="Path"/>, because the leaf alone is wrong for
+    /// a grouped action: <c>real-examples/c/probe-nest</c> taken as <c>probe-nest</c> sends a step
+    /// that runs in its action's directory to a directory at the top of the actions tree that
+    /// nothing created.
+    /// </remarks>
+    public string? Directory { get; init; }
+
+    /// <summary>
+    /// The directory this action owns, relative to the actions directory, taken from where the file
+    /// was read rather than from its <see cref="Name"/> key.
+    /// </summary>
+    /// <remarks>
+    /// The layout requires the file to carry its directory's name, and this is the one the file
+    /// system agrees with: a step that runs in its action's own directory has to reach the directory
+    /// that is actually there, not the one a <c>name:</c> key claims it is.
     /// </remarks>
     public string DirectoryName
-        => System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(Path)) ?? string.Empty;
+        => Directory
+            ?? System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(Path))
+            ?? string.Empty;
 
     /// <summary>
     /// The file's steps as the phases the harness runs. A predefined action contributes none,

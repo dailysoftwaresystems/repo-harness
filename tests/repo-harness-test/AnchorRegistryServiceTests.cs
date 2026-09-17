@@ -610,6 +610,8 @@ public sealed class AnchorRegistryServiceTests
             => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
 
         public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
+        public void CopyFile(string source, string destination, bool overwrite = false)
+            => inner.CopyFile(source, destination, overwrite);
 
         public void DeleteDirectory(string path) => inner.DeleteDirectory(path);
 

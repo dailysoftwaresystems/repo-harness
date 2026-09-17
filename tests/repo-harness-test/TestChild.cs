@@ -32,9 +32,29 @@ internal static class TestChild
             "stream" => Stream(standardOutput, standardError, arguments),
             "spawn-grandchild" => SpawnGrandchild(arguments),
             "print-env" => PrintEnvironment(standardOutput, arguments),
+            "write-file" => WriteFile(arguments),
             "exit" => int.Parse(arguments[0], CultureInfo.InvariantCulture),
             _ => 99,
         };
+    }
+
+    /// <summary>
+    /// Writes <c>arguments[1]</c> into the file <c>arguments[0]</c> names, for a step that has to
+    /// actually produce something.
+    /// </summary>
+    /// <remarks>
+    /// Exits zero either way. A step that declares an output and does not write it is the case the
+    /// harness has to notice by looking, so this child must be able to succeed at doing nothing.
+    /// </remarks>
+    private static int WriteFile(string[] arguments)
+    {
+        if (arguments.Length >= 2)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(arguments[0]) ?? ".");
+            File.WriteAllText(arguments[0], arguments[1]);
+        }
+
+        return 0;
     }
 
     /// <summary>Writes each argument on its own line between brackets, so an empty one is visible.</summary>

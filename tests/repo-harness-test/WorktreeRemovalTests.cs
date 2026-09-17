@@ -595,6 +595,8 @@ public sealed class WorktreeRemovalTests
         public void DeleteFile(string path) => inner.DeleteFile(path);
 
         public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
+        public void CopyFile(string source, string destination, bool overwrite = false)
+            => inner.CopyFile(source, destination, overwrite);
 
         public void DeleteDirectory(string path) => inner.DeleteDirectory(path);
 
@@ -688,6 +690,8 @@ internal sealed class UndeletableFileSystem(IFileSystem inner) : IFileSystem
     public void DeleteFile(string path) => inner.DeleteFile(path);
 
     public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
+    public void CopyFile(string source, string destination, bool overwrite = false)
+        => inner.CopyFile(source, destination, overwrite);
 
     public void DeleteDirectory(string path)
         => throw new IOException("The process cannot access the file because it is being used by another process.");

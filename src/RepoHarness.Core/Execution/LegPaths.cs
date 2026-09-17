@@ -95,6 +95,24 @@ public sealed record LegPaths
 
     /// <summary>Why <see cref="Product"/> is null, for a refusal that can say which case it is.</summary>
     public string? ProductProblem { get; init; }
+
+    /// <summary>
+    /// Where this run of the action writes while it runs, or <see langword="null"/> outside an
+    /// action.
+    /// </summary>
+    public string? ActionBuild { get; init; }
+
+    /// <summary>
+    /// Where this run of the action's persisted outputs are kept, or <see langword="null"/> outside
+    /// an action.
+    /// </summary>
+    public string? ActionArtifacts { get; init; }
+
+    /// <summary>
+    /// This step's own directory under <see cref="ActionBuild"/>, or <see langword="null"/> outside
+    /// a step.
+    /// </summary>
+    public string? StepBuild { get; init; }
 }
 
 /// <summary>
@@ -173,12 +191,21 @@ public static partial class LegPathNames
     /// <summary>Names the one file this leg's build is declared to produce.</summary>
     public const string Product = "product";
 
+    /// <summary>Names where this run of the action writes while it runs.</summary>
+    public const string ActionBuild = "actionBuild";
+
+    /// <summary>Names where this run of the action's persisted outputs are kept.</summary>
+    public const string ActionArtifacts = "actionArtifacts";
+
+    /// <summary>Names this step's own directory under the action's build directory.</summary>
+    public const string StepBuild = "stepBuild";
+
     /// <summary>Every name, in the order a refusal lists them.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
         BuildDirectory, TreeRoot, HarnessDirectory,
         Leg, Os, Processor, Toolchain, Config, Variant, Host, RunId,
-        Product,
+        Product, ActionBuild, ActionArtifacts, StepBuild,
     ];
 
     /// <summary>
@@ -323,6 +350,13 @@ public static partial class LegPathNames
                     HarnessExit.ConfigInvalid,
                     $"{setting} names '{{{Product}}}', and {paths.ProductProblem ?? "this leg has no build product"}.");
 
+            case ActionBuild or ActionArtifacts or StepBuild when paths.ActionBuild is null:
+                throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"{setting} names '{{{name}}}', and this runner declares phases rather than an "
+                    + "action, so there is no action directory to put there. Only a step of an "
+                    + "action file has one.");
+
             case Leg or Os or Processor or Toolchain or Config or Variant or Host or RunId
                 when paths.Identity is null:
                 throw new HarnessException(
@@ -376,6 +410,9 @@ public static partial class LegPathNames
         TreeRoot => paths.TreeRoot,
         HarnessDirectory => paths.HarnessDirectory,
         Product => paths.Product,
+        ActionBuild => paths.ActionBuild,
+        ActionArtifacts => paths.ActionArtifacts,
+        StepBuild => paths.StepBuild,
         Leg => paths.Identity?.Leg,
         Os => paths.Identity?.Os,
         Processor => paths.Identity?.Processor,

@@ -110,6 +110,18 @@ public sealed record RunnerPhase
     /// while it ran is reported rather than producing a result that describes no tree that existed.
     /// </summary>
     public bool RequireInputsUnmoved { get; init; }
+
+    /// <summary>
+    /// The step this phase belongs to, which names the directory its work goes in. Empty for a
+    /// phase a runner declared directly, which owns no action directory.
+    /// </summary>
+    public string StepName { get; init; } = string.Empty;
+
+    /// <summary>What this phase must have produced, relative to its step's own build directory.</summary>
+    public IReadOnlyList<string> Outputs { get; init; } = [];
+
+    /// <summary>Whether this step's outputs survive the run.</summary>
+    public bool Persist { get; init; }
 }
 
 /// <summary>A named command invokable through <c>DssHarness exec</c>.</summary>

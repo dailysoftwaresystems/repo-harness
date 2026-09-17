@@ -30,6 +30,12 @@ public interface IFileSystem
     /// <summary>Copies a file to a new file in the temporary directory, and returns the copy's path.</summary>
     string CopyToTemporaryFile(string path);
 
+    /// <summary>Copies <paramref name="source"/> to <paramref name="destination"/>.</summary>
+    /// <param name="source">The file to copy.</param>
+    /// <param name="destination">Where the copy goes. Its directory must exist.</param>
+    /// <param name="overwrite">Whether an existing file there is replaced.</param>
+    void CopyFile(string source, string destination, bool overwrite = false);
+
     /// <summary>
     /// Deletes a directory and everything under it, including files git has marked
     /// read only. No-op when absent.

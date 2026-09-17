@@ -154,6 +154,106 @@ public sealed class RunnerRunServiceTests
         Assert.NotNull(result);
     }
 
+    /// <summary>
+    /// A step produces something, a later step consumes it by name, what the run asked to keep
+    /// survives, and the working space goes. Without this an action is a wrapper around one
+    /// program: a round trip whose first half runs here and second half elsewhere has nowhere to
+    /// put the thing being carried.
+    /// </summary>
+    [Fact]
+    public async Task AStepsOutput_IsThereForTheNextStep_Persisted_AndItsWorkingSpaceRemoved()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, $$"""
+            name: corpus
+            steps:
+              - name: pack
+                outputs:
+                  - payload.txt
+                persist: true
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "{stepBuild}/payload.txt" carried
+              - name: consume
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "{actionBuild}/pack/copied.txt" seen
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        var runner = new RunnerConfig
+        {
+            Action = "corpus/corpus.yml",
+            Env = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "write-file" },
+        };
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, runner),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+
+        var action = Path.Combine(temp.Path, ".harness-config", "runner", "actions", "corpus");
+
+        // Kept, under the run and the step that produced it.
+        var kept = Path.Combine(action, "artifacts", RunId, "pack", "payload.txt");
+        Assert.True(File.Exists(kept), $"expected '{kept}' to have been kept");
+        Assert.Equal("carried", await File.ReadAllTextAsync(kept, TestContext.Current.CancellationToken));
+
+        // And the working space is gone, including what the second step wrote there and never
+        // asked to keep.
+        Assert.False(
+            Directory.Exists(Path.Combine(action, "build", RunId)),
+            "this run's working directory should have been removed");
+    }
+
+    /// <summary>
+    /// A step that exits zero having written nothing it declared is unwitnessed, not passed. An
+    /// exit code alone cannot tell that apart from work that was done.
+    /// </summary>
+    [Fact]
+    public async Task AStepThatDeclaredAnOutputAndProducedNothing_IsUnwitnessed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, $$"""
+            name: corpus
+            steps:
+              - name: pack
+                outputs:
+                  - payload.txt
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" 0
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        var runner = new RunnerConfig
+        {
+            Action = "corpus/corpus.yml",
+            Env = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "exit" },
+        };
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, runner),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
+        Assert.Contains("without producing payload.txt", result.Verdict.Detail, StringComparison.Ordinal);
+    }
+
+    private static string Child => TestHost.DotnetExecutable;
+
+    private const string Exec = "exec";
+
+    private static string Assembly => TestHost.AssemblyPath;
+
     [Fact]
     public async Task AStepThatPutsASecretInItsArguments_IsRefusedWithoutQuotingIt()
     {

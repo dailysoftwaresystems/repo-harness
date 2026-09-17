@@ -87,6 +87,8 @@ public sealed class ActionFileParser(
         "continueOnError",
         "watchContention",
         "requireInputsUnmoved",
+        "outputs",
+        "persist",
     ];
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -111,7 +113,13 @@ public sealed class ActionFileParser(
 
         _output.Detail("run", $"reading action file '{path}'");
 
-        return Task.FromResult(Parse(path, _fileSystem.ReadAllText(path)));
+        // The directory as the runner spelled it, so a grouped action keeps every segment above
+        // its own. Derived from the configured value rather than from the resolved path, which has
+        // followed links and no longer says where in the actions tree the author put it.
+        return Task.FromResult(Parse(path, _fileSystem.ReadAllText(path)) with
+        {
+            Directory = ActionPath.DirectoryOf(action),
+        });
     }
 
     public ActionFile Parse(string path, string text)
@@ -382,6 +390,8 @@ public sealed class ActionFileParser(
         string? successPattern = null;
         int? stallSeconds = null;
         var continueOnError = false;
+        var outputs = (IReadOnlyList<string>)[];
+        var persist = false;
         var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (keyNode, valueNode) in mapping.Children)
@@ -424,6 +434,14 @@ public sealed class ActionFileParser(
 
                 case "requireInputsUnmoved":
                     requireInputsUnmoved = ReadFlag(valueNode, "requireInputsUnmoved", problems);
+                    break;
+
+                case "outputs":
+                    outputs = ReadOutputs(valueNode, problems);
+                    break;
+
+                case "persist":
+                    persist = ReadFlag(valueNode, "persist", problems);
                     break;
 
                 case "workingDirectoryRoot":
@@ -497,7 +515,57 @@ public sealed class ActionFileParser(
             SuccessPattern = successPattern,
             StallSeconds = stallSeconds,
             ContinueOnError = continueOnError,
+            Outputs = outputs,
+            Persist = persist,
         };
+    }
+
+    /// <summary>
+    /// The paths a step declares it produces, each relative to its own directory under the action's
+    /// build directory.
+    /// </summary>
+    /// <param name="node">The <c>outputs</c> value.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <remarks>
+    /// Relative, and refused otherwise. An output is something this step wrote in the directory the
+    /// harness gave it; a path that climbs out of that directory names a file the harness did not
+    /// create, cannot clean up, and would move somewhere else when the step asked to persist it.
+    /// </remarks>
+    private static IReadOnlyList<string> ReadOutputs(YamlNode node, List<string> problems)
+    {
+        if (node is not YamlSequenceNode sequence)
+        {
+            problems.Add(At(node, "a step's 'outputs' is a list of paths the step produces."));
+            return [];
+        }
+
+        var outputs = new List<string>();
+
+        foreach (var item in sequence.Children)
+        {
+            if (RequireScalar(item, "a step's output", problems) is not { Length: > 0 } path)
+            {
+                continue;
+            }
+
+            var normalised = path.Replace('\\', '/').Trim();
+
+            if (Path.IsPathRooted(normalised)
+                || normalised.StartsWith('/')
+                || normalised.Split('/').Any(segment => segment is ".." or "." or ""))
+            {
+                problems.Add(At(
+                    item,
+                    $"a step's output '{path}' is not a path inside the step's own directory; an "
+                    + "output is something the step wrote where the harness put it, without '.' or "
+                    + "'..' and never rooted."));
+                continue;
+            }
+
+            outputs.Add(normalised);
+        }
+
+        return outputs;
     }
 
     private static PredefinedAction ReadUses(

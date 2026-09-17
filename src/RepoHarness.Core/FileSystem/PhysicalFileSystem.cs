@@ -92,6 +92,9 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         return copy;
     }
 
+    public void CopyFile(string source, string destination, bool overwrite = false)
+        => File.Copy(source, destination, overwrite);
+
     public void DeleteDirectory(string path)
     {
         if (!Directory.Exists(path))

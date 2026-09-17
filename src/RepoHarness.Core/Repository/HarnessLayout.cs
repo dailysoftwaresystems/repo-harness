@@ -49,11 +49,53 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// <summary>Name of the directory holding one subdirectory per run, with its logs. Gitignored.</summary>
     public const string RunsDirectoryName = "runs";
 
+    /// <summary>
+    /// Name of the directory an action's steps write into while they run. Gitignored, and emptied
+    /// when the action finishes.
+    /// </summary>
+    public const string ActionBuildDirectoryName = "build";
+
+    /// <summary>
+    /// Name of the directory an action's persisted outputs are kept in. Gitignored, and what
+    /// survives a run.
+    /// </summary>
+    public const string ActionArtifactsDirectoryName = "artifacts";
+
     /// <summary>Name of the configuration file.</summary>
     public const string ConfigFileName = "config.json";
 
     /// <summary>Name of the run lock file.</summary>
     public const string LockFileName = "lock.json";
+
+    /// <summary>
+    /// Where one run of an action writes while it runs, relative to a tree root.
+    /// </summary>
+    /// <param name="actionDirectory">The action's own directory, relative to the actions directory.</param>
+    /// <param name="runId">The run, whose id names the directory.</param>
+    /// <remarks>
+    /// Keyed by the run, never written into directly. Two runs of one action on one machine — two
+    /// legs, or a retry — would otherwise write over each other's intermediate files, and the second
+    /// would measure something the first left behind.
+    /// </remarks>
+    public static string ActionBuildRelative(string actionDirectory, string runId)
+        => ActionScratchRelative(actionDirectory, ActionBuildDirectoryName, runId);
+
+    /// <summary>
+    /// Where one run of an action's persisted outputs are kept, relative to a tree root.
+    /// </summary>
+    /// <param name="actionDirectory">The action's own directory, relative to the actions directory.</param>
+    /// <param name="runId">The run, whose id names the directory.</param>
+    public static string ActionArtifactsRelative(string actionDirectory, string runId)
+        => ActionScratchRelative(actionDirectory, ActionArtifactsDirectoryName, runId);
+
+    /// <summary>One of an action's two run-keyed directories, relative to a tree root.</summary>
+    private static string ActionScratchRelative(string actionDirectory, string kind, string runId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+
+        return Path.Combine(RunnerActionDirectoryRelative(actionDirectory), kind, runId);
+    }
 
     /// <summary>Placeholder that keeps an otherwise-ignored directory in git.</summary>
     public const string GitKeepFileName = ".gitkeep";

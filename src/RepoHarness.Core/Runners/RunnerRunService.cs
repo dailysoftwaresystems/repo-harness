@@ -225,6 +225,14 @@ public sealed class RunnerRunService(
 
         var steps = await StepsAsync(config, request, values, cancellationToken).ConfigureAwait(false);
 
+        // Keyed by the run, under the action's own directory. Two runs of one action on one machine
+        // — two legs, or a retry — would otherwise write over each other's intermediate files.
+        var scratch = steps.ActionDirectory is { Length: > 0 } owned
+            ? new ActionScratch(
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId)),
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId)))
+            : null;
+
         Refuse(request, steps.Phases, values);
 
         var record = await _runSegments
@@ -305,8 +313,10 @@ public sealed class RunnerRunService(
 
             _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
 
-            var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, cancellationToken)
+            var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, scratch, cancellationToken)
                 .ConfigureAwait(false);
+
+            result = WithDeclaredOutputs(result, phase, scratch);
             Record(state, phase, result, values);
 
             _output.Info(
@@ -331,6 +341,11 @@ public sealed class RunnerRunService(
                 break;
             }
         }
+
+        // Whatever the verdict. What a run asked to keep is kept, and its working space goes:
+        // a failed run's intermediate files are the least useful thing on the machine, and a tree
+        // that grew one directory per run on every host is a tree nobody prunes.
+        SettleArtifacts(steps, scratch);
 
         _output.Info(
             CommandName,
@@ -454,6 +469,7 @@ public sealed class RunnerRunService(
         IReadOnlyList<RunnerPhase> phases;
         IReadOnlyList<string> performed = [];
         IReadOnlyDictionary<string, string> inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? actionDirectory = null;
 
         if (runner.Action is { Length: > 0 } action)
         {
@@ -478,6 +494,7 @@ public sealed class RunnerRunService(
             Clean(request);
 
             performed = actions.Performed;
+            actionDirectory = file.DirectoryName;
             phases = [.. file.ToPhases().Select(phase => WithInputs(phase, actions.Environment))];
         }
         else
@@ -514,7 +531,7 @@ public sealed class RunnerRunService(
             _output.Detail(CommandName, $"{request.Leg}: performed '{name}'");
         }
 
-        return new RunnerSteps(phases, performed, inputs);
+        return new RunnerSteps(phases, performed, inputs, actionDirectory);
     }
 
     /// <summary>
@@ -592,8 +609,21 @@ public sealed class RunnerRunService(
         RunnerPhase phase,
         ActionValues values,
         IReadOnlyDictionary<string, string> inputs,
+        ActionScratch? scratch,
         CancellationToken cancellationToken)
     {
+        // Created before the step runs, not lazily by whatever the step happens to do. A program
+        // told to write into a directory that is not there fails in its own words, which is a worse
+        // message than the one this would have given.
+        var stepBuild = scratch is not null && phase.StepName is { Length: > 0 }
+            ? Path.Combine(scratch.Build, phase.StepName)
+            : null;
+
+        if (stepBuild is not null)
+        {
+            _fileSystem.CreateDirectory(stepBuild);
+        }
+
         // The leg's directories and the action's own values, through the one expander a project's
         // test invocation uses. A step that builds out of source has no other way to name where its
         // build went: the directory is derived per leg and no tracked file can spell it.
@@ -602,6 +632,9 @@ public sealed class RunnerRunService(
             Identity = request.Identity,
             Product = request.Product,
             ProductProblem = request.ProductProblem,
+            ActionBuild = scratch?.Build,
+            ActionArtifacts = scratch?.Artifacts,
+            StepBuild = stepBuild,
         };
         // The runner's own values, and the action's declared inputs over them. One map, because the
         // check that refuses an unfillable name is given this same set: fed from two places they
@@ -1018,10 +1051,117 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>The steps a runner declares, and the predefined actions performed before they ran.</summary>
+    /// <summary>
+    /// The phase's result, with any output it declared and did not produce named on it.
+    /// </summary>
+    /// <param name="result">What the phase reported.</param>
+    /// <param name="phase">The phase, carrying what it said it would produce.</param>
+    /// <param name="scratch">The action's directories, or null outside an action.</param>
+    /// <remarks>
+    /// Checked only where the phase otherwise passed. A step that failed has already said so, and
+    /// adding "and it produced nothing" to a program that crashed names a consequence as though it
+    /// were a second cause.
+    /// </remarks>
+    private PhaseResult WithDeclaredOutputs(PhaseResult result, RunnerPhase phase, ActionScratch? scratch)
+    {
+        if (phase.Outputs.Count == 0 || scratch is null || !result.Passed)
+        {
+            return result;
+        }
+
+        var directory = Path.Combine(scratch.Build, phase.StepName);
+
+        var missing = phase.Outputs
+            .Where(output => !_fileSystem.FileExists(Path.Combine(directory, output))
+                && !_fileSystem.DirectoryExists(Path.Combine(directory, output)))
+            .ToList();
+
+        return missing.Count == 0 ? result : result with { MissingOutputs = missing };
+    }
+
+    /// <summary>
+    /// Moves what the run asked to keep into the action's artifacts, then empties what it did not.
+    /// </summary>
+    /// <param name="steps">The steps that ran, carrying what each declared and whether it persists.</param>
+    /// <param name="scratch">The action's directories.</param>
+    /// <remarks>
+    /// Persisted first, removed second, so a failure to keep something cannot be followed by
+    /// deleting it. The build directory goes whatever the verdict was: it is this run's working
+    /// space, and a tree that accumulated one per run on every host is a tree nobody prunes.
+    /// </remarks>
+    private void SettleArtifacts(RunnerSteps steps, ActionScratch? scratch)
+    {
+        if (scratch is null)
+        {
+            return;
+        }
+
+        foreach (var phase in steps.Phases.Where(phase => phase.Persist && phase.Outputs.Count > 0))
+        {
+            var from = Path.Combine(scratch.Build, phase.StepName);
+            var into = Path.Combine(scratch.Artifacts, phase.StepName);
+
+            foreach (var output in phase.Outputs)
+            {
+                var source = Path.Combine(from, output);
+
+                if (!_fileSystem.FileExists(source))
+                {
+                    continue;
+                }
+
+                var destination = Path.Combine(into, output);
+
+                try
+                {
+                    _fileSystem.CreateDirectory(Path.GetDirectoryName(destination) ?? into);
+                    _fileSystem.CopyFile(source, destination, overwrite: true);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    // Said rather than swallowed. What a later run will not find is worth a line
+                    // now, while somebody can still see which step produced it.
+                    _output.Warn(
+                        CommandName,
+                        $"'{phase.StepName}' asked to keep '{output}', which could not be copied to "
+                        + $"'{destination}': {exception.Message}");
+                }
+            }
+        }
+
+        try
+        {
+            if (_fileSystem.DirectoryExists(scratch.Build))
+            {
+                _fileSystem.DeleteDirectory(scratch.Build);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _output.Warn(
+                CommandName,
+                $"this run's working directory '{scratch.Build}' could not be removed: {exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The two run-keyed directories an action owns: where its steps write, and what survives.
+    /// </summary>
+    /// <param name="Build">Where this run's steps write. Emptied when the action finishes.</param>
+    /// <param name="Artifacts">Where this run's persisted outputs are kept.</param>
+    /// <remarks>
+    /// Both are gitignored and neither is written into directly: everything goes under a directory
+    /// named for the run, and below that for the step that produced it. An action that wrote into
+    /// the roots would have two runs of itself sharing one directory, and the second would measure
+    /// what the first left behind.
+    /// </remarks>
+    private sealed record ActionScratch(string Build, string Artifacts);
+
     private sealed record RunnerSteps(
         IReadOnlyList<RunnerPhase> Phases,
         IReadOnlyList<string> PerformedActions,
-        IReadOnlyDictionary<string, string> Inputs);
+        IReadOnlyDictionary<string, string> Inputs,
+        string? ActionDirectory);
 
     /// <summary>What a run line may name: the runner's values, with the action's inputs over them.</summary>
     /// <param name="values">What the runner value directories supply.</param>
