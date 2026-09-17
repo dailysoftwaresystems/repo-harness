@@ -72,18 +72,95 @@ public sealed class PhaseRunnerTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var watch = Stopwatch.StartNew();
+        var quiet = new QuietRunner(TimeSpan.FromSeconds(30));
 
-        // The child writes one line and then waits up to 30 seconds for a signal this test never
-        // sends. Nothing about its total duration is wrong; its silence is.
-        var result = await Runner(factory).RunAsync(
+        // A phase that writes one line and then says nothing. Nothing about its total duration is
+        // wrong; its silence is.
+        //
+        // Measured against a runner rather than a real child, for the reason PacedRunner below gives:
+        // the stall clock starts before the child is spawned, so with a bound of one second this once
+        // raced `dotnet` starting up, and on a loaded machine over a slow filesystem the race was
+        // sometimes lost. That made the test report on how fast a process launches. Stopping a real
+        // process tree is covered where it belongs, in ProcessRunnerTests.
+        var result = await new PhaseRunner(quiet, factory.FileSystem, factory.Output).RunAsync(
             Child("stream", temp.Combine("test.log"), temp.Combine("never")) with { StallSeconds = 1 },
             TestContext.Current.CancellationToken);
 
         Assert.True(result.Stalled, "the phase went quiet and was not stopped");
         Assert.False(result.Passed);
         Assert.Contains("hung", result.Verdict().Detail, StringComparison.Ordinal);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(20), $"the bound was enforced only after {watch.Elapsed}");
+
+        // The claim without a clock in it: the phase was told to stop rather than left to finish on
+        // its own. Had the bound never fired, the runner would have run its thirty seconds out and
+        // reported that it was not stopped.
+        Assert.True(quiet.Stopped, "the bound fired and the phase was not actually stopped");
+    }
+
+    /// <summary>
+    /// A child that starts and then never says anything is the plainest hung command there is, and
+    /// the one the bound must still catch now that the time before a child starts is not counted
+    /// against it. It is caught because starting is itself something the clock is told about — take
+    /// that away and silence never begins, so nothing is ever bounded.
+    /// </summary>
+    [Fact]
+    public async Task AStallBound_StopsAPhaseThatNeverSaysAnythingAtAll()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var mute = new QuietRunner(TimeSpan.FromSeconds(30), speaks: false);
+
+        var result = await new PhaseRunner(mute, factory.FileSystem, factory.Output).RunAsync(
+            Child("stream", temp.Combine("mute.log"), temp.Combine("never")) with { StallSeconds = 1 },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Stalled, "a child that said nothing at all was never bounded");
+        Assert.True(mute.Stopped, "the bound fired and the phase was not actually stopped");
+    }
+
+    /// <summary>
+    /// Starting a process is this tool's own time, not the child being quiet. A machine under load
+    /// can take longer over it than a short bound allows, and counting that as silence made a slow
+    /// launch read as a hung command — which is exactly what made this suite's own stall test flake.
+    /// </summary>
+    [Fact]
+    public async Task AStallBound_DoesNotCountTheTimeSpentStartingAChild()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        // Three times the bound before the child is running, and then it finishes at once.
+        var slow = new SlowToStartRunner(TimeSpan.FromSeconds(3));
+
+        var result = await new PhaseRunner(slow, factory.FileSystem, factory.Output).RunAsync(
+            Child("echo-args", temp.Combine("slow.log")) with { StallSeconds = 1 },
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Stalled, "the time spent starting the child was counted as the child being quiet");
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    /// <summary>
+    /// Not counted as silence is not the same as not counted. Resolving a program walks every entry
+    /// of PATH, and one naming an unreachable share blocks for that platform's own timeout per
+    /// entry; a working directory on a mount that has gone away does the same. Unbounded, that is a
+    /// phase which never ends and never reports, and only the operator interrupting the run gets it
+    /// back — with no verdict for the leg.
+    /// </summary>
+    [Fact]
+    public async Task AChildThatNeverStartsAtAll_IsStillBounded()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        // Far past four times the bound before the child is running.
+        var never = new SlowToStartRunner(TimeSpan.FromSeconds(60));
+
+        var result = await new PhaseRunner(never, factory.FileSystem, factory.Output).RunAsync(
+            Child("echo-args", temp.Combine("never-starts.log")) with { StallSeconds = 1 },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Stalled, "a phase whose child never started was never bounded");
+        Assert.True(result.Duration < TimeSpan.FromSeconds(30), $"it was bounded, but only after {result.Duration}");
     }
 
     [Fact]
@@ -92,21 +169,27 @@ public sealed class PhaseRunnerTests
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
 
-        // Eight lines, 150 milliseconds apart: no gap reaches the bound, and the whole phase runs
-        // for longer than the bound. A wall-clock budget would have killed it; a stall bound does
-        // not, which is the entire reason the bound is on silence rather than on duration.
+        // Twenty lines, 200 milliseconds apart, against a bound of three seconds: no gap comes
+        // near the bound, and the whole phase runs for longer than it. A wall-clock budget would
+        // have killed it; a stall bound does not, which is the entire reason the bound is on
+        // silence rather than on duration.
+        //
+        // The margin is fifteen times the gap on purpose. At one second it was under seven, and a
+        // contended arm64 runner paused a single Task.Delay past the bound often enough to turn
+        // this red — measuring that machine's scheduler rather than this rule. Fifteen times over,
+        // a pause long enough to fire the bound is a stall by any reading.
         var runner = new PhaseRunner(
-            new PacedRunner(TimeSpan.FromMilliseconds(150), lines: 8),
+            new PacedRunner(TimeSpan.FromMilliseconds(200), lines: 20),
             factory.FileSystem,
             factory.Output);
 
         var result = await runner.RunAsync(
-            Child("echo-args", temp.Combine("paced.log")) with { StallSeconds = 1 },
+            Child("echo-args", temp.Combine("paced.log")) with { StallSeconds = 3 },
             TestContext.Current.CancellationToken);
 
         Assert.False(result.Stalled, "output was flowing and the phase was stopped anyway");
         Assert.Equal(0, result.ExitCode);
-        Assert.True(result.Duration >= TimeSpan.FromSeconds(1), $"the phase ran for only {result.Duration}");
+        Assert.True(result.Duration >= TimeSpan.FromSeconds(3), $"the phase ran for only {result.Duration}");
     }
 
     [Fact]
@@ -213,15 +296,91 @@ public sealed class PhaseRunnerTests
     }
 
     /// <summary>
+    /// A runner that says one thing and then goes quiet, so a stall is what the bound sees rather
+    /// than a machine that was busy. Runs <paramref name="life"/> out if nothing stops it, which is
+    /// how a bound that never fires shows up as a failure rather than as a hang.
+    /// </summary>
+    private sealed class QuietRunner(TimeSpan life, bool speaks = true) : IProcessRunner
+    {
+        /// <summary>Whether the phase was stopped, rather than left to finish on its own.</summary>
+        public bool Stopped { get; private set; }
+
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            var watch = Stopwatch.StartNew();
+            const string Line = "starting";
+
+            request.OnStarted?.Invoke();
+
+            if (speaks)
+            {
+                request.OnOutputLine?.Invoke(Line);
+            }
+
+            try
+            {
+                await Task.Delay(life, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // What the real runner reports when it stopped the child: the exit code is
+                // meaningless and the phase is marked as stopped.
+                Stopped = true;
+                return new ProcessResult(-1, Said(speaks, Line), string.Empty, watch.Elapsed, TimedOut: true);
+            }
+
+            return new ProcessResult(0, Said(speaks, Line), string.Empty, watch.Elapsed, TimedOut: false);
+        }
+
+        public string? FindExecutable(string command) => command;
+
+        private static string Said(bool speaks, string line) => speaks ? line + "\n" : string.Empty;
+    }
+
+    /// <summary>
+    /// A runner that takes <paramref name="launch"/> to get the child running and then finishes at
+    /// once, so what the bound sees is a slow start rather than a silent child.
+    /// </summary>
+    private sealed class SlowToStartRunner(TimeSpan launch) : IProcessRunner
+    {
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            var watch = Stopwatch.StartNew();
+
+            await Task.Delay(launch, cancellationToken);
+            request.OnStarted?.Invoke();
+
+            const string Line = "done";
+            request.OnOutputLine?.Invoke(Line);
+
+            return new ProcessResult(0, Line + "\n", string.Empty, watch.Elapsed, TimedOut: false);
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
+    /// <summary>
     /// A runner that emits lines at a fixed cadence, so the stall bound can be measured against
     /// output that keeps arriving rather than against a child whose timing the machine decides.
     /// </summary>
+    /// <param name="gap">How long between lines.</param>
+    /// <param name="lines">How many lines to write.</param>
     private sealed class PacedRunner(TimeSpan gap, int lines) : IProcessRunner
     {
         public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
         {
+            ArgumentNullException.ThrowIfNull(request);
+
             var captured = new StringBuilder();
             var watch = Stopwatch.StartNew();
+
+            // As the real runner does, and before any line: without it this stands for a runner
+            // that never reports the start, which is a different thing to measure.
+            request.OnStarted?.Invoke();
 
             try
             {

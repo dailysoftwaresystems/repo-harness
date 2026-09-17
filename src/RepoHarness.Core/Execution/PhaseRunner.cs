@@ -127,6 +127,10 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         };
 
         var gate = new Lock();
+        // Silence is the child's, so the clock is told when the child starts. Everything before that
+        // — reading the request, opening the log, resolving the program, a machine under load taking
+        // its time over any of it — is this tool's own, and counting it as the child being quiet is
+        // how a slow launch reads as a hung command.
         var clock = new StallClock();
         var streamed = new StringBuilder();
 
@@ -180,6 +184,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             Arguments = request.Arguments,
             WorkingDirectory = request.WorkingDirectory,
             Environment = request.Environment,
+            OnStarted = clock.Saw,
             OnOutputLine = line => Line(line, error: false),
             OnErrorLine = line => Line(line, error: true),
 
@@ -279,9 +284,25 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     }
 
     /// <summary>
-    /// Watches the silence and cancels <paramref name="stall"/> when it passes <paramref name="bound"/>.
-    /// The poll is a quarter of the bound so the phase is stopped near the moment it is due, and
-    /// never more often than every 50 milliseconds, which would cost more than it measures.
+    /// How much longer than the silence bound a child may take to start. Starting is this tool's own
+    /// work and is not counted as the child being quiet, but it is not unbounded either: resolving a
+    /// program walks every entry of PATH, and one naming an unreachable share blocks for that
+    /// platform's own timeout per entry, as does a working directory on a mount that has gone away.
+    /// <para>
+    /// A multiple of the silence bound rather than a number of its own, because the two measure
+    /// different things and only one of them repeats. A child may legitimately be silent for its
+    /// whole bound over and over; it starts once. Four times over is past any honest launch and
+    /// still finite, and it scales with how patient the run was asked to be, which is the knob
+    /// somebody actually sets.
+    /// </para>
+    /// </summary>
+    private const int StartBoundMultiple = 4;
+
+    /// <summary>
+    /// Watches the silence and cancels <paramref name="stall"/> when it passes <paramref name="bound"/>,
+    /// or when the child has not started within <see cref="StartBoundMultiple"/> times that. The poll
+    /// is a quarter of the bound so the phase is stopped near the moment it is due, and never more
+    /// often than every 50 milliseconds, which would cost more than it measures.
     /// </summary>
     private static async Task WatchAsync(StallClock clock, TimeSpan bound, CancellationTokenSource stall, CancellationToken finished)
     {
@@ -293,7 +314,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             {
                 await Task.Delay(poll, finished).ConfigureAwait(false);
 
-                if (clock.Quiet >= bound)
+                if (clock.Overdue(bound, bound * StartBoundMultiple))
                 {
                     await stall.CancelAsync().ConfigureAwait(false);
                     return;
@@ -411,16 +432,55 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     /// </summary>
     private sealed class StallClock
     {
+        /// <summary>What <see cref="_lastOutputMs"/> holds before the child has started.</summary>
+        private const long NotYet = -1;
+
         private readonly Stopwatch _elapsed = Stopwatch.StartNew();
-        private long _lastOutputMs;
+        private long _lastOutputMs = NotYet;
 
         /// <summary>How long the phase has run.</summary>
         public TimeSpan Elapsed => _elapsed.Elapsed;
 
-        /// <summary>How long since the last line on either stream.</summary>
-        public TimeSpan Quiet => TimeSpan.FromMilliseconds(_elapsed.ElapsedMilliseconds - Interlocked.Read(ref _lastOutputMs));
+        /// <summary>
+        /// How long since the last line on either stream, and nothing at all until the child is
+        /// running. A process that has not started yet has not been quiet: the time spent starting
+        /// one belongs to this tool, and counting it against the child makes a machine under load
+        /// look like a hung command. That window has a bound of its own, in
+        /// <see cref="Overdue(TimeSpan, TimeSpan)"/>.
+        /// </summary>
+        public TimeSpan Quiet
+        {
+            get
+            {
+                var last = Interlocked.Read(ref _lastOutputMs);
 
-        /// <summary>Records a line. Called from the reader threads of both streams, so it is interlocked.</summary>
+                return last == NotYet
+                    ? TimeSpan.Zero
+                    : TimeSpan.FromMilliseconds(_elapsed.ElapsedMilliseconds - last);
+            }
+        }
+
+        /// <summary>
+        /// Whether the phase is past whichever bound is in force: how long the child may take to
+        /// start before it has started, how long it may stay silent after.
+        /// </summary>
+        /// <param name="quiet">How long the child may say nothing.</param>
+        /// <param name="starting">How long the child may take to start.</param>
+        /// <remarks>
+        /// Two bounds rather than one because they measure different things. Counting the launch as
+        /// silence makes a slow machine read as a hung command, which is the defect this clock was
+        /// written for; leaving the launch unmeasured makes an unreachable PATH entry a phase that
+        /// never ends and never reports.
+        /// </remarks>
+        public bool Overdue(TimeSpan quiet, TimeSpan starting)
+            => Interlocked.Read(ref _lastOutputMs) == NotYet
+                ? _elapsed.Elapsed >= starting
+                : Quiet >= quiet;
+
+        /// <summary>
+        /// Records that the child started, or said something. Called from the thread that starts the
+        /// child and from the reader threads of both streams, so it is interlocked.
+        /// </summary>
         public void Saw() => Interlocked.Exchange(ref _lastOutputMs, _elapsed.ElapsedMilliseconds);
     }
 }

@@ -163,6 +163,24 @@ public static class Verdicts
     /// <param name="verdict">The verdict.</param>
     public static bool IsFailure(LegVerdict verdict) => Describe(verdict).IsFailure;
 
+    /// <summary>
+    /// Whether the leg was asked to run and did no work: no host could run it, or a tool it needs
+    /// is missing.
+    /// </summary>
+    /// <remarks>
+    /// Neither a failure nor a pass, and the run's summary needs all three: a leg that was asked
+    /// for and could not run proves nothing about the code, so counting it as passed reports
+    /// evidence nobody gathered. <c>skipped-not-selected</c> is deliberately not one of these —
+    /// nobody asked for that leg, so its absence is an answer rather than a gap in one, and counting
+    /// it would make every run narrowed by <c>--legs</c> report as incomplete. Listed by verdict
+    /// rather than by a flag on the table, because these are exactly the verdicts a leg reaches
+    /// after being asked to run and not running, and a new verdict should have to say which it is.
+    /// </remarks>
+    /// <param name="verdict">The verdict.</param>
+    public static bool IsSkip(LegVerdict verdict) => verdict
+        is LegVerdict.SkippedUnavailable
+        or LegVerdict.SkippedToolMissing;
+
     /// <summary>How fundamental the verdict is; the smaller number decides when legs disagree.</summary>
     /// <param name="verdict">The verdict.</param>
     public static int Rank(LegVerdict verdict) => Describe(verdict).Rank;

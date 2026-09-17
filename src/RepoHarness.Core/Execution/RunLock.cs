@@ -27,17 +27,35 @@ public enum LockScope
 /// <summary>Who holds a lock, in enough detail to name them and to tell whether they still exist.</summary>
 /// <param name="Machine">The machine the holder runs on.</param>
 /// <param name="ProcessId">The holder's process id.</param>
-/// <param name="ProcessStartedUtc">When that process started, so a recycled id is not mistaken for a live holder.</param>
+/// <param name="ProcessStamp">
+/// What tells that process from another that inherits its id, so a recycled id is not mistaken for a
+/// live holder. Holds no clock, so a clock that steps cannot turn a live holder into a dead one.
+/// </param>
 /// <param name="RunId">The holder's run id, which is also what a log path is scoped to.</param>
 /// <param name="TakenUtc">When the lock was taken, for display; nothing is ordered by it.</param>
 /// <param name="Command">What the holder is doing, so the reader knows what they are waiting for.</param>
 public sealed record LockHolder(
     string Machine,
     int ProcessId,
-    DateTimeOffset ProcessStartedUtc,
+    string? ProcessStamp,
     string RunId,
     DateTimeOffset TakenUtc,
-    string Command);
+    string Command)
+{
+    /// <summary>
+    /// The wall-clock start time a build before this one recorded here, kept only so such a file is
+    /// still readable. Nothing decides anything from it: it is exactly the value that moves when the
+    /// clock steps, which is why it stopped being what identifies a process.
+    /// </summary>
+    /// <remarks>
+    /// Declared rather than skipped so that every other unknown member can be refused. Not written
+    /// by this build: an entry it records carries a stamp instead. An entry it only keeps — another
+    /// machine's, which it has no business rewriting — is written back as it was read, this member
+    /// among it, so that machine's own build still finds what it wrote.
+    /// </remarks>
+    [JsonPropertyName("processStartedUtc")]
+    public DateTimeOffset? LegacyStartedUtc { get; init; }
+}
 
 /// <summary>One entry in the lock file: what is held, how much of it, and by whom.</summary>
 /// <param name="Host">The host the work runs on, as the command line names it.</param>
@@ -49,7 +67,19 @@ public sealed record LockEntry(string Host, string Tree, string? Variant, LockSc
 {
     /// <summary>The entry as a refusal names it.</summary>
     public string Describe()
-        => $"{Holder.Machine} pid {Holder.ProcessId}, run {Holder.RunId}, since {Holder.TakenUtc:u}, running '{Holder.Command}'";
+        => $"{Holder.Machine} pid {Holder.ProcessId}, run {Holder.RunId}, since {Holder.TakenUtc:u}, "
+            + $"running '{Holder.Command}'{Unstamped}";
+
+    /// <summary>
+    /// Said of an entry carrying no stamp, which is one an older build wrote. Such an entry is kept
+    /// while anything at all carries its id, so it can outlive its run once that id comes back around
+    /// to something else. Saying so is what tells the reader that <c>--force-lock</c> is the answer
+    /// here rather than waiting for a run that finished long ago.
+    /// </summary>
+    private string Unstamped
+        => Holder.ProcessStamp is { Length: > 0 }
+            ? string.Empty
+            : " (recorded by an older build, so a reused id cannot be told from it; --force-lock takes it)";
 }
 
 /// <summary>What a run asks to take.</summary>
@@ -88,8 +118,10 @@ public sealed record LockRequest
 /// would make two runs of the same leg invisible to each other. A held lock refuses immediately and
 /// names its holder: silently blocking for hours is worse than a refusal somebody can act on.
 /// </remarks>
-public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
+public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProcessIdentity identity)
 {
+    private readonly IProcessIdentity _identity = identity;
+
     /// <summary>The command name this reports under.</summary>
     public const string CommandName = "lock";
 
@@ -107,6 +139,13 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new JsonStringEnumConverter() },
+
+        // A shape this build does not recognise is a hard failure rather than silent data loss, as
+        // it is wherever this tool reads JSON that decides something: the configuration, the owner
+        // file, the sync marker and the host protocol. The one field an older build wrote and this
+        // one no longer uses is declared on the holder, so upgrading reads its own lock file rather
+        // than refusing it.
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -144,9 +183,9 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
             request.Variant,
             request.Scope,
             new LockHolder(
-                ProcessLiveness.CurrentMachine,
-                ProcessLiveness.CurrentId,
-                ProcessLiveness.CurrentStartedUtc,
+                _identity.CurrentMachine,
+                _identity.CurrentId,
+                _identity.Current,
                 request.RunId.Value,
                 DateTimeOffset.UtcNow,
                 request.Command));
@@ -236,24 +275,28 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output)
 
         foreach (var entry in entries)
         {
-            var mine = string.Equals(entry.Holder.Machine, ProcessLiveness.CurrentMachine, StringComparison.OrdinalIgnoreCase);
+            // Only the entry actually in the way. --force-lock says "this lock is stale, take it";
+            // taking every other lock as well would drop holds on trees and variants this run never
+            // asked for, including one another run is mid-sync on.
+            //
+            // Asked before the holder's machine is, so that a lock this machine will not reclaim on
+            // its own can still be given up. Otherwise an entry whose process id has come back around
+            // to something live is held for ever, and only editing the file by hand recovers it.
+            if (force && Conflicts(entry, wanted))
+            {
+                _output.Warn(CommandName, $"Taking {Describe(entry)} from {entry.Describe()} because --force-lock was given.");
+                continue;
+            }
+
+            var mine = string.Equals(entry.Holder.Machine, _identity.CurrentMachine, StringComparison.OrdinalIgnoreCase);
 
             if (!mine)
             {
-                // Only the entry actually in the way. --force-lock says "this lock is stale, take
-                // it"; taking every other machine's lock as well would drop holds on trees and
-                // variants this run never asked for, including one another run is mid-sync on.
-                if (force && Conflicts(entry, wanted))
-                {
-                    _output.Warn(CommandName, $"Taking {Describe(entry)} from {entry.Describe()} because --force-lock was given.");
-                    continue;
-                }
-
                 kept.Add(entry);
                 continue;
             }
 
-            if (ProcessLiveness.IsAlive(entry.Holder.ProcessId, entry.Holder.ProcessStartedUtc))
+            if (_identity.IsAlive(entry.Holder.ProcessId, entry.Holder.ProcessStamp))
             {
                 kept.Add(entry);
                 continue;

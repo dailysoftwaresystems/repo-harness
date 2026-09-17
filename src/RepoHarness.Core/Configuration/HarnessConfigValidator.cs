@@ -25,8 +25,13 @@ public static class HarnessConfigValidator
     /// <summary>Adapters a project may declare.</summary>
     private static readonly string[] ProjectTypes = ["cmake", "dotnet", "dart"];
 
-    /// <summary>Platform keys a per-platform map may use.</summary>
-    private static readonly string[] PlatformKeys = ["all", PlatformNames.Windows, PlatformNames.Linux, PlatformNames.MacOs];
+    /// <summary>Platform keys a per-platform map or list may use.</summary>
+    /// <remarks>
+    /// Built from the operating systems a host can be measured as, plus the one key that means all
+    /// of them, so a platform added to <see cref="PlatformNames"/> is accepted here without anyone
+    /// remembering to add it twice.
+    /// </remarks>
+    private static readonly string[] PlatformKeys = [PlatformScope.Every, .. PlatformNames.OperatingSystems];
 
     /// <summary>The phases of a leg, which an emulator may run.</summary>
     private static readonly string[] LegPhases = ["build", "test"];
@@ -325,12 +330,150 @@ public static class HarnessConfigValidator
                     problems.Add(
                         $"project '{project.Name}' defaultToolchain['{platform}'] names "
                         + $"toolchain '{toolchain}', which is not declared");
+                    continue;
+                }
+
+                var owner = $"project '{project.Name}' defaultToolchain['{platform}']";
+
+                // A key naming one platform says which platform it is for. The 'all' key does not,
+                // so it is checked against the operating systems the legs building this project
+                // actually declare: a general default that cannot serve one of them is the same
+                // contradiction, reached by a different route.
+                if (string.Equals(platform, PlatformScope.Every, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var os in OperatingSystemsBuilding(config, project))
+                    {
+                        RequireToolchainOn(config, toolchain, os, owner, problems);
+                    }
+                }
+                else
+                {
+                    RequireToolchainOn(config, toolchain, platform, owner, problems);
                 }
             }
 
-            RequireRelativePaths(project.BuildOutputs, $"project '{project.Name}' buildOutputs", problems);
+            ValidateBuildOutputs(config, project, problems);
             ValidateTest(project.Test, $"project '{project.Name}'", config, problems);
         }
+    }
+
+    /// <summary>
+    /// Checks a project's build outputs: every path relative, every platform key known, and every
+    /// leg that builds the project covered by every entry.
+    /// </summary>
+    /// <remarks>
+    /// The coverage check is what makes a keyed entry safe. An entry naming a path for Windows
+    /// alone, in a repository whose legs also run Linux, would leave the Linux legs with one fewer
+    /// witness than the file appears to give them — and a witness that quietly is not checked is
+    /// the failure the whole <c>buildOutputs</c> mechanism exists to prevent. It is refused here,
+    /// naming the leg, because every declared leg and its operating system are known when the file
+    /// is read; leaving it to the run would report it once per leg, much later, and only on the
+    /// legs that happened to be selected.
+    /// </remarks>
+    private static void ValidateBuildOutputs(HarnessConfig config, ProjectConfig project, List<string> problems)
+    {
+        var owner = $"project '{project.Name}' buildOutputs";
+
+        RequireRelativePaths(
+            project.BuildOutputs.SelectMany(output => output.Paths.Values),
+            owner,
+            problems);
+
+        foreach (var platform in project.BuildOutputs.SelectMany(output => output.Paths.Keys))
+        {
+            if (!PlatformKeys.Contains(platform, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"{owner} has an entry for '{platform}'; "
+                    + $"expected one of {string.Join(", ", PlatformKeys)}");
+            }
+        }
+
+        foreach (var output in project.BuildOutputs.Where(output => output.Plain is null))
+        {
+            foreach (var (leg, os) in LegsBuilding(config, project).Where(leg => !output.Covers(leg.Os)))
+            {
+                problems.Add(
+                    $"{owner} entry '{output}' names no path for '{os}', which leg '{leg}' builds on; "
+                    + $"give it a '{os}' entry or an '{PlatformScope.Every}' one");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks that <paramref name="toolchain"/> is declared to exist on <paramref name="platform"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Refused when the file is read rather than skipped when a leg is placed, because nothing here
+    /// depends on measuring anything: a leg's <c>os</c> is required, and a leg is only ever placed
+    /// on a host whose operating system equals it — emulation varies the processor, never the
+    /// system. So the contradiction is entirely between two lines of this file, and a check at
+    /// placement could never fire for anything this one has not already caught.
+    /// </para>
+    /// <para>
+    /// Refusing also keeps the answer to "what ran" unchanged. Skipping the leg instead would add a
+    /// new reason for a run to report legs that reached no verdict, and such a run is not a
+    /// success; a repository whose platform lists were wrong would find previously-green runs
+    /// turning non-zero without anything about its code having changed.
+    /// </para>
+    /// </remarks>
+    /// <param name="config">The configuration, for its toolchains.</param>
+    /// <param name="toolchain">The toolchain named. Already known to be declared.</param>
+    /// <param name="platform">The operating system it would have to exist on.</param>
+    /// <param name="owner">What names it, as the problem reports it.</param>
+    /// <param name="problems">Collects the problem.</param>
+    private static void RequireToolchainOn(
+        HarnessConfig config,
+        string toolchain,
+        string platform,
+        string owner,
+        List<string> problems)
+    {
+        if (string.IsNullOrWhiteSpace(platform)
+            || !config.Toolchains.TryGetValue(toolchain, out var declared)
+            || PlatformScope.Applies(declared.Platforms, platform))
+        {
+            return;
+        }
+
+        problems.Add(
+            $"{owner} names toolchain '{toolchain}', which declares platforms "
+            + $"{string.Join(", ", declared.Platforms)} and so does not exist on '{platform}'");
+    }
+
+    /// <summary>
+    /// The legs that build <paramref name="project"/>, each with the operating system it declares.
+    /// </summary>
+    /// <remarks>
+    /// A leg naming another project, or none where several are declared, says nothing about what
+    /// this one must produce or build with.
+    /// </remarks>
+    /// <param name="config">The configuration, for its legs.</param>
+    /// <param name="project">The project.</param>
+    private static IReadOnlyList<(string Leg, string Os)> LegsBuilding(HarnessConfig config, ProjectConfig project)
+        => [.. config.Legs
+            .Where(leg => BuildsProject(config, leg.Value, project))
+            .Select(leg => (Leg: leg.Key, leg.Value.Os))
+            .Where(leg => !string.IsNullOrWhiteSpace(leg.Os))];
+
+    /// <summary>The operating systems the legs building <paramref name="project"/> declare, once each.</summary>
+    /// <param name="config">The configuration, for its legs.</param>
+    /// <param name="project">The project.</param>
+    private static IEnumerable<string> OperatingSystemsBuilding(HarnessConfig config, ProjectConfig project)
+        => LegsBuilding(config, project).Select(leg => leg.Os).Distinct(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether <paramref name="leg"/> builds <paramref name="project"/>, by its own name for it or
+    /// by the repository's default.
+    /// </summary>
+    private static bool BuildsProject(HarnessConfig config, LegConfig leg, ProjectConfig project)
+    {
+        var named = leg.Project ?? config.Defaults.Project;
+
+        return named is null
+            ? config.Projects.Count == 1
+            : string.Equals(named, project.Name, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ValidateToolchains(HarnessConfig config, List<string> problems)
@@ -525,9 +668,16 @@ public static class HarnessConfigValidator
                 problems.Add($"{owner} names config '{leg.Config}', which is not declared");
             }
 
-            if (leg.Toolchain is { } toolchain && !config.Toolchains.ContainsKey(toolchain))
+            if (leg.Toolchain is { } toolchain)
             {
-                problems.Add($"{owner} names toolchain '{toolchain}', which is not declared");
+                if (!config.Toolchains.ContainsKey(toolchain))
+                {
+                    problems.Add($"{owner} names toolchain '{toolchain}', which is not declared");
+                }
+                else
+                {
+                    RequireToolchainOn(config, toolchain, leg.Os, owner, problems);
+                }
             }
 
             if (leg.Sanitizer is { } sanitizer && !config.Sanitizers.ContainsKey(sanitizer))
@@ -627,6 +777,12 @@ public static class HarnessConfigValidator
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        var legPlatforms = config.Legs.Values
+            .Select(leg => leg.Os)
+            .Where(os => !string.IsNullOrWhiteSpace(os))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         foreach (var tool in config.Tools)
         {
             if (string.IsNullOrWhiteSpace(tool.Name))
@@ -641,6 +797,30 @@ public static class HarnessConfigValidator
             }
 
             CheckPattern(tool.Probe?.Regex, $"tool '{tool.Name}' probe.regex", problems);
+
+            foreach (var platform in tool.Platforms)
+            {
+                if (!PlatformKeys.Contains(platform, StringComparer.OrdinalIgnoreCase))
+                {
+                    problems.Add(
+                        $"tool '{tool.Name}' lists platform '{platform}'; "
+                        + $"expected one of {string.Join(", ", PlatformKeys)}");
+                }
+            }
+
+            // A list naming only platforms no leg runs on removes the tool from every host, which
+            // reads exactly like never having declared it. Refused for the reason a buildOutput
+            // covering no leg is: a rule that applies nowhere is one the file appears to state and
+            // nothing enforces, and the spelling that causes it is a single mistyped word.
+            if (tool.Platforms.Count > 0
+                && legPlatforms.Count > 0
+                && !legPlatforms.Any(os => PlatformScope.Applies(tool.Platforms, os)))
+            {
+                problems.Add(
+                    $"tool '{tool.Name}' is needed only on {string.Join(", ", tool.Platforms)}, "
+                    + $"and no declared leg runs on any of those ({string.Join(", ", legPlatforms)}), "
+                    + "so it would never be checked anywhere");
+            }
 
             if (tool.MinVersion is { } minVersion && !Version.TryParse(minVersion, out _))
             {

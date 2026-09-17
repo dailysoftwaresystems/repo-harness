@@ -1,6 +1,8 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -28,6 +30,45 @@ public sealed partial class CliEndToEndTests
         {
             Assert.Contains(command, result.StandardOutput, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// <c>init</c> and <c>install-missing-tools</c> share one provisioning engine, and either of them
+    /// can stop to ask for a superuser password. The flag that refuses to ask therefore has to reach
+    /// both: declared on one command alone, the other would turn it away as an option it does not know.
+    /// </summary>
+    [Theory]
+    [InlineData("init")]
+    [InlineData("install-missing-tools")]
+    public async Task NoPrompt_IsOfferedByEveryCommandThatCanProvision(string command)
+    {
+        var result = await CliRunner.RunAsync([command, "--help"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("--no-prompt", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// One sync reaches every host, and taking a directory over deletes what the source does not
+    /// have. Saying which machine that applies to is the whole point, so the flag cannot be a bare
+    /// yes that a reader could take to mean "this one" while it means "all of them".
+    /// </summary>
+    [Fact]
+    public async Task Adopt_RefusesToBeABareYes_AndMustNameItsHosts()
+    {
+        // In a directory of its own, deliberately. Without one the real command line runs with this
+        // process's working directory, which is inside this repository: were the option's arity ever
+        // to allow none, this test would sync against whatever hosts this tree declares.
+        using var temp = new TempDirectory();
+
+        var result = await CliRunner.RunAsync(
+            ["sync", "--adopt"],
+            TestContext.Current.CancellationToken,
+            workingDirectory: temp.Path);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
+        Assert.Contains("--adopt", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("argument", result.StandardError, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -356,6 +397,109 @@ public sealed partial class CliEndToEndTests
               "predefinedRunners": { "corpus": { "action": {{System.Text.Json.JsonSerializer.Serialize(action)}} } }
             }
             """);
+
+    /// <summary>
+    /// The line a migration's acceptance gate reads. A leg that reached no verdict used to be
+    /// counted among the legs that passed, so a run where nothing ran at all printed
+    /// "OK - n leg(s) passed" and exited 0 — which is the one number a gate compares.
+    /// </summary>
+    [Fact]
+    public async Task ARunWhereALegReachedNoVerdict_IsNotReportedAsPassed()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native,elsewhere", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Incomplete, result.ExitCode);
+        Assert.DoesNotContain("OK -", result.StandardOutput, StringComparison.Ordinal);
+
+        // Both halves are named: how many did report, and which ones did not.
+        Assert.Contains("1 of 2 leg(s) passed", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("elsewhere", result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARunWhereEveryLegReported_IsStillReportedAsPassed()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("1 leg(s) passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// B2's whole point is that a green nobody earned must not be reported, and the JSON ledger is
+    /// the machine-readable half of that — the half a gate actually parses.
+    /// </summary>
+    [Fact]
+    public async Task TheJsonLedgerOfARunWithAnUnreportedLeg_SaysItIsNotComplete()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native,elsewhere", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Incomplete, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        // The document and the process agree, and both say the same thing the table said.
+        Assert.Equal(HarnessExit.Incomplete, root.GetProperty("exitCode").GetInt32());
+        Assert.True(root.GetProperty("passed").GetBoolean(), "nothing failed, so this is not a red run");
+        Assert.False(root.GetProperty("complete").GetBoolean());
+        Assert.False(root.GetProperty("cancelled").GetBoolean());
+
+        var legs = root.GetProperty("legs").EnumerateArray().Select(leg => leg.GetProperty("leg").GetString()).ToList();
+        Assert.Contains("native", legs);
+        Assert.Contains("elsewhere", legs);
+    }
+
+    /// <summary>
+    /// A repository with one leg this machine can run and one no host can, and a runner that does
+    /// something trivial on whichever of them runs.
+    /// </summary>
+    private static async Task PrepareRunnerAsync(TempDirectory temp)
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs =
+            {
+                ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" },
+
+                // An operating system no declared host provides: this machine is the only host.
+                ["elsewhere"] = new LegConfig
+                {
+                    Os = platform.PlatformKey == PlatformNames.Linux ? PlatformNames.MacOs : PlatformNames.Linux,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                },
+            },
+            PredefinedRunners =
+            {
+                ["probe"] = new RunnerConfig { Action = "probe/probe.yml" },
+            },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
+    }
 
     /// <summary>An initialised repository whose path budget any temporary directory fits.</summary>
     private static Task PrepareRepositoryAsync(TempDirectory temp)

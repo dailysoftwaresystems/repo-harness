@@ -19,6 +19,15 @@ public sealed record SyncEntry(string Path, long Size, string ContentHash);
 /// <param name="Entries">Every transferable file, keyed by relative path.</param>
 public sealed record SyncManifest(string Root, IReadOnlyDictionary<string, SyncEntry> Entries)
 {
+    /// <summary>
+    /// Every link the walk refused to follow, by relative path. Not content, and never compared with
+    /// anything: a link is neither transferred nor deleted. Recorded because a reader deciding
+    /// whether to let this tool take a directory over cannot see them any other way — a link is in
+    /// no entry, so a file written at its name replaces it and is reported as an ordinary write,
+    /// and a directory behind one hides everything under it from the list entirely.
+    /// </summary>
+    public IReadOnlyList<string> Links { get; init; } = [];
+
     /// <summary>An empty manifest, for a destination that does not exist yet.</summary>
     /// <param name="root">The tree the manifest would describe.</param>
     public static SyncManifest Empty(string root)
@@ -79,9 +88,13 @@ public sealed class ManifestBuilder(IFileSystem fileSystem, IHostPlatform platfo
             return SyncManifest.Empty(root);
         }
 
-        await WalkAsync(root, root, isWithheld, entries, cancellationToken).ConfigureAwait(false);
+        var links = new List<string>();
 
-        return new SyncManifest(root, entries);
+        await WalkAsync(root, root, isWithheld, entries, links, cancellationToken).ConfigureAwait(false);
+
+        links.Sort(StringComparer.Ordinal);
+
+        return new SyncManifest(root, entries) { Links = links };
     }
 
     private async Task WalkAsync(
@@ -89,6 +102,7 @@ public sealed class ManifestBuilder(IFileSystem fileSystem, IHostPlatform platfo
         string directory,
         Func<string, bool> isWithheld,
         Dictionary<string, SyncEntry> entries,
+        List<string> links,
         CancellationToken cancellationToken)
     {
         foreach (var file in _fileSystem.EnumerateFiles(directory, recursive: false))
@@ -108,6 +122,7 @@ public sealed class ManifestBuilder(IFileSystem fileSystem, IHostPlatform platfo
             // link's own name — the repository's content deciding what leaves this machine.
             if (IsLink(file))
             {
+                links.Add(relative);
                 continue;
             }
 
@@ -129,10 +144,11 @@ public sealed class ManifestBuilder(IFileSystem fileSystem, IHostPlatform platfo
             // would put files outside it into the manifest.
             if (IsLink(child))
             {
+                links.Add(relative);
                 continue;
             }
 
-            await WalkAsync(root, child, isWithheld, entries, cancellationToken).ConfigureAwait(false);
+            await WalkAsync(root, child, isWithheld, entries, links, cancellationToken).ConfigureAwait(false);
         }
     }
 

@@ -17,6 +17,17 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
 
     public bool IsVerbose { get; } = verbose;
 
+    public bool IsDataOnly
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _dataOnly;
+            }
+        }
+    }
+
     public void Ok(string command, string message) => Write(Progress, $"{command}: OK - {message}");
 
     public void Fail(string command, string message) => Write(_error, $"{command}: FAIL - {message}");

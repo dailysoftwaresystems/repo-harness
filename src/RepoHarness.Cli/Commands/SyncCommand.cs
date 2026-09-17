@@ -19,6 +19,13 @@ internal static class SyncCommand
         Description = "List what would be written and deleted, and change nothing.",
     };
 
+    private static readonly Option<string[]> AdoptOption = new("--adopt")
+    {
+        Description = "Take over these hosts' copies although the harness did not create them: --adopt vps or --adopt vps \"wsl Ubuntu\". Otherwise refused. What it would cost is reported either way.",
+        AllowMultipleArgumentsPerToken = true,
+        Arity = ArgumentArity.OneOrMore,
+    };
+
     private static readonly Option<string[]> PullOption = new("--pull")
     {
         Description = "Bring these paths back from each host's copy instead of syncing to it, verified on arrival.",
@@ -33,6 +40,7 @@ internal static class SyncCommand
 
         command.Options.Add(LegsOption);
         command.Options.Add(DryRunOption);
+        command.Options.Add(AdoptOption);
         command.Options.Add(PullOption);
         GlobalOptions.AddTo(command);
 
@@ -48,7 +56,7 @@ internal static class SyncCommand
                 .SyncHostsAsync(
                     context.Directory,
                     legs,
-                    new SyncOptions(arguments.GetValue(DryRunOption)),
+                    new SyncOptions(arguments.GetValue(DryRunOption), arguments.GetValue(AdoptOption)),
                     arguments.GetValue(PullOption) ?? [],
                     cancellationToken)
                 .ConfigureAwait(false);

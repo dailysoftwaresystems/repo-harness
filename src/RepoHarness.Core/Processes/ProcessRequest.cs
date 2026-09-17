@@ -42,6 +42,13 @@ public sealed record ProcessRequest
     public bool HoldStandardInputOpen { get; init; }
 
     /// <summary>
+    /// Called once the child is running, before any of its output can arrive. What a caller bounding
+    /// a phase by silence needs: the time spent starting a process is this tool's, not the child
+    /// being quiet, and counting it as the child's is how a slow launch reads as a hung command.
+    /// </summary>
+    public Action? OnStarted { get; init; }
+
+    /// <summary>
     /// Invoked for each stdout line as it arrives, in addition to capture.
     /// Raised on background threads, so implementations must be thread safe.
     /// </summary>

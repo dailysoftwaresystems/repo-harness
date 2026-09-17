@@ -10,18 +10,44 @@ namespace RepoHarness.Core.Execution;
 /// <summary>The run that owns a log directory.</summary>
 /// <param name="Machine">The machine it runs on.</param>
 /// <param name="ProcessId">Its process id.</param>
-/// <param name="ProcessStartedUtc">When that process started, so a recycled id is not read as a live owner.</param>
+/// <param name="ProcessStamp">
+/// What tells that process from another that inherits its id, so a recycled id is not read as a live
+/// owner. Holds no clock, so a clock that steps cannot turn a live owner into a dead one.
+/// </param>
 /// <param name="RunId">Its run id.</param>
 /// <param name="TakenUtc">When it claimed the directory, for display.</param>
 public sealed record LogOwner(
     string Machine,
     int ProcessId,
-    DateTimeOffset ProcessStartedUtc,
+    string? ProcessStamp,
     string RunId,
     DateTimeOffset TakenUtc)
 {
+    /// <summary>
+    /// The wall-clock start time a build before this one recorded here, kept only so such a file is
+    /// still readable. Nothing decides anything from it: it is exactly the value that moves when the
+    /// clock steps, which is why it stopped being what identifies a process.
+    /// </summary>
+    /// <remarks>
+    /// Declared rather than skipped so that every other unknown member can be refused, as this tool
+    /// refuses one everywhere else it reads JSON. Never written back: an entry rewritten by this
+    /// build carries a stamp instead.
+    /// </remarks>
+    [JsonPropertyName("processStartedUtc")]
+    public DateTimeOffset? LegacyStartedUtc { get; init; }
+
     /// <summary>The owner as a refusal names it.</summary>
-    public string Describe() => $"{Machine} pid {ProcessId}, run {RunId}, since {TakenUtc:u}";
+    public string Describe()
+        => $"{Machine} pid {ProcessId}, run {RunId}, since {TakenUtc:u}{Unstamped}";
+
+    /// <summary>
+    /// Said of an owner carrying no stamp, which is one an older build wrote. Kept while anything at
+    /// all carries its id, so it can outlive its run once that id comes back around to something else.
+    /// </summary>
+    private string Unstamped
+        => ProcessStamp is { Length: > 0 }
+            ? string.Empty
+            : " (recorded by an older build, so a reused id cannot be told from it; --force-lock takes it)";
 }
 
 /// <summary>What claiming a log directory found.</summary>
@@ -53,8 +79,10 @@ public sealed record LogClaim(bool Taken, LogOwner? Holder, string OwnerFile)
 /// than allowed to interleave its output with another run's, since one leg's result read as
 /// another's is exactly the failure the ids exist to prevent.
 /// </remarks>
-public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output)
+public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, IProcessIdentity identity)
 {
+    private readonly IProcessIdentity _identity = identity;
+
     /// <summary>The command name this reports under.</summary>
     public const string CommandName = "logs";
 
@@ -73,6 +101,12 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output)
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+
+        // As the lock file, the configuration, the sync marker and the host protocol are read: a
+        // shape this build does not recognise is a hard failure, not silent data loss. The one
+        // field an older build wrote is declared, so upgrading reads its own owner file rather than
+        // refusing it.
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -94,8 +128,16 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output)
     /// </summary>
     /// <param name="logDirectory">The directory this run writes its logs to.</param>
     /// <param name="runId">The run claiming it.</param>
+    /// <param name="force">
+    /// Whether to take a path a live owner still holds, which <c>--force-lock</c> asks for. The only
+    /// way out of an owner that cannot be reclaimed: without it the file has to be deleted by hand.
+    /// </param>
     /// <param name="cancellationToken">Stops the attempt.</param>
-    public Task<LogClaim> ClaimAsync(string logDirectory, RunId runId, CancellationToken cancellationToken = default)
+    public Task<LogClaim> ClaimAsync(
+        string logDirectory,
+        RunId runId,
+        bool force = false,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logDirectory);
         ArgumentNullException.ThrowIfNull(runId);
@@ -108,21 +150,30 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output)
         {
             if (Read(file) is { } existing && !Mine(existing, runId))
             {
-                if (ProcessLiveness.IsAlive(existing.ProcessId, existing.ProcessStartedUtc)
-                    || !string.Equals(existing.Machine, ProcessLiveness.CurrentMachine, StringComparison.OrdinalIgnoreCase))
+                var held = _identity.IsAlive(existing.ProcessId, existing.ProcessStamp)
+                    || !string.Equals(existing.Machine, _identity.CurrentMachine, StringComparison.OrdinalIgnoreCase);
+
+                if (held && !force)
                 {
                     // A holder on another machine cannot be asked whether it is still running, so
                     // it stands. Liveness, never a timeout, is what decides for one on this machine.
                     return new LogClaim(false, existing, file);
                 }
 
-                _output.Info(CommandName, $"Reclaimed the log path '{logDirectory}' from {existing.Describe()}, which is no longer running.");
+                if (held)
+                {
+                    _output.Warn(CommandName, $"Taking the log path '{logDirectory}' from {existing.Describe()} because --force-lock was given.");
+                }
+                else
+                {
+                    _output.Info(CommandName, $"Reclaimed the log path '{logDirectory}' from {existing.Describe()}, which is no longer running.");
+                }
             }
 
             var owner = new LogOwner(
-                ProcessLiveness.CurrentMachine,
-                ProcessLiveness.CurrentId,
-                ProcessLiveness.CurrentStartedUtc,
+                _identity.CurrentMachine,
+                _identity.CurrentId,
+                _identity.Current,
                 runId.Value,
                 DateTimeOffset.UtcNow);
 
@@ -167,10 +218,10 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output)
     /// <param name="logDirectory">The directory a run writes its logs to.</param>
     public LogOwner? Owner(string logDirectory) => Read(OwnerFile(logDirectory));
 
-    private static bool Mine(LogOwner owner, RunId runId)
+    private bool Mine(LogOwner owner, RunId runId)
         => string.Equals(owner.RunId, runId.Value, StringComparison.Ordinal)
-            && owner.ProcessId == ProcessLiveness.CurrentId
-            && string.Equals(owner.Machine, ProcessLiveness.CurrentMachine, StringComparison.OrdinalIgnoreCase);
+            && owner.ProcessId == _identity.CurrentId
+            && string.Equals(owner.Machine, _identity.CurrentMachine, StringComparison.OrdinalIgnoreCase);
 
     private LogOwner? Read(string file)
     {

@@ -113,6 +113,14 @@ at once, with the line it concerns where the parser knows it:
 - References are resolved: a leg naming an undeclared host or emulator, an emulator that
   runs programs for another processor than the leg's, a success pattern that does not
   compile, a commit template placeholder no variable declares.
+- **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
+  toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
+  about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose
+  operating system equals it — emulation varies the processor, never the system. Skipping instead
+  would also make the run report a leg that reached no verdict, which is not a success, so a wrong
+  list would turn a green run non-zero rather than telling its author which line to fix. A
+  project's `defaultToolchain` is held to the same rule, against the platform its key names, or
+  against the operating systems its legs declare where the key is `all`.
 
 It is written with LF line endings and no byte order mark on every platform. The file
 is tracked, and its bytes must not depend on which machine ran `init`.
@@ -487,8 +495,9 @@ build, or has no copy of the repository.
 - Interrupting `host-exec` stops ssh or wsl.exe, which ends the host's input, and the host
   cancels the command instead of leaving it running there.
 - A host's copy is created by `sync`, which also puts `.harness-config/config.json` there so
-  the DssHarness running there can find the repository at all. Sync will not adopt a checkout
-  made by hand, since it never writes into a directory it did not create.
+  the DssHarness running there can find the repository at all. Sync will not take over a checkout
+  made by hand unless `--adopt` names that host, and reports what taking it over would cost
+  either way.
 
 ### Installing what a host is missing
 
@@ -506,9 +515,40 @@ ready to be told what is missing.
   allowlist entry: probed where it declares a probe, reported when missing, never installed. That
   is how a program shipping with the platform, or with the repository, is allowed to appear in a
   runner's steps.
+- **A tool may name the platforms it is needed on**, with `platforms`, in the same words a
+  toolchain uses: `windows`, `linux`, `macos`, or `all`. A host whose platform an entry does not
+  name is never asked about it, so it is neither probed there nor counted against that host's legs.
+  Left out, a tool is needed everywhere, which is what every list written before this meant.
+  Without it a repository could not declare both a Windows compiler and a POSIX one: each was
+  reported missing on the other's hosts, and no leg was ever fully provisioned.
 - **A privileged install takes its credential from that host's own item, on standard input
-  only.** It never reaches an argument list, a log or an error message, and redaction happens at
-  one place rather than at each call site: a failure excerpt was measured carrying one through.
+  only.** The item declares it as `SUDO_PASSWORD` in its `.env`, beside the address and user:
+  `.harness-config/sshItems/<name>/.env`, or `.harness-config/wslDistros/<distro>/.env`. It never
+  reaches an argument list, a log or an error message, and redaction happens at one place rather
+  than at each call site: a failure excerpt was measured carrying one through. Only the six system
+  package managers ask for one at all — `apt`, `apt-get`, `dnf`, `yum`, `apk`, `zypper` and
+  `pacman` install into system directories; `brew`, `winget`, `choco`, `scoop`, `npm`, `pip` and
+  `dotnet` never run under `sudo`.
+- **A host that declares no password is asked for one, once, at the terminal.** Where nothing
+  else can supply it, `install-missing-tools` and `init` ask whoever is running them, echoing
+  nothing. The answer is checked against that host with `sudo -S -v` before an install that may
+  run for half an hour rides on it, and a wrong one is refused on the spot rather than tried
+  again: a second guess is a second failed authentication counted against that account.
+  - **It is held per host, in memory, for that one command and no longer.** Each host owns its
+    own answer, so a password typed for one is never offered to another — which would spend
+    somebody's failed-login budget on a machine they never meant to touch. Nothing is written
+    anywhere: the next command asks again.
+  - **This machine can be asked too**, which is the one case an item could never cover: local
+    legs have no item and so can declare no credential at all.
+- **Nobody is asked where nobody is there.** A run whose standard input is not a terminal, and a
+  run answering with `--json`, both refuse exactly as a run with no credential always has, so
+  what a script reads keeps parsing. `--no-prompt` refuses the same way at a real terminal, and
+  says so in the refusal. The refusal names every remedy, including running the harness as root,
+  which needs no password: CI normally installs its dependencies in an earlier step and never
+  reaches this at all, and where it does, running as root is the answer that suits it.
+- **Interrupting the prompt stops the run.** Under `install-missing-tools` that is exit `130`,
+  as any interruption is. Under `init` it is also `130`, and everything already created is still
+  listed: the repository is initialised either way, and only the last step was stopped.
 - A second run reports "already current" and changes nothing. An unreachable host is named, and
   the other legs still go ahead.
 
@@ -569,6 +609,14 @@ When several apply, the more fundamental one is reported: `poisoned`, then
 `unwitnessed`. A leg whose inputs moved is not reported as failed even if its tests
 failed, because what failed was a tree that never existed.
 
+**A leg that reached no verdict is never counted among the legs that passed.** A skip is not a
+failure — a switched-off machine is normal — but it is not a pass either, and a run carrying one
+exits `21` (`Incomplete`) rather than `0`, naming the legs that did not report. The verdict table
+already ranks a skip above a pass so that such a run summarises as the warning; the summary now
+reads that ranking instead of reporting the number of rows in the ledger as the number that
+passed. A gate comparing two runs reads exactly this line, and "8 leg(s) passed" for eight legs
+that never ran is the one number that must never be wrong.
+
 ## Parallel execution
 
 A command that selects several legs starts them together and waits for **every**
@@ -627,6 +675,14 @@ tool replaces, where a green result had quietly stopped meaning anything.
   when the file is read.
 - A build passes only if every file in the project's `buildOutputs` exists afterwards,
   so a build that exited 0 cannot hand its tests a binary left over from an earlier one.
+  An entry is a path, or a mapping of platform to path where the platforms disagree about what the
+  same target is called — a program CMake names `app` is `app.exe` on Windows, and a static library
+  differs by prefix as well as suffix. A bare string applies everywhere, so a list written before
+  this means what it always did. An entry that names no path for a platform some leg builds on is
+  refused when the file is read, naming the leg: a witness that is quietly not checked is the
+  failure `buildOutputs` exists to prevent, and the legs and their operating systems are all known
+  then. A suffix added automatically was the alternative and is weaker — it has to guess which
+  entries name programs, and cannot express a name differing by more than its suffix.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
 - Executables are resolved on the host before a leg starts, so a missing tool is
@@ -694,10 +750,21 @@ while a gate ran turned a green suite red, with four test processes live at once
 - No verdict depends on a sample finishing within a time window. Sampling costs
   seconds on one platform and a fraction of that on another, and one such overhead
   asymmetry was once read, for a whole cycle, as a speed difference between legs.
-- A process is identified by its id together with its start time, and a parent link is
-  followed only when the parent started no later than the child. Process ids are
-  recycled: on Windows a freed id was measured coming back after about a hundred
-  allocations.
+- **A phase is bounded by silence, and silence starts when the child does.** Reading the request,
+  opening the log and starting the process are this tool's own time; counting them against the
+  child made a slow launch on a loaded machine read as a hung command. A child that starts and then
+  says nothing is still bounded, because starting is itself something the clock is told about.
+- A process is identified by its id together with a stamp that tells it from the next
+  holder of that id, and a parent link is followed only when the parent started no later
+  than the child. Process ids are recycled: on Windows a freed id was measured coming back
+  after about a hundred allocations.
+- **That stamp holds no clock.** On Linux it is the boot this machine is on and the tick
+  within it the process started, read from `/proc`; on Windows and macOS it is the start
+  time the kernel records once at creation and never works out again. A start time
+  recomputed from the current clock — which is what `ps lstart` reports, and what adding
+  `/proc/stat`'s `btime` to ticks-since-boot produces — moves for every live process the
+  moment the clock steps, and every live holder then reads as a recycled id at once. On a
+  host whose clock steps by about 25 seconds every few seconds, that is not an edge case.
 - What sampling cannot see is stated in the report: a tool started from inside the
   build directory with a relative path, since another process's working directory
   cannot be read, and processes that do not expose their command line.
@@ -805,8 +872,13 @@ while their sources are being replaced. A lock is released only by the run that 
 - A dead holder on this host is reclaimed automatically, and the reclaim is
   reported. A holder on another host requires `--force-lock`, which is always a
   human decision.
-- Process start time is recorded alongside the pid so a recycled pid is not
-  mistaken for a live holder.
+- A clock-free process stamp is recorded alongside the pid so a recycled pid is not
+  mistaken for a live holder, and so a clock that steps cannot turn a live one into a
+  dead one. Compared exactly: there is no clock in it for a tolerance to absorb.
+- `--force-lock` takes any lock actually in the way, on this host or another. On this
+  host it is the only way out of an id that has come back around to something live,
+  which would otherwise hold a tree until the file was edited by hand. It takes the log
+  path with it, for the same reason.
 
 ## Syncing a tree
 
@@ -815,10 +887,55 @@ for this machine, a WSL distribution and an ssh host, so a sync to a host and a 
 directory here cannot drift apart.
 
 - **The copy is the tool's.** Sync creates it, records that it did, and refuses to write into a
-  directory it did not create. It deletes whatever the source does not have, so adopting a
-  checkout somebody made by hand would delete work nothing here knows about, on a machine whose
-  owner is not watching. The refusal says to move that directory aside and let sync create the
-  copy itself.
+  directory it did not create. It deletes whatever the source does not have, so taking over a
+  checkout somebody made by hand could delete work nothing here knows about, on a machine whose
+  owner is not watching.
+- **The refusal says what taking it over would cost.** It is worked out from the same manifest
+  and plan a real sync uses, so the reader is told which files would be overwritten and which
+  deleted, rather than only that the directory is not the tool's. An overwrite is named apart
+  from a write everywhere it is reported — in the refusal, in `--dry-run`, and while it happens —
+  because a file the copy already had, holding an edit nobody committed, reads exactly like a file
+  the copy never had, and only one of the two loses anything. For the same reason an overwrite is
+  reported by default rather than only under `--verbose`, as a deletion already was.
+- **`--adopt` names the hosts it takes over** — `--adopt vps`, not a bare yes. One sync reaches
+  every host, so a flag meaning "go ahead" would take over whatever unexpected directory is found
+  at another host's `repositoryPath`, a mistyped one included, without being asked again. A host
+  nobody named is refused exactly as it would have been without the flag, and told which spelling
+  would take it.
+- **It says what that is about to cost before it starts** — not only in the refusal, because
+  somebody who reads the flag in the help and types it never sees a refusal.
+- **The marker records which it was.** Afterwards a copy taken over and one the tool made are the
+  same directory, and only one of them deleted somebody's files; the marker is the only thing left
+  that can say so.
+- **What survives an adoption is narrower than it looks.** Its `.git` and so every commit in it,
+  the rest of `.harness-config`, the worktrees root and whatever `sync.neverTransfer` names are
+  protected from the deletion — though `config.json` there is replaced with this tree's, which the
+  refusal says. The ignore list is *not* read from that host: it is this tree's, listed by asking
+  git which ignored files exist **here**. A directory only the host has — a build tree under a name
+  `sync.neverTransfer` does not carry, a `node_modules`, a virtual environment — is ignored by
+  nothing this side can see and is deleted like any other file. It appears in the list the refusal
+  prints, which is why the list is the thing to read; name it in `sync.neverTransfer` first if it
+  should stay.
+- **`sync.maxDeleteFraction` bounds an adoption too.** A directory that exists and carries no marker
+  is exactly what a mistyped `repositoryPath` produces, which is the case that bound was written
+  for: the path meant to name a checkout names a home directory, and every other project under it
+  is what the source does not have. Two gates for that is the point of having one.
+- **A takeover is marked as begun before anything is deleted, and as finished only once the copy is
+  one.** Both of the obvious markings are wrong about a run that stopped part way: unmarked, the
+  next run refuses and reports a smaller loss than the first did, because what has gone no longer
+  appears in a plan; marked complete, the next ordinary `build` or `test` — which never carries an
+  adopt list — would quietly delete the rest with nobody asked at all. So a stopped takeover is its
+  own state: it still needs `--adopt <host>`, and its refusal says plainly that what the earlier run
+  removed is not in the list.
+- **A link the copy holds is named too.** A link sits in no manifest — the walk refuses to follow
+  one — so a file written at its name replaces it and reads as an ordinary write, and everything
+  behind a linked directory is outside any list a plan can build. Reported rather than guarded
+  against: a build directory pointed at another volume is ordinary, and refusing to write through
+  one would refuse `--pull build/...` — a path the reader named, inside the tree they named.
+- **`--dry-run` shows the plan instead of refusing,** for a directory the tool did not create and
+  for one whose deletions are over the bound. A preview changes nothing, so there is nothing for
+  either refusal to protect — and the bound's own message says to run with `--dry-run` to see the
+  list it was until now refusing to show.
 - **The copy is created, with its parents,** when the declared `repositoryPath` is not there, so
   the first sync to a fresh host needs no hand-made clone. A path that exists and is not a
   directory, or that cannot be created, is a named failure — never a silent fallback to
@@ -854,7 +971,8 @@ directory here cannot drift apart.
   is indistinguishable from a source that deleted everything, and without the bound that empties
   a host. A first sync into an empty copy has nothing to measure and is never over it.
 - **Deletion stays inside the tree.** Every path is resolved against the copy's declared root and
-  refused if it leaves by `..`, by an absolute path, or through a link.
+  refused if it leaves by `..` or by being absolute. Links are compared as spelled rather than
+  followed, for the reason the takeover bullet above gives, and are disclosed instead.
 - **What was deleted is reported** by name, at the level a reader sees by default rather than
   behind `--verbose`: what a sync removed from another machine is the one thing running it again
   cannot recover. `--dry-run` lists every write and every deletion and changes nothing.
@@ -873,9 +991,14 @@ directory here cannot drift apart.
 A procedure specific to one repository — a corpus build-and-test, a benchmark, a round trip —
 lives in `predefinedRunners` rather than in the tool. `run <name>` executes one across the legs
 it declares, with the same isolation, locking, stall bounds, witnesses and reporting every other
-leg-running command gets. A runner that declares `requireBuild` has its leg's tree synced first
-when the leg is an ssh host or a WSL distribution, then built, and only then run: a runner that
-calls a program the build produces otherwise runs against whatever was left there.
+leg-running command gets. A runner that declares `requireBuild` has its leg built before it runs:
+a runner that calls a program the build produces otherwise runs against whatever was left there.
+
+**`requireBuild` gates the build, never the sync.** A leg on an ssh host or a WSL distribution runs
+from that host's own copy of the tree — the host reads `config.json` and the runner's action file
+from it — so the tree is put there whether or not anything is compiled. A runner that skipped the
+sync because it compiles nothing would find no configuration on the host and fail saying so.
+`--use-staged` is how a run says the copy there is already current.
 
 Runners are keyed by name because a name is how one is selected — by `run`, and by the checks
 below. An unnamed entry in a list could not be selected at all.
@@ -1002,8 +1125,9 @@ with "the harness could not run", because the remedies differ.
 | 14 | A required tool is missing, or could not be started |
 | 15 | A host could not be reached, DssHarness could not run there, or a command run there never reported how it finished |
 | 20 | The wrapped command ran and failed |
+| 21 | Ran with nothing failing, but a leg reached no verdict; it is not a pass |
 | 70 | The harness itself failed unexpectedly (a defect in the tool) |
-| 130 | The run was interrupted before it finished; a deletion already under way says what it left |
+| 130 | The run was interrupted before it finished; what it had already done is still reported |
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,

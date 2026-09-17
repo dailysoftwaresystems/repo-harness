@@ -880,6 +880,306 @@ public sealed class ConfigStoreTests
         Assert.Equal(6, config.Defaults.MaxParallelLegsTotal);
     }
 
+    /// <summary>
+    /// A keyed entry that covers no platform some leg builds on would leave that leg with one
+    /// fewer witness than the file appears to give it, which is the failure buildOutputs exists to
+    /// prevent. Refused when the file is read, naming the leg: every declared leg and its operating
+    /// system are known then.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsABuildOutputThatNoLegsPlatformIsCoveredBy()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "projects": [
+                { "name": "app", "type": "cmake", "buildOutputs": [ { "windows": "bin/app.exe" } ] }
+              ],
+              "legs": {
+                "win": { "os": "windows", "processor": "x86_64", "config": "debug" },
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug" }
+              }
+            }
+            """);
+
+        Assert.Contains("names no path for 'linux'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("leg 'nix'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_AcceptsAKeyedBuildOutputThatCoversEveryLeg()
+    {
+        var config = LoadValid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "projects": [
+                { "name": "app", "type": "cmake",
+                  "buildOutputs": [ "compile_commands.json", { "windows": "bin/app.exe", "all": "bin/app" } ] }
+              ],
+              "legs": {
+                "win": { "os": "windows", "processor": "x86_64", "config": "debug" },
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug" }
+              }
+            }
+            """);
+
+        var outputs = Assert.Single(config.Projects).BuildOutputs;
+
+        Assert.Equal(2, outputs.Count);
+        Assert.Equal("compile_commands.json", outputs[0].For("linux"));
+        Assert.Equal("bin/app.exe", outputs[1].For("windows"));
+        Assert.Equal("bin/app", outputs[1].For("linux"));
+    }
+
+    [Theory]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "freebsd": "bin/a" } ] } ] }""", "expected one of")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "all": "/etc/passwd" } ] } ] }""", "relative path")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "all": "../escape" } ] } ] }""", "relative path")]
+    public void Load_RejectsABuildOutputThatCannotWork(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A bare string is what every configuration written before platform keying used, and it still
+    /// means the same thing, written back the same way.
+    /// </summary>
+    [Fact]
+    public void ABuildOutput_WrittenAsAString_RoundTripsAsAString()
+    {
+        using var temp = new TempDirectory();
+        var store = CreateStore();
+        var path = temp.Combine("config.json");
+
+        store.Save(path, new HarnessConfig
+        {
+            Projects = { new ProjectConfig { Name = "a", Type = "cmake", BuildOutputs = ["bin/a"] } },
+        });
+
+        Assert.Contains("\"bin/a\"", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Equal([(BuildOutput)"bin/a"], Assert.Single(store.Load(path).Projects).BuildOutputs);
+    }
+
+    /// <summary>
+    /// A tool needed only on one platform stops being reported missing on the others. Without this
+    /// a repository declaring both MSVC and a POSIX compiler could never have every leg provisioned.
+    /// </summary>
+    [Fact]
+    public void ATool_MayNameThePlatformsItIsNeededOn()
+    {
+        var config = LoadValid("""
+            {
+              "tools": [
+                { "name": "cl", "platforms": ["windows"] },
+                { "name": "cmake" }
+              ]
+            }
+            """);
+
+        Assert.Equal(["windows"], config.Tools[0].Platforms);
+        Assert.Empty(config.Tools[1].Platforms);
+    }
+
+    [Fact]
+    public void Load_RejectsAToolPlatformThatIsNotOne()
+    {
+        var exception = LoadInvalid("""{ "tools": [ { "name": "cl", "platforms": ["windoze"] } ] }""");
+
+        Assert.Contains("windoze", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A toolchain's platforms used to be validated for spelling and then read by nothing, so a leg
+    /// naming a compiler that does not exist on its own operating system was attempted anyway and
+    /// failed much later as a missing program.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsALegNamingAToolchainThatDoesNotExistOnItsPlatform()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "msvc": { "platforms": ["windows"] } },
+              "legs": {
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "msvc" }
+              }
+            }
+            """);
+
+        Assert.Contains("leg 'nix'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("does not exist on 'linux'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "platforms": ["linux"] }""")]
+    [InlineData("""{ "platforms": ["all"] }""")]
+    [InlineData("{ }")]
+    public void Load_AcceptsALegWhoseToolchainExistsOnItsPlatform(string toolchain)
+    {
+        var config = LoadValid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "gcc": {{toolchain}} },
+              "legs": {
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "gcc" }
+              }
+            }
+            """);
+
+        Assert.Equal("gcc", config.Legs["nix"].Toolchain);
+    }
+
+    /// <summary>
+    /// The same contradiction reached through a project's default rather than a leg's own name.
+    /// A key naming one platform says which platform it is for; <c>all</c> does not, so it is
+    /// checked against the operating systems the legs building that project declare.
+    /// </summary>
+    [Theory]
+    [InlineData("windows", "defaultToolchain['windows']")]
+    [InlineData("all", "defaultToolchain['all']")]
+    public void Load_RejectsADefaultToolchainThatDoesNotExistOnThePlatformItServes(string key, string expected)
+    {
+        var exception = LoadInvalid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "{{key}}": "gcc" } } ],
+              "legs": {
+                "win": { "os": "windows", "processor": "x86_64", "config": "debug" }
+              }
+            }
+            """);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+        Assert.Contains("does not exist on 'windows'", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An <c>all</c> default serving only legs it can serve is fine: the key covers every platform,
+    /// but only the ones some leg actually builds on have to be satisfiable.
+    /// </summary>
+    [Fact]
+    public void Load_AcceptsAnAllDefaultToolchain_WhenEveryLegBuildingItIsOnAPlatformItExistsOn()
+    {
+        var config = LoadValid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "all": "gcc" } } ],
+              "legs": {
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug" }
+              }
+            }
+            """);
+
+        Assert.Equal("gcc", Assert.Single(config.Projects).DefaultToolchain["all"]);
+    }
+
+    /// <summary>
+    /// Every way a buildOutputs entry can be malformed is refused where the file is read, so the
+    /// reader is told which line is wrong rather than handed a degenerate entry that witnesses
+    /// nothing later.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ 3 ] } ] }""", "a path, or a mapping")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ ["x"] ] } ] }""", "a path, or a mapping")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "windows": 3 } ] } ] }""", "is not a path")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ { "windows": { "x": "y" } } ] } ] }""", "is not a path")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ {} ] } ] }""", "names no path at all")]
+    [InlineData("""{ "projects": [ { "name": "a", "type": "cmake", "buildOutputs": [ "" ] } ] }""", "empty path")]
+    public void Load_RefusesAMalformedBuildOutput(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two spellings of one platform are one key on the entry, so the second would silently replace
+    /// the first and a leg would be witnessed by a file nobody meant to name.
+    /// </summary>
+    [Fact]
+    public void Load_RefusesABuildOutputThatNamesOnePlatformTwice()
+    {
+        var exception = LoadInvalid("""
+            {
+              "projects": [
+                { "name": "a", "type": "cmake",
+                  "buildOutputs": [ { "windows": "bin/a.exe", "WINDOWS": "bin/b.exe" } ] }
+              ]
+            }
+            """);
+
+        Assert.Contains("names platform 'WINDOWS' twice", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A keyed entry comes back keyed. Written back as a bare string it would lose every platform
+    /// but one; written back as a map, an entry spelled as a string would turn every save into a
+    /// diff against a file nobody edited.
+    /// </summary>
+    [Fact]
+    public void ABuildOutput_RoundTripsInTheShapeItWasWritten()
+    {
+        using var temp = new TempDirectory();
+        var store = CreateStore();
+        var path = temp.Combine("config.json");
+
+        store.Save(path, new HarnessConfig
+        {
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "a",
+                    Type = "cmake",
+                    BuildOutputs =
+                    [
+                        "compile_commands.json",
+                        BuildOutput.Keyed([
+                            new KeyValuePair<string, string>("windows", "bin/a.exe"),
+                            new KeyValuePair<string, string>("all", "bin/a"),
+                        ]),
+                    ],
+                },
+            },
+        });
+
+        var text = File.ReadAllText(path);
+
+        // The plain entry stays plain, and the keyed one keeps every platform it named.
+        Assert.Contains("\"compile_commands.json\"", text, StringComparison.Ordinal);
+        Assert.Contains("\"windows\"", text, StringComparison.Ordinal);
+
+        var outputs = Assert.Single(store.Load(path).Projects).BuildOutputs;
+
+        Assert.Equal("compile_commands.json", outputs[0].Plain);
+        Assert.Null(outputs[1].Plain);
+        Assert.Equal("bin/a.exe", outputs[1].For("windows"));
+        Assert.Equal("bin/a", outputs[1].For("linux"));
+    }
+
+    /// <summary>
+    /// A list naming only platforms no leg runs on removes the tool from every host, which reads
+    /// exactly like never having declared it — and the spelling that causes it is one mistyped word.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolNeededOnlyWhereNoLegRuns()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "tools": [ { "name": "clang", "platforms": ["macos"] } ],
+              "legs": { "nix": { "os": "linux", "processor": "x86_64", "config": "debug" } }
+            }
+            """);
+
+        Assert.Contains("tool 'clang'", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("never be checked anywhere", exception.Message, StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

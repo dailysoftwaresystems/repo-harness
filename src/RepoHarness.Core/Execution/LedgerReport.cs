@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Execution;
 
@@ -69,10 +70,57 @@ public sealed class LedgerReport
     public LegVerdict Verdict { get; }
 
     /// <summary>The exit code the run reports.</summary>
-    public int ExitCode => Verdicts.ExitCodeFor(Verdict);
+    /// <remarks>
+    /// Computed here rather than at each caller so that the table, the JSON and the process agree.
+    /// A run where nothing failed but a leg never reported is <see cref="HarnessExit.Incomplete"/>:
+    /// the worst verdict such a run reached is a skip, which maps to success on its own, and
+    /// reading that alone is how a leg nobody could reach came to print as a pass.
+    /// </remarks>
+    public int ExitCode => ExitCodeGiven(cancelled: false, unfinished: []);
+
+    /// <summary>The exit code this run reports, given what only its caller knows.</summary>
+    /// <remarks>
+    /// The rows cannot show a run that stopped early or left a leg running, so the caller that can
+    /// see those supplies them here rather than deciding a code of its own. One derivation, read by
+    /// the summary and by the JSON alike, so the two cannot drift apart.
+    /// </remarks>
+    /// <param name="cancelled">Whether the run was interrupted before it finished.</param>
+    /// <param name="unfinished">The legs still running when it stopped.</param>
+    public int ExitCodeGiven(bool cancelled, IReadOnlyList<string> unfinished)
+    {
+        ArgumentNullException.ThrowIfNull(unfinished);
+
+        return cancelled ? HarnessExit.Cancelled
+            : !Passed ? Verdicts.ExitCodeFor(Verdict)
+            : Complete && unfinished.Count == 0 ? HarnessExit.Success
+            : HarnessExit.Incomplete;
+    }
 
     /// <summary>Whether every leg reached a verdict that is not a failure.</summary>
     public bool Passed => !Lines.Any(line => Verdicts.IsFailure(line.Verdict));
+
+    /// <summary>The legs that did no work, each with why, in the order they were recorded.</summary>
+    /// <remarks>
+    /// A skip is not a failure — a switched-off machine is normal — but it is not a pass either,
+    /// and the difference is the whole of what a gate reads. Kept apart from
+    /// <see cref="Passed"/> rather than folded into it: a run where one leg passed and another was
+    /// never reached is neither wholly green nor red, and saying so is the only honest summary.
+    /// </remarks>
+    public IReadOnlyList<LedgerLine> WithoutVerdict
+        => [.. Lines.Where(line => Verdicts.IsSkip(line.Verdict))];
+
+    /// <summary>How many legs actually reached a verdict of their own.</summary>
+    public int Reported => Lines.Count - WithoutVerdict.Count;
+
+    /// <summary>Whether every leg with a row reached a verdict of its own.</summary>
+    /// <remarks>
+    /// Orthogonal to <see cref="Passed"/> on purpose: "did everything report" and "did anything
+    /// fail" are separate questions, and folding them into one boolean made a run where all eight
+    /// legs ran and two failed report as incomplete — which reads as a run that did not finish,
+    /// when it finished and found bugs. Interruption is not visible from the rows at all, so the
+    /// caller that can see it supplies it to <see cref="ExitCodeGiven"/> and <see cref="ToJson"/>.
+    /// </remarks>
+    public bool Complete => WithoutVerdict.Count == 0;
 
     /// <summary>
     /// Builds the report, marking a phase that took more than
@@ -207,12 +255,29 @@ public sealed class LedgerReport
     }
 
     /// <summary>The same ledger as data, for <c>--json</c>.</summary>
-    public string ToJson() => JsonSerializer.Serialize(
+    /// <remarks>
+    /// An interrupted run is told, not inferred. The report is built from the legs that finished,
+    /// so on its own it would describe a run stopped after its first leg as a clean pass of one
+    /// leg, with the others simply absent — and the process would meanwhile exit 130. A script
+    /// reading this instead of the shell's status would take that for a green run, which is the
+    /// failure the whole ledger exists to prevent.
+    /// </remarks>
+    /// <param name="cancelled">Whether the run was interrupted before it finished.</param>
+    /// <param name="unfinished">The legs that were still running when it stopped.</param>
+    public string ToJson(bool cancelled, IReadOnlyList<string> unfinished) => JsonSerializer.Serialize(
         new
         {
             Verdict = Verdicts.Display(Verdict),
-            ExitCode,
-            Passed,
+            ExitCode = ExitCodeGiven(cancelled, unfinished),
+            Passed = !cancelled && Passed,
+            Cancelled = cancelled,
+            Unfinished = unfinished,
+
+            // Beside Passed rather than folded into it: a script comparing two runs has to be able
+            // to tell "nothing failed" from "nothing failed and everything reported", and those are
+            // the same boolean only when every leg ran. A run that was interrupted, or that left a
+            // leg running, reported on fewer legs than it was asked about whatever its rows say.
+            Complete = !cancelled && Complete && unfinished.Count == 0,
             Legs = Lines.Select(line => new
             {
                 line.Leg,

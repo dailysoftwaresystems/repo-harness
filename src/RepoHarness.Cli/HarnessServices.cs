@@ -32,7 +32,12 @@ namespace RepoHarness.Cli;
 internal static class HarnessServices
 {
     /// <summary>Builds the service provider for one command invocation.</summary>
-    internal static ServiceProvider Build(bool verbose)
+    /// <param name="verbose">Whether detail and child process output are shown.</param>
+    /// <param name="prompting">
+    /// Whether a password may be asked for at the terminal. False under <c>--no-prompt</c>, and for
+    /// a process serving another machine, which has nobody to ask.
+    /// </param>
+    internal static ServiceProvider Build(bool verbose, bool prompting)
     {
         var services = new ServiceCollection();
 
@@ -45,6 +50,7 @@ internal static class HarnessServices
             provider.GetRequiredService<IHostPlatform>(),
             provider.GetRequiredService<IProcessRunner>()));
 
+        services.AddSingleton<IProcessIdentity, ProcessIdentity>();
         services.AddSingleton<IHarnessOutput>(_ => new ConsoleHarnessOutput(verbose));
         services.AddSingleton<IFileSystem, PhysicalFileSystem>();
         services.AddSingleton<IProcessRunner, ProcessRunner>();
@@ -81,6 +87,14 @@ internal static class HarnessServices
         services.AddSingleton<IHostConnector, HostConnector>();
 
         services.AddSingleton<IHostInspector, HostInspector>();
+
+        // Reading a terminal without echoing what is typed is the one thing the core cannot do for
+        // itself, so it is supplied here, exactly as the console writer above is. Whether anybody is
+        // there to ask is measured by the implementation; this only carries the refusal to ask.
+        services.AddSingleton<ISuperuserPrompt>(provider => new ConsoleSuperuserPrompt(
+            provider.GetRequiredService<IHarnessOutput>(),
+            prompting));
+
         services.AddSingleton<IToolProvisionService, ToolProvisionService>();
         services.AddSingleton<LegsService>();
         services.AddSingleton<HostExecService>();

@@ -184,7 +184,6 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
     private static (IReadOnlyList<SampledProcess> Table, string? Problem) LinuxTable()
     {
         var processes = new List<SampledProcess>();
-        var boot = LinuxBootTime();
 
         foreach (var directory in Directory.EnumerateDirectories("/proc"))
         {
@@ -197,26 +196,23 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
             {
                 var stat = File.ReadAllText(Path.Combine(directory, "stat"));
 
-                // The program name is in parentheses and may itself contain spaces and parentheses,
-                // so the fields after it are found from the last closing one, never by counting.
-                var close = stat.LastIndexOf(')');
-                if (close < 0)
+                var fields = ProcStat.FieldsAfterName(stat);
+                if (fields is null)
                 {
                     continue;
                 }
 
-                var fields = stat[(close + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                var open = stat.IndexOf('(', StringComparison.Ordinal);
-                var name = open >= 0 && close > open ? stat[(open + 1)..close] : id.ToString(CultureInfo.InvariantCulture);
+                var name = ProcStat.Name(stat) ?? id.ToString(CultureInfo.InvariantCulture);
 
-                // Fields after the name, zero-based: 1 is the parent, 19 the start time in clock
-                // ticks since boot. USER_HZ is 100 on every Linux ABI, which is what makes this a
-                // stable identity rather than an exact instant.
-                int? parent = fields.Length > 1 && int.TryParse(fields[1], CultureInfo.InvariantCulture, out var ppid) ? ppid : null;
-                DateTimeOffset? started = boot is { } bootTime
-                    && fields.Length > 19
-                    && long.TryParse(fields[19], CultureInfo.InvariantCulture, out var ticks)
-                    ? bootTime.AddSeconds(ticks / 100.0)
+                int? parent = ProcStat.Number(fields, ProcStat.ParentField) is { } ppid ? (int)ppid : null;
+
+                // Ticks since boot, counted from the epoch rather than from a boot time worked out
+                // from the clock as it is now. What this is for is telling one process from the next
+                // holder of its id between two samples, and a boot time derived from the wall clock
+                // moves for every live process the moment that clock steps — which fragments one
+                // contender into two and makes a report say it came and went when it never left.
+                DateTimeOffset? started = ProcStat.Number(fields, ProcStat.StartTicksField) is { } ticks
+                    ? DateTimeOffset.UnixEpoch.AddSeconds(ticks / ProcStat.TicksPerSecond)
                     : null;
 
                 var commandLine = ReadCommandLine(Path.Combine(directory, "cmdline"));
@@ -290,8 +286,9 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
     }
 
     /// <summary>
-    /// What the runtime alone can see: ids, names, and a start time for each process this user may
-    /// open. Used only when the platform's own source failed, and reported with the limit it carries.
+    /// What the runtime alone can see: the id and the name of each process this user may open, and
+    /// no start time for any of them. Used only when the platform's own source failed, and reported
+    /// with the limit that carries.
     /// </summary>
     private static IReadOnlyList<SampledProcess> FromDiagnostics()
     {
@@ -301,19 +298,13 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
         {
             try
             {
-                DateTimeOffset? started = null;
-
-                try
-                {
-                    started = new DateTimeOffset(process.StartTime).ToUniversalTime();
-                }
-                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
-                {
-                    // This user may not open it, or it has already exited. Its id alone is still a
-                    // fact, and an unknown start time is never merged with another sample's entry.
-                }
-
-                processes.Add(new SampledProcess(process.Id, null, CleanName(process.ProcessName), started, null));
+                // No start time at all, rather than one worked out from the clock. Process.StartTime
+                // on Linux is ticks since boot added to a boot time derived from the clock as it is
+                // now, so a clock that steps hands the same process a new identity between two
+                // samples and splits one contender into two. Unknown is the honest answer, and what
+                // reads these knows what to do with it: ProcessSamplingSession names such a process
+                // by its id alone in every sample and says so among the report's limits.
+                processes.Add(new SampledProcess(process.Id, null, CleanName(process.ProcessName), null, null));
             }
             catch (InvalidOperationException)
             {
@@ -326,28 +317,6 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
         }
 
         return processes;
-    }
-
-    private static DateTimeOffset? LinuxBootTime()
-    {
-        try
-        {
-            foreach (var line in File.ReadLines("/proc/stat"))
-            {
-                if (line.StartsWith("btime ", StringComparison.Ordinal)
-                    && long.TryParse(line[6..].Trim(), CultureInfo.InvariantCulture, out var seconds))
-                {
-                    return DateTimeOffset.FromUnixTimeSeconds(seconds);
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Without the boot time no start time can be computed, so every process in this sample
-            // carries an unknown one and is never merged across samples.
-        }
-
-        return null;
     }
 
     private static string? ReadCommandLine(string path)

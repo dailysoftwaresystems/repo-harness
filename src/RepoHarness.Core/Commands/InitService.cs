@@ -200,9 +200,16 @@ public sealed class InitService(
             EnsureAnchorRegistry(root, registry, config.Anchors, actions);
         }
 
-        await ProvisionAsync(root, config, actions, cancellationToken).ConfigureAwait(false);
+        var interrupted = await ProvisionAsync(root, config, actions, cancellationToken).ConfigureAwait(false);
 
-        return CommandOutcome.Ok($"initialised {root}", actions);
+        // The repository is initialised either way, and the list below says everything that was done.
+        // Only the exit code reports that the last step was stopped rather than that it finished.
+        return interrupted
+            ? CommandOutcome.Failed(
+                HarnessExit.Cancelled,
+                $"initialised {root}, and the tool check was interrupted",
+                actions)
+            : CommandOutcome.Ok($"initialised {root}", actions);
     }
 
     /// <summary>
@@ -293,9 +300,12 @@ public sealed class InitService(
     /// Nothing happens where no leg is declared, which is every first <c>init</c>: the configuration
     /// it has just written names no host. Where hosts are declared, a failure here is reported and
     /// never fatal — the harness directory exists either way, and a host that is switched off is a
-    /// normal state that must not leave a repository half-initialised.
+    /// normal state that must not leave a repository half-initialised. Being interrupted is not a
+    /// failure of this step and is reported apart from one, because a privileged install can stop here
+    /// to ask for a password and Ctrl+C is how somebody who has not got one answers.
     /// </remarks>
-    private async Task ProvisionAsync(
+    /// <returns>Whether the run was interrupted rather than finishing, however it ended otherwise.</returns>
+    private async Task<bool> ProvisionAsync(
         string root,
         HarnessConfig config,
         List<string> actions,
@@ -303,7 +313,7 @@ public sealed class InitService(
     {
         if (config.Legs.Count == 0)
         {
-            return;
+            return false;
         }
 
         try
@@ -325,10 +335,23 @@ public sealed class InitService(
                 actions.Add(
                     "tools   some legs are missing tools; run 'DssHarness install-missing-tools' for the detail");
             }
+
+            return false;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Told apart from the failures below: nothing went wrong, somebody stopped it. Reported
+            // rather than thrown so the list of what was created survives, and reported as an
+            // interruption rather than as success so a script that reads the exit code is not told
+            // the tools were checked when they were not. Guarded on the run's own token, because a
+            // budget inside provisioning cancels its own work and is a failure like any other.
+            actions.Add("tools   could not be checked: interrupted before finishing");
+            return true;
         }
         catch (Exception ex) when (ex is HarnessException or ConfigException or Processes.ProgramStartException)
         {
             actions.Add($"tools   could not be checked: {ex.Message}");
+            return false;
         }
     }
 

@@ -25,22 +25,40 @@ public interface ISyncTransport
     /// Creates the copy's root and every missing parent, and records that the harness made it.
     /// </summary>
     /// <param name="root">The copy's root.</param>
+    /// <param name="mark">
+    /// What to record about how this copy came to be. A takeover is marked before it starts and
+    /// again when it finishes, because the two are indistinguishable afterwards and one of them
+    /// deleted files that were already there.
+    /// </param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <exception cref="Results.HarnessException">
     /// The path exists and is not a directory, or it could not be created. Never a silent fallback
     /// to somewhere else: a sync that writes to a directory nobody named is worse than one that
     /// refuses, because the leg's verdict then describes a tree the reader cannot find.
     /// </exception>
-    Task CreateRootAsync(string root, CancellationToken cancellationToken = default);
+    Task CreateRootAsync(string root, CopyMark mark = CopyMark.Complete, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Whether the harness created this copy. A directory it did not create is never adopted,
-    /// because sync deletes whatever the source does not have and a checkout someone made by hand
-    /// holds work nobody told the harness about.
+    /// What the harness has recorded about this copy. A directory it did not make is never taken
+    /// over on its own, because sync deletes whatever the source does not have and a checkout
+    /// somebody made by hand holds work nobody told the harness about.
     /// </summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="cancellationToken">Stops the check.</param>
-    Task<bool> IsHarnessCopyAsync(string root, CancellationToken cancellationToken = default);
+    Task<CopyMark> ReadMarkAsync(string root, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Whether the copy's root is there and what the harness has recorded about it, in one answer.
+    /// </summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="cancellationToken">Stops the question.</param>
+    /// <remarks>
+    /// Asked as one question rather than as <see cref="RootExistsAsync"/> and then
+    /// <see cref="ReadMarkAsync"/>. Over ssh those are two round trips for something the far side
+    /// answers in one, and between them the directory can change — so the mark that decides whether
+    /// a sync may delete could describe a directory other than the one found.
+    /// </remarks>
+    Task<SyncInspectAnswer> InspectAsync(string root, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Makes the copy a git repository, because the DssHarness on that host finds everything through

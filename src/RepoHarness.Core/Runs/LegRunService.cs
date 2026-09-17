@@ -131,7 +131,7 @@ public sealed class LegRunService(
             ledger.Record(entry);
         }
 
-        var claim = await _logOwnership.ClaimAsync(runDirectory, runId, cancellationToken).ConfigureAwait(false);
+        var claim = await _logOwnership.ClaimAsync(runDirectory, runId, request.ForceLock, cancellationToken).ConfigureAwait(false);
 
         if (!claim.Taken)
         {
@@ -342,9 +342,9 @@ public sealed class LegRunService(
         {
             return CommandOutcome.Ok(string.Empty, null) with
             {
-                Data = [report.ToJson()],
+                Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
                 Quiet = true,
-                ExitCode = execution.Cancelled ? HarnessExit.Cancelled : report.ExitCode,
+                ExitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished),
             };
         }
 
@@ -365,11 +365,34 @@ public sealed class LegRunService(
                 details);
         }
 
-        return report.Passed
-            ? CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details)
-            : CommandOutcome.Failed(
+        if (!report.Passed)
+        {
+            return CommandOutcome.Failed(
                 report.ExitCode,
                 $"{Verdicts.Display(report.Verdict)}: {report.Lines.Count} leg(s) reported",
                 details);
+        }
+
+        // A leg that did no work is not a leg that passed. Nothing failed here, so this is not a
+        // red run; but reporting it as an unqualified success would put "OK - 8 leg(s) passed" in
+        // front of a reader when none of those eight ran, which is the one thing a gate reads. The
+        // legs are named, because which of them went unreported is the first thing to ask.
+        // Asked about legs that did no work, or left running when the run stopped: neither is a
+        // failure, and neither is a pass. Decided by the same derivation the JSON uses, so a reader
+        // and a script are never told different things about one run.
+        var code = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
+
+        if (code != HarnessExit.Success)
+        {
+            var withoutWork = report.WithoutVerdict.Select(line => line.Leg).Concat(execution.Unfinished).ToList();
+
+            return CommandOutcome.Failed(
+                code,
+                $"{report.Reported} of {report.Lines.Count} leg(s) passed; "
+                + $"{withoutWork.Count} did no work: {string.Join(", ", withoutWork)}",
+                details);
+        }
+
+        return CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details);
     }
 }

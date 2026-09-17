@@ -12,6 +12,32 @@ public sealed class SyncPlanTests
 {
     private static readonly SyncExclusions Default = new(new SyncConfig(), ".harness-config/worktrees");
 
+    /// <summary>
+    /// A file the copy already had, holding something else, is a loss; a file it never had is not.
+    /// Both are writes, and telling them apart is what lets a refusal say which is which.
+    /// </summary>
+    [Fact]
+    public void APathTheCopyAlreadyHeld_IsAnOverwrite_AndOneItNeverHadIsNot()
+    {
+        var source = Manifest(("kept.c", "one"), ("fresh.c", "two"));
+        var destination = Manifest(("kept.c", "something else"));
+
+        var plan = SyncPlan.Between(source, destination, Default);
+
+        Assert.Equal(["kept.c"], plan.Overwrites);
+        Assert.Contains(plan.Writes, entry => entry.Path == "fresh.c");
+        Assert.Equal(2, plan.Writes.Count);
+
+        // And the loss report names it as what it is, ahead of the deletions.
+        Assert.Contains("overwrite kept.c", plan.DescribeLoss());
+
+        // So does the listing a refusal sends the reader to for the whole of it. Spelled the same as
+        // a write there, the lossy half would arrive looking like the half that costs nothing.
+        var described = plan.Describe(SyncVerb.Planned);
+        Assert.Contains("would overwrite  kept.c", described);
+        Assert.Contains("would write  fresh.c", described);
+    }
+
     [Fact]
     public void AFileWithTheSameContent_IsNeitherWrittenNorDeleted()
     {
@@ -92,6 +118,12 @@ public sealed class SyncPlanTests
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("would delete 7", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("Nothing was changed", refusal.Message, StringComparison.Ordinal);
+
+        // Which of the two mistakes this is decides what to check. For a copy this tool already
+        // owns, the source is what is wrong; the takeover's remedy would send the reader to inspect
+        // a tree they never doubted.
+        Assert.Contains("source tree is the one", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("directory you meant to take over", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]

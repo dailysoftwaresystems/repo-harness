@@ -15,11 +15,38 @@ namespace RepoHarness.Core.Runners;
 /// <param name="Warning">Whether the outcome carries a warning, so an excused failure stays visible.</param>
 /// <param name="ResultCode">The code reported. Never negative: no process returns one.</param>
 /// <param name="Message">What is reported, already phrased for a reader.</param>
-public sealed record RunOutcome(bool Success, bool Warning, int ResultCode, string Message)
+/// <param name="Output">
+/// What the run's steps printed, when it was captured. Carried beside <paramref name="Message"/>
+/// for the reason <see cref="RunFailure"/> carries both: a run's own summary sentence and what its
+/// steps said are different evidence, and a check looking for a line a step prints — a count, a
+/// marker, a measured figure — would otherwise be matching against a sentence that never contains
+/// it. Not part of <see cref="SameExceptionAs"/>: an excusal is defined by the four fields an
+/// entry declares, and output is not one of them.
+/// </param>
+public sealed record RunOutcome(bool Success, bool Warning, int ResultCode, string Message, string? Output = null)
 {
+    /// <summary>Everything a check's expected message is matched against.</summary>
+    /// <remarks>
+    /// Mirrors <see cref="RunFailure.Texts"/>, so a check reads the same way whether it is
+    /// confirming a failure or witnessing a run that passed.
+    /// </remarks>
+    public IEnumerable<string> Texts
+    {
+        get
+        {
+            yield return Message;
+
+            if (!string.IsNullOrEmpty(Output))
+            {
+                yield return Output;
+            }
+        }
+    }
+
     /// <summary>A plain success.</summary>
     /// <param name="message">What to report.</param>
-    public static RunOutcome Ok(string message) => new(true, false, 0, message);
+    /// <param name="output">What the run's steps printed, when it was captured.</param>
+    public static RunOutcome Ok(string message, string? output = null) => new(true, false, 0, message, output);
 
     /// <summary>A plain failure.</summary>
     /// <param name="resultCode">The code the run reported.</param>

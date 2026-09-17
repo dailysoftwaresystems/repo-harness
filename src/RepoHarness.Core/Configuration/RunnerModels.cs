@@ -28,10 +28,15 @@ public sealed class RunnerConfig
     public string? Action { get; init; }
 
     /// <summary>
-    /// Whether this runner needs the repository built first. A runner that says so has its leg's tree
-    /// synced when the leg is an ssh host or a WSL distribution, then built, and only then run: a
-    /// runner that calls a program the build produces otherwise runs against whatever was left there.
+    /// Whether this runner needs the repository built before it runs. A runner that calls a program
+    /// the build produces otherwise runs against whatever was left there.
     /// </summary>
+    /// <remarks>
+    /// This gates the build alone, never the sync. A leg on an ssh host or a WSL distribution runs
+    /// from that host's own copy of the tree — the host reads <c>config.json</c> and this runner's
+    /// action file from it — so the tree is put there whether or not anything is compiled. Use
+    /// <c>--use-staged</c> to run against a copy already known to be current.
+    /// </remarks>
     public bool RequireBuild { get; init; }
 
     /// <summary>

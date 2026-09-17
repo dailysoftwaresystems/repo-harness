@@ -190,6 +190,52 @@ public sealed class RunCheckGateTests
         Assert.Equal(["probe", "probe-two"], invoked);
     }
 
+    /// <summary>
+    /// A check asking for a marker a step prints means the run reported it, not that the harness's
+    /// own summary sentence happened to contain it. The documented example expects exactly that,
+    /// and could not match before: a step's output never reached the outcome.
+    /// </summary>
+    [Fact]
+    public async Task ConfirmAsync_MatchesAMessage_AgainstWhatTheStepsPrinted()
+    {
+        var entry = ExpectedExceptionMatcherTests.Entry(
+            messages: ["busy"],
+            runChecks: [Check("probe", new RunCheckExpectation { Message = "steps=" })]);
+
+        var result = await ConfirmAsync(
+            entry,
+            _ => RunOutcome.Ok("2 step(s) passed", "measuring\nsteps=41\ndone"));
+
+        Assert.True(result.Confirmed);
+    }
+
+    [Fact]
+    public async Task ConfirmAsync_StillMatchesAMessage_AgainstTheOutcomesOwnSentence()
+    {
+        var entry = ExpectedExceptionMatcherTests.Entry(
+            messages: ["busy"],
+            runChecks: [Check("probe", new RunCheckExpectation { Message = "quiet" })]);
+
+        var result = await ConfirmAsync(entry, _ => RunOutcome.Ok("the device was quiet"));
+
+        Assert.True(result.Confirmed);
+    }
+
+    [Fact]
+    public async Task ConfirmAsync_Refuses_WhenNeitherTheMessageNorAnyStepCarriesIt()
+    {
+        var entry = ExpectedExceptionMatcherTests.Entry(
+            messages: ["busy"],
+            runChecks: [Check("probe", new RunCheckExpectation { Message = "steps=" })]);
+
+        var result = await ConfirmAsync(
+            entry,
+            _ => RunOutcome.Ok("2 step(s) passed", "measuring\ndone"));
+
+        Assert.False(result.Confirmed);
+        Assert.Contains("no step printed it", Assert.Single(result.Reasons), StringComparison.Ordinal);
+    }
+
     private static Task<RunCheckGateResult> ConfirmAsync(
         ExpectedException entry,
         Func<string, RunOutcome> respond,

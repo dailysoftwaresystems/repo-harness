@@ -18,7 +18,7 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         await using var held = await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken);
@@ -44,12 +44,12 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         // This process's own id, recorded with a start time it cannot have: exactly what a run sees
         // after the operating system has handed the id out again.
-        Write(layout, Entry(Environment.MachineName, Environment.ProcessId, DateTimeOffset.UnixEpoch));
+        Write(layout, Entry(Environment.MachineName, Environment.ProcessId, "some-other-process"));
 
         await using var taken = await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken);
 
@@ -63,11 +63,11 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         // An id no process on any platform carries.
-        Write(layout, Entry(Environment.MachineName, int.MaxValue - 1, DateTimeOffset.UtcNow.AddHours(-1)));
+        Write(layout, Entry(Environment.MachineName, int.MaxValue - 1, "a-process-that-has-gone"));
 
         await using var taken = await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken);
 
@@ -76,17 +76,125 @@ public sealed class RunLockTests
         Assert.Contains("no longer running", factory.StandardOutput.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Everywhere else this tool reads JSON, a shape it does not recognise is a hard failure rather
+    /// than silent data loss. This file is no exception: a member nobody declared is a file written
+    /// by something else, or by a build from the future, and quietly dropping half of it is how a
+    /// lock gets judged on what survived the read.
+    /// </summary>
+    [Fact]
+    public async Task ALockFileWithAMemberThisBuildDoesNotKnow_IsRefused_RatherThanPartlyRead()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, int.MaxValue - 1).Replace(
+            "\"command\": \"test\"",
+            "\"command\": \"test\", \"somethingNobodyDeclared\": 1",
+            StringComparison.Ordinal));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+    }
+
+    /// <summary>
+    /// A lock file this tool wrote before it stopped recording a wall-clock start time. The field it
+    /// held is gone and nothing replaces it, so the entry can only be judged by whether anything at
+    /// all carries its id — which is the check the stamp exists to retire. Kept while something does,
+    /// because taking what a live run holds is the worse of the two mistakes.
+    /// </summary>
+    [Fact]
+    public async Task AnEntryFromAnOlderBuild_IsKeptWhileItsIdIsCarried_AndSaysWhySoItCanBeForced()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, Environment.ProcessId));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+
+        // Told apart from an ordinary holder, because waiting for this one could mean waiting for a
+        // run that finished before the upgrade.
+        Assert.Contains("recorded by an older build", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("--force-lock", refusal.Message, StringComparison.Ordinal);
+
+        await using var forced = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync") with { Force = true },
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AnEntryFromAnOlderBuild_WhoseIdNothingCarries_IsStillReclaimed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, int.MaxValue - 1));
+
+        await using var taken = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("Reclaimed", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AHolderOnThisMachineThatStillReadsAlive_CanStillBeForced()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        // Held by this very process under this very process's stamp, so it is alive by every test
+        // this machine can apply and is never reclaimed on its own. Without a way to force it, an id
+        // that has come back around to something live holds a tree for ever and only editing the
+        // file by hand recovers it.
+        Write(layout, Entry(Environment.MachineName, factory.Identity.CurrentId, factory.Identity.Current));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+
+        await using var forced = await runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync") with { Force = true },
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("--force-lock was given", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AHolderOnAnotherMachine_StandsUntilItIsForced()
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         // Dead by every test this machine can apply, and still not reclaimed: nothing here can ask
         // that machine whether the run is still going.
-        Write(layout, Entry("another-machine", int.MaxValue - 1, DateTimeOffset.UtcNow.AddHours(-1)));
+        Write(layout, Entry("another-machine", int.MaxValue - 1, "a-process-elsewhere"));
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
             layout,
@@ -113,10 +221,10 @@ public sealed class RunLockTests
         // this run never asked about — including one another run is part way through syncing.
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
-        Write(layout, Entry("another-machine", int.MaxValue - 1, DateTimeOffset.UtcNow.AddHours(-1), tree: "/other-repo"));
+        Write(layout, Entry("another-machine", int.MaxValue - 1, "a-process-elsewhere", tree: "/other-repo"));
 
         await using var forced = await runLock.AcquireAsync(
             layout,
@@ -135,7 +243,7 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         await using var msvc = await runLock.AcquireAsync(
@@ -162,7 +270,7 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         await using (await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken))
@@ -190,11 +298,11 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         // Another run, on another machine, holding another variant of the same tree.
-        Write(layout, Entry("another-machine", 4321, DateTimeOffset.UtcNow, variant: "x86_64-gcc-release", scope: "TreeShared"));
+        Write(layout, Entry("another-machine", 4321, "a-process-elsewhere", variant: "x86_64-gcc-release", scope: "TreeShared"));
 
         var handle = await runLock.AcquireAsync(
             layout,
@@ -217,7 +325,7 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
         var layout = Layout(temp);
 
         Directory.CreateDirectory(Path.GetDirectoryName(layout.LockFile)!);
@@ -242,7 +350,7 @@ public sealed class RunLockTests
         // one step, or both would read "free" and both would write themselves in.
         var attempts = Enumerable.Range(0, 8).Select(index => Task.Run(async () =>
         {
-            var runLock = new RunLock(factory.FileSystem, factory.Output);
+            var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
 
             try
             {
@@ -258,7 +366,7 @@ public sealed class RunLockTests
         var taken = await Task.WhenAll(attempts);
 
         Assert.Equal(1, taken.Count(success => success));
-        Assert.Single(new RunLock(factory.FileSystem, factory.Output).Read(layout));
+        Assert.Single(new RunLock(factory.FileSystem, factory.Output, factory.Identity).Read(layout));
     }
 
     [Fact]
@@ -266,7 +374,7 @@ public sealed class RunLockTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var runLock = new RunLock(factory.FileSystem, factory.Output);
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
             Layout(temp),
@@ -296,21 +404,37 @@ public sealed class RunLockTests
         File.WriteAllText(layout.LockFile, "[" + entry + "]");
     }
 
+    /// <summary>
+    /// One entry exactly as the release before the process stamp wrote it: a wall-clock start time
+    /// under its old name, and no stamp at all.
+    /// </summary>
+    private static string LegacyEntry(string machine, int processId)
+    {
+        var stamp = DateTimeOffset.UtcNow.AddHours(-1).ToString("O", CultureInfo.InvariantCulture);
+        var id = processId.ToString(CultureInfo.InvariantCulture);
+
+        return "{ \"host\": \"local\", \"tree\": \"/repo\", \"scope\": \"TreeExclusive\", "
+            + "\"holder\": { \"machine\": \"" + machine + "\", \"processId\": " + id + ", "
+            + "\"processStartedUtc\": \"" + stamp + "\", \"runId\": \"20250101-120000-deadbeef\", "
+            + "\"takenUtc\": \"" + stamp + "\", \"command\": \"test\" } }";
+    }
+
     private static string Entry(
         string machine,
         int processId,
-        DateTimeOffset startedUtc,
+        string? processStamp,
         string? variant = null,
         string scope = "TreeExclusive",
         string tree = "/repo")
     {
-        var stamp = startedUtc.ToString("O", CultureInfo.InvariantCulture);
+        var taken = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
         var id = processId.ToString(CultureInfo.InvariantCulture);
         var variantField = variant is null ? string.Empty : $"\"variant\": \"{variant}\",";
+        var stampField = processStamp is null ? string.Empty : "\"processStamp\": \"" + processStamp + "\", ";
 
         return "{ \"host\": \"local\", \"tree\": \"" + tree + "\", " + variantField + " \"scope\": \"" + scope + "\", "
             + "\"holder\": { \"machine\": \"" + machine + "\", \"processId\": " + id + ", "
-            + "\"processStartedUtc\": \"" + stamp + "\", \"runId\": \"20250101-120000-deadbeef\", "
-            + "\"takenUtc\": \"" + stamp + "\", \"command\": \"test\" } }";
+            + stampField + "\"runId\": \"20250101-120000-deadbeef\", "
+            + "\"takenUtc\": \"" + taken + "\", \"command\": \"test\" } }";
     }
 }

@@ -63,6 +63,10 @@ detected it seeds no legs, and `legs` fails until some are declared.
 
 Every command takes `-C, --directory <dir>` and `-v, --verbose`.
 
+Zero means every selected leg reached a verdict and none failed. A run where nothing failed but
+some leg never reported exits `21` and names those legs: a leg that did no work proves nothing
+about the code, so it is never counted among the legs that passed.
+
 `--time` pulls each phase's own timing marks out of its output, using `buildTimingRegex`,
 `testTimingRegex` or `runTimingRegex`, and prints them under the ledger as a `TIMINGS` block naming
 the leg and phase that reported each one. `host-exec` needs no `--time` of its own: everything after
@@ -97,6 +101,12 @@ listed at once.
 operating system is observed in two tightly scoped places and nowhere else;
 everything downstream is platform agnostic. CI runs the whole suite on all three, on
 both x86_64 and arm64.
+
+**Witness the work, never the exit code.** A build passes only when every file the project's
+`buildOutputs` names is there afterwards — a build tool exits 0 having produced nothing often
+enough that the code alone is not evidence. An entry is a path, or a mapping of platform to path
+where the platforms disagree about what the same target is called (`app` against `app.exe`), and
+an entry naming no path for a platform some leg builds on is refused when `config.json` is read.
 
 **Refuse early, with the arithmetic.** `create-worktree` will not create a worktree
 whose build paths cannot fit inside Windows' path limit, because that failure
@@ -177,7 +187,14 @@ this machine's exact version: a host that is behind is updated, never downgraded
 released on GitHub rather than nuget.org, so only a stable build can bring a host to its
 version. `install-missing-tools` installs the .NET SDK, and everything `tools` declares an
 `install` for, on every configured leg's host; a `tools` entry with no `install` is an
-allowlist entry, reported when missing and never installed. `sync` creates the host's copy
+allowlist entry, reported when missing and never installed. An install that needs a superuser
+takes the password from that host's own `.env`, as `SUDO_PASSWORD`, and asks for it at the
+terminal when none is declared — once per host, held in memory for that command alone and never
+written anywhere. A run with no terminal, a run answering with `--json`, and a run given
+`--no-prompt` all refuse instead, naming what would fix it; running the harness as root needs no
+password at all, which is usually the answer in CI. An entry may name the platforms it
+is needed on — `"platforms": ["windows"]` — and a host whose platform it does not name is never
+asked about it, so a repository can declare both a Windows compiler and a POSIX one. `sync` creates the host's copy
 of the repository at its `repositoryPath` and keeps it in step, deletions included. An
 emulator counts only once its witness proves it runs programs for its processor.
 

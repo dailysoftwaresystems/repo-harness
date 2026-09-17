@@ -148,7 +148,35 @@ public sealed class BuildService(
                 null);
         }
 
-        var missing = MissingOutputs(request, buildDirectory);
+        var unresolved = request.Project.BuildOutputs
+            .Where(output => string.IsNullOrWhiteSpace(output.For(request.PlatformKey)))
+            .ToList();
+
+        if (unresolved.Count > 0)
+        {
+            // Every declared output must name a path here, not merely some of them. An entry that
+            // resolves to nothing is dropped from the list this build is held to, so a project
+            // declaring three and resolving two passes having checked two thirds of its own evidence
+            // with nothing saying so, and one resolving none passes having checked nothing at all.
+            // The configuration reader refuses an entry naming no path for a platform some leg
+            // builds on, and a leg only runs on a host whose system it matches, so reaching here
+            // means one of those two stopped holding. Refused anyway: the cost of being wrong is a
+            // green build nobody witnessed, which is the whole of what buildOutputs is for.
+            return new BuildResult(
+                ReachedVerdict.Of(
+                    LegVerdict.Unwitnessed,
+                    $"project '{request.Project.Name}' declares {unresolved.Count} buildOutput(s) naming no "
+                    + $"path for '{request.PlatformKey}', so this build would be held to fewer files than "
+                    + $"the configuration declares: {string.Join("; ", unresolved)}"),
+                buildDirectory,
+                phases,
+                rebuilt,
+                null);
+        }
+
+        var missing = ExpectedOutputs(request, buildDirectory)
+            .Where(path => !_fileSystem.FileExists(path))
+            .ToList();
 
         if (missing.Count > 0)
         {
@@ -306,10 +334,8 @@ public sealed class BuildService(
     {
         DateTime? newest = null;
 
-        foreach (var output in request.Project.BuildOutputs)
+        foreach (var path in ExpectedOutputs(request, buildDirectory))
         {
-            var path = Path.Combine(buildDirectory, output);
-
             if (!_fileSystem.FileExists(path))
             {
                 continue;
@@ -321,6 +347,26 @@ public sealed class BuildService(
 
         return newest;
     }
+
+    /// <summary>
+    /// Every file this build must produce, resolved for the platform it ran on.
+    /// </summary>
+    /// <remarks>
+    /// An entry naming no path for this platform contributes none, rather than contributing an
+    /// empty one: that would resolve to the build directory itself, which <c>FileExists</c> never
+    /// finds, failing a build that produced everything it actually named. The caller refuses a
+    /// project with any such entry, so this never silently shortens the list of files a build is
+    /// held to. What is reported afterwards is the resolved path rather than the entry as written:
+    /// an entry naming one file per platform would otherwise report every platform's spelling,
+    /// leaving the reader to work out which this leg actually missed.
+    /// </remarks>
+    /// <param name="request">The build, carrying the platform it ran on.</param>
+    /// <param name="buildDirectory">The directory the paths are relative to.</param>
+    private static IEnumerable<string> ExpectedOutputs(BuildRequest request, string buildDirectory)
+        => request.Project.BuildOutputs
+            .Select(output => output.For(request.PlatformKey))
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.Combine(buildDirectory, path!));
 
     /// <summary>
     /// The first tracked source that changed without becoming newer than the build's newest output.
@@ -482,10 +528,6 @@ public sealed class BuildService(
 
         _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecordFileName), record.ToString());
     }
-
-    private List<string> MissingOutputs(BuildRequest request, string buildDirectory)
-        => [.. request.Project.BuildOutputs
-            .Where(output => !_fileSystem.FileExists(Path.Combine(buildDirectory, output)))];
 
     /// <summary>
     /// The dependency report for a cmake build, or why it could not be produced.

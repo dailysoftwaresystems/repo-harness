@@ -54,10 +54,13 @@ internal static class SyncServeCommand
                 case SyncServe.Inspect:
                     return Answer(new SyncInspectAnswer(
                         await transport.RootExistsAsync(root, cancellationToken).ConfigureAwait(false),
-                        await transport.IsHarnessCopyAsync(root, cancellationToken).ConfigureAwait(false)));
+                        await transport.ReadMarkAsync(root, cancellationToken).ConfigureAwait(false)));
 
                 case SyncServe.Create:
-                    await transport.CreateRootAsync(root, cancellationToken).ConfigureAwait(false);
+                    await transport
+                        .CreateRootAsync(root, SyncServe.MarkIn(arguments), cancellationToken)
+                        .ConfigureAwait(false);
+
                     return Done();
 
                 case SyncServe.InitRepository:
@@ -72,7 +75,10 @@ internal static class SyncServeCommand
                         .ReadManifestAsync(root, withheld, cancellationToken)
                         .ConfigureAwait(false);
 
-                    return Answer(new SyncManifestAnswer([.. manifest.Paths.Select(path => manifest.Entries[path])]));
+                    return Answer(new SyncManifestAnswer([.. manifest.Paths.Select(path => manifest.Entries[path])])
+                    {
+                        Links = manifest.Links,
+                    });
 
                 case SyncServe.Write:
                     await transport
