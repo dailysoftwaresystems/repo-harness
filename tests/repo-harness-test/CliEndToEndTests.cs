@@ -48,6 +48,20 @@ public sealed partial class CliEndToEndTests
         Assert.Contains("--no-prompt", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// One sync reaches every host, and taking a directory over deletes what the source does not
+    /// have. Saying which machine that applies to is the whole point, so the flag cannot be a bare
+    /// yes that a reader could take to mean "this one" while it means "all of them".
+    /// </summary>
+    [Fact]
+    public async Task Adopt_RefusesToBeABareYes_AndMustNameItsHosts()
+    {
+        var result = await CliRunner.RunAsync(["sync", "--adopt"], TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("--adopt", result.StandardError, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Version_IsReportedWithoutBuildMetadata()
     {

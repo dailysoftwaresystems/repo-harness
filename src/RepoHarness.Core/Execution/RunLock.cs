@@ -40,7 +40,21 @@ public sealed record LockHolder(
     string? ProcessStamp,
     string RunId,
     DateTimeOffset TakenUtc,
-    string Command);
+    string Command)
+{
+    /// <summary>
+    /// The wall-clock start time a build before this one recorded here, kept only so such a file is
+    /// still readable. Nothing decides anything from it: it is exactly the value that moves when the
+    /// clock steps, which is why it stopped being what identifies a process.
+    /// </summary>
+    /// <remarks>
+    /// Declared rather than skipped so that every other unknown member can be refused, as this tool
+    /// refuses one everywhere else it reads JSON. Never written back: an entry rewritten by this
+    /// build carries a stamp instead.
+    /// </remarks>
+    [JsonPropertyName("processStartedUtc")]
+    public DateTimeOffset? LegacyStartedUtc { get; init; }
+}
 
 /// <summary>One entry in the lock file: what is held, how much of it, and by whom.</summary>
 /// <param name="Host">The host the work runs on, as the command line names it.</param>
@@ -124,6 +138,12 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         Converters = { new JsonStringEnumConverter() },
+
+        // A shape this build does not recognise is a hard failure rather than silent data loss, as it
+        // is everywhere else this tool reads JSON. The one field an older build wrote and this one no
+        // longer uses is declared on the holder, so upgrading reads its own lock file rather than
+        // refusing it.
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private readonly IFileSystem _fileSystem = fileSystem;

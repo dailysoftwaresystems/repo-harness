@@ -57,7 +57,10 @@ internal static class SyncServeCommand
                         await transport.IsHarnessCopyAsync(root, cancellationToken).ConfigureAwait(false)));
 
                 case SyncServe.Create:
-                    await transport.CreateRootAsync(root, cancellationToken).ConfigureAwait(false);
+                    await transport
+                        .CreateRootAsync(root, SyncServe.SaysAdopted(arguments), cancellationToken)
+                        .ConfigureAwait(false);
+
                     return Done();
 
                 case SyncServe.InitRepository:

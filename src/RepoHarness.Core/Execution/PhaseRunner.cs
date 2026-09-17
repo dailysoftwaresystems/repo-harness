@@ -127,6 +127,10 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         };
 
         var gate = new Lock();
+        // Silence is the child's, so the clock is told when the child starts. Everything before that
+        // — reading the request, opening the log, resolving the program, a machine under load taking
+        // its time over any of it — is this tool's own, and counting it as the child being quiet is
+        // how a slow launch reads as a hung command.
         var clock = new StallClock();
         var streamed = new StringBuilder();
 
@@ -180,6 +184,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             Arguments = request.Arguments,
             WorkingDirectory = request.WorkingDirectory,
             Environment = request.Environment,
+            OnStarted = clock.Saw,
             OnOutputLine = line => Line(line, error: false),
             OnErrorLine = line => Line(line, error: true),
 
@@ -411,16 +416,37 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     /// </summary>
     private sealed class StallClock
     {
+        /// <summary>What <see cref="_lastOutputMs"/> holds before the child has started.</summary>
+        private const long NotYet = -1;
+
         private readonly Stopwatch _elapsed = Stopwatch.StartNew();
-        private long _lastOutputMs;
+        private long _lastOutputMs = NotYet;
 
         /// <summary>How long the phase has run.</summary>
         public TimeSpan Elapsed => _elapsed.Elapsed;
 
-        /// <summary>How long since the last line on either stream.</summary>
-        public TimeSpan Quiet => TimeSpan.FromMilliseconds(_elapsed.ElapsedMilliseconds - Interlocked.Read(ref _lastOutputMs));
+        /// <summary>
+        /// How long since the last line on either stream, and nothing at all until the child is
+        /// running. A process that has not started yet has not been quiet: the time spent starting
+        /// one belongs to this tool, and counting it against the child makes a machine under load
+        /// look like a hung command.
+        /// </summary>
+        public TimeSpan Quiet
+        {
+            get
+            {
+                var last = Interlocked.Read(ref _lastOutputMs);
 
-        /// <summary>Records a line. Called from the reader threads of both streams, so it is interlocked.</summary>
+                return last == NotYet
+                    ? TimeSpan.Zero
+                    : TimeSpan.FromMilliseconds(_elapsed.ElapsedMilliseconds - last);
+            }
+        }
+
+        /// <summary>
+        /// Records that the child started, or said something. Called from the reader threads of both
+        /// streams, so it is interlocked.
+        /// </summary>
         public void Saw() => Interlocked.Exchange(ref _lastOutputMs, _elapsed.ElapsedMilliseconds);
     }
 }

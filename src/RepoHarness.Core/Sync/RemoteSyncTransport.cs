@@ -39,8 +39,8 @@ public sealed class RemoteSyncTransport(
         => (await InspectAsync(root, cancellationToken).ConfigureAwait(false)).HarnessCopy;
 
     /// <inheritdoc/>
-    public Task CreateRootAsync(string root, CancellationToken cancellationToken = default)
-        => AskAsync<object>(root, [SyncServe.Create, root], cancellationToken);
+    public Task CreateRootAsync(string root, bool adopted = false, CancellationToken cancellationToken = default)
+        => AskAsync<object>(root, [SyncServe.Create, root, adopted ? SyncServe.Adopted : string.Empty], cancellationToken);
 
     /// <inheritdoc/>
     public Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default)

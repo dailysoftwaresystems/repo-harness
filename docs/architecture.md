@@ -496,7 +496,8 @@ build, or has no copy of the repository.
   cancels the command instead of leaving it running there.
 - A host's copy is created by `sync`, which also puts `.harness-config/config.json` there so
   the DssHarness running there can find the repository at all. Sync will not take over a checkout
-  made by hand unless `--adopt` says to, and reports what taking it over would cost either way.
+  made by hand unless `--adopt` names that host, and reports what taking it over would cost
+  either way.
 
 ### Installing what a host is missing
 
@@ -749,6 +750,10 @@ while a gate ran turned a green suite red, with four test processes live at once
 - No verdict depends on a sample finishing within a time window. Sampling costs
   seconds on one platform and a fraction of that on another, and one such overhead
   asymmetry was once read, for a whole cycle, as a speed difference between legs.
+- **A phase is bounded by silence, and silence starts when the child does.** Reading the request,
+  opening the log and starting the process are this tool's own time; counting them against the
+  child made a slow launch on a loaded machine read as a hung command. A child that starts and then
+  says nothing is still bounded, because starting is itself something the clock is told about.
 - A process is identified by its id together with a stamp that tells it from the next
   holder of that id, and a parent link is followed only when the parent started no later
   than the child. Process ids are recycled: on Windows a freed id was measured coming back
@@ -892,8 +897,16 @@ directory here cannot drift apart.
   because a file the copy already had, holding an edit nobody committed, reads exactly like a file
   the copy never had, and only one of the two loses anything. For the same reason an overwrite is
   reported by default rather than only under `--verbose`, as a deletion already was.
-- **`--adopt` takes it over,** and says what that is about to cost before it starts — not only in
-  the refusal, because somebody who reads the flag in the help and types it never sees a refusal.
+- **`--adopt` names the hosts it takes over** — `--adopt vps`, not a bare yes. One sync reaches
+  every host, so a flag meaning "go ahead" would take over whatever unexpected directory is found
+  at another host's `repositoryPath`, a mistyped one included, without being asked again. A host
+  nobody named is refused exactly as it would have been without the flag, and told which spelling
+  would take it.
+- **It says what that is about to cost before it starts** — not only in the refusal, because
+  somebody who reads the flag in the help and types it never sees a refusal.
+- **The marker records which it was.** Afterwards a copy taken over and one the tool made are the
+  same directory, and only one of them deleted somebody's files; the marker is the only thing left
+  that can say so.
 - **What survives an adoption is narrower than it looks.** Its `.git` and so every commit in it,
   `.harness-config`, the worktrees root and whatever `sync.neverTransfer` names are protected from
   the deletion. The ignore list is *not* read from that host: it is this tree's, listed by asking

@@ -77,6 +77,33 @@ public sealed class RunLockTests
     }
 
     /// <summary>
+    /// Everywhere else this tool reads JSON, a shape it does not recognise is a hard failure rather
+    /// than silent data loss. This file is no exception: a member nobody declared is a file written
+    /// by something else, or by a build from the future, and quietly dropping half of it is how a
+    /// lock gets judged on what survived the read.
+    /// </summary>
+    [Fact]
+    public async Task ALockFileWithAMemberThisBuildDoesNotKnow_IsRefused_RatherThanPartlyRead()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, LegacyEntry(Environment.MachineName, int.MaxValue - 1).Replace(
+            "\"command\": \"test\"",
+            "\"command\": \"test\", \"somethingNobodyDeclared\": 1",
+            StringComparison.Ordinal));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.AcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "sync"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+    }
+
+    /// <summary>
     /// A lock file this tool wrote before it stopped recording a wall-clock start time. The field it
     /// held is gone and nothing replaces it, so the entry can only be judged by whether anything at
     /// all carries its id — which is the check the stamp exists to retire. Kept while something does,

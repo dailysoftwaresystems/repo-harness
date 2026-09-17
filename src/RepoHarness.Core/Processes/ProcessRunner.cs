@@ -84,6 +84,10 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
         try
         {
             process.Start();
+
+            // Before the readers below, so nothing the child says can arrive ahead of the fact that
+            // it started.
+            request.OnStarted?.Invoke();
         }
         catch (Win32Exception ex)
         {

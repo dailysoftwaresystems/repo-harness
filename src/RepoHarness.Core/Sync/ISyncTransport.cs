@@ -25,13 +25,18 @@ public interface ISyncTransport
     /// Creates the copy's root and every missing parent, and records that the harness made it.
     /// </summary>
     /// <param name="root">The copy's root.</param>
+    /// <param name="adopted">
+    /// Whether this took over a directory somebody else made, rather than creating one. Recorded in
+    /// the marker because the two are indistinguishable afterwards, and one of them deleted files
+    /// that were already there.
+    /// </param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <exception cref="Results.HarnessException">
     /// The path exists and is not a directory, or it could not be created. Never a silent fallback
     /// to somewhere else: a sync that writes to a directory nobody named is worse than one that
     /// refuses, because the leg's verdict then describes a tree the reader cannot find.
     /// </exception>
-    Task CreateRootAsync(string root, CancellationToken cancellationToken = default);
+    Task CreateRootAsync(string root, bool adopted = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Whether the harness created this copy. A directory it did not create is never adopted,

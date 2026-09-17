@@ -37,7 +37,7 @@ public sealed class LocalSyncTransport(
         => Task.FromResult(_fileSystem.DirectoryExists(Home(root)));
 
     /// <inheritdoc/>
-    public Task CreateRootAsync(string root, CancellationToken cancellationToken = default)
+    public Task CreateRootAsync(string root, bool adopted = false, CancellationToken cancellationToken = default)
     {
         // A file where the directory should be is named rather than worked around. Creating the
         // copy somewhere else would leave a leg reporting on a tree nobody can find.
@@ -62,7 +62,7 @@ public sealed class LocalSyncTransport(
         _fileSystem.WriteAllTextAtomic(
             MarkerPath(root),
             JsonSerializer.Serialize(
-                new SyncedCopyMarker(DateTimeOffset.UtcNow.ToString("O"), Environment.MachineName),
+                new SyncedCopyMarker(DateTimeOffset.UtcNow.ToString("O"), Environment.MachineName, adopted),
                 MarkerOptions));
 
         return Task.CompletedTask;
@@ -247,7 +247,12 @@ public sealed class LocalSyncTransport(
     /// <summary>What the marker file records, so a reader can tell where a copy came from.</summary>
     /// <param name="CreatedUtc">When the harness created this copy.</param>
     /// <param name="CreatedBy">The machine that created it.</param>
-    private sealed record SyncedCopyMarker(string CreatedUtc, string CreatedBy);
+    /// <param name="Adopted">
+    /// Whether it took over a directory that was already there, deleting what the source did not
+    /// have, rather than creating an empty one. Afterwards the two are indistinguishable, and only
+    /// one of them destroyed something.
+    /// </param>
+    private sealed record SyncedCopyMarker(string CreatedUtc, string CreatedBy, bool Adopted);
 
     /// <summary>A withheld-path test built once, rather than re-parsed for every file in a tree.</summary>
     private sealed class PathSet(IReadOnlyList<string> paths)

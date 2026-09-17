@@ -19,9 +19,11 @@ internal static class SyncCommand
         Description = "List what would be written and deleted, and change nothing.",
     };
 
-    private static readonly Option<bool> AdoptOption = new("--adopt")
+    private static readonly Option<string[]> AdoptOption = new("--adopt")
     {
-        Description = "Take over a copy the harness did not create, which is otherwise refused. What it would cost is reported either way.",
+        Description = "Take over these hosts' copies although the harness did not create them: --adopt vps or --adopt vps \"wsl Ubuntu\". Otherwise refused. What it would cost is reported either way.",
+        AllowMultipleArgumentsPerToken = true,
+        Arity = ArgumentArity.OneOrMore,
     };
 
     private static readonly Option<string[]> PullOption = new("--pull")

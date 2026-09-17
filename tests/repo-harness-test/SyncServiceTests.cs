@@ -2,6 +2,7 @@ using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Sync;
 
@@ -203,7 +204,7 @@ public sealed class SyncServiceTests
             await File.WriteAllTextAsync(Path.Combine(copy, "build", "warm.o"), "object\n", cancellationToken);
 
             var result = await service.SyncAsync(
-                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken);
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
 
             Assert.True(result.Verified);
 
@@ -224,6 +225,96 @@ public sealed class SyncServiceTests
             DeleteIfPresent(copy);
         }
     }
+
+    /// <summary>
+    /// One sync reaches every host, so saying yes once must not say yes everywhere. A host nobody
+    /// named is refused exactly as it would have been without the flag.
+    /// </summary>
+    [Theory]
+    [InlineData("local", true)]
+    [InlineData("LOCAL", true)]
+    [InlineData("vps", false)]
+    [InlineData("ssh vps", false)]
+    public void Adopt_NamesTheHostsItTakesOver_AndNoOthers(string named, bool adopted)
+        => Assert.Equal(adopted, new SyncOptions(Adopt: [named]).Adopts(HostId.Local));
+
+    [Fact]
+    public void Adopt_NamingNobody_TakesOverNothing()
+        => Assert.False(new SyncOptions().Adopts(HostId.Local));
+
+    /// <summary>
+    /// A host that was not named is still refused, and the refusal names the flag that would take
+    /// that host in particular rather than a flag that would take every one of them.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryOnAHostNobodyNamed_IsStillRefused_EvenWhileAnotherIsBeingAdopted()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(copy);
+            await File.WriteAllTextAsync(Path.Combine(copy, "theirs.txt"), "x\n", cancellationToken);
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["some-other-host"]), cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains("--adopt local", refusal.Message, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(copy, "theirs.txt")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// Afterwards a taken-over directory and one the tool made itself are the same directory, and
+    /// only one of them deleted somebody's files. The marker is the only place that can still say so.
+    /// </summary>
+    [Fact]
+    public async Task TheMarker_RecordsWhetherTheCopyWasTakenOver_OrMade()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var made = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+        var taken = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            _ = await service.SyncAsync(temp.Path, Transport(harness), made, new SyncOptions(), cancellationToken);
+
+            // A checkout of the same repository with one stray file, so the deletion bound — which
+            // this test is not about — has nothing to say.
+            Directory.CreateDirectory(Path.Combine(taken, "src"));
+            await File.WriteAllTextAsync(Path.Combine(taken, ".gitignore"), "build/\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(taken, "src", "a.c"), "a\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(taken, "src", "b.c"), "b\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(taken, "theirs.txt"), "x\n", cancellationToken);
+
+            _ = await service.SyncAsync(
+                temp.Path, Transport(harness), taken, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            var madeMarker = await File.ReadAllTextAsync(Marker(made), cancellationToken);
+            var takenMarker = await File.ReadAllTextAsync(Marker(taken), cancellationToken);
+
+            Assert.Contains("\"Adopted\": false", madeMarker, StringComparison.Ordinal);
+            Assert.Contains("\"Adopted\": true", takenMarker, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(made);
+            DeleteIfPresent(taken);
+        }
+    }
+
+    private static string Marker(string root)
+        => Path.Combine(root, HarnessLayout.DirectoryName, "synced-copy.json");
 
     /// <summary>
     /// The correction to what this feature once promised. Ignored paths are listed from the source by
@@ -289,7 +380,7 @@ public sealed class SyncServiceTests
             }
 
             var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
-                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken));
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken));
 
             Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
             Assert.Contains("maxDeleteFraction", refusal.Message, StringComparison.Ordinal);
@@ -321,7 +412,7 @@ public sealed class SyncServiceTests
             await File.WriteAllTextAsync(Path.Combine(copy, "src", "b.c"), "b\n", cancellationToken);
 
             _ = await service.SyncAsync(
-                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: true), cancellationToken);
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
 
             var said = harness.StandardError.ToString();
 

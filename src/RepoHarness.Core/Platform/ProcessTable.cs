@@ -297,19 +297,13 @@ public sealed class ProcessTable(IHostPlatform platform, IProcessRunner processR
         {
             try
             {
-                DateTimeOffset? started = null;
-
-                try
-                {
-                    started = new DateTimeOffset(process.StartTime).ToUniversalTime();
-                }
-                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
-                {
-                    // This user may not open it, or it has already exited. Its id alone is still a
-                    // fact, and an unknown start time is never merged with another sample's entry.
-                }
-
-                processes.Add(new SampledProcess(process.Id, null, CleanName(process.ProcessName), started, null));
+                // No start time at all, rather than one worked out from the clock. This runs only
+                // where /proc could not be read, and Process.StartTime on Linux is ticks since boot
+                // added to a boot time derived from the clock as it is now — so a clock that steps
+                // would hand the same process a new identity between two samples and split one
+                // contender into two. Left unknown, an entry is simply never merged across samples,
+                // which is the honest answer and the one this table already has a shape for.
+                processes.Add(new SampledProcess(process.Id, null, CleanName(process.ProcessName), null, null));
             }
             catch (InvalidOperationException)
             {

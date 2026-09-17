@@ -30,6 +30,21 @@ public static class SyncServe
     /// <summary>Makes the copy a git repository, which the harness there needs to find anything.</summary>
     public const string InitRepository = "init-repository";
 
+    /// <summary>
+    /// What <see cref="Create"/> carries to say it took over a directory rather than making one.
+    /// Passed as a word rather than as a flag because this protocol is positional arguments.
+    /// </summary>
+    public const string Adopted = "adopted";
+
+    /// <summary>Whether a <see cref="Create"/> request says it took over a directory.</summary>
+    /// <param name="arguments">The request's arguments, the copy's root first.</param>
+    public static bool SaysAdopted(IReadOnlyList<string> arguments)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        return arguments.Count > 1 && string.Equals(arguments[1], Adopted, StringComparison.Ordinal);
+    }
+
     /// <summary>Writes one file into the copy.</summary>
     public const string Write = "write";
 

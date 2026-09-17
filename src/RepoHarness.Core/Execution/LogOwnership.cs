@@ -23,6 +23,19 @@ public sealed record LogOwner(
     string RunId,
     DateTimeOffset TakenUtc)
 {
+    /// <summary>
+    /// The wall-clock start time a build before this one recorded here, kept only so such a file is
+    /// still readable. Nothing decides anything from it: it is exactly the value that moves when the
+    /// clock steps, which is why it stopped being what identifies a process.
+    /// </summary>
+    /// <remarks>
+    /// Declared rather than skipped so that every other unknown member can be refused, as this tool
+    /// refuses one everywhere else it reads JSON. Never written back: an entry rewritten by this
+    /// build carries a stamp instead.
+    /// </remarks>
+    [JsonPropertyName("processStartedUtc")]
+    public DateTimeOffset? LegacyStartedUtc { get; init; }
+
     /// <summary>The owner as a refusal names it.</summary>
     public string Describe()
         => $"{Machine} pid {ProcessId}, run {RunId}, since {TakenUtc:u}{Unstamped}";
@@ -88,6 +101,11 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+
+        // As above and as everywhere else this tool reads JSON: a shape it does not recognise is a
+        // hard failure, not silent data loss. The one field an older build wrote is declared, so
+        // upgrading reads its own owner file rather than refusing it.
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private readonly IFileSystem _fileSystem = fileSystem;

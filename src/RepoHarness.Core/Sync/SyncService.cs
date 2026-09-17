@@ -1,5 +1,6 @@
 using System.Globalization;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
@@ -9,10 +10,30 @@ namespace RepoHarness.Core.Sync;
 /// <summary>How one sync should behave.</summary>
 /// <param name="DryRun">List what would be written and deleted, and change nothing.</param>
 /// <param name="Adopt">
-/// Take over a directory the harness did not create, rather than refusing it. What it would cost is
-/// reported either way; this says go ahead and pay it.
+/// The hosts whose copy may be taken over although the harness did not create it. Named rather than
+/// a plain yes, because one sync reaches every host at once: a run that takes over the directory
+/// somebody meant on one machine would otherwise also take over whatever unexpected thing is found
+/// at another's repositoryPath, including a mistyped one, without being asked again.
 /// </param>
-public sealed record SyncOptions(bool DryRun = false, bool Adopt = false);
+public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Adopt = null)
+{
+    private readonly IReadOnlyList<string> _adopt = Adopt ?? [];
+
+    /// <summary>Whether <paramref name="host"/> was named as one to take over.</summary>
+    /// <param name="host">The host whose copy is being synced.</param>
+    /// <remarks>
+    /// Matched on the name alone as well as on the whole spelling, so both <c>--adopt vps</c> and
+    /// <c>--adopt "ssh vps"</c> name the same machine and neither is a trap.
+    /// </remarks>
+    public bool Adopts(HostId host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+
+        return _adopt.Any(named =>
+            string.Equals(named, host.ToString(), StringComparison.OrdinalIgnoreCase)
+            || (host.Name is { Length: > 0 } name && string.Equals(named, name, StringComparison.OrdinalIgnoreCase)));
+    }
+}
 
 /// <summary>What was found where a host's copy should be.</summary>
 internal enum CopyState
@@ -243,7 +264,9 @@ public sealed class SyncService(
         // Asked before the deletion bound. Whose directory this is comes first: told that a sync
         // would remove all of a directory, the reader goes looking for a mistake in the source, when
         // what is actually true is that this is not a copy of the source at all.
-        if (state == CopyState.Unclaimed && !options.Adopt && !options.DryRun)
+        var adopting = options.Adopts(transport.Host);
+
+        if (state == CopyState.Unclaimed && !adopting && !options.DryRun)
         {
             throw new HarnessException(HarnessExit.Refused, Unclaimed(transport, destinationRoot, plan));
         }
@@ -263,12 +286,12 @@ public sealed class SyncService(
 
         if (options.DryRun)
         {
-            if (state == CopyState.Unclaimed && !options.Adopt)
+            if (state == CopyState.Unclaimed && !adopting)
             {
                 _output.Info(
                     CommandName,
                     $"{transport.Host}: '{destinationRoot}' exists and the harness did not create it; "
-                    + "syncing into it needs --adopt.");
+                    + $"syncing into it needs '--adopt {transport.Host}'.");
             }
 
             return new SyncResult(transport.Host.ToString(), destinationRoot, plan, Verified: false, created);
@@ -293,7 +316,7 @@ public sealed class SyncService(
             // part way leaves it that way. Marked, the next run finishes the job; unmarked, it would
             // refuse and report a smaller loss than the first one did, because what it had already
             // destroyed no longer shows up in a plan.
-            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+            await transport.CreateRootAsync(destinationRoot, adopted: true, cancellationToken).ConfigureAwait(false);
             _output.Info(CommandName, $"{transport.Host}: adopted '{destinationRoot}'");
         }
 
@@ -444,7 +467,7 @@ public sealed class SyncService(
             }
 
             _output.Info(CommandName, $"{transport.Host}: creating '{destinationRoot}'");
-            await transport.CreateRootAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
+            await transport.CreateRootAsync(destinationRoot, adopted: false, cancellationToken).ConfigureAwait(false);
 
             return CopyState.Created;
         }
@@ -471,6 +494,8 @@ public sealed class SyncService(
         var opening = $"'{destinationRoot}' on {transport.Host} exists and the harness did not create it, "
             + "so sync will not write into it on its own.";
 
+        var take = $"'--adopt {transport.Host}'";
+
         var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
             + "there with this tree's.";
 
@@ -482,14 +507,14 @@ public sealed class SyncService(
 
         if (plan.Overwrites.Count == 0 && plan.Deletes.Count == 0)
         {
-            return $"{opening} Taking it over is '--adopt', and would remove nothing there. "
+            return $"{opening} Taking it over is {take}, and would remove nothing there. "
                 + $"{configuration} Nothing has been changed by this run.";
         }
 
         var counted = $"{plan.Overwrites.Count.ToString(CultureInfo.InvariantCulture)} file(s) would be "
             + $"overwritten and {plan.Deletes.Count.ToString(CultureInfo.InvariantCulture)} deleted there";
 
-        return $"{opening} Taking it over is '--adopt', and {counted}:\n  "
+        return $"{opening} Taking it over is {take}, and {counted}:\n  "
             + string.Join("\n  ", plan.DescribeLoss())
             + $"\n{configuration} {survives} Run with '--dry-run' to see all of it. Nothing has been "
             + "changed by this run.";
