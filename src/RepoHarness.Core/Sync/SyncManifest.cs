@@ -169,13 +169,5 @@ public sealed class ManifestBuilder(IFileSystem fileSystem, IHostPlatform platfo
     /// still not transferred: what would arrive on the other machine is a copy of the target under
     /// the link's name, which is not what the source holds.
     /// </remarks>
-    private bool IsLink(string path)
-    {
-        var resolved = _fileSystem.ResolveLinks(path);
-
-        return !string.Equals(
-            System.IO.Path.TrimEndingDirectorySeparator(resolved),
-            System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(path)),
-            _platform.PathComparison);
-    }
+    private bool IsLink(string path) => LinkPaths.IsLink(_fileSystem, path, _platform.PathComparison);
 }

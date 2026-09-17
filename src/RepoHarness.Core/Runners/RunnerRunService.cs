@@ -42,6 +42,12 @@ public sealed record RunnerRunRequest
     public string? WorkingDirectory { get; init; }
 
     /// <summary>
+    /// The leg's variant-keyed build directory, or <see langword="null"/> where this run reaches no
+    /// leg and so has none. What a step's <c>watchContention</c> watches.
+    /// </summary>
+    public string? BuildDirectory { get; init; }
+
+    /// <summary>
     /// The legs this run actually selected, for a runner whose own <c>legs</c> list is empty and
     /// therefore means the default set. Left out, an expected exception's scope is the runner alone,
     /// which is wider than the run intended.
@@ -141,10 +147,17 @@ public sealed class RunnerRunService(
     RunCheckGate runCheckGate,
     RunSegments runSegments,
     IPredefinedActionRunner predefinedActions,
+    InputFingerprint inputFingerprint,
+    ProcessSampler processSampler,
+    Git.IGitClient gitClient,
     Platform.IHostPlatform platform,
     IFileSystem fileSystem,
     IHarnessOutput output) : IRunnerRunService
 {
+    private readonly InputFingerprint _inputFingerprint = inputFingerprint;
+    private readonly ProcessSampler _processSampler = processSampler;
+    private readonly Git.IGitClient _gitClient = gitClient;
+
     /// <summary>The command this service reports under.</summary>
     public const string CommandName = "run";
 
@@ -213,6 +226,53 @@ public sealed class RunnerRunService(
             $"{request.Leg}: starting {steps.Phases.Count} step(s): "
             + string.Join(", ", steps.Phases.Select(phase => values.Redact(phase.Name))));
 
+        // One scope around every step, not one per step: an action of five steps has four gaps
+        // between them, and a file changed in a gap is the same moving tree as one changed inside a
+        // step. A sampler restarted per step loses a contender that spanned the join.
+        var watching = steps.Phases.Any(phase => phase.WatchContention);
+        var fingerprinting = steps.Phases.Any(phase => phase.RequireInputsUnmoved);
+
+        if (watching && string.IsNullOrEmpty(request.BuildDirectory))
+        {
+            // Refused rather than watched-as-nothing. A sample of no directory reports a clean one,
+            // which is the "nobody looked read as nothing found" this tool refuses everywhere. It
+            // cannot be caught when the file is read: an action file is tracked, and reading it
+            // cannot know whether the run that uses it will reach a leg.
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"a step of '{request.RunnerName}' asks for watchContention, and this run reaches no "
+                + "leg, so there is no build directory to watch. Run it for a leg, or take the key "
+                + "off the step.");
+        }
+
+        var (guarded, unmeasurable) = fingerprinting
+            ? await TrackedAsync(request, cancellationToken).ConfigureAwait(false)
+            : ((IReadOnlyList<string>?)null, null);
+
+        await using var guards = await LegGuards
+            .OpenAsync(
+                _inputFingerprint,
+                _processSampler,
+                new LegGuardRequest
+                {
+                    TreeRoot = request.TreeRoot,
+                    Inputs = unmeasurable is not null
+                        ? LegInputs.Unmeasured(unmeasurable)
+                        : LegInputs.Watch(guarded ?? []),
+                    Contention = watching
+                        ? new ContentionRequest
+                        {
+                            Leg = request.Leg,
+                            BuildDirectory = request.BuildDirectory!,
+                            BuildTools = config.Contention.BuildTools,
+                            SharedResourceTools = config.Contention.SharedResourceTools,
+                            SampleSeconds = config.Defaults.ProcessSampleSeconds,
+                        }
+                        : null,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
         foreach (var phase in steps.Phases)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -263,7 +323,25 @@ public sealed class RunnerRunService(
             .EndAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
             .ConfigureAwait(false);
 
+        var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
         var decided = await DecideAsync(request, state, values, cancellationToken).ConfigureAwait(false);
+
+        // What the guards saw is folded in the same way every other verb folds it, so a step whose
+        // tree moved reports the verdict a test leg would and not a sentence of its own.
+        //
+        // Into the outcome as well as the verdict, because the outcome is what a run check reads:
+        // RunCheckGate tests Success and ResultCode and nothing else, so a check run whose own tree
+        // moved would otherwise confirm an expected failure on the evidence of a run that measured
+        // nothing. Carried() a few lines down already updates both; this is the same rule.
+        var folded = seen.Decide(request.Leg, [decided.Verdict]);
+
+        decided = folded.Verdict == decided.Verdict.Verdict
+            ? decided with { Verdict = folded }
+            : decided with
+            {
+                Verdict = folded,
+                Outcome = RunOutcome.Failed(Verdicts.ExitCodeFor(folded.Verdict), folded.Detail),
+            };
         var union = _runSegments.Load(request.Layout, request.RunId, request.Leg).Union;
 
         decided = Carried(decided, state, union);
@@ -366,6 +444,7 @@ public sealed class RunnerRunService(
             // Before anything starts, and over the whole file rather than step by step: a file whose
             // last step names an undeclared program is refused with its first step not yet run.
             _toolPolicy.Enforce(file, config, request.TreeRoot);
+            RefuseUnknownNames(file);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -416,6 +495,73 @@ public sealed class RunnerRunService(
         return new RunnerSteps(phases, performed);
     }
 
+    /// <summary>
+    /// Refuses a step naming something nothing can fill in, over the whole file and before its
+    /// first program starts.
+    /// </summary>
+    /// <param name="file">The action as it was read.</param>
+    /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
+    /// <remarks>
+    /// The same vocabulary a project's test invocation uses, but not the same policy. A run line is a
+    /// program's own text, where <c>${HOME}</c> and <c>awk '{print}'</c> are ordinary, so a brace
+    /// group this tool does not own is left for whoever does. What is still refused here, over the
+    /// whole file and before the first program starts, is a name that is one of this vocabulary's
+    /// spelled differently — <c>{builddir}</c> for <c>{buildDir}</c> — because that one reaches the
+    /// interpreter as a literal path segment, which a consumer measured as an Errno 2 from a step
+    /// that looked exactly like the configuration that works.
+    /// </remarks>
+    private static void RefuseUnknownNames(ActionFile file)
+    {
+        var declared = file.Inputs.Select(input => input.Name).ToList();
+
+        foreach (var step in file.Steps)
+        {
+            foreach (var argument in step.Commands.SelectMany(command => command.Arguments))
+            {
+                LegPathNames.RefuseUnknown(
+                    argument,
+                    $"'{step.Name}' run line",
+                    PlaceholderPolicy.LeaveAsWritten,
+                    declared);
+            }
+
+            LegPathNames.RefuseUnknown(
+                step.WorkingDirectory,
+                $"'{step.Name}' workingDirectory",
+                PlaceholderPolicy.LeaveAsWritten,
+                declared);
+        }
+    }
+
+    /// <summary>
+    /// The tracked files a guarded run watches, and why they could not be listed when they could
+    /// not.
+    /// </summary>
+    /// <param name="request">The run, carrying the tree.</param>
+    /// <param name="cancellationToken">Stops the listing.</param>
+    private async Task<(IReadOnlyList<string>? Inputs, string? Unmeasurable)> TrackedAsync(
+        RunnerRunRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var index = await _gitClient.ListIndexAsync(request.TreeRoot, cancellationToken).ConfigureAwait(false);
+
+            return (
+                [.. index
+                    .Where(entry => entry.IsRegularFile)
+                    .Select(entry => entry.Path)
+                    .Distinct(StringComparer.Ordinal)],
+                null);
+        }
+        catch (HarnessException ex)
+        {
+            // Unmeasured rather than clean: a step asked for its inputs to be held still, and
+            // nothing here can say whether they were.
+            return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
+        }
+    }
+
     /// <summary>Runs one step, with the runner's bounds and the values it reads.</summary>
     private async Task<PhaseResult> RunPhaseAsync(
         HarnessConfig config,
@@ -424,11 +570,32 @@ public sealed class RunnerRunService(
         ActionValues values,
         CancellationToken cancellationToken)
     {
-        var arguments = phase.Command.Skip(1).ToList();
+        // The leg's directories and the action's own values, through the one expander a project's
+        // test invocation uses. A step that builds out of source has no other way to name where its
+        // build went: the directory is derived per leg and no tracked file can spell it.
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory);
+        var supplied = values.Supplied;
+
+        var arguments = phase.Command
+            .Skip(1)
+            .Select(argument => LegPathNames.Expand(
+                argument,
+                paths,
+                $"'{phase.Name}' run line",
+                PlaceholderPolicy.LeaveAsWritten,
+                supplied))
+            .ToList();
 
         var working = Path.GetFullPath(Path.Combine(
             request.WorkingDirectory ?? request.TreeRoot,
-            phase.WorkingDirectory ?? "."));
+            phase.WorkingDirectory is { Length: > 0 } declared
+                ? LegPathNames.Expand(
+                    declared,
+                    paths,
+                    $"'{phase.Name}' workingDirectory",
+                    PlaceholderPolicy.LeaveAsWritten,
+                    supplied)
+                : "."));
 
         var result = await _phaseRunner
             .RunAsync(
@@ -436,7 +603,12 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    FileName = phase.Command[0],
+                    FileName = LegPathNames.Expand(
+                        phase.Command[0],
+                        paths,
+                        $"'{phase.Name}' run line",
+                        PlaceholderPolicy.LeaveAsWritten,
+                        supplied),
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),
@@ -805,16 +977,10 @@ public sealed class RunnerRunService(
             environment[name] = value;
         }
 
-        return new RunnerPhase
-        {
-            Name = phase.Name,
-            Command = phase.Command,
-            WorkingDirectory = phase.WorkingDirectory,
-            Env = environment,
-            SuccessPattern = phase.SuccessPattern,
-            StallSeconds = phase.StallSeconds,
-            ContinueOnError = phase.ContinueOnError,
-        };
+        // A copy with one field changed. Written out member by member this dropped
+        // WatchContention and RequireInputsUnmoved, so an action that declared inputs ran with both
+        // guards off while its own text said they were on.
+        return phase with { Env = environment };
     }
 
     /// <summary>The steps a runner declares, and the predefined actions performed before they ran.</summary>

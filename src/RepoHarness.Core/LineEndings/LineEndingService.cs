@@ -248,10 +248,18 @@ public sealed class LineEndingService(
     private static string Normalize(string path)
         => string.Join('/', path.Split('/', '\\').Where(segment => segment.Length > 0 && segment != "."));
 
-    private static bool IsExcluded(string path, IEnumerable<string> excludes)
-        => excludes.Any(exclude =>
-            string.Equals(path, exclude, StringComparison.Ordinal)
-            || path.StartsWith(exclude + "/", StringComparison.Ordinal));
+    /// <summary>
+    /// Whether <paramref name="path"/> is covered by <paramref name="excludes"/>, by the one rule
+    /// every configured list of paths is read by.
+    /// </summary>
+    /// <remarks>
+    /// The same matcher <c>sync.exclude</c> uses, so <c>**/node_modules</c> means here what it means
+    /// there. Compared as literal text, as this was, an entry written that way covered nothing and
+    /// said nothing — a rule that protects nothing while reading, to anybody looking at the file, as
+    /// evidence that it does.
+    /// </remarks>
+    private static bool IsExcluded(string path, IReadOnlyList<string> excludes)
+        => PathPatterns.Matches(excludes, path);
 
     private static IReadOnlyList<string> SplitPaths(string output)
         => [.. output.Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(path => path.Trim('\n', '\r'))];

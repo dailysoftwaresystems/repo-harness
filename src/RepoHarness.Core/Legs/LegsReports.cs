@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.Results;
 
+using RepoHarness.Core.Hosts;
+
 namespace RepoHarness.Core.Legs;
 
 /// <summary>Turns what checking legs found into what <c>legs</c> prints.</summary>
@@ -25,8 +27,20 @@ public static class LegsReports
     {
         ArgumentNullException.ThrowIfNull(report);
 
-        var exitCode = report.Passed ? HarnessExit.Success : LegsExit.Unavailable;
-        var message = Summary(report);
+        // A leg no host can run is a complete answer: the survey looked and says so. A host that
+        // could not be reached is not — nothing was established about the legs it would have taken,
+        // and 'OK' for both differs only by a number somebody has to parse out of prose. Incomplete
+        // is the code the run verbs already use for exactly this: nothing failed, and not
+        // everything reported.
+        var silent = report.Hosts.Where(host => !host.Available).ToList();
+
+        var exitCode = !report.Passed
+            ? LegsExit.Unavailable
+            : silent.Count > 0
+                ? HarnessExit.Incomplete
+                : HarnessExit.Success;
+
+        var message = Summary(report, silent);
 
         if (json)
         {
@@ -50,6 +64,7 @@ public static class LegsReports
                     host.Os,
                     host.Processor,
                     host.ToolVersion,
+                    host.ToolPath,
                     host.Actions,
                 }),
             };
@@ -87,7 +102,7 @@ public static class LegsReports
         return new CommandOutcome(exitCode, message, details);
     }
 
-    private static string Summary(LegsReport report)
+    private static string Summary(LegsReport report, IReadOnlyList<HostReport> silent)
     {
         if (report.Placements.Count == 0)
         {
@@ -99,7 +114,10 @@ public static class LegsReports
 
         if (report.Passed)
         {
-            return counted;
+            return silent.Count == 0
+                ? counted
+                : $"{counted}; {silent.Count} host(s) did not answer, so this survey is incomplete: "
+                    + string.Join(", ", silent.Select(host => host.Host.ToString()));
         }
 
         return runnable == 0

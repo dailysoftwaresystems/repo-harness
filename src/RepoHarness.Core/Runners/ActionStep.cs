@@ -63,6 +63,24 @@ public sealed record ActionStep
     public bool ContinueOnError { get; init; }
 
     /// <summary>
+    /// Whether the process table is watched while this runs, so another run building in the same
+    /// directory is reported rather than silently shared with.
+    /// </summary>
+    /// <remarks>
+    /// Needs a build directory to watch, which is the leg's. A run reaching no leg has none, and
+    /// that is refused when the action runs rather than passed over: a guard that watched nothing
+    /// would report a clean directory without having looked at one.
+    /// </remarks>
+    public bool WatchContention { get; init; }
+
+    /// <summary>
+    /// Whether the tracked files are fingerprinted before, during and after this, so a tree edited
+    /// while it ran is reported rather than producing a result that describes no tree that existed.
+    /// </summary>
+    public bool RequireInputsUnmoved { get; init; }
+
+
+    /// <summary>
     /// This step as the phases the harness runs: one per line of its <c>run</c> block, each
     /// carrying the step's working directory, environment, witness, stall bound and failure policy.
     /// A predefined action yields none, because it is not a child process.
@@ -108,6 +126,8 @@ public sealed record ActionStep
                 Name = total == 1 ? Name : $"{Name} ({index + 1}/{total})",
                 Command = [.. command.Arguments],
                 WorkingDirectory = working,
+                WatchContention = WatchContention,
+                RequireInputsUnmoved = RequireInputsUnmoved,
                 Env = new Dictionary<string, string>(Env, StringComparer.OrdinalIgnoreCase),
 
                 // The witness belongs to the step, so it is checked against the step's last command:

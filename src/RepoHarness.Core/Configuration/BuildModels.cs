@@ -88,6 +88,30 @@ public sealed class ProjectConfig : VariantOverlay
     /// <summary>Default toolchain per platform, used when a leg names none.</summary>
     public Dictionary<string, string> DefaultToolchain { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The kinds of file whose content decides whether a warm build directory can be kept:
+    /// extensions or whole file names, such as <c>[".cpp", ".h", "CMakeLists.txt"]</c>. Declared
+    /// and non-empty, it replaces the set this project's type would use; absent or empty, the
+    /// type's own set applies.
+    /// </summary>
+    /// <remarks>
+    /// Declared where a build reads something its language would not suggest: a schema compiled in,
+    /// a document a <c>configure_file</c> embeds. Empty means "say nothing", not "match nothing" —
+    /// a list that matched nothing would compare equal every time, which is exactly the answer that
+    /// keeps a stale binary, so the only way to say less is to say something narrower.
+    /// <para>
+    /// It replaces rather than extends: a project saying what its build reads is making a
+    /// statement, and half-inheriting a list is how a file ends up watched by nobody's intention.
+    /// A project that overrides owns the whole list, its build system's own files included.
+    /// </para>
+    /// <para>
+    /// A file with no extension is a build input whatever this says, for the reason given on
+    /// <see cref="Build.BuildInputKinds"/>: an extension is the signal these entries read, and a
+    /// file carrying none carries no signal.
+    /// </para>
+    /// </remarks>
+    public List<string> RebuildableFormats { get; init; } = [];
+
     /// <summary>How to run this project's tests, unless a leg overrides it.</summary>
     public TestConfig? Test { get; init; }
 }

@@ -166,10 +166,12 @@ public sealed class AnchorCitationService(
     /// directory, and the separator at the boundary is required: a bare prefix test would also pull
     /// in a sibling directory whose name merely begins the same way.
     /// </summary>
-    private static bool IsInsideARoot(string path, IEnumerable<string> roots)
-        => roots.Any(root =>
-            string.Equals(path, root, StringComparison.Ordinal)
-            || path.StartsWith(root + "/", StringComparison.Ordinal));
+    /// <remarks>
+    /// Through the one matcher every configured list of paths is read by, so a root written
+    /// <c>**/name</c> covers that name at any depth here as it does everywhere else.
+    /// </remarks>
+    private static bool IsInsideARoot(string path, IReadOnlyList<string> roots)
+        => Repository.PathPatterns.Matches(roots, path);
 
     private static bool IsBinary(string text)
         => text.AsSpan(0, Math.Min(text.Length, BinaryProbeLength)).IndexOf('\0') >= 0;

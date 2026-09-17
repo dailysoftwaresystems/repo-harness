@@ -51,6 +51,109 @@ public sealed class RunnerRunServiceTests
         Assert.False(Directory.Exists(temp.Combine(".harness-config", "runs", RunId)));
     }
 
+    /// <summary>
+    /// A phase derived from another was rebuilt member by member, and the two guard keys were not
+    /// among the members copied — so an action file that declared inputs ran with both guards off
+    /// while its own text said they were on. Nothing said they had been skipped.
+    /// </summary>
+    /// <remarks>
+    /// Observed through the refusal a step asking for contention gets when the run reaches no leg:
+    /// that refusal can only fire if the key survived the copy. Drop it again and this run is
+    /// allowed, having watched nothing.
+    /// </remarks>
+    [Fact]
+    public async Task AGuardedStep_KeepsItsGuard_ThroughAnActionThatDeclaresInputs()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, """
+            name: corpus
+            inputs:
+              corpusRoot:
+                default: corpus
+            steps:
+              - name: read
+                uses: harness/read-inputs
+              - name: measure
+                watchContention: true
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Contains("watchContention", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same file without inputs, which took a different path through the code: this is the one
+    /// that always worked, and it is here so the pair says which half was broken.
+    /// </summary>
+    [Fact]
+    public async Task AGuardedStep_KeepsItsGuard_WithNoInputsDeclared()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, """
+            name: corpus
+            steps:
+              - name: measure
+                watchContention: true
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+    }
+
+    /// <summary>
+    /// A run line using the shell is an ordinary action file, and this tool owns none of its braces.
+    /// Refusing them turned working files away at load, before the first step.
+    /// </summary>
+    [Fact]
+    public async Task AnActionFileUsingShellVariables_IsNotRefused()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(temp, """
+            name: corpus
+            steps:
+              - name: measure
+                run: |
+                  dotnet --version ${HOME}
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        // Runs, rather than being refused over a brace group belonging to the shell. Whether the
+        // child succeeds is not what this pins.
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(result);
+    }
+
     [Fact]
     public async Task AStepThatPutsASecretInItsArguments_IsRefusedWithoutQuotingIt()
     {
@@ -370,6 +473,9 @@ public sealed class RunnerRunServiceTests
             new RunCheckGate(factory.Output),
             new RunSegments(factory.FileSystem, factory.Output),
             new PredefinedActionRunner(factory.GitClient, factory.Output),
+            new InputFingerprint(factory.FileSystem, factory.Platform),
+            new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
+            factory.GitClient,
             factory.Platform,
             factory.FileSystem,
             factory.Output);

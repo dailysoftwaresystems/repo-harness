@@ -70,8 +70,17 @@ public sealed class LedgerReportTests
         var slow = report.Lines.Single(line => line.Leg == "slow");
 
         Assert.True(slow.TimingsSuspect);
-        Assert.Contains("build took", slow.Detail, StringComparison.Ordinal);
-        Assert.Contains("412 tests", slow.Detail, StringComparison.Ordinal);
+
+        // The note travels beside the detail, not inside it, so a ledger reported onward composes
+        // the mark once rather than once per machine it passed through.
+        Assert.Contains(slow.TimingNotes, note => note.Contains("build took", StringComparison.Ordinal));
+        Assert.Equal("412 tests", slow.Detail);
+
+        // And the reader still sees both, in the one column they look at.
+        var row = Assert.Single(report.Render(), line => line.StartsWith("slow", StringComparison.Ordinal));
+
+        Assert.Contains("build took", row, StringComparison.Ordinal);
+        Assert.Contains("412 tests", row, StringComparison.Ordinal);
 
         // The mark is about the clock, not about the code.
         Assert.Equal(LegVerdict.Passed, slow.Verdict);
@@ -121,8 +130,50 @@ public sealed class LedgerReportTests
         var line = report.Lines.Single();
 
         Assert.True(line.TimingsSuspect);
-        Assert.Contains("the clock stepped during test", line.Detail, StringComparison.Ordinal);
+        Assert.Contains("the clock stepped during test", line.TimingNotes, StringComparer.Ordinal);
+        Assert.Equal("412 tests", line.Detail);
         Assert.Equal(LegVerdict.Passed, line.Verdict);
+
+        Assert.Contains(
+            report.Render(),
+            row => row.Contains("the clock stepped during test", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A ledger is reported onward: every remote leg runs this same code on its own host, answers
+    /// with --json, and the asking machine builds its own ledger from those lines. Measured on a
+    /// consumer's two-leg run, the whole explanation arrived twice, concatenated, in the one column
+    /// a reader actually looks at.
+    /// </summary>
+    [Fact]
+    public void ALedgerReportedOnward_ComposesTheMarkOnce_NotOncePerMachine()
+    {
+        var first = LedgerReport.From(
+            [Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(60), "412 tests", new PhaseRecord("test", TimeSpan.FromSeconds(60), ClockStepped: true))],
+            durationWarningFactor: 3.0);
+
+        var arrived = first.Lines.Single();
+
+        // Exactly what a host's --json hands back, and what the asking machine makes of it.
+        var again = LedgerReport.From(
+            [
+                new LegEntry
+                {
+                    Leg = arrived.Leg,
+                    Verdict = arrived.Verdict,
+                    Detail = arrived.Detail,
+                    Duration = arrived.Duration,
+                    CommandTime = arrived.CommandTime,
+                    TestCount = arrived.TestCount,
+                    TimingNotes = arrived.TimingNotes,
+                },
+            ],
+            durationWarningFactor: 3.0);
+
+        var row = Assert.Single(again.Render(), line => line.StartsWith("a ", StringComparison.Ordinal));
+        var mark = "timings suspect:";
+
+        Assert.Equal(row.IndexOf(mark, StringComparison.Ordinal), row.LastIndexOf(mark, StringComparison.Ordinal));
     }
 
     [Fact]

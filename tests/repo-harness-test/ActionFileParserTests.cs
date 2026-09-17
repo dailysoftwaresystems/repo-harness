@@ -652,6 +652,60 @@ public sealed class ActionFileParserTests
         Assert.Contains("outside", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A step asks for the guards the build and test verbs carry, and gets them off unless it does.
+    /// </summary>
+    [Fact]
+    public void AStepAsksForItsGuards_AndHasNoneUnlessItDoes()
+    {
+        var asked = Parse("""
+            name: build
+            steps:
+              - name: compile
+                run: |
+                  cmake --build .
+                watchContention: true
+                requireInputsUnmoved: true
+            """).Steps[0];
+
+        Assert.True(asked.WatchContention);
+        Assert.True(asked.RequireInputsUnmoved);
+
+        var silent = Parse("""
+            name: build
+            steps:
+              - name: compile
+                run: |
+                  cmake --build .
+            """).Steps[0];
+
+        Assert.False(silent.WatchContention);
+        Assert.False(silent.RequireInputsUnmoved);
+    }
+
+    /// <summary>
+    /// Anything that is not exactly true or false is refused, never read as false. These keys turn
+    /// guards on, so a misspelling read as "off" is a step that looks guarded in the file and is
+    /// not — which is the failure the guards exist to make impossible.
+    /// </summary>
+    [Theory]
+    [InlineData("watchContention")]
+    [InlineData("requireInputsUnmoved")]
+    public void AGuardKeyThatSaysSomethingElse_IsRefused_NotReadAsOff(string key)
+    {
+        var refusal = Refused($"""
+            name: build
+            steps:
+              - name: compile
+                run: |
+                  cmake --build .
+                {key}: yes
+            """);
+
+        Assert.Contains(key, refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'true', 'false'", refusal.Message, StringComparison.Ordinal);
+    }
+
     private static ActionFileParser CreateParser()
         => new(
             new PhysicalFileSystem(FilePermissionsFactory.Create()),

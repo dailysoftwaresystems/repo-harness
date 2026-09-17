@@ -45,7 +45,7 @@ public sealed class NamedMutexAnchorRegistryLock(IHostPlatform platform, TimeSpa
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"Another {ToolPackage.Command} process has held the anchor registries for {_timeout.TotalSeconds:0} seconds, "
+                $"Another {ToolPackage.Id} process has held the anchor registries for {_timeout.TotalSeconds:0} seconds, "
                 + "so nothing was changed. Run the command again once it has finished.");
         }
 

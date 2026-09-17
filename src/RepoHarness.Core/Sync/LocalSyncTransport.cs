@@ -179,6 +179,96 @@ public sealed class LocalSyncTransport(
     }
 
     /// <inheritdoc/>
+    public Task<IReadOnlyList<EmptiedDirectory>> RemoveEmptyDirectoriesAsync(
+        string root,
+        IReadOnlyList<string> directories,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(directories);
+
+        var expanded = Home(root);
+        var answered = new List<EmptiedDirectory>();
+
+        // Deepest first, so a directory that empties only because its child went is considered
+        // after that child has gone rather than before.
+        foreach (var directory in directories
+            .Where(path => path.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .OrderByDescending(path => path.Count(character => character is '/' or '\\'))
+            .ThenBy(path => path, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Resolved the same way every other path a sync acts on is, so one arriving with '..'
+            // cannot reach a directory beside the copy.
+            var full = Resolve(root, directory);
+            var relative = directory;
+
+            // Only the directory the plan emptied is answered for. The walk continues upward to take
+            // parents the removal has just emptied in turn, but a parent that still holds something
+            // is the ordinary case — it is where the tree keeps its other files — and reporting it
+            // as a copy that diverges would put a false warning on almost every sync that deletes a
+            // nested directory.
+            var emptiedHere = true;
+
+            while (PathContainment.IsStrictlyInside(expanded, full, _platform.PathComparison))
+            {
+                // Files and subdirectories both, and links among them: EnumerateFiles lists a link
+                // to a file and EnumerateDirectories lists a link to a directory, so a directory
+                // holding nothing but a link is correctly not empty. That is the case the manifest
+                // cannot see, and the one where being wrong deletes what no plan can speak for.
+                if (!_fileSystem.DirectoryExists(full))
+                {
+                    break;
+                }
+
+                var held = _fileSystem
+                    .EnumerateFiles(full, recursive: false)
+                    .Concat(_fileSystem.EnumerateDirectories(full))
+                    .Select(Path.GetFileName)
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Order(StringComparer.Ordinal)
+                    .Take(HeldNamesReported)
+                    .ToList();
+
+                if (held.Count > 0)
+                {
+                    if (emptiedHere)
+                    {
+                        // Answered for rather than passed over. This is the shape a consumer measured:
+                        // a directory whose every managed file the plan deleted, kept alive by bytecode
+                        // that sync.neverTransfer protects, so the checkout diverges from this tree and
+                        // the next structural check on that host fails with nothing naming the cause.
+                        answered.Add(EmptiedDirectory.Kept(relative.Replace('\\', '/'), held!));
+                    }
+
+                    break;
+                }
+
+                _fileSystem.DeleteDirectory(full);
+                answered.Add(EmptiedDirectory.Gone(relative.Replace('\\', '/')));
+
+                if (Path.GetDirectoryName(full) is not { Length: > 0 } parent)
+                {
+                    break;
+                }
+
+                full = parent;
+                relative = ManifestBuilder.Relative(expanded, parent);
+                emptiedHere = false;
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<EmptiedDirectory>>(answered);
+    }
+
+    /// <summary>
+    /// How many of a surviving directory's names are reported. Enough to recognise what kept it
+    /// without printing somebody's whole cache.
+    /// </summary>
+    private const int HeldNamesReported = 5;
+
+    /// <inheritdoc/>
     public async Task<byte[]> ReadFileAsync(
         string root,
         string relativePath,
@@ -360,20 +450,21 @@ public sealed class LocalSyncTransport(
     /// </remarks>
     private bool Adopted(string root) => Marker(root) is { Adopted: true };
 
-    /// <summary>A withheld-path test built once, rather than re-parsed for every file in a tree.</summary>
+    /// <summary>A withheld-path test over a list put into its comparison form once.</summary>
+    /// <remarks>
+    /// Through the one matcher the plan is built with, not a second copy of the rule. The walk on a
+    /// host and the plan on the asking machine have to agree about what is covered, and two
+    /// implementations are how a file ends up protected by one and deleted by the other.
+    /// <para>
+    /// The list is normalised here rather than on every comparison. A host walk asks this once per
+    /// file and the matcher normalises whatever it is handed, so an un-normalised list would be
+    /// re-parsed once per file per pattern — which is what "built once" was claiming not to do.
+    /// </para>
+    /// </remarks>
     private sealed class PathSet(IReadOnlyList<string> paths)
     {
-        private readonly string[] _paths = [.. paths
-            .Select(path => path.Replace('\\', '/').Trim('/'))
-            .Where(path => path.Length > 0)];
+        private readonly IReadOnlyList<string> _paths = [.. paths.Select(PathPatterns.Normalize)];
 
-        public bool Contains(string relativePath)
-        {
-            var candidate = relativePath.Replace('\\', '/').Trim('/');
-
-            return _paths.Any(path =>
-                string.Equals(candidate, path, StringComparison.Ordinal)
-                || candidate.StartsWith(path + "/", StringComparison.Ordinal));
-        }
+        public bool Contains(string relativePath) => PathPatterns.Matches(_paths, relativePath);
     }
 }

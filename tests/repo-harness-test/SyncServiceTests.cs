@@ -1098,6 +1098,8 @@ public sealed class SyncServiceTests
             factory,
             new LegsService(loader, inspector, harness.Output),
             harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
             harness.Output);
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncHostsAsync(
@@ -1452,8 +1454,107 @@ public sealed class SyncServiceTests
         public Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
             => inner.DeleteFileAsync(root, relativePath, cancellationToken);
 
+        public Task<IReadOnlyList<EmptiedDirectory>> RemoveEmptyDirectoriesAsync(
+            string root,
+            IReadOnlyList<string> directories,
+            CancellationToken cancellationToken = default)
+            => inner.RemoveEmptyDirectoriesAsync(root, directories, cancellationToken);
+
         public Task<byte[]> ReadFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
             => inner.ReadFileAsync(root, relativePath, cancellationToken);
+    }
+
+    /// <summary>
+    /// A manifest holds files, so a plan can delete every file a directory had and never mention
+    /// the directory. Locally that is invisible — git rm takes the directory with the last file —
+    /// and it shows up only on a host, where the husk stays and whatever reads the tree next finds
+    /// a directory with nothing addressable in it. Measured on a consumer's host after a wave of
+    /// twenty deletions: ten directories left behind, eight holding nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryTheDeletionEmptied_IsRemoved_AndSaidSo()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await MirrorAsync(temp.Path, copy, cancellationToken);
+
+            // A directory the source does not have at all, holding only files.
+            Directory.CreateDirectory(Path.Combine(copy, "scripts", "retired"));
+            await File.WriteAllTextAsync(Path.Combine(copy, "scripts", "retired", "a.sh"), "x\n", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(copy, "scripts", "retired", "b.sh"), "y\n", cancellationToken);
+
+            await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            Assert.False(Directory.Exists(Path.Combine(copy, "scripts", "retired")));
+
+            // And its parent, which emptied with it.
+            Assert.False(Directory.Exists(Path.Combine(copy, "scripts")));
+            Assert.Contains("removed scripts/retired/", harness.StandardOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A directory kept alive by something the walk never lists stays, and is named with what kept
+    /// it. A link is the sharp case: no manifest holds one, so deciding emptiness from the plan
+    /// would delete a directory still holding the one thing no plan can speak for. The same path
+    /// answers for content sync.neverTransfer protects, which is what a consumer measured: two such
+    /// directories survived a deletion wave and their next structural check went red naming one.
+    /// <para>
+    /// Staying is deliberate — removing a directory because its only remaining content is protected
+    /// is one bad generalisation away from deleting a warm build root — but a divergence nobody is
+    /// told about arrives later with nothing connecting it to the sync that caused it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryHeldOpenByWhatSyncDoesNotManage_Stays_AndIsNamedWithWhatHeldIt()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+        var elsewhere = Path.Combine(temp.Path, "..", "elsewhere-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await MirrorAsync(temp.Path, copy, cancellationToken);
+            Directory.CreateDirectory(elsewhere);
+
+            Directory.CreateDirectory(Path.Combine(copy, "scripts", "retired"));
+            await File.WriteAllTextAsync(Path.Combine(copy, "scripts", "retired", "a.py"), "x\n", cancellationToken);
+
+            if (!TryLink(Path.Combine(copy, "scripts", "retired", "cache"), elsewhere))
+            {
+                Assert.Skip("Creating a link needs a privilege this machine did not grant.");
+            }
+
+            await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            // It stayed, because it is not empty — and what it holds is what no plan could list.
+            Assert.True(Directory.Exists(Path.Combine(copy, "scripts", "retired")));
+            Assert.True(Directory.Exists(elsewhere));
+
+            var said = harness.StandardError.ToString();
+
+            Assert.Contains("scripts/retired/", said, StringComparison.Ordinal);
+            Assert.Contains("cache", said, StringComparison.Ordinal);
+            Assert.Contains("differs from this tree", said, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+            DeleteIfPresent(elsewhere);
+        }
     }
 
     /// <summary>
@@ -1558,6 +1659,89 @@ public sealed class SyncServiceTests
         }
     }
 
+    /// <summary>
+    /// The far side of every real sync. A host removes its own husks, so the operation has to
+    /// survive the wire: an answer that never arrives is the asking machine reporting that nothing
+    /// was removed when a directory went.
+    /// </summary>
+    [Fact]
+    public async Task TheAgentRemovesADirectoryTheDeletionEmptied_AndSaysWhatItDid()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        Directory.CreateDirectory(temp.Combine("gone"));
+        Directory.CreateDirectory(temp.Combine("kept"));
+        await File.WriteAllTextAsync(temp.Combine("kept", "still-here.txt"), "x\n", token);
+
+        var result = await CliRunner.RunAsync(
+            ["sync-serve", SyncServe.Prune, temp.Path, "gone\nkept"],
+            token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        var answer = SyncServe.ReadAnswer<SyncPruneAnswer>(result.StandardOutput.Trim());
+
+        Assert.NotNull(answer);
+
+        var went = Assert.Single(answer.Directories, entry => entry.Path == "gone");
+        var stayed = Assert.Single(answer.Directories, entry => entry.Path == "kept");
+
+        Assert.True(went.Removed);
+        Assert.False(stayed.Removed);
+        Assert.Contains("still-here.txt", stayed.Held, StringComparer.Ordinal);
+
+        Assert.False(Directory.Exists(temp.Combine("gone")));
+        Assert.True(Directory.Exists(temp.Combine("kept")));
+    }
+
+    /// <summary>
+    /// A dry run exits as the run it previews would. Printing the cost and exiting zero makes
+    /// "this checkout needs taking over" indistinguishable from "everything is in step" to anything
+    /// reading the code, which is what a dry run is for reading. This changed silently between two
+    /// releases and a consumer found it.
+    /// </summary>
+    [Fact]
+    public async Task ADryRunOverAnUnclaimedCopy_SaysARunWouldRefuseIt()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(copy);
+            await File.WriteAllTextAsync(Path.Combine(copy, "theirs.txt"), "x\n", cancellationToken);
+
+            var result = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(DryRun: true), cancellationToken);
+
+            Assert.True(result.RequiresAdoption);
+
+            // And a copy this tool made says the opposite, so the flag means something.
+            var mine = Path.Combine(temp.Path, "..", "mine-" + Guid.NewGuid().ToString("N")[..8]);
+
+            try
+            {
+                await service.SyncAsync(temp.Path, Transport(harness), mine, new SyncOptions(), cancellationToken);
+
+                var again = await service.SyncAsync(
+                    temp.Path, Transport(harness), mine, new SyncOptions(DryRun: true), cancellationToken);
+
+                Assert.False(again.RequiresAdoption);
+            }
+            finally
+            {
+                DeleteIfPresent(mine);
+            }
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
     private static LocalSyncTransport Transport(HarnessFactory harness)
         => new LocalSyncTransport(
             harness.FileSystem,
@@ -1589,6 +1773,8 @@ public sealed class SyncServiceTests
             Substitute.For<ISyncTransportFactory>(),
             new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Output),
             harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
             harness.Output);
 
         return (harness, service);

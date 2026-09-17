@@ -94,6 +94,38 @@ public interface ISyncTransport
     /// <param name="cancellationToken">Stops the deletion.</param>
     Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Removes each of <paramref name="directories"/> that is now empty, and every parent of one
+    /// that empties with it, and answers with what went and what stayed.
+    /// </summary>
+    /// <param name="root">The copy's root, which is never removed.</param>
+    /// <param name="directories">Directories to consider, relative to the root.</param>
+    /// <param name="cancellationToken">Stops the removal.</param>
+    /// <remarks>
+    /// A manifest holds files, so a plan can delete every file a directory had and never mention
+    /// the directory. Locally that is invisible — <c>git rm</c> takes the directory with the last
+    /// file — and it shows up only on a host, where a directory that a wave emptied stays behind
+    /// and whatever reads the tree next finds a directory with nothing addressable in it.
+    /// <para>
+    /// Emptiness is decided HERE, on the side that holds the directory, by looking at what is
+    /// actually in it. Deciding it from the manifest would be wrong in two ways that both cost
+    /// somebody their files: a manifest lists no ignored file, so a directory holding what
+    /// <c>sync.neverTransfer</c> protects would read as empty, and it lists no link, so a directory
+    /// holding only a link would read as empty while holding the one thing no plan can speak for.
+    /// </para>
+    /// <para>
+    /// A directory that stayed is answered for too, with what was still in it. A sync's contract is
+    /// that the host's checkout matches this tree, and a directory the plan emptied which survives
+    /// because protected content remains is a divergence from that — one that arrives later as a
+    /// structural check failing on a host, with nothing connecting it to the sync that caused it.
+    /// Named here it is visible when it happens, to somebody who can act on it.
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyList<EmptiedDirectory>> RemoveEmptyDirectoriesAsync(
+        string root,
+        IReadOnlyList<string> directories,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Reads one file out of the copy, for bringing a leg's output home.</summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="relativePath">The file to read, relative to the root.</param>

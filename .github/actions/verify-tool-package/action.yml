@@ -51,7 +51,7 @@ runs:
         PACKAGE_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        tool="$RUNNER_TEMP/verify-tool-package/tool/DssHarness"
+        tool="$RUNNER_TEMP/verify-tool-package/tool/dssharness"
 
         # Output is compared, not just the exit code: a tool that printed an error and
         # exited 0 would otherwise pass.
@@ -65,6 +65,6 @@ runs:
         # by a closed pipe once grep has its match, and pipefail then fails a good package.
         codes=$("$tool" help exit-codes)
         if ! grep -q 'CommandFailed' <<< "$codes"; then
-          echo "::error::'DssHarness help exit-codes' did not list the exit codes."
+          echo "::error::'dssharness help exit-codes' did not list the exit codes."
           exit 1
         fi

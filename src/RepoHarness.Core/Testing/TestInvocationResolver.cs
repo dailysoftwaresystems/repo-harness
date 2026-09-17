@@ -84,6 +84,12 @@ public static class TestInvocationResolver
     /// <param name="cores">The core count this leg runs with.</param>
     /// <param name="filter">A filter the caller asked for, or null.</param>
     /// <param name="excludes">Exclusions the caller asked for.</param>
+    /// <param name="paths">
+    /// The directories this leg runs against, which the arguments and the working directory may
+    /// name. Null is for a caller with no leg in hand: every placeholder is left as written and the
+    /// configured working directory is dropped rather than resolved, so what comes back describes
+    /// the shape of the command and not a command anybody should run.
+    /// </param>
     /// <remarks>
     /// The core count goes through <c>coresEnv</c> where the runner reads a variable and
     /// <c>coresArgs</c> where it does not. A variable is preferred because an explicit option in the
@@ -94,7 +100,8 @@ public static class TestInvocationResolver
         ResolvedTestInvocation invocation,
         int cores,
         string? filter,
-        IReadOnlyList<string>? excludes)
+        IReadOnlyList<string>? excludes,
+        LegPaths? paths = null)
     {
         ArgumentNullException.ThrowIfNull(invocation);
 
@@ -143,8 +150,36 @@ public static class TestInvocationResolver
             }
         }
 
-        return new TestCommand(invocation.Runner, arguments, environment);
+        // Expanded once, here, after the filter and the exclusions have been spliced in and the
+        // core count added: every argument the runner will see goes through one rule, so an
+        // argument that arrived from --filter cannot name a directory an argument from config
+        // could not.
+        if (paths is not null)
+        {
+            for (var index = 0; index < arguments.Count; index++)
+            {
+                arguments[index] = LegPathNames.Expand(arguments[index], paths, "test.args");
+            }
+        }
+
+        var workingDirectory = invocation.WorkingDirectory is { Length: > 0 } declared && paths is not null
+            ? Rooted(LegPathNames.Expand(declared, paths, "test.workingDirectory"), paths.TreeRoot)
+            : null;
+
+        return new TestCommand(invocation.Runner, arguments, environment, workingDirectory);
     }
+
+    /// <summary>
+    /// <paramref name="path"/> as an absolute path, resolving a relative one against
+    /// <paramref name="treeRoot"/>.
+    /// </summary>
+    /// <remarks>
+    /// So a working directory can be written either way: <c>{buildDir}</c> expands to an absolute
+    /// path already, while a plain <c>tests/integration</c> means what every other path in the
+    /// configuration means, which is somewhere under the tree.
+    /// </remarks>
+    private static string Rooted(string path, string treeRoot)
+        => Path.IsPathRooted(path) ? path : Path.Combine(treeRoot, path);
 
     private static ResolvedTestInvocation Merge(TestInvocation? all, TestInvocation? platform)
         => new(
@@ -157,7 +192,8 @@ public static class TestInvocationResolver
             platform?.CoresEnv ?? all?.CoresEnv ?? [],
             platform?.Env ?? all?.Env ?? [],
             platform?.SuccessPattern ?? all?.SuccessPattern ?? string.Empty,
-            platform?.CountPattern ?? all?.CountPattern);
+            platform?.CountPattern ?? all?.CountPattern,
+            platform?.WorkingDirectory ?? all?.WorkingDirectory);
 }
 
 /// <summary>One test invocation, with every field decided.</summary>
@@ -171,6 +207,7 @@ public static class TestInvocationResolver
 /// <param name="Env">Environment for the invocation.</param>
 /// <param name="SuccessPattern">What must appear in the runner's own output for this to pass.</param>
 /// <param name="CountPattern">What captures how many tests ran, or null.</param>
+/// <param name="WorkingDirectory">Where the runner starts, or null for the leg's tree root.</param>
 public sealed record ResolvedTestInvocation(
     string Runner,
     IReadOnlyList<string> Args,
@@ -181,13 +218,16 @@ public sealed record ResolvedTestInvocation(
     IReadOnlyList<string> CoresEnv,
     IReadOnlyDictionary<string, string> Env,
     string SuccessPattern,
-    string? CountPattern);
+    string? CountPattern,
+    string? WorkingDirectory = null);
 
 /// <summary>A test invocation ready to start.</summary>
 /// <param name="Program">The runner to start.</param>
 /// <param name="Arguments">Its arguments, one element each, never a shell string.</param>
 /// <param name="Environment">The environment it runs with.</param>
+/// <param name="WorkingDirectory">Where it starts, or null for the leg's tree root.</param>
 public sealed record TestCommand(
     string Program,
     IReadOnlyList<string> Arguments,
-    IReadOnlyDictionary<string, string> Environment);
+    IReadOnlyDictionary<string, string> Environment,
+    string? WorkingDirectory = null);

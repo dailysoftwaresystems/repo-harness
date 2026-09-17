@@ -64,7 +64,14 @@ public sealed class RunnerConfig
 }
 
 /// <summary>One phase of a runner.</summary>
-public sealed class RunnerPhase
+/// <remarks>
+/// A record so that a phase derived from another is written as a copy with the one field changed,
+/// rather than rebuilt member by member. Rebuilt, every field added later has to be remembered at
+/// every rebuild site, and the one that is forgotten is silently false: this shipped once, and what
+/// it dropped was <see cref="WatchContention"/> and <see cref="RequireInputsUnmoved"/> — two
+/// guards, off, in exactly the action files that declared inputs.
+/// </remarks>
+public sealed record RunnerPhase
 {
     /// <summary>Name, used in progress output and to name this phase's log file.</summary>
     public required string Name { get; init; }
@@ -86,6 +93,23 @@ public sealed class RunnerPhase
 
     /// <summary>Whether a failure here ends the leg or is recorded and passed over.</summary>
     public bool ContinueOnError { get; init; }
+
+    /// <summary>
+    /// Whether the process table is watched while this runs, so another run building in the same
+    /// directory is reported rather than silently shared with.
+    /// </summary>
+    /// <remarks>
+    /// Needs a build directory to watch, which is the leg's. A run reaching no leg has none, and
+    /// that is refused when the action runs rather than passed over: a guard that watched nothing
+    /// would report a clean directory without having looked at one.
+    /// </remarks>
+    public bool WatchContention { get; init; }
+
+    /// <summary>
+    /// Whether the tracked files are fingerprinted before, during and after this, so a tree edited
+    /// while it ran is reported rather than producing a result that describes no tree that existed.
+    /// </summary>
+    public bool RequireInputsUnmoved { get; init; }
 }
 
 /// <summary>A named command invokable through <c>DssHarness exec</c>.</summary>

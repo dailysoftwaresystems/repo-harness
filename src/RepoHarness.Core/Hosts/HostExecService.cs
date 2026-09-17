@@ -99,7 +99,7 @@ public sealed class HostExecService(
 
         if (report.Session is not { } session)
         {
-            return CommandOutcome.Failed(HarnessExit.HostUnavailable, $"{host} cannot run {ToolPackage.Command}: {report.Reason}");
+            return CommandOutcome.Failed(HarnessExit.HostUnavailable, $"{host} cannot run {ToolPackage.Id}: {report.Reason}");
         }
 
         var nonce = HostAgentProtocol.NewNonce();

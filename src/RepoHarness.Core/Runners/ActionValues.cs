@@ -27,6 +27,21 @@ public sealed class ActionValues
     /// <summary>What a redacted secret is replaced with.</summary>
     public const string Mask = "***";
 
+    /// <summary>
+    /// The plain values, by name, for a step's run line to name. Secrets are deliberately absent:
+    /// a value spliced into a command line reaches the process table, where anything on the machine
+    /// can read it, and the environment is how a secret is handed over instead.
+    /// </summary>
+    /// <remarks>
+    /// Ordinal, unlike the environment these same values are handed over in. A name in a run line is
+    /// matched exactly because the text around it belongs to a program: an action declaring an input
+    /// called <c>home</c> must not have a step's <c>${HOME}</c> replaced with its value.
+    /// </remarks>
+    public IReadOnlyDictionary<string, string> Supplied =>
+        _supplied ??= new Dictionary<string, string>(_values, StringComparer.Ordinal);
+
+    private Dictionary<string, string>? _supplied;
+
     private readonly Dictionary<string, string> _values;
     private readonly Dictionary<string, string> _secrets;
     private readonly IReadOnlyList<string> _secretTexts;

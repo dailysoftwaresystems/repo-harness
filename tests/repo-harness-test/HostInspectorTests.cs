@@ -161,7 +161,7 @@ public sealed class HostInspectorTests
         Assert.Equal(
             ["tool", "install", "--global", "DssHarness", "--version", "1.2.0", "--source", "https://api.nuget.org/v3/index.json"],
             fixture.Commands.Single("tool", "install").Arguments);
-        Assert.Equal(".dotnet/tools/DssHarness", report.Session?.ToolPath);
+        Assert.Equal(".dotnet/tools/dssharness", report.Session?.ToolPath);
         Assert.Equal("linux", report.Os);
         Assert.Equal("x86_64", report.Processor);
     }
@@ -487,7 +487,7 @@ public sealed class HostInspectorTests
         var report = await fixture.InspectAsync(HostId.Ssh(SshName));
 
         Assert.True(report.Available, report.Reason);
-        Assert.Equal(@".dotnet\tools\DssHarness.exe", report.Session?.ToolPath);
+        Assert.Equal(@".dotnet\tools\dssharness.exe", report.Session?.ToolPath);
         Assert.Equal(RemoteShell.Cmd, report.Session?.Connection.Shell);
         Assert.Equal("windows", report.Os);
     }
@@ -505,7 +505,7 @@ public sealed class HostInspectorTests
 
         Assert.True(report.Available, report.Reason);
         Assert.Equal(RemoteShell.Standard, report.Session?.Connection.Shell);
-        Assert.Equal(".dotnet/tools/DssHarness.exe", report.Session?.ToolPath);
+        Assert.Equal(".dotnet/tools/dssharness.exe", report.Session?.ToolPath);
         Assert.Equal("tasklist", fixture.Commands.Single("/FO").Program);
     }
 

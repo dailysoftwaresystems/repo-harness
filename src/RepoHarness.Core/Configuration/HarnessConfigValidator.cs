@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
@@ -266,7 +267,14 @@ public static class HarnessConfigValidator
     }
 
     private static void ValidateLineEndings(LineEndingSettings lineEndings, List<string> problems)
-        => RequireRelativePaths(lineEndings.Exclude, "lineEndings.exclude", problems);
+    {
+        RequireRelativePaths(lineEndings.Exclude, "lineEndings.exclude", problems);
+
+        // Read by the same matcher as sync.exclude, so checked by the same rule. Left unchecked, a
+        // '*' anywhere but the leading '**/' is compared as text, matches nothing, and the line sits
+        // in the file reading as protection.
+        CheckPathPatterns(lineEndings.Exclude, "lineEndings.exclude", problems);
+    }
 
     private static void ValidateCi(CiSettings ci, List<string> problems)
     {
@@ -314,6 +322,30 @@ public static class HarnessConfigValidator
                 problems.Add(
                     $"project '{project.Name}' has type '{project.Type}'; "
                     + $"known types are {string.Join(", ", ProjectTypes)}");
+            }
+
+            foreach (var format in project.RebuildableFormats)
+            {
+                // A blank entry in a list that is otherwise a statement. Left alone it matches
+                // every file's extension against "." and nothing's name, which is neither what it
+                // says nor a safe reading of it.
+                if (string.IsNullOrWhiteSpace(format))
+                {
+                    problems.Add(
+                        $"project '{project.Name}' rebuildableFormats has a blank entry; each is an "
+                        + "extension or a whole file name, such as '.cpp' or 'CMakeLists.txt'");
+                }
+                else if (format.Contains('/', StringComparison.Ordinal)
+                    || format.Contains('\\', StringComparison.Ordinal)
+                    || format.Contains('*', StringComparison.Ordinal))
+                {
+                    // Said rather than ignored, because a path or a glob here looks like it works
+                    // and matches nothing: the entries are kinds of file, not places.
+                    problems.Add(
+                        $"project '{project.Name}' rebuildableFormats names '{format}', which is a "
+                        + "path or a pattern; entries are extensions or whole file names, such as "
+                        + "'.cpp' or 'CMakeLists.txt', and apply wherever such a file is tracked");
+                }
             }
 
             foreach (var (platform, toolchain) in project.DefaultToolchain)
@@ -1123,6 +1155,8 @@ public static class HarnessConfigValidator
     {
         RequireRelativePaths(sync.Exclude, "sync.exclude", problems);
         RequireRelativePaths(sync.NeverTransfer, "sync.neverTransfer", problems);
+        CheckPathPatterns(sync.NeverTransfer, "sync.neverTransfer", problems);
+        CheckPathPatterns(sync.Exclude, "sync.exclude", problems);
 
         if (!double.IsFinite(sync.MaxDeleteFraction) || sync.MaxDeleteFraction is < 0 or > 1)
         {
@@ -1196,15 +1230,37 @@ public static class HarnessConfigValidator
             CheckCountPattern(invocation.CountPattern, $"{setting}.countPattern", problems);
 
             if (invocation.CoresArgs is { Count: > 0 } coresArgs
-                && !coresArgs.Any(argument => argument.Contains("{cores}", StringComparison.Ordinal)))
+                && !coresArgs.Any(argument => argument.Contains(CoreCounts.Placeholder, StringComparison.Ordinal)))
             {
-                problems.Add($"{setting}.coresArgs never uses {{cores}}, so the core count never reaches the runner");
+                problems.Add(
+                    $"{setting}.coresArgs never uses {CoreCounts.Placeholder}, so the core count never "
+                    + "reaches the runner");
             }
 
             if (invocation.CoresEnv is { } coresEnv && coresEnv.Any(string.IsNullOrWhiteSpace))
             {
                 problems.Add($"{setting}.coresEnv contains a blank variable name");
             }
+
+            // Here rather than when the leg runs. A name nothing fills in reaches the runner as the
+            // literal text it was written as, and what a runner makes of a directory that cannot
+            // exist is its own business: ctest reports no tests and exits 8, which reads as a suite
+            // that ran and found nothing. Found here it names the line to fix, and has cost nobody
+            // the build that would have preceded it.
+            CheckPlaceholders(invocation.Args, $"{setting}.args", problems);
+            CheckPlaceholders(
+                invocation.WorkingDirectory is null ? null : [invocation.WorkingDirectory],
+                $"{setting}.workingDirectory",
+                problems);
+
+            // The one setting where the core count's own name belongs. It is spliced by the rule that
+            // owns it and only into these, so the same name in 'args' reaches the runner as literal
+            // text: checked here rather than left to disagree with what expands them.
+            CheckPlaceholders(
+                invocation.CoresArgs,
+                $"{setting}.coresArgs",
+                problems,
+                [CoreCounts.PlaceholderName]);
         }
 
         // What runs on a platform is its own section merged over 'all', field by field. Every
@@ -1388,6 +1444,54 @@ public static class HarnessConfigValidator
         if (value < 1)
         {
             problems.Add($"{setting} must be at least 1, found {value}");
+        }
+    }
+
+    /// <summary>
+    /// Records a problem for every configured string naming a directory this tool cannot fill in.
+    /// </summary>
+    /// <param name="values">The configured strings, or null when the setting is absent.</param>
+    /// <param name="setting">What to call the setting in the problem.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <param name="extra">
+    /// Names that are legal in this setting beyond the leg's directories, such as the core count's
+    /// own name in <c>coresArgs</c>.
+    /// </param>
+    private static void CheckPlaceholders(
+        IReadOnlyList<string>? values,
+        string setting,
+        List<string> problems,
+        IReadOnlyCollection<string>? extra = null)
+    {
+        foreach (var value in values ?? [])
+        {
+            try
+            {
+                LegPathNames.RefuseUnknown(value, setting, PlaceholderPolicy.Refuse, extra);
+            }
+            catch (HarnessException ex)
+            {
+                // Collected rather than thrown, so one read of the configuration reports every
+                // problem it has rather than the first.
+                problems.Add(ex.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records a problem for every sync entry that would match nothing it looks like it matches.
+    /// </summary>
+    /// <param name="patterns">The entries, as written.</param>
+    /// <param name="setting">What to call the setting in the problem.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    private static void CheckPathPatterns(IReadOnlyList<string>? patterns, string setting, List<string> problems)
+    {
+        foreach (var pattern in patterns ?? [])
+        {
+            if (Repository.PathPatterns.Problem(pattern) is { } problem)
+            {
+                problems.Add($"{setting} names '{pattern}', which {problem}");
+            }
         }
     }
 

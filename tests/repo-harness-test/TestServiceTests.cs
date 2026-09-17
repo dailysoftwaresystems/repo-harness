@@ -34,6 +34,7 @@ public sealed class TestServiceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.NotNull(result.Inputs);
         Assert.Equal(InputChange.Unchanged, result.Inputs.Change);
 
         // The count is what makes two legs running "the same tests" comparable at all: a platform
@@ -114,6 +115,7 @@ public sealed class TestServiceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.InputsMoved, result.Verdict.Verdict);
+        Assert.NotNull(result.Inputs);
         Assert.Contains(Fixture, result.Inputs.Changed);
         Assert.Equal(LegExit.InputsMoved, Verdicts.ExitCodeFor(result.Verdict.Verdict));
     }
@@ -156,6 +158,7 @@ public sealed class TestServiceTests
         var result = await Service(factory).RunAsync(Config(), request, TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.Unmeasured, result.Verdict.Verdict);
+        Assert.NotNull(result.Inputs);
         Assert.Equal(InputChange.Unmeasured, result.Inputs.Change);
         Assert.Equal(LegExit.InputsMoved, Verdicts.ExitCodeFor(result.Verdict.Verdict));
         Assert.True(result.Phase.Passed, "the suite itself passed; it is the measurement that did not");
@@ -178,6 +181,7 @@ public sealed class TestServiceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.Unmeasured, result.Verdict.Verdict);
+        Assert.NotNull(result.Inputs);
         Assert.Contains(Fixture, result.Inputs.Changed);
     }
 
