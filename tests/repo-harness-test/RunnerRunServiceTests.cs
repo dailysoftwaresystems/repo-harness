@@ -199,14 +199,14 @@ public sealed class RunnerRunServiceTests
         var action = Path.Combine(temp.Path, ".harness-config", "runner", "actions", "corpus");
 
         // Kept, under the run and the step that produced it.
-        var kept = Path.Combine(action, "artifacts", RunId, "pack", "payload.txt");
+        var kept = Path.Combine(action, "artifacts", RunId, Leg, "pack", "payload.txt");
         Assert.True(File.Exists(kept), $"expected '{kept}' to have been kept");
         Assert.Equal("carried", await File.ReadAllTextAsync(kept, TestContext.Current.CancellationToken));
 
         // And the working space is gone, including what the second step wrote there and never
         // asked to keep.
         Assert.False(
-            Directory.Exists(Path.Combine(action, "build", RunId)),
+            Directory.Exists(Path.Combine(action, "build", RunId, Leg)),
             "this run's working directory should have been removed");
     }
 

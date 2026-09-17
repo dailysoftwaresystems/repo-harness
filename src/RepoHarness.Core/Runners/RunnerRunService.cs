@@ -229,8 +229,8 @@ public sealed class RunnerRunService(
         // — two legs, or a retry — would otherwise write over each other's intermediate files.
         var scratch = steps.ActionDirectory is { Length: > 0 } owned
             ? new ActionScratch(
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId)),
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId)))
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId, request.Leg)),
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
             : null;
 
         Refuse(request, steps.Phases, values);
@@ -298,54 +298,61 @@ public sealed class RunnerRunService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var phase in steps.Phases)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (!remaining.Contains(phase.Name))
+            foreach (var phase in steps.Phases)
             {
-                // Already carried to an outcome by an earlier segment. Skipped rather than repeated,
-                // because a suite that aborts near its end otherwise costs its whole duration again.
-                _output.Detail(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' is already done; skipping it");
-                state.Skipped.Add(phase.Name);
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
+                if (!remaining.Contains(phase.Name))
+                {
+                    // Already carried to an outcome by an earlier segment. Skipped rather than repeated,
+                    // because a suite that aborts near its end otherwise costs its whole duration again.
+                    _output.Detail(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' is already done; skipping it");
+                    state.Skipped.Add(phase.Name);
+                    continue;
+                }
 
-            var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, scratch, cancellationToken)
-                .ConfigureAwait(false);
+                _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
 
-            result = WithDeclaredOutputs(result, phase, scratch);
-            Record(state, phase, result, values);
+                var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, scratch, cancellationToken)
+                    .ConfigureAwait(false);
 
-            _output.Info(
-                CommandName,
-                $"{request.Leg}: '{values.Redact(phase.Name)}' finished "
-                + $"{(result.Passed ? "ok" : "failed")} in {LedgerReport.FormatDuration(result.Duration)}");
+                result = WithDeclaredOutputs(result, phase, scratch);
+                Record(state, phase, result, values);
 
-            await _runSegments
-                .RecordCompletedAsync(
-                    request.Layout,
-                    request.RunId,
-                    request.Leg,
-                    request.SegmentId,
-                    phase.Name,
-                    state.Outcomes[^1],
-                    state.FinishedAt[^1],
-                    cancellationToken)
-                .ConfigureAwait(false);
+                _output.Info(
+                    CommandName,
+                    $"{request.Leg}: '{values.Redact(phase.Name)}' finished "
+                    + $"{(result.Passed ? "ok" : "failed")} in {LedgerReport.FormatDuration(result.Duration)}");
 
-            if (state.Stopped)
-            {
-                break;
+                await _runSegments
+                    .RecordCompletedAsync(
+                        request.Layout,
+                        request.RunId,
+                        request.Leg,
+                        request.SegmentId,
+                        phase.Name,
+                        state.Outcomes[^1],
+                        state.FinishedAt[^1],
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (state.Stopped)
+                {
+                    break;
+                }
             }
         }
-
-        // Whatever the verdict. What a run asked to keep is kept, and its working space goes:
-        // a failed run's intermediate files are the least useful thing on the machine, and a tree
-        // that grew one directory per run on every host is a tree nobody prunes.
-        SettleArtifacts(steps, scratch);
+        finally
+        {
+            // Whatever the verdict, and whatever stopped the run. What it asked to keep is
+            // kept and its working space goes: a failed run's intermediate files are the least
+            // useful thing on the machine, and a tree that grew one directory per run on every
+            // host is a tree nobody prunes. In a finally because cancellation is the case that
+            // would otherwise leave one behind on every host at once.
+            SettleArtifacts(steps, scratch);
+        }
 
         _output.Info(
             CommandName,
@@ -616,7 +623,7 @@ public sealed class RunnerRunService(
         // told to write into a directory that is not there fails in its own words, which is a worse
         // message than the one this would have given.
         var stepBuild = scratch is not null && phase.StepName is { Length: > 0 }
-            ? Path.Combine(scratch.Build, phase.StepName)
+            ? Path.Combine(scratch.Build, LogNameFor(phase.StepName))
             : null;
 
         if (stepBuild is not null)
@@ -1069,7 +1076,7 @@ public sealed class RunnerRunService(
             return result;
         }
 
-        var directory = Path.Combine(scratch.Build, phase.StepName);
+        var directory = Path.Combine(scratch.Build, LogNameFor(phase.StepName));
 
         var missing = phase.Outputs
             .Where(output => !_fileSystem.FileExists(Path.Combine(directory, output))
@@ -1098,8 +1105,8 @@ public sealed class RunnerRunService(
 
         foreach (var phase in steps.Phases.Where(phase => phase.Persist && phase.Outputs.Count > 0))
         {
-            var from = Path.Combine(scratch.Build, phase.StepName);
-            var into = Path.Combine(scratch.Artifacts, phase.StepName);
+            var from = Path.Combine(scratch.Build, LogNameFor(phase.StepName));
+            var into = Path.Combine(scratch.Artifacts, LogNameFor(phase.StepName));
 
             foreach (var output in phase.Outputs)
             {
@@ -1134,6 +1141,16 @@ public sealed class RunnerRunService(
             if (_fileSystem.DirectoryExists(scratch.Build))
             {
                 _fileSystem.DeleteDirectory(scratch.Build);
+            }
+
+            // And the run's own directory once its last leg has gone. Left behind it is a husk:
+            // empty, gitignored, and one per run for ever on every host that ran the action.
+            if (Path.GetDirectoryName(scratch.Build) is { Length: > 0 } run
+                && _fileSystem.DirectoryExists(run)
+                && !_fileSystem.EnumerateDirectories(run).Any()
+                && !_fileSystem.EnumerateFiles(run, recursive: false).Any())
+            {
+                _fileSystem.DeleteDirectory(run);
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

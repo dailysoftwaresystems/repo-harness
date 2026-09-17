@@ -15,6 +15,7 @@ namespace RepoHarness.Tests;
 public sealed class ActionArtifactsTests
 {
     private const string RunId = "20260917-100000-0a1b2c3d";
+    private const string Leg = "lin-gcc-release";
 
     /// <summary>
     /// Both directories are keyed by the run, and neither is written into directly. Two runs of one
@@ -24,11 +25,13 @@ public sealed class ActionArtifactsTests
     [Fact]
     public void AnActionsDirectories_AreKeyedByTheRun_AndSitUnderTheActionsOwnDirectory()
     {
-        var build = HarnessLayout.ActionBuildRelative("roundtrip", RunId).Replace('\\', '/');
-        var artifacts = HarnessLayout.ActionArtifactsRelative("roundtrip", RunId).Replace('\\', '/');
+        var build = HarnessLayout.ActionBuildRelative("roundtrip", RunId, Leg).Replace('\\', '/');
+        var artifacts = HarnessLayout.ActionArtifactsRelative("roundtrip", RunId, Leg).Replace('\\', '/');
 
-        Assert.Equal($".harness-config/runner/actions/roundtrip/build/{RunId}", build);
-        Assert.Equal($".harness-config/runner/actions/roundtrip/artifacts/{RunId}", artifacts);
+        // The leg too: one run places many legs and they share its id, so keyed by the run
+        // alone two legs running one action on one machine would write into one directory.
+        Assert.Equal($".harness-config/runner/actions/roundtrip/build/{RunId}/{Leg}", build);
+        Assert.Equal($".harness-config/runner/actions/roundtrip/artifacts/{RunId}/{Leg}", artifacts);
     }
 
     /// <summary>
@@ -40,11 +43,11 @@ public sealed class ActionArtifactsTests
     public void AGroupedActionsDirectories_KeepTheirGrouping()
     {
         var build = HarnessLayout
-            .ActionBuildRelative("real-examples/c/probe-nest", RunId)
+            .ActionBuildRelative("real-examples/c/probe-nest", RunId, Leg)
             .Replace('\\', '/');
 
         Assert.Equal(
-            $".harness-config/runner/actions/real-examples/c/probe-nest/build/{RunId}",
+            $".harness-config/runner/actions/real-examples/c/probe-nest/build/{RunId}/{Leg}",
             build);
     }
 
