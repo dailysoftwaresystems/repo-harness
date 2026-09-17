@@ -216,9 +216,15 @@ public static partial class LegPathNames
     /// <remarks>
     /// Matched rather than searched for by name, so that a name nobody declared is found and refused
     /// instead of surviving into a command line.
+    /// <para>
+    /// The name may carry <c>_</c>, <c>-</c> and <c>.</c>, because the things that get named here do:
+    /// a runner value directory holds <c>CORPUS_PATH</c>, and a name the pattern cannot see is a name
+    /// neither half of this can refuse — it reaches the program as its own text and the step exits
+    /// zero having done nothing, which is the failure this whole rule exists to end.
+    /// </para>
     /// </remarks>
     [GeneratedRegex(
-        @"(?<doubled>\{\{|\}\})|(?<other>\$\{[^}]*\})|\{(?<name>[A-Za-z][A-Za-z0-9]*)\}",
+        @"(?<doubled>\{\{|\}\})|(?<other>\$\{[^}]*\})|\{(?<name>[A-Za-z][A-Za-z0-9_.-]*)\}",
         RegexOptions.CultureInvariant)]
     private static partial Regex Placeholder { get; }
 

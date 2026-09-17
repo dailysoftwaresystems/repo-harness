@@ -489,7 +489,11 @@ public sealed class RunnerRunService(
             _toolPolicy.Enforce(file, config, request.TreeRoot);
 
             inputs = ResolveInputs(file, values);
-            RefuseUnknownNames(file, inputs.Keys);
+
+            // The names the expansion will actually have, not a subset of them. Handed the declared
+            // inputs alone this refused a run line naming a runner value directory's own value — the
+            // same check-against-a-different-set defect as before, inverted.
+            RefuseUnknownNames(file, Namable(values.Supplied, inputs).Keys);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -1111,16 +1115,25 @@ public sealed class RunnerRunService(
             foreach (var output in phase.Outputs)
             {
                 var source = Path.Combine(from, output);
-
-                if (!_fileSystem.FileExists(source))
-                {
-                    continue;
-                }
-
                 var destination = Path.Combine(into, output);
 
                 try
                 {
+                    if (_fileSystem.DirectoryExists(source))
+                    {
+                        // A directory is as ordinary an output as a file: a step that emits a run of
+                        // samples emits a directory of them. Skipped here — which is what this did —
+                        // it passed the witness, was never copied, and went with the build directory,
+                        // leaving a passed run and no measurements.
+                        KeepDirectory(source, destination);
+                        continue;
+                    }
+
+                    if (!_fileSystem.FileExists(source))
+                    {
+                        continue;
+                    }
+
                     _fileSystem.CreateDirectory(Path.GetDirectoryName(destination) ?? into);
                     _fileSystem.CopyFile(source, destination, overwrite: true);
                 }
@@ -1158,6 +1171,23 @@ public sealed class RunnerRunService(
             _output.Warn(
                 CommandName,
                 $"this run's working directory '{scratch.Build}' could not be removed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Copies a directory output, with everything under it.</summary>
+    /// <param name="source">The directory the step produced.</param>
+    /// <param name="destination">Where it is kept.</param>
+    private void KeepDirectory(string source, string destination)
+    {
+        _fileSystem.CreateDirectory(destination);
+
+        foreach (var file in _fileSystem.EnumerateFiles(source, recursive: true))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            var into = Path.Combine(destination, relative);
+
+            _fileSystem.CreateDirectory(Path.GetDirectoryName(into) ?? destination);
+            _fileSystem.CopyFile(file, into, overwrite: true);
         }
     }
 

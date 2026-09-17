@@ -102,6 +102,12 @@ public sealed record PlacedLeg(
     /// The one file this leg's build is declared to produce, and why there is none when there is
     /// not.
     /// </summary>
+    /// <param name="buildDirectory">
+    /// The build directory the caller is handing this same work, so the product and
+    /// <c>{buildDir}</c> cannot come from two different tree roots. They do differ: a leg placed on
+    /// another machine has a host tree root that is not this machine's, and a run re-invoked there
+    /// resolves its own.
+    /// </param>
     /// <remarks>
     /// A single answer or none. <c>buildOutputs</c> is a list, every entry of which must exist for a
     /// build to be witnessed, so "the product" is a well-formed question only where the list holds
@@ -109,8 +115,10 @@ public sealed record PlacedLeg(
     /// of a guess: an instrument pointed at the wrong one of three binaries measures something
     /// nobody asked about and reports it as a success.
     /// </remarks>
-    public (string? Path, string? Problem) ProductFor()
+    public (string? Path, string? Problem) ProductFor(string buildDirectory)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(buildDirectory);
+
         if (Project is null)
         {
             return (null, $"leg '{Name}' builds nothing, so it has no product");
@@ -126,7 +134,7 @@ public sealed record PlacedLeg(
 
         return declared.Count switch
         {
-            1 => (Path.Combine(BuildDirectory, declared[0]), null),
+            1 => (Path.Combine(buildDirectory, declared[0]), null),
             0 => (null, $"project '{Project.Name}' declares no buildOutputs for {platform}"),
             _ => (
                 null,

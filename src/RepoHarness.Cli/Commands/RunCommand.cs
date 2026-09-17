@@ -208,9 +208,12 @@ internal static class RunCommand
             }
         }
 
-        // Derived once from the placed leg, so a run line naming {product} and the witness the
-        // build checked are talking about the same file.
-        var (product, productProblem) = leg.ProductFor();
+        // Derived from the very directory this request carries, so a run line naming {product} and
+        // one naming {buildDir} cannot come from two different tree roots. They do differ: a leg
+        // placed on another machine re-invokes this there, where its own tree is the one that
+        // resolves.
+        var buildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot);
+        var (product, productProblem) = leg.ProductFor(buildDirectory);
 
         var result = await runners
             .RunAsync(
@@ -228,7 +231,7 @@ internal static class RunCommand
                     SegmentId = Guid.NewGuid().ToString("N")[..8],
                     TreeRoot = leg.TreeRoot,
                     WorkingDirectory = leg.TreeRoot,
-                    BuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot),
+                    BuildDirectory = buildDirectory,
                     Identity = leg.IdentityFor(work.RunId.Value),
                     Product = product,
                     ProductProblem = productProblem,
@@ -264,7 +267,8 @@ internal static class RunCommand
         CancellationToken cancellationToken)
     {
         var leg = work.Leg;
-        var (confirmProduct, confirmProductProblem) = leg.ProductFor();
+        var confirmBuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot);
+        var (confirmProduct, confirmProductProblem) = leg.ProductFor(confirmBuildDirectory);
 
         var result = await runners
             .RunAsync(
@@ -279,7 +283,7 @@ internal static class RunCommand
                     SegmentId = Guid.NewGuid().ToString("N")[..8],
                     TreeRoot = leg.TreeRoot,
                     WorkingDirectory = leg.TreeRoot,
-                    BuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot),
+                    BuildDirectory = confirmBuildDirectory,
                     Identity = leg.IdentityFor(work.RunId.Value),
                     Product = confirmProduct,
                     ProductProblem = confirmProductProblem,

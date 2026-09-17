@@ -1,5 +1,6 @@
 using System.CommandLine.Parsing;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
@@ -336,6 +337,8 @@ public sealed class ActionFileParser(
                 }
             }
 
+            RefuseShadowedInput(keyNode, inputName, problems);
+
             yield return new ActionInput(inputName, fallback, required, inputDescription);
         }
     }
@@ -478,6 +481,15 @@ public sealed class ActionFileParser(
                 + "unnamed steps would write one file, the second overwriting the first's evidence."));
             name = string.Empty;
         }
+        else if (RunSegments.FileNameFor(name).Trim('.', ' ') is { Length: 0 })
+        {
+            // A step's name becomes a directory under the action's build directory as well as a log
+            // file's name. Everything a path cannot carry is already replaced, but a name that is
+            // only dots survives that and means 'the directory above' to every file system there is.
+            problems.Add(At(node, $"a step named '{name}' has no name a directory can carry; a step "
+                + "writes into a directory of its own, and this one would name the directory above "
+                + "it."));
+        }
 
         var action = ReadUses(usesNode, uses, run is not null, node, problems);
         var commands = run is null
@@ -518,6 +530,33 @@ public sealed class ActionFileParser(
             Outputs = outputs,
             Persist = persist,
         };
+    }
+
+    /// <summary>
+    /// Records a problem for a declared input whose name is one this tool already fills in.
+    /// </summary>
+    /// <param name="node">The input's own node, for the line number.</param>
+    /// <param name="name">The declared name.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <remarks>
+    /// Refused rather than resolved one way or the other, because the two halves would answer
+    /// differently: a run line naming it gets this tool's value, while the environment a
+    /// <c>harness/read-inputs</c> step fills gets the file's. An action declaring <c>config</c> would
+    /// invoke its program with the leg's build configuration while telling it, in
+    /// <c>INPUT_CONFIG</c>, the corpus the author meant — and both halves would report success.
+    /// </remarks>
+    private static void RefuseShadowedInput(YamlNode node, string name, List<string> problems)
+    {
+        if (!LegPathNames.All.Contains(name, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        problems.Add(At(
+            node,
+            $"an input named '{name}' is a name this tool already fills in, so a run line naming "
+            + $"'{{{name}}}' would get this tool's value while INPUT_{name.ToUpperInvariant()} carried "
+            + "the action's. Give the input another name."));
     }
 
     /// <summary>
