@@ -189,6 +189,7 @@ public sealed class SyncService(
     ISyncTransportFactory transportFactory,
     Legs.LegsService legsService,
     Git.IGitClient gitClient,
+    IFileSystem fileSystem,
     IHarnessOutput output) : ISyncService
 {
     /// <summary>The command this service reports under.</summary>
@@ -197,6 +198,7 @@ public sealed class SyncService(
     private readonly IHarnessContextLoader _contextLoader = contextLoader;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
     private readonly ISyncTransport _localTransport = localTransport;
+    private readonly IFileSystem _fileSystem = fileSystem;
     private readonly ISyncTransportFactory _transportFactory = transportFactory;
     private readonly Legs.LegsService _legsService = legsService;
     private readonly Git.IGitClient _gitClient = gitClient;
@@ -334,6 +336,19 @@ public sealed class SyncService(
         await exclusions
             .RefuseWhenNoLongerIgnoredAsync(_gitClient, context.Layout.RepositoryRoot, cancellationToken)
             .ConfigureAwait(false);
+
+        // A rule somebody believes is protecting something, doubted before a deletion rests on it.
+        // A rooted entry that matches nothing here while the name exists deeper reads, to any
+        // reader, as evidence that name is protected.
+        foreach (var name in exclusions
+            .RootedEntriesMatchingNothing(_fileSystem, context.Layout.RepositoryRoot, cancellationToken))
+        {
+            _output.Warn(
+                CommandName,
+                $"sync.neverTransfer names '{name}', which is not in this tree's root though the name "
+                + $"does exist deeper in it, so this entry protects nothing. Write '**/{name}' to "
+                + "cover that name wherever it appears.");
+        }
 
         var state = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)
             .ConfigureAwait(false);

@@ -70,5 +70,5 @@ internal static class MachineWideFile
                 HarnessExit.Refused,
                 string.Create(
                     CultureInfo.InvariantCulture,
-                    $"Another {ToolPackage.Command} process has been updating '{path}' for {window.TotalSeconds:0} seconds, so nothing was changed."));
+                    $"Another {ToolPackage.Id} process has been updating '{path}' for {window.TotalSeconds:0} seconds, so nothing was changed."));
 }

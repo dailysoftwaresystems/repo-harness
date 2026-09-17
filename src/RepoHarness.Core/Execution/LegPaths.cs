@@ -68,8 +68,15 @@ public static partial class LegPathNames
     /// <param name="value">The configured string.</param>
     /// <param name="paths">The leg's directories.</param>
     /// <param name="setting">What to call the setting in a refusal.</param>
+    /// <param name="extra">
+    /// Names this caller supplies beyond the directories, such as an action's declared inputs.
+    /// </param>
     /// <exception cref="HarnessException">A placeholder names nothing.</exception>
-    public static string Expand(string value, LegPaths paths, string setting)
+    public static string Expand(
+        string value,
+        LegPaths paths,
+        string setting,
+        IReadOnlyDictionary<string, string>? extra = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
@@ -82,7 +89,14 @@ public static partial class LegPathNames
         {
             var name = match.Groups["name"].Value;
 
-            return Path(name, paths) ?? throw Unknown(setting, name);
+            if (Path(name, paths) is { } directory)
+            {
+                return directory;
+            }
+
+            return extra is not null && extra.TryGetValue(name, out var supplied)
+                ? supplied
+                : throw Unknown(setting, name, extra?.Keys);
         });
     }
 
@@ -92,13 +106,14 @@ public static partial class LegPathNames
     /// </summary>
     /// <param name="value">The configured string.</param>
     /// <param name="setting">What to call the setting in a refusal.</param>
+    /// <param name="extra">Names this caller will supply beyond the directories.</param>
     /// <exception cref="HarnessException">A placeholder names nothing.</exception>
     /// <remarks>
     /// Called when the configuration is read, where no leg has been placed and no build directory
     /// exists yet. A typo found there names the line to fix; found when the leg runs it has already
     /// cost the build that preceded it.
     /// </remarks>
-    public static void RefuseUnknown(string? value, string setting)
+    public static void RefuseUnknown(string? value, string setting, IReadOnlyCollection<string>? extra = null)
     {
         if (string.IsNullOrEmpty(value))
         {
@@ -111,10 +126,14 @@ public static partial class LegPathNames
 
             // {cores} is expanded elsewhere, by the runner's own core-count rule, and a string
             // holding one is not this vocabulary's to refuse.
-            if (!string.Equals(name, CoresName, StringComparison.Ordinal) && Path(name, null) is null)
+            if (string.Equals(name, CoresName, StringComparison.Ordinal)
+                || Path(name, null) is not null
+                || (extra is not null && extra.Contains(name)))
             {
-                throw Unknown(setting, name);
+                continue;
             }
+
+            throw Unknown(setting, name, extra);
         }
     }
 
@@ -133,9 +152,13 @@ public static partial class LegPathNames
         _ => null,
     };
 
-    private static HarnessException Unknown(string setting, string name)
-        => new(
+    private static HarnessException Unknown(string setting, string name, IEnumerable<string>? extra)
+    {
+        var known = All.Concat(extra ?? []).Select(spelled => $"{{{spelled}}}");
+
+        return new HarnessException(
             HarnessExit.ConfigInvalid,
-            $"{setting} names '{{{name}}}', which is not a directory this tool can fill in. "
-            + $"The names are {string.Join(", ", All.Select(known => $"{{{known}}}"))}.");
+            $"{setting} names '{{{name}}}', which nothing here can fill in. "
+            + $"The names are {string.Join(", ", known)}.");
+    }
 }

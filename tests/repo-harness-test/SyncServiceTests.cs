@@ -1098,6 +1098,7 @@ public sealed class SyncServiceTests
             factory,
             new LegsService(loader, inspector, harness.Output),
             harness.GitClient,
+            harness.FileSystem,
             harness.Output);
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncHostsAsync(
@@ -1771,6 +1772,7 @@ public sealed class SyncServiceTests
             Substitute.For<ISyncTransportFactory>(),
             new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Output),
             harness.GitClient,
+            harness.FileSystem,
             harness.Output);
 
         return (harness, service);

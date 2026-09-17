@@ -34,6 +34,18 @@ public sealed record HostReport
     /// <summary>The version of DssHarness there, when it runs.</summary>
     public string? ToolVersion { get; init; }
 
+    /// <summary>
+    /// Where the tool is on that host, as this tool invokes it, or <see langword="null"/> where the
+    /// host was not reached.
+    /// </summary>
+    /// <remarks>
+    /// Reported because "the host answered" and "somebody can type the tool's name there" are
+    /// different facts, and a survey that only shows the first reads as the second. This tool always
+    /// invokes the absolute path, so a host whose PATH does not carry it is perfectly runnable here
+    /// and unusable by hand.
+    /// </remarks>
+    public string? ToolPath { get; init; }
+
     /// <summary>What checking each emulator found there, by name.</summary>
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
@@ -160,7 +172,7 @@ public sealed class HostInspector(
         if (!listed.Any(sdk => sdk.Major >= ToolPackage.MinimumSdkMajor))
         {
             var present = listed.Count == 0 ? "none" : string.Join(", ", listed.Select(sdk => sdk.Version));
-            return found with { Reason = $"{ToolPackage.Command} needs the .NET {ToolPackage.MinimumSdkMajor} SDK there, and it has {present}" };
+            return found with { Reason = $"{ToolPackage.Id} needs the .NET {ToolPackage.MinimumSdkMajor} SDK there, and it has {present}" };
         }
 
         // Where the SDK is installed is how a Windows host is told from any other before DssHarness
@@ -209,13 +221,13 @@ public sealed class HostInspector(
             var install = await RunToolCommandAsync(connection, "install", root.Version, cancellationToken).ConfigureAwait(false);
 
             return install.Succeeded
-                ? (null, $"installed {ToolPackage.Command} {root.Version}")
-                : (HostProbes.Failure($"installing {ToolPackage.Command} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
+                ? (null, $"installed {ToolPackage.Id} {root.Version}")
+                : (HostProbes.Failure($"installing {ToolPackage.Id} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
         }
 
         if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
         {
-            return ($"{ToolPackage.Command} {installed} there cannot be compared with {root.Version} here", null);
+            return ($"{ToolPackage.Id} {installed} there cannot be compared with {root.Version} here", null);
         }
 
         var order = SemanticVersion.Compare(hostVersion, rootVersion);
@@ -224,7 +236,7 @@ public sealed class HostInspector(
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"{host} has {ToolPackage.Command} {installed}, newer than this machine's {root.Version}. Versions only move up, "
+                $"{host} has {ToolPackage.Id} {installed}, newer than this machine's {root.Version}. Versions only move up, "
                 + $"so update this machine first: dotnet tool update --global {ToolPackage.Id} --version {installed}");
         }
 
@@ -242,8 +254,8 @@ public sealed class HostInspector(
         var update = await RunToolCommandAsync(connection, "update", root.Version, cancellationToken).ConfigureAwait(false);
 
         return update.Succeeded
-            ? (null, $"updated {ToolPackage.Command} {installed} to {root.Version}")
-            : (HostProbes.Failure($"updating {ToolPackage.Command} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
+            ? (null, $"updated {ToolPackage.Id} {installed} to {root.Version}")
+            : (HostProbes.Failure($"updating {ToolPackage.Id} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
     }
 
     /// <summary>Runs <c>dotnet tool install</c> or <c>update</c> for exactly <paramref name="version"/>, from nuget.org alone.</summary>
@@ -287,14 +299,14 @@ public sealed class HostInspector(
 
         if (!answer.Succeeded)
         {
-            return found with { Reason = HostProbes.Failure($"{ToolPackage.Command} did not answer from {shownTool}, where global tools are installed", answer) };
+            return found with { Reason = HostProbes.Failure($"{ToolPackage.Id} did not answer from {shownTool}, where global tools are installed", answer) };
         }
 
         var start = answer.StandardOutput.IndexOf('{', StringComparison.Ordinal);
 
         if (start < 0)
         {
-            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered with no document: {HostProbes.Excerpt(answer.StandardOutput)}" };
+            return found with { Reason = $"{ToolPackage.Id} at {shownTool} answered with no document: {HostProbes.Excerpt(answer.StandardOutput)}" };
         }
 
         var document = answer.StandardOutput[start..];
@@ -303,19 +315,19 @@ public sealed class HostInspector(
         // shape is still reported as the build it is, with the remedy for that.
         if (!TryReadIdentity(document, out var version, out var assemblySha256, out var problem))
         {
-            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered in a form this build cannot read: {problem}" };
+            return found with { Reason = $"{ToolPackage.Id} at {shownTool} answered in a form this build cannot read: {problem}" };
         }
 
         if (!string.Equals(version, root.Version, StringComparison.Ordinal))
         {
-            return found with { Reason = $"{ToolPackage.Command} there reports {version}, and {root.Version} was expected" };
+            return found with { Reason = $"{ToolPackage.Id} there reports {version}, and {root.Version} was expected" };
         }
 
         if (!string.Equals(assemblySha256, root.AssemblySha256, StringComparison.OrdinalIgnoreCase))
         {
             return found with
             {
-                Reason = $"{ToolPackage.Command} {version} there is a different build from this machine's although the versions match, "
+                Reason = $"{ToolPackage.Id} {version} there is a different build from this machine's although the versions match, "
                     + "so one of the two is not the package published on nuget.org; on the machine that has a local build, run "
                     + $"dotnet tool uninstall --global {ToolPackage.Id}, then dotnet tool install --global {ToolPackage.Id} --version {version}",
             };
@@ -329,11 +341,11 @@ public sealed class HostInspector(
         }
         catch (JsonException ex)
         {
-            return found with { Reason = $"{ToolPackage.Command} at {shownTool} answered in a form this build cannot read: {ex.Message}" };
+            return found with { Reason = $"{ToolPackage.Id} at {shownTool} answered in a form this build cannot read: {ex.Message}" };
         }
 
         return info is null
-            ? found with { Reason = $"{ToolPackage.Command} at {shownTool} answered with an empty document" }
+            ? found with { Reason = $"{ToolPackage.Id} at {shownTool} answered with an empty document" }
             : Answered(found, info, new HostSession(connection, toolPath));
     }
 
@@ -354,7 +366,7 @@ public sealed class HostInspector(
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
-            ? $"{ToolPackage.Command} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
+            ? $"{ToolPackage.Id} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
             : null;
     }
 
@@ -373,14 +385,14 @@ public sealed class HostInspector(
         if (dotnet is null or { Found: ProgramFound.Unreadable })
         {
             return $"whether {sdk} is installed there could not be established: the host did not answer when asked "
-                + $"where 'dotnet' is; run again once it does, and see '{ToolPackage.Command} legs' for what answered";
+                + $"where 'dotnet' is; run again once it does, and see '{ToolPackage.Id} legs' for what answered";
         }
 
         if (dotnet.Found == ProgramFound.Nowhere)
         {
             return $"{sdk} is not installed there: 'dotnet' is neither on the PATH of a command run without a login "
                 + $"shell nor in any of the directories an installer uses; install it there, or run "
-                + $"'{ToolPackage.Command} {ToolProvisionService.CommandName}'";
+                + $"'{ToolPackage.Id} {ToolProvisionService.CommandName}'";
         }
 
         // Reached only when dotnet was found and then would not run: a partial install, a broken
@@ -418,6 +430,7 @@ public sealed class HostInspector(
         Os = info.Os,
         Processor = info.Processor,
         ToolVersion = info.Version,
+        ToolPath = session?.ToolPath,
         Emulators = info.Emulators,
         Session = session,
     };

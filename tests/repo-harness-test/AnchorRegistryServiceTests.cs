@@ -500,7 +500,7 @@ public sealed class AnchorRegistryServiceTests
             harness.AnchorRegistryService.ListAsync(temp.Path, new AnchorListFilter(), TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.NotInitialized, exception.ExitCode);
-        Assert.Contains("DssHarness init", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("dssharness init", exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]

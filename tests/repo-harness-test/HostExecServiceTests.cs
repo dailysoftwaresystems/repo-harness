@@ -105,7 +105,7 @@ public sealed class HostExecServiceTests
         Assert.Equal("vps", Assert.Single(fixture.Inspector.Inspected).Name);
 
         var (_, command) = Assert.Single(fixture.Commands.Calls);
-        Assert.Equal(".dotnet/tools/DssHarness", command.Program);
+        Assert.Equal(".dotnet/tools/dssharness", command.Program);
         Assert.Equal([HostAgentProtocol.CommandName], command.Arguments);
 
         // One line, with the input held open: stopping this process ends it on the host, which cancels the command.
@@ -225,7 +225,7 @@ public sealed class HostExecServiceTests
                     KeyFile = "/repo/.key",
                     KnownHostsFile = "/repo/known_hosts",
                 },
-                ".dotnet/tools/DssHarness"),
+                ".dotnet/tools/dssharness"),
         }));
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));

@@ -64,6 +64,7 @@ public static class LegsReports
                     host.Os,
                     host.Processor,
                     host.ToolVersion,
+                    host.ToolPath,
                     host.Actions,
                 }),
             };

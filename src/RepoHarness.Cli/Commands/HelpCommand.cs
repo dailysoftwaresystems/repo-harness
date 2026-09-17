@@ -408,6 +408,13 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness host-exec --ssh vps -- verify-git");
         builder.AppendLine("  DssHarness host-exec --wsl -- list-worktree");
         builder.AppendLine();
+        builder.AppendLine("Every cmake build also has its dependency records read, with 'ninja -t deps'.");
+        builder.AppendLine("An object that recorded no header dependencies is never rebuilt when a header it");
+        builder.AppendLine("includes changes, so the next build links yesterday's object and reports success.");
+        builder.AppendLine("A build whose records cannot be read is 'unmeasured' rather than passed, because a");
+        builder.AppendLine("check that did not run has established nothing. A build directory that is not");
+        builder.AppendLine("ninja's is skipped and says so.");
+        builder.AppendLine();
         builder.AppendLine("A leg no host can run is a warning that names it and says why; the other legs");
         builder.AppendLine("still go ahead. The check fails when a leg named with --legs cannot run, or when");
         builder.AppendLine("no selected leg can. --legs given without a name is refused, not taken for every leg.");
@@ -455,8 +462,8 @@ internal static class HelpCommand
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run, or with no --legs, at least one leg can");
         builder.AppendLine($"  {LegsExit.Unavailable,3}  legs: a leg named with --legs cannot run, or no selected leg can");
         builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set, or no name at all");
-        builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Command} than this machine");
-        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Command}, has no copy of the repository,");
+        builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Id} than this machine");
+        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the repository,");
         builder.AppendLine("       or the command never reported how it finished, so it may have run only in part");
         builder.AppendLine("       host-exec otherwise returns the exit code of the command it ran");
 

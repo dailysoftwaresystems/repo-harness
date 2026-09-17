@@ -16,8 +16,8 @@ public sealed class RemoteCommandLineTests
             RemoteCommandLine.Join(["dotnet", "tool", "update", "--global", "DssHarness", "--version", "1.2.3-beta+abc.1"], RemoteShell.Standard));
 
         Assert.Equal(
-            ".dotnet/tools/DssHarness host-agent",
-            RemoteCommandLine.Join([".dotnet/tools/DssHarness", "host-agent"], RemoteShell.Standard));
+            ".dotnet/tools/dssharness host-agent",
+            RemoteCommandLine.Join([".dotnet/tools/dssharness", "host-agent"], RemoteShell.Standard));
 
         Assert.Equal("ps -A -o comm=", RemoteCommandLine.Join(["ps", "-A", "-o", "comm="], RemoteShell.Standard));
     }

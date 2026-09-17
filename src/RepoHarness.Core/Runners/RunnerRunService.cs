@@ -431,6 +431,7 @@ public sealed class RunnerRunService(
             // Before anything starts, and over the whole file rather than step by step: a file whose
             // last step names an undeclared program is refused with its first step not yet run.
             _toolPolicy.Enforce(file, config, request.TreeRoot);
+            RefuseUnknownNames(file);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -483,6 +484,33 @@ public sealed class RunnerRunService(
 
     /// <summary>Runs one step, with the runner's bounds and the values it reads.</summary>
     /// <summary>
+    /// Refuses a step naming something nothing can fill in, over the whole file and before its
+    /// first program starts.
+    /// </summary>
+    /// <param name="file">The action as it was read.</param>
+    /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
+    /// <remarks>
+    /// The same vocabulary a project's test invocation uses, refused the same way. Left unchecked a
+    /// brace reaches the interpreter as a literal path segment, which a consumer measured: a run
+    /// line naming <c>{treeDir}</c> produced a path holding the braces and an Errno 2, from a step
+    /// that looked exactly like the configuration that works.
+    /// </remarks>
+    private static void RefuseUnknownNames(ActionFile file)
+    {
+        var declared = file.Inputs.Select(input => input.Name).ToList();
+
+        foreach (var step in file.Steps)
+        {
+            foreach (var argument in step.Commands.SelectMany(command => command.Arguments))
+            {
+                LegPathNames.RefuseUnknown(argument, $"'{step.Name}' run line", declared);
+            }
+
+            LegPathNames.RefuseUnknown(step.WorkingDirectory, $"'{step.Name}' workingDirectory", declared);
+        }
+    }
+
+    /// <summary>
     /// The tracked files a guarded run watches, and why they could not be listed when they could
     /// not.
     /// </summary>
@@ -518,11 +546,22 @@ public sealed class RunnerRunService(
         ActionValues values,
         CancellationToken cancellationToken)
     {
-        var arguments = phase.Command.Skip(1).ToList();
+        // The leg's directories and the action's own values, through the one expander a project's
+        // test invocation uses. A step that builds out of source has no other way to name where its
+        // build went: the directory is derived per leg and no tracked file can spell it.
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory ?? request.TreeRoot);
+        var supplied = values.Supplied;
+
+        var arguments = phase.Command
+            .Skip(1)
+            .Select(argument => LegPathNames.Expand(argument, paths, $"'{phase.Name}' run line", supplied))
+            .ToList();
 
         var working = Path.GetFullPath(Path.Combine(
             request.WorkingDirectory ?? request.TreeRoot,
-            phase.WorkingDirectory ?? "."));
+            phase.WorkingDirectory is { Length: > 0 } declared
+                ? LegPathNames.Expand(declared, paths, $"'{phase.Name}' workingDirectory", supplied)
+                : "."));
 
         var result = await _phaseRunner
             .RunAsync(
@@ -530,7 +569,7 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    FileName = phase.Command[0],
+                    FileName = LegPathNames.Expand(phase.Command[0], paths, $"'{phase.Name}' run line", supplied),
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),

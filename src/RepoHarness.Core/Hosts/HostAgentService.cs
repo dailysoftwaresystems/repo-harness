@@ -67,7 +67,7 @@ public sealed class HostAgentService(
             return await RefuseAsync(
                 error,
                 HarnessExit.UsageError,
-                $"the request speaks protocol {protocol}, and {ToolPackage.Command} {_identity.Current.Version} on this host speaks {HostAgentProtocol.Version}").ConfigureAwait(false);
+                $"the request speaks protocol {protocol}, and {ToolPackage.Id} {_identity.Current.Version} on this host speaks {HostAgentProtocol.Version}").ConfigureAwait(false);
         }
 
         HostAgentRequest? request;

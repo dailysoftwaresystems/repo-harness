@@ -108,7 +108,7 @@ public sealed class HostProbesTests
 
     [Theory]
     [InlineData("bash\nsshd\nDssHarness\n", true)]
-    [InlineData("/Users/dev/.dotnet/tools/DssHarness\n", true)]
+    [InlineData("/Users/dev/.dotnet/tools/dssharness\n", true)]
     [InlineData("\"svchost.exe\",\"1234\",\"Services\",\"0\",\"10,000 K\"\r\n\"DssHarness.exe\",\"4321\",\"Console\",\"1\",\"50,000 K\"\r\n", true)]
     [InlineData("bash\nDssHarness-helper\nsshd\n", false)]
     [InlineData("\"svchost.exe\",\"1234\",\"Services\",\"0\",\"10,000 K\"\r\n", false)]

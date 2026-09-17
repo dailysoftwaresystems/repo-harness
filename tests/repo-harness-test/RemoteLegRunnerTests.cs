@@ -181,7 +181,7 @@ public sealed class RemoteLegRunnerTests
             Processor = "x86_64",
             Session = new HostSession(
                 new HostConnection { Host = HostId.Wsl("Example-Linux"), Distribution = "Example-Linux" },
-                ".dotnet/tools/DssHarness"),
+                ".dotnet/tools/dssharness"),
         };
 
         return new PlacedLeg(

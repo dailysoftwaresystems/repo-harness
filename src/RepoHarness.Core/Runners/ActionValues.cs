@@ -27,6 +27,13 @@ public sealed class ActionValues
     /// <summary>What a redacted secret is replaced with.</summary>
     public const string Mask = "***";
 
+    /// <summary>
+    /// The plain values, by name, for a step's run line to name. Secrets are deliberately absent:
+    /// a value spliced into a command line reaches the process table, where anything on the machine
+    /// can read it, and the environment is how a secret is handed over instead.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Supplied => _values;
+
     private readonly Dictionary<string, string> _values;
     private readonly Dictionary<string, string> _secrets;
     private readonly IReadOnlyList<string> _secretTexts;

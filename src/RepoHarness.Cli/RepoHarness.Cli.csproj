@@ -6,7 +6,7 @@
     <AssemblyName>DssHarness</AssemblyName>
 
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>DssHarness</ToolCommandName>
+    <ToolCommandName>dssharness</ToolCommandName>
     <PackageId>DssHarness</PackageId>
     <Version>0.5.5</Version>
     <Description>Cross-platform repository harness CLI: git worktree management with Windows path-budget checks, driven entirely by .harness-config/config.json.</Description>

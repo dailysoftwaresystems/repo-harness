@@ -2,6 +2,8 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Results;
 
+using RepoHarness.Core.FileSystem;
+
 namespace RepoHarness.Core.Sync;
 
 /// <summary>
@@ -67,6 +69,88 @@ public sealed class SyncExclusions
     /// </summary>
     /// <param name="relativePath">A path relative to the tree root, with forward separators.</param>
     public bool IsProtectedFromDeletion(string relativePath) => Matches(_withheld, relativePath);
+
+    /// <summary>
+    /// Names every rooted entry that matches nothing here while that name exists deeper in the tree.
+    /// </summary>
+    /// <param name="fileSystem">Reads the tree.</param>
+    /// <param name="root">The tree the entries are relative to.</param>
+    /// <param name="cancellationToken">Stops the walk.</param>
+    /// <remarks>
+    /// A protective rule that silently matches nothing is worse than no rule, because the name in
+    /// the file reads as evidence the thing is protected and any reader stops there. Measured on a
+    /// consumer's tree: of seventeen entries, three protected nothing at all, and one of them was
+    /// <c>.secrets</c> — which protected the root instance while a second <c>.secrets</c> three
+    /// levels down, the directory this tool's own design names as where a host credential goes, was
+    /// covered by nothing.
+    /// <para>
+    /// Reported rather than refused, and rather than quietly widened. Widening a bare name to mean
+    /// any depth would stop transferring nested directories that builds read; refusing would fail a
+    /// tree whose author meant exactly what they wrote. Naming it lets them decide, and the fix is
+    /// one they can see: write <c>**/name</c>.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> RootedEntriesMatchingNothing(
+        IFileSystem fileSystem,
+        string root,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+
+        var rooted = _withheld
+            .Where(path => !path.StartsWith(SyncPathPatterns.AnyDepth, StringComparison.Ordinal))
+            .Where(path => !path.Contains('/', StringComparison.Ordinal))
+            .Where(path => !SyncConfig.NeverTransferFloor.Contains(path, StringComparer.Ordinal))
+            .ToList();
+
+        if (rooted.Count == 0 || !fileSystem.DirectoryExists(root))
+        {
+            return [];
+        }
+
+        var absent = rooted
+            .Where(name => !fileSystem.DirectoryExists(Path.Combine(root, name))
+                && !fileSystem.FileExists(Path.Combine(root, name)))
+            .ToHashSet(StringComparer.Ordinal);
+
+        if (absent.Count == 0)
+        {
+            return [];
+        }
+
+        var found = new List<string>();
+
+        foreach (var directory in fileSystem.EnumerateDirectories(root))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Deeper(fileSystem, directory, absent, found, cancellationToken);
+        }
+
+        return [.. found.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+    }
+
+    /// <summary>Collects the absent names that do exist somewhere below <paramref name="directory"/>.</summary>
+    private static void Deeper(
+        IFileSystem fileSystem,
+        string directory,
+        IReadOnlySet<string> absent,
+        List<string> found,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var name = Path.GetFileName(directory);
+
+        if (name is { Length: > 0 } && absent.Contains(name))
+        {
+            found.Add(name);
+        }
+
+        foreach (var child in fileSystem.EnumerateDirectories(directory))
+        {
+            Deeper(fileSystem, child, absent, found, cancellationToken);
+        }
+    }
 
     /// <summary>
     /// Refuses when git has stopped ignoring something the configuration withholds.
