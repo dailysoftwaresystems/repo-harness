@@ -113,6 +113,17 @@ public sealed record LegPaths
     /// a step.
     /// </summary>
     public string? StepBuild { get; init; }
+
+    /// <summary>
+    /// This run's artifacts across every leg, holding one directory per leg, or
+    /// <see langword="null"/> outside an action.
+    /// </summary>
+    /// <remarks>
+    /// How a step reads what another leg produced. <see cref="ActionArtifacts"/> is this leg's own,
+    /// which is the wrong half of the question for a round trip: the point of one is that what was
+    /// built on one machine runs on another, so the consumer has to be able to name the producer.
+    /// </remarks>
+    public string? RunArtifacts { get; init; }
 }
 
 /// <summary>
@@ -200,12 +211,15 @@ public static partial class LegPathNames
     /// <summary>Names this step's own directory under the action's build directory.</summary>
     public const string StepBuild = "stepBuild";
 
+    /// <summary>Names this run's artifacts across every leg, one directory per leg.</summary>
+    public const string RunArtifacts = "runArtifacts";
+
     /// <summary>Every name, in the order a refusal lists them.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
         BuildDirectory, TreeRoot, HarnessDirectory,
         Leg, Os, Processor, Toolchain, Config, Variant, Host, RunId,
-        Product, ActionBuild, ActionArtifacts, StepBuild,
+        Product, ActionBuild, ActionArtifacts, StepBuild, RunArtifacts,
     ];
 
     /// <summary>
@@ -356,7 +370,8 @@ public static partial class LegPathNames
                     HarnessExit.ConfigInvalid,
                     $"{setting} names '{{{Product}}}', and {paths.ProductProblem ?? "this leg has no build product"}.");
 
-            case ActionBuild or ActionArtifacts or StepBuild when paths.ActionBuild is null:
+            case ActionBuild or ActionArtifacts or StepBuild or RunArtifacts
+                when paths.ActionBuild is null:
                 throw new HarnessException(
                     HarnessExit.ConfigInvalid,
                     $"{setting} names '{{{name}}}', and this runner declares phases rather than an "
@@ -419,6 +434,7 @@ public static partial class LegPathNames
         ActionBuild => paths.ActionBuild,
         ActionArtifacts => paths.ActionArtifacts,
         StepBuild => paths.StepBuild,
+        RunArtifacts => paths.RunArtifacts,
         Leg => paths.Identity?.Leg,
         Os => paths.Identity?.Os,
         Processor => paths.Identity?.Processor,

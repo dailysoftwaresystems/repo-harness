@@ -54,7 +54,9 @@ internal static class TestChild
             File.WriteAllText(arguments[0], arguments[1]);
         }
 
-        return 0;
+        // An optional exit code, so a step can produce exactly what it declared and still fail.
+        // That is the case a caller has to tell apart from a step that produced nothing.
+        return arguments.Length >= 3 ? int.Parse(arguments[2], CultureInfo.InvariantCulture) : 0;
     }
 
     /// <summary>Writes each argument on its own line between brackets, so an empty one is visible.</summary>

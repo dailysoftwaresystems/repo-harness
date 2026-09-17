@@ -17,6 +17,35 @@ namespace RepoHarness.Core.Sync;
 /// </param>
 public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Adopt = null)
 {
+    /// <summary>
+    /// The run whose artifacts to carry to each host instead of syncing the tree, or
+    /// <see langword="null"/> for an ordinary sync.
+    /// </summary>
+    /// <remarks>
+    /// A run's artifacts are gitignored, so an ordinary sync withholds them — deliberately, because
+    /// the withheld list is what stops a host's own state being written over. This carries exactly
+    /// one run's, by name, and nothing else: the narrowest thing that makes a round trip possible
+    /// without putting a hole in that rule.
+    /// </remarks>
+    public string? Artifact { get; init; }
+
+    /// <summary>Refuses asking for two directions at once.</summary>
+    /// <param name="pull">The paths <c>--pull</c> named.</param>
+    /// <exception cref="HarnessException">Both directions were asked for.</exception>
+    public void RefuseWhenPullingAndCarrying(IReadOnlyList<string> pull)
+    {
+        ArgumentNullException.ThrowIfNull(pull);
+
+        if (Artifact is { Length: > 0 } && pull.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                "--artifact carries a run's artifacts to each host and --pull brings named files "
+                + "back from them, so asking for both leaves which direction this runs in undecided. "
+                + "Run one, then the other.");
+        }
+    }
+
     /// <summary>Whether <paramref name="host"/> was named as one to take over.</summary>
     /// <param name="host">The host whose copy is being synced.</param>
     /// <remarks>
@@ -217,6 +246,29 @@ public sealed class SyncService(
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(pull);
 
+        // Before the hosts are measured, and before the early return below. Asked for two directions
+        // at once, or for a run that kept nothing, this is wrong whether or not any host needs a
+        // copy — and answering OK because there happened to be no host is how a mistyped run id
+        // reads as a transfer that had nothing to do.
+        options.RefuseWhenPullingAndCarrying(pull);
+
+        var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
+
+        var carrying = options.Artifact is { Length: > 0 } runId
+            ? ArtifactsOf(context.Layout, runId)
+            : [];
+
+        if (options.Artifact is { Length: > 0 } named && carrying.Count == 0)
+        {
+            return CommandOutcome.Failed(
+                HarnessExit.UsageError,
+                $"no run '{named}' has kept anything: nothing under "
+                + $"'{HarnessLayout.DirectoryName}/{HarnessLayout.RunnerDirectoryName}/"
+                + $"{HarnessLayout.RunnerActionsDirectoryName}' holds artifacts for it. A step keeps "
+                + "what it declares under 'outputs' and asks for with 'persist', and only when it "
+                + "passes.");
+        }
+
         var report = await _legsService.CheckAsync(directory, legNames, here: false, cancellationToken).ConfigureAwait(false);
 
         var hosts = report.Placements
@@ -231,7 +283,6 @@ public sealed class SyncService(
             return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
         }
 
-        var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var details = new List<string>();
         var needAdopting = new List<string>();
 
@@ -245,6 +296,16 @@ public sealed class SyncService(
 
             var destination = RepositoryPathOf(context.Config, host);
             var transport = _transportFactory.For(host);
+
+            if (carrying.Count > 0)
+            {
+                var carried = await CarryAsync(
+                        transport, context.Layout.RepositoryRoot, destination, carrying, cancellationToken)
+                    .ConfigureAwait(false);
+
+                details.Add($"{host.Host}: carried {carried} artifact file(s) of run '{options.Artifact}'");
+                continue;
+            }
 
             if (pull.Count > 0)
             {
@@ -608,6 +669,129 @@ public sealed class SyncService(
         }
 
         return brought;
+    }
+
+    /// <summary>
+    /// Every file one run kept, relative to the tree root, across every action and every leg.
+    /// </summary>
+    /// <param name="layout">Resolved paths for this repository.</param>
+    /// <param name="runId">The run whose artifacts to find.</param>
+    /// <remarks>
+    /// Found by walking the actions directory for an <c>artifacts/&lt;run id&gt;</c>, at whatever
+    /// depth the author grouped the action to. Links are not followed: a link inside a tree makes
+    /// the walk unbounded, and one leaving it would carry files the tree does not contain to another
+    /// machine.
+    /// </remarks>
+    private IReadOnlyList<string> ArtifactsOf(HarnessLayout layout, string runId)
+    {
+        var actions = layout.RunnerActionsDirectory;
+
+        if (!_fileSystem.DirectoryExists(actions))
+        {
+            return [];
+        }
+
+        var found = new List<string>();
+        Collect(actions, 0);
+        return [.. found.Order(StringComparer.Ordinal)];
+
+        void Collect(string directory, int depth)
+        {
+            // Deep enough for any grouping somebody writes by hand, and bounded so a tree that is
+            // not one cannot spend the command.
+            if (depth > 32)
+            {
+                return;
+            }
+
+            foreach (var child in _fileSystem.EnumerateDirectories(directory))
+            {
+                if (LinkPaths.IsLink(_fileSystem, child, _platform.PathComparison))
+                {
+                    continue;
+                }
+
+                var kept = Path.Combine(child, HarnessLayout.ActionArtifactsDirectoryName, runId);
+
+                if (string.Equals(
+                        Path.GetFileName(child),
+                        HarnessLayout.ActionArtifactsDirectoryName,
+                        StringComparison.Ordinal))
+                {
+                    // An artifacts directory holds runs, not actions. Walking into it would find the
+                    // run directories themselves and treat each as an action.
+                    continue;
+                }
+
+                if (_fileSystem.DirectoryExists(kept))
+                {
+                    foreach (var file in _fileSystem.EnumerateFiles(kept, recursive: true))
+                    {
+                        found.Add(PathPatterns.Normalize(
+                            Path.GetRelativePath(layout.RepositoryRoot, file)));
+                    }
+                }
+
+                Collect(child, depth + 1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes each of <paramref name="paths"/> into the copy at the same relative place, verified
+    /// on arrival.
+    /// </summary>
+    /// <param name="transport">How the copy is reached.</param>
+    /// <param name="sourceRoot">This tree's root.</param>
+    /// <param name="destinationRoot">The copy's root on the far side.</param>
+    /// <param name="paths">What to carry, relative to the tree root.</param>
+    /// <param name="cancellationToken">Stops the transfer.</param>
+    /// <returns>How many files landed.</returns>
+    /// <remarks>
+    /// The same relative place, which is what makes a consuming step's path work unchanged on the
+    /// far side: the run and the leg that produced it are already in it. Verified after writing for
+    /// the reason a pull is — an artefact carried host to host is evidence that something built
+    /// there runs here, and evidence nobody checked is not evidence.
+    /// </remarks>
+    private async Task<int> CarryAsync(
+        ISyncTransport transport,
+        string sourceRoot,
+        string destinationRoot,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var landed = 0;
+
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var contents = await _localTransport
+                .ReadFileAsync(sourceRoot, path, cancellationToken)
+                .ConfigureAwait(false);
+
+            var expected = FileContentHash.Of(contents);
+
+            await transport.WriteFileAsync(destinationRoot, path, contents, cancellationToken)
+                .ConfigureAwait(false);
+
+            var arrived = await transport.ReadFileAsync(destinationRoot, path, cancellationToken)
+                .ConfigureAwait(false);
+
+            var actual = FileContentHash.Of(arrived);
+
+            if (!string.Equals(expected, actual, StringComparison.Ordinal))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"'{path}' did not land intact on {transport.Host}: it was sent as {expected} and "
+                    + $"arrived as {actual}.");
+            }
+
+            landed++;
+        }
+
+        return landed;
     }
 
     /// <summary>

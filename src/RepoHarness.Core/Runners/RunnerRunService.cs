@@ -319,6 +319,16 @@ public sealed class RunnerRunService(
                     .ConfigureAwait(false);
 
                 result = WithDeclaredOutputs(result, phase, scratch);
+
+            // Kept now, not at the end of the run. A later step — here, or on another host after an
+            // artifact sync — reads what an earlier one produced, and what it reads has to be there
+            // before the run that produced it is over. A step that did not pass persists nothing:
+            // carrying evidence from work that failed is the misattribution this tool exists to
+            // refuse.
+            if (result.Passed)
+            {
+                PersistOutputs(phase, scratch);
+            }
                 Record(state, phase, result, values);
 
                 _output.Info(
@@ -351,7 +361,7 @@ public sealed class RunnerRunService(
             // useful thing on the machine, and a tree that grew one directory per run on every
             // host is a tree nobody prunes. In a finally because cancellation is the case that
             // would otherwise leave one behind on every host at once.
-            SettleArtifacts(steps, scratch);
+            RemoveWorkingSpace(scratch);
         }
 
         _output.Info(
@@ -645,6 +655,7 @@ public sealed class RunnerRunService(
             ProductProblem = request.ProductProblem,
             ActionBuild = scratch?.Build,
             ActionArtifacts = scratch?.Artifacts,
+            RunArtifacts = scratch is null ? null : Path.GetDirectoryName(scratch.Artifacts),
             StepBuild = stepBuild,
         };
         // The runner's own values, and the action's declared inputs over them. One map, because the
@@ -1091,23 +1102,22 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>
-    /// Moves what the run asked to keep into the action's artifacts, then empties what it did not.
+    /// Copies what a step asked to keep into the action's artifacts, as soon as it has passed.
     /// </summary>
-    /// <param name="steps">The steps that ran, carrying what each declared and whether it persists.</param>
-    /// <param name="scratch">The action's directories.</param>
+    /// <param name="phase">The step that finished, carrying what it declared and whether it persists.</param>
+    /// <param name="scratch">The action's directories, or null outside an action.</param>
     /// <remarks>
-    /// Persisted first, removed second, so a failure to keep something cannot be followed by
-    /// deleting it. The build directory goes whatever the verdict was: it is this run's working
-    /// space, and a tree that accumulated one per run on every host is a tree nobody prunes.
+    /// Per step rather than per run, because a later step reads what an earlier one produced. On
+    /// another host that reading happens after an artifact sync, and a sync cannot carry what the
+    /// run has not written yet.
     /// </remarks>
-    private void SettleArtifacts(RunnerSteps steps, ActionScratch? scratch)
+    private void PersistOutputs(RunnerPhase phase, ActionScratch? scratch)
     {
-        if (scratch is null)
+        if (scratch is null || !phase.Persist || phase.Outputs.Count == 0)
         {
             return;
         }
 
-        foreach (var phase in steps.Phases.Where(phase => phase.Persist && phase.Outputs.Count > 0))
         {
             var from = Path.Combine(scratch.Build, LogNameFor(phase.StepName));
             var into = Path.Combine(scratch.Artifacts, LogNameFor(phase.StepName));
@@ -1147,6 +1157,21 @@ public sealed class RunnerRunService(
                         + $"'{destination}': {exception.Message}");
                 }
             }
+        }
+    }
+
+    /// <summary>Removes this run's working space, whatever the verdict was.</summary>
+    /// <param name="scratch">The action's directories, or null outside an action.</param>
+    /// <remarks>
+    /// What the run asked to keep has already been copied out, step by step, as each one passed. So
+    /// this only removes: a failed run's intermediate files are the least useful thing on the
+    /// machine, and a tree that grew one directory per run on every host is a tree nobody prunes.
+    /// </remarks>
+    private void RemoveWorkingSpace(ActionScratch? scratch)
+    {
+        if (scratch is null)
+        {
+            return;
         }
 
         try

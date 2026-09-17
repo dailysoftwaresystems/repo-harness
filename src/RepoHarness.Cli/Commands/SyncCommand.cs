@@ -32,6 +32,11 @@ internal static class SyncCommand
         AllowMultipleArgumentsPerToken = true,
     };
 
+    private static readonly Option<string> ArtifactOption = new("--artifact")
+    {
+        Description = "Carry one run's kept artifacts to each host instead of syncing the tree: --artifact 20260917-100000-0a1b2c3d. What a step kept is what a later step on another host reads.",
+    };
+
     internal static Command Create()
     {
         var command = new Command(
@@ -42,6 +47,7 @@ internal static class SyncCommand
         command.Options.Add(DryRunOption);
         command.Options.Add(AdoptOption);
         command.Options.Add(PullOption);
+        command.Options.Add(ArtifactOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -56,7 +62,10 @@ internal static class SyncCommand
                 .SyncHostsAsync(
                     context.Directory,
                     legs,
-                    new SyncOptions(arguments.GetValue(DryRunOption), arguments.GetValue(AdoptOption)),
+                    new SyncOptions(arguments.GetValue(DryRunOption), arguments.GetValue(AdoptOption))
+                    {
+                        Artifact = arguments.GetValue(ArtifactOption),
+                    },
                     arguments.GetValue(PullOption) ?? [],
                     cancellationToken)
                 .ConfigureAwait(false);

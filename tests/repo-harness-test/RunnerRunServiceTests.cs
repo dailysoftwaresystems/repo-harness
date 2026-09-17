@@ -211,6 +211,56 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A step that produced exactly what it declared and then failed keeps nothing. Carrying
+    /// evidence out of work that did not pass is the misattribution this tool exists to refuse: a
+    /// later step, on another host, would read a payload from a leg that never succeeded and have no
+    /// way to know.
+    /// </summary>
+    [Fact]
+    public async Task AStepThatFailed_KeepsNothing_EvenThoughItWroteWhatItDeclared()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        // Writes payload.txt, then exits 7. The file is on disk; the step is not one that passed.
+        WriteAction(temp, $$"""
+            name: corpus
+            steps:
+              - name: pack
+                outputs:
+                  - payload.txt
+                persist: true
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "{stepBuild}/payload.txt" carried 7
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        var runner = new RunnerConfig
+        {
+            Action = "corpus/corpus.yml",
+            Env = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "write-file" },
+        };
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, runner),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Failed, result.Verdict.Verdict);
+
+        var action = Path.Combine(temp.Path, ".harness-config", "runner", "actions", "corpus");
+
+        Assert.False(
+            File.Exists(Path.Combine(action, "artifacts", RunId, Leg, "pack", "payload.txt")),
+            "a step that failed should have kept nothing, although it wrote the file");
+
+        // And the working space is gone either way, so the file is not reachable there either.
+        Assert.False(Directory.Exists(Path.Combine(action, "build", RunId, Leg)));
+    }
+
+    /// <summary>
     /// A step that exits zero having written nothing it declared is unwitnessed, not passed. An
     /// exit code alone cannot tell that apart from work that was done.
     /// </summary>
