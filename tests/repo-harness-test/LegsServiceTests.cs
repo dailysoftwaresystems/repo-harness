@@ -139,6 +139,45 @@ public sealed class LegsServiceTests
         Assert.Contains("legs: wsl Ubuntu: updated DssHarness 1.1.9 to 1.2.0", fixture.Output.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A leg no host MATCHES is a complete answer: the survey looked and says so. A host that could
+    /// not be REACHED is not, and 'OK - 6 of 8' differs from 'OK - 8 of 8' only by a number
+    /// somebody has to parse out of prose. Incomplete is the code the run verbs already use for
+    /// exactly this shape.
+    /// </summary>
+    [Fact]
+    public void AHostThatDidNotAnswer_MakesTheSurveyIncomplete_NotAnOk()
+    {
+        var report = new LegsReport(
+            [new LegPlacement(new SelectedLeg("a", HostDoubles.Leg("linux", "x86_64")), Reachable, Reason: null)],
+            [
+                new HostReport { Host = HostId.Local, Os = "linux", Processor = "x86_64" },
+                new HostReport { Host = HostId.Ssh("vps"), Reason = "the connection was refused" },
+            ],
+            Named: false);
+
+        var outcome = LegsReports.Render(report, json: false);
+
+        Assert.Equal(HarnessExit.Incomplete, outcome.ExitCode);
+        Assert.Contains("did not answer", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh vps", outcome.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every host answering is an unqualified OK, which is the whole point of the other one.</summary>
+    [Fact]
+    public void EveryHostAnswering_IsStillSuccess()
+    {
+        var report = new LegsReport(
+            [new LegPlacement(new SelectedLeg("a", HostDoubles.Leg("linux", "x86_64")), Reachable, Reason: null)],
+            [new HostReport { Host = HostId.Local, Os = "linux", Processor = "x86_64" }],
+            Named: false);
+
+        Assert.Equal(HarnessExit.Success, LegsReports.Render(report, json: false).ExitCode);
+    }
+
+    /// <summary>A host a leg can be placed on, which is what makes a placement runnable.</summary>
+    private static HostReport Reachable { get; } = new() { Host = HostId.Local, Os = "linux", Processor = "x86_64" };
+
     private static EmulatorConfig Emulator() => new()
     {
         HostOs = "linux",

@@ -1657,6 +1657,89 @@ public sealed class SyncServiceTests
         }
     }
 
+    /// <summary>
+    /// The far side of every real sync. A host removes its own husks, so the operation has to
+    /// survive the wire: an answer that never arrives is the asking machine reporting that nothing
+    /// was removed when a directory went.
+    /// </summary>
+    [Fact]
+    public async Task TheAgentRemovesADirectoryTheDeletionEmptied_AndSaysWhatItDid()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        Directory.CreateDirectory(temp.Combine("gone"));
+        Directory.CreateDirectory(temp.Combine("kept"));
+        await File.WriteAllTextAsync(temp.Combine("kept", "still-here.txt"), "x\n", token);
+
+        var result = await CliRunner.RunAsync(
+            ["sync-serve", SyncServe.Prune, temp.Path, "gone\nkept"],
+            token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        var answer = SyncServe.ReadAnswer<SyncPruneAnswer>(result.StandardOutput.Trim());
+
+        Assert.NotNull(answer);
+
+        var went = Assert.Single(answer.Directories, entry => entry.Path == "gone");
+        var stayed = Assert.Single(answer.Directories, entry => entry.Path == "kept");
+
+        Assert.True(went.Removed);
+        Assert.False(stayed.Removed);
+        Assert.Contains("still-here.txt", stayed.Held, StringComparer.Ordinal);
+
+        Assert.False(Directory.Exists(temp.Combine("gone")));
+        Assert.True(Directory.Exists(temp.Combine("kept")));
+    }
+
+    /// <summary>
+    /// A dry run exits as the run it previews would. Printing the cost and exiting zero makes
+    /// "this checkout needs taking over" indistinguishable from "everything is in step" to anything
+    /// reading the code, which is what a dry run is for reading. This changed silently between two
+    /// releases and a consumer found it.
+    /// </summary>
+    [Fact]
+    public async Task ADryRunOverAnUnclaimedCopy_SaysARunWouldRefuseIt()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            Directory.CreateDirectory(copy);
+            await File.WriteAllTextAsync(Path.Combine(copy, "theirs.txt"), "x\n", cancellationToken);
+
+            var result = await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(DryRun: true), cancellationToken);
+
+            Assert.True(result.RequiresAdoption);
+
+            // And a copy this tool made says the opposite, so the flag means something.
+            var mine = Path.Combine(temp.Path, "..", "mine-" + Guid.NewGuid().ToString("N")[..8]);
+
+            try
+            {
+                await service.SyncAsync(temp.Path, Transport(harness), mine, new SyncOptions(), cancellationToken);
+
+                var again = await service.SyncAsync(
+                    temp.Path, Transport(harness), mine, new SyncOptions(DryRun: true), cancellationToken);
+
+                Assert.False(again.RequiresAdoption);
+            }
+            finally
+            {
+                DeleteIfPresent(mine);
+            }
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
     private static LocalSyncTransport Transport(HarnessFactory harness)
         => new LocalSyncTransport(
             harness.FileSystem,
