@@ -108,6 +108,22 @@ public sealed class AnchorBalanceService(
             // A misfiled row is refused as it stands rather than compared with the base: an open row in
             // the done registry is never picked up as work, whatever the base held.
             findings.AddRange(document.Rows.Select(registry.Misfiling).OfType<AnchorFinding>());
+
+            // And a row whose Status cell is not one of the four spellings, for the same reason and
+            // in the same words 'read-anchors --lint' uses. Whether a row is closed is decided here
+            // by what the cell OPENS with, so a cell nothing can parse still lands in one column or
+            // the other and is silently counted. A consumer measured the consequence: --lint exited
+            // 1 on three rows while this verb answered that the balance held, and both verbs cannot
+            // be right about the same file.
+            findings.AddRange(document.Rows
+                .Where(row => !AnchorStatus.IsCanonical(row.Status))
+                .Select(row => new AnchorFinding(
+                    registry.RelativePath,
+                    row.LineNumber,
+                    AnchorFindingSeverity.Fatal,
+                    $"anchor '{row.Id}' has status '{row.Status}', which is not one of "
+                    + $"{string.Join(" / ", AnchorStatus.Cells)}, so whether it is open cannot be "
+                    + "counted")));
         }
 
         var openAtBase = OpenAnchors(atBase);

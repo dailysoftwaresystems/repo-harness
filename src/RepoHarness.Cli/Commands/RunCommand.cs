@@ -87,8 +87,7 @@ internal static class RunCommand
             var runner = Resolve(harness.Config, runnerName);
 
             // Before a leg is placed or a host is measured, so that a mistyped action costs nothing
-            // and says so in the same terms 'legs' would have. The parser checks again when it
-            // reads the file: this one is a courtesy, that one is the guard.
+            // and says so in the same terms 'legs' would have.
             if (runner.Action is { Length: > 0 } action)
             {
                 ActionPath.RequireResolvable(
@@ -96,6 +95,15 @@ internal static class RunCommand
                     harness.Layout.RunnerActionsDirectory,
                     context.Get<IFileSystem>(),
                     context.Get<IHostPlatform>().PathComparison);
+
+                // And read here, not only once a leg is running it. Read per leg, a file carrying
+                // one unrecognised key is refused once per leg, each time after that leg's run has
+                // begun and its run directory exists: on an eight-leg gate that is eight started
+                // runs and eight directories for one typo. The file is the same for every leg, so
+                // the question is asked once, where nothing has been created yet.
+                await context.Get<IActionFileParser>()
+                    .LoadAsync(harness.Layout.RunnerActionsDirectory, action, cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             // The runner's own legs when --legs was left out. Resolved here rather than left to the

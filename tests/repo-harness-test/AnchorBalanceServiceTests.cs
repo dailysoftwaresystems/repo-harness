@@ -29,6 +29,40 @@ public sealed class AnchorBalanceServiceTests
         Assert.Empty(report.Findings);
     }
 
+    /// <summary>
+    /// Whether a row is closed was decided by what its Status cell OPENS with, so a cell nothing
+    /// can parse still landed in one column and was counted from there. Measured on a consumer's
+    /// registry: 'read-anchors --lint' exited 1 on three rows while this verb answered that the
+    /// balance held. Both verbs cannot be right about one file, and the one that COUNTS is the one
+    /// that must not guess.
+    /// </summary>
+    [Fact]
+    public async Task AStatusCellNothingCanParse_IsRefusedHereToo_NotSilentlyCounted()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareCommittedAsync(temp, One);
+
+        // Opens with the closed mark, so every reader testing the opening glyph takes it for
+        // closed, and none of them reads the words after it.
+        var registry = PendingPath(temp);
+        var text = await File.ReadAllTextAsync(registry, cancellationToken);
+
+        await File.WriteAllTextAsync(
+            registry,
+            text.Replace(
+                AnchorStatus.Render(AnchorState.Open),
+                AnchorStatus.ClosedMark + " CLOSED (superseded)",
+                StringComparison.Ordinal),
+            cancellationToken);
+
+        var report = await harness.AnchorBalanceService.CheckAsync(temp.Path, null, cancellationToken);
+
+        Assert.Contains(
+            report.Findings,
+            finding => finding.Message.Contains("is not one of", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AChangeThatLeavesMoreOpenAnchors_Fails()
     {
