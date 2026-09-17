@@ -29,6 +29,29 @@ public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Ado
     /// </remarks>
     public string? Artifact { get; init; }
 
+    /// <summary>Refuses <c>--artifact</c> given without a run to carry.</summary>
+    /// <exception cref="HarnessException">The option was given and names nothing.</exception>
+    /// <remarks>
+    /// An empty value is the option asked for, not the option absent, and the difference is the
+    /// whole command: read as absent this would fall through to an ordinary sync, which deletes
+    /// whatever the host has that this tree does not. A script whose run id variable is unset is
+    /// the ordinary way an empty value arrives, and it asked to carry one run's files.
+    /// </remarks>
+    public void RefuseWhenCarryingAnUnnamedRun()
+    {
+        if (Artifact is null || !string.IsNullOrWhiteSpace(Artifact))
+        {
+            return;
+        }
+
+        throw new HarnessException(
+            HarnessExit.UsageError,
+            "--artifact names the run whose artifacts to carry and was given an empty name, so "
+            + "there is no run to carry. It is the directory under an action's "
+            + $"'{HarnessLayout.ActionArtifactsDirectoryName}', as "
+            + "--artifact 20260917-100000-0a1b2c3d. Nothing was changed.");
+    }
+
     /// <summary>Refuses asking for two directions at once.</summary>
     /// <param name="pull">The paths <c>--pull</c> named.</param>
     /// <exception cref="HarnessException">Both directions were asked for.</exception>
@@ -36,7 +59,7 @@ public sealed record SyncOptions(bool DryRun = false, IReadOnlyList<string>? Ado
     {
         ArgumentNullException.ThrowIfNull(pull);
 
-        if (Artifact is { Length: > 0 } && pull.Count > 0)
+        if (Artifact is not null && pull.Count > 0)
         {
             throw new HarnessException(
                 HarnessExit.UsageError,
@@ -250,15 +273,14 @@ public sealed class SyncService(
         // at once, or for a run that kept nothing, this is wrong whether or not any host needs a
         // copy — and answering OK because there happened to be no host is how a mistyped run id
         // reads as a transfer that had nothing to do.
+        options.RefuseWhenCarryingAnUnnamedRun();
         options.RefuseWhenPullingAndCarrying(pull);
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
 
-        var carrying = options.Artifact is { Length: > 0 } runId
-            ? ArtifactsOf(context.Layout, runId)
-            : [];
+        var carrying = options.Artifact is { } runId ? ArtifactsOf(context.Layout, runId) : [];
 
-        if (options.Artifact is { Length: > 0 } named && carrying.Count == 0)
+        if (options.Artifact is { } named && carrying.Count == 0)
         {
             return CommandOutcome.Failed(
                 HarnessExit.UsageError,
@@ -290,6 +312,24 @@ public sealed class SyncService(
         // refused while nothing has been deleted anywhere.
         options.RefuseWhenNamingNoOneHost([.. hosts.Select(host => host.Host)]);
 
+        // Same reason, for the same kind of mistake: a carry writes into a copy and never makes or
+        // takes over one, so a host that has no copy is answered for here rather than after the
+        // files have gone to the hosts listed before it.
+        if (carrying.Count > 0
+            && await NoCopyToCarryIntoAsync(hosts, context.Config, cancellationToken).ConfigureAwait(false)
+                is { Count: > 0 } unreachable)
+        {
+            return CommandOutcome.Failed(
+                HarnessExit.Refused,
+                $"{unreachable.Count} of {hosts.Count} host(s) hold no copy this harness made, so "
+                + $"run '{options.Artifact}' was carried nowhere. A carry writes an existing copy's "
+                + "own files and nothing else: it creates no directory and takes none over, because "
+                + "a repositoryPath that is a typo would otherwise be filled in rather than "
+                + "noticed. Run 'DssHarness sync' first, adding '--adopt \"<host>\"' where a "
+                + "directory is already there. Nothing was changed.",
+                unreachable);
+        }
+
         foreach (var host in hosts)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -299,6 +339,14 @@ public sealed class SyncService(
 
             if (carrying.Count > 0)
             {
+                if (options.DryRun)
+                {
+                    details.Add(
+                        $"{host.Host}: would carry {carrying.Count} artifact file(s) of run "
+                        + $"'{options.Artifact}' into '{destination}'");
+                    continue;
+                }
+
                 var carried = await CarryAsync(
                         transport, context.Layout.RepositoryRoot, destination, carrying, cancellationToken)
                     .ConfigureAwait(false);
@@ -309,6 +357,12 @@ public sealed class SyncService(
 
             if (pull.Count > 0)
             {
+                if (options.DryRun)
+                {
+                    details.Add($"{host.Host}: would bring back {pull.Count} named file(s) from '{destination}'");
+                    continue;
+                }
+
                 var brought = await PullAsync(
                         transport, destination, context.Layout.RepositoryRoot, pull, cancellationToken)
                     .ConfigureAwait(false);
@@ -347,11 +401,35 @@ public sealed class SyncService(
 
         // Reaching here means every copy was confirmed: a copy that still differed raised from the
         // verification inside the sync, naming the files, and took the whole command with it.
-        return CommandOutcome.Ok(
-            options.DryRun
-                ? $"{hosts.Count} host(s) inspected; nothing was changed"
-                : $"{hosts.Count} host(s) in step",
-            details);
+        //
+        // Said as the direction that ran, because "in step" is a claim about the whole tree that
+        // only the tree sync makes good on. A carry writes one run's artifacts and a pull reads a
+        // handful of named files; either reported as "in step" tells somebody their host matches
+        // this tree, which is the one thing neither of them did.
+        return CommandOutcome.Ok(Summary(options, hosts.Count, pull.Count), details);
+    }
+
+    /// <summary>What this run did, in one line, as the direction it ran in.</summary>
+    /// <param name="options">What was asked for.</param>
+    /// <param name="hosts">How many hosts were reached.</param>
+    /// <param name="pulled">How many files <c>--pull</c> named.</param>
+    private static string Summary(SyncOptions options, int hosts, int pulled)
+    {
+        var count = hosts.ToString(CultureInfo.InvariantCulture);
+
+        if (options.DryRun)
+        {
+            return $"{count} host(s) inspected; nothing was changed";
+        }
+
+        if (options.Artifact is { } runId)
+        {
+            return $"run '{runId}' carried to {count} host(s)";
+        }
+
+        return pulled > 0
+            ? $"{pulled.ToString(CultureInfo.InvariantCulture)} named file(s) brought back from {count} host(s)"
+            : $"{count} host(s) in step";
     }
 
     /// <summary>
@@ -711,17 +789,17 @@ public sealed class SyncService(
                     continue;
                 }
 
-                var kept = Path.Combine(child, HarnessLayout.ActionArtifactsDirectoryName, runId);
-
-                if (string.Equals(
-                        Path.GetFileName(child),
-                        HarnessLayout.ActionArtifactsDirectoryName,
-                        StringComparison.Ordinal))
+                // Neither of the two directories an action owns holds actions, and no action may
+                // be called either name. The artifacts one holds runs, and walking it would treat
+                // each run directory as an action; the build one holds the working space of runs in
+                // flight and of any that was killed before it could clear its own, which is a whole
+                // build tree to enumerate for something that cannot be in it.
+                if (Runners.ActionPath.Reserved(Path.GetFileName(child)))
                 {
-                    // An artifacts directory holds runs, not actions. Walking into it would find the
-                    // run directories themselves and treat each as an action.
                     continue;
                 }
+
+                var kept = Path.Combine(child, HarnessLayout.ActionArtifactsDirectoryName, runId);
 
                 if (_fileSystem.DirectoryExists(kept))
                 {
@@ -760,38 +838,159 @@ public sealed class SyncService(
         IReadOnlyList<string> paths,
         CancellationToken cancellationToken)
     {
-        var landed = 0;
+        var landed = new List<string>();
 
-        foreach (var path in paths)
+        try
+        {
+            foreach (var path in paths)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var contents = await _localTransport
+                    .ReadFileAsync(sourceRoot, path, cancellationToken)
+                    .ConfigureAwait(false);
+
+                var expected = FileContentHash.Of(contents);
+
+                await transport.WriteFileAsync(destinationRoot, path, contents, cancellationToken)
+                    .ConfigureAwait(false);
+
+                // Counted as written before it is verified, because what has to be taken back is
+                // what reached the far side, and a file that arrived wrong is one of those.
+                landed.Add(path);
+
+                var arrived = await transport.ReadFileAsync(destinationRoot, path, cancellationToken)
+                    .ConfigureAwait(false);
+
+                var actual = FileContentHash.Of(arrived);
+
+                if (!string.Equals(expected, actual, StringComparison.Ordinal))
+                {
+                    throw new HarnessException(
+                        HarnessExit.CommandFailed,
+                        $"'{path}' did not land intact on {transport.Host}: it was sent as {expected} and "
+                        + $"arrived as {actual}.");
+                }
+            }
+        }
+        catch (Exception)
+        {
+            await TakeBackAsync(transport, destinationRoot, landed).ConfigureAwait(false);
+            throw;
+        }
+
+        return landed.Count;
+    }
+
+    /// <summary>
+    /// Removes what a carry had already written, after that carry stopped part way.
+    /// </summary>
+    /// <param name="transport">How the copy is reached.</param>
+    /// <param name="destinationRoot">The copy's root on the far side.</param>
+    /// <param name="written">What reached it, relative to the tree root.</param>
+    /// <remarks>
+    /// A run's artifacts are read by naming a path, and a directory holding two thirds of what the
+    /// producer kept is the same path holding fewer files: the step that reads it measures less
+    /// than was built and passes, and nothing anywhere says which of the two happened. The carry
+    /// therefore lands whole or not at all. It stops loudly on this side either way; taking the
+    /// part back is what stops it being quiet on the other.
+    /// <para>
+    /// Not cancellable. The removal exists because the transfer stopped, and stopping it by the
+    /// same Ctrl-C is exactly the case that would leave the partial set in place.
+    /// </para>
+    /// </remarks>
+    private async Task TakeBackAsync(
+        ISyncTransport transport,
+        string destinationRoot,
+        IReadOnlyList<string> written)
+    {
+        if (written.Count == 0)
+        {
+            return;
+        }
+
+        var stayed = new List<string>();
+
+        foreach (var path in written)
+        {
+            try
+            {
+                await transport.DeleteFileAsync(destinationRoot, path, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is HarnessException or IOException or UnauthorizedAccessException)
+            {
+                stayed.Add(path);
+            }
+        }
+
+        if (stayed.Count == 0)
+        {
+            _output.Warn(
+                CommandName,
+                $"{transport.Host}: the carry stopped part way, so the {written.Count} file(s) it had "
+                + "already written were taken back. That run has nothing there.");
+
+            return;
+        }
+
+        // Said, not swallowed. This is the one outcome where a later step can read a run's
+        // artifacts and be measuring less than the producer kept, so the files are named.
+        _output.Warn(
+            CommandName,
+            $"{transport.Host}: the carry stopped part way and {stayed.Count} of the "
+            + $"{written.Count} file(s) it had written could not be taken back, so that run's "
+            + "artifacts are there in part and a step reading them would measure less than was "
+            + $"kept. Remove them before running anything that reads them: {string.Join(", ", stayed)}");
+    }
+
+    /// <summary>
+    /// The hosts among <paramref name="hosts"/> that hold no copy this harness made, each with why.
+    /// </summary>
+    /// <param name="hosts">Every host this run would reach.</param>
+    /// <param name="config">The whole configuration, for where each host keeps its copy.</param>
+    /// <param name="cancellationToken">Stops the questions.</param>
+    /// <remarks>
+    /// The same gate an ordinary sync passes through, asked for a carry as well. Without it a carry
+    /// is the one write to a host that skips it: it would create the whole path under a mistyped
+    /// repositoryPath and report success, and it would leave the directory it made unmarked, so the
+    /// next ordinary sync refuses as "a directory the harness did not create" a directory this tool
+    /// made itself minutes earlier.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> NoCopyToCarryIntoAsync(
+        IReadOnlyList<Hosts.HostReport> hosts,
+        Configuration.HarnessConfig config,
+        CancellationToken cancellationToken)
+    {
+        var refused = new List<string>();
+
+        foreach (var host in hosts)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var contents = await _localTransport
-                .ReadFileAsync(sourceRoot, path, cancellationToken)
+            var destination = RepositoryPathOf(config, host);
+
+            var found = await _transportFactory.For(host)
+                .InspectAsync(destination, cancellationToken)
                 .ConfigureAwait(false);
 
-            var expected = FileContentHash.Of(contents);
+            var why = !found.Exists
+                ? "is not there"
+                : StateOf(found.Mark) switch
+                {
+                    CopyState.Harness => null,
+                    CopyState.Interrupted => "was being taken over and the run stopped before it "
+                        + "finished, so it is neither the checkout it was nor a copy of this tree",
+                    _ => "exists and the harness did not create it",
+                };
 
-            await transport.WriteFileAsync(destinationRoot, path, contents, cancellationToken)
-                .ConfigureAwait(false);
-
-            var arrived = await transport.ReadFileAsync(destinationRoot, path, cancellationToken)
-                .ConfigureAwait(false);
-
-            var actual = FileContentHash.Of(arrived);
-
-            if (!string.Equals(expected, actual, StringComparison.Ordinal))
+            if (why is not null)
             {
-                throw new HarnessException(
-                    HarnessExit.CommandFailed,
-                    $"'{path}' did not land intact on {transport.Host}: it was sent as {expected} and "
-                    + $"arrived as {actual}.");
+                refused.Add($"{host.Host}: '{destination}' {why}");
             }
-
-            landed++;
         }
 
-        return landed;
+        return refused;
     }
 
     /// <summary>
@@ -824,13 +1023,17 @@ public sealed class SyncService(
             return CopyState.Created;
         }
 
-        return found.Mark switch
-        {
-            CopyMark.Complete => CopyState.Harness,
-            CopyMark.AdoptionStopped => CopyState.Interrupted,
-            _ => CopyState.Unclaimed,
-        };
+        return StateOf(found.Mark);
     }
+
+    /// <summary>What a copy's marker says about whose directory it is.</summary>
+    /// <param name="mark">What the far side recorded there.</param>
+    private static CopyState StateOf(CopyMark mark) => mark switch
+    {
+        CopyMark.Complete => CopyState.Harness,
+        CopyMark.AdoptionStopped => CopyState.Interrupted,
+        _ => CopyState.Unclaimed,
+    };
 
     /// <summary>
     /// Why a directory the harness did not make is refused, and what taking it over would cost.

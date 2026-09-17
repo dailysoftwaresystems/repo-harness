@@ -12,6 +12,54 @@ namespace RepoHarness.Tests;
 public sealed class ActionVocabularyGuardTests
 {
     /// <summary>
+    /// Every action already owns a 'build' and an 'artifacts' directory, at whatever depth it is
+    /// grouped. A directory of either name under 'actions' would be one of those and an action at
+    /// once, and the two rules written for the names would both then be wrong about it: the walk
+    /// that finds what a run kept would skip a real action, and the ignore rules would keep that
+    /// action's own file out of git so nothing a reviewer reads could ever be committed.
+    /// </summary>
+    [Theory]
+    [InlineData("build/build.yml")]
+    [InlineData("artifacts/artifacts.yml")]
+    [InlineData("build/nested/nested.yml")]
+    [InlineData("group/artifacts/probe/probe.yml")]
+    [InlineData("build.yml")]
+    public void AnActionCalledAfterOneOfTheTwoDirectoriesEveryActionOwns_IsRefused(string action)
+    {
+        var problem = ActionPath.Problem(action);
+
+        Assert.NotNull(problem);
+        Assert.Contains("every action already owns", problem, StringComparison.Ordinal);
+
+        // And the remedy it offers is a name, not one of these names. Written as 'build.yml' this
+        // would otherwise fall through to the flat-spelling refusal, whose remedy is
+        // 'build/build.yml' - a path this same rule then refuses.
+        Assert.Contains(ActionPath.Expected("<name>"), problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Refused without case, because on Windows 'Build' and 'build' are one directory: accepted
+    /// there, an action would occupy the working space and neither would be what it looked like.
+    /// </summary>
+    [Theory]
+    [InlineData("Build/Build.yml")]
+    [InlineData("ARTIFACTS/ARTIFACTS.yml")]
+    public void TheSameNameInAnotherCase_IsRefusedToo(string action)
+        => Assert.Contains("every action already owns", ActionPath.Problem(action), StringComparison.Ordinal);
+
+    /// <summary>
+    /// Only those two names, exactly. The rule is about a collision, not about the word, so an
+    /// action whose name merely starts with one of them is an ordinary action.
+    /// </summary>
+    [Theory]
+    [InlineData("build-all/build-all.yml")]
+    [InlineData("rebuild/rebuild.yml")]
+    [InlineData("artifacts-check/artifacts-check.yml")]
+    [InlineData("group/builds/builds.yml")]
+    public void ANameThatMerelyLooksLikeOne_IsAnOrdinaryAction(string action)
+        => Assert.Null(ActionPath.Problem(action));
+
+    /// <summary>
     /// A name the pattern cannot see is a name neither half can refuse: it reaches the program as
     /// its own text, and a tool handed an unreadable path often exits 0 having done nothing.
     /// Runner value directories hold exactly this shape.

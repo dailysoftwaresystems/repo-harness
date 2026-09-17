@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.Results;
@@ -75,6 +76,56 @@ public static class SyncServe
 
     /// <summary>Reads one file out of the copy.</summary>
     public const string Read = "read";
+
+    /// <summary>
+    /// The largest file one request can carry, in bytes.
+    /// </summary>
+    /// <remarks>
+    /// A file crosses whole, inside one request, encoded as base64 - which is a third longer again
+    /// and is one string, so it cannot be longer than <see cref="int.MaxValue"/>. That is where
+    /// this number comes from; it is not a policy anybody chose, and no configuration moves it.
+    /// </remarks>
+    public const long LargestFile = (int.MaxValue / 4) * 3L;
+
+    /// <summary>
+    /// Refuses a file too large to cross whole, by name and with its size, rather than leaving it
+    /// to run out of memory.
+    /// </summary>
+    /// <param name="length">The file's size in bytes.</param>
+    /// <param name="relativePath">The file, relative to the tree root.</param>
+    /// <param name="host">The host it was going to or coming from.</param>
+    /// <exception cref="HarnessException">It is larger than <see cref="LargestFile"/>.</exception>
+    /// <remarks>
+    /// Left to throw, this is an <see cref="OutOfMemoryException"/>, which every command reports as
+    /// a defect in the tool. A build output of that size is ordinary, and "the harness has a bug"
+    /// is the one reading of it that sends somebody nowhere useful.
+    /// </remarks>
+    public static void RefuseAFileTooLargeToCarry(long length, string relativePath, string host)
+    {
+        if (length <= LargestFile)
+        {
+            return;
+        }
+
+        throw new HarnessException(HarnessExit.CommandFailed, TooLargeToCarry(length, relativePath, host));
+    }
+
+    /// <summary>Why one file could not cross.</summary>
+    /// <param name="length">The file's size in bytes, or -1 when it is not known.</param>
+    /// <param name="relativePath">The file, relative to the tree root.</param>
+    /// <param name="host">The host it was going to or coming from.</param>
+    public static string TooLargeToCarry(long length, string relativePath, string host)
+    {
+        var size = length < 0
+            ? "is too large"
+            : $"is {length.ToString(CultureInfo.InvariantCulture)} bytes, past the "
+                + $"{LargestFile.ToString(CultureInfo.InvariantCulture)} one request can hold";
+
+        return $"'{relativePath}' {size}: a file crosses to and from {host} whole, inside one "
+            + "request. Keep the smaller thing a later step actually reads - a packaged build "
+            + "rather than a build tree - or put what has to cross somewhere both machines already "
+            + "reach.";
+    }
 
     /// <summary>How an answer is written, and read back, so both ends agree without guessing.</summary>
     public static JsonSerializerOptions JsonOptions { get; } = new()

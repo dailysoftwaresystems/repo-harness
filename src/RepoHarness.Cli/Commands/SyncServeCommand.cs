@@ -112,6 +112,13 @@ internal static class SyncServeCommand
                         .ReadFileAsync(root, Required(arguments, 1, operation), cancellationToken)
                         .ConfigureAwait(false);
 
+                    // Refused here rather than where it is decoded, because this is the side
+                    // that knows the size and is about to spend the memory.
+                    SyncServe.RefuseAFileTooLargeToCarry(
+                        contents.LongLength,
+                        Required(arguments, 1, operation),
+                        "this host");
+
                     // Hashed here, where the bytes were read. A hash the asking machine took of what
                     // arrived would agree with those bytes whatever happened on the way.
                     return Answer(new SyncFileAnswer(

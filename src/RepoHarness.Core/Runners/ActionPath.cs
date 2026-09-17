@@ -1,4 +1,5 @@
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Runners;
@@ -68,6 +69,25 @@ public static class ActionPath
                 + $"'{Expected("<name>")}', without '.' or '..'";
         }
 
+        // Every segment but the last names a directory outright; the last names the file, whose
+        // stem is the directory an action of that name owns - so 'build.yml' is caught here too,
+        // rather than falling through to a refusal whose suggested remedy this rule also refuses.
+        var owned = segments[..^1].Append(Path.GetFileNameWithoutExtension(segments[^1]));
+
+        if (owned.FirstOrDefault(Reserved) is { } reserved)
+        {
+            // Every action already owns two directories of these names, at whatever depth it is
+            // grouped: its working space and what it keeps. A directory called one of them under
+            // 'actions' would be that and an action at once - and the ignore rules that keep a
+            // run's output out of git are written for the names, so an action called one of them
+            // would have its own file ignored and never be committed at all.
+            return $"'{action}' has a directory called '{reserved}'; every action already owns a "
+                + $"'{HarnessLayout.ActionBuildDirectoryName}' for its working space and an "
+                + $"'{HarnessLayout.ActionArtifactsDirectoryName}' for what it keeps, so neither "
+                + $"name can also be an action or group one. Call it something else, as "
+                + $"'{Expected("<name>")}'";
+        }
+
         if (segments.Length < 2)
         {
             // One segment is the flat spelling this layout replaced: a file with no directory of
@@ -110,6 +130,20 @@ public static class ActionPath
 
         return $"{name}/{name}{Extension}";
     }
+
+    /// <summary>
+    /// Whether <paramref name="segment"/> is one of the two names every action's own directory
+    /// already holds.
+    /// </summary>
+    /// <param name="segment">One segment of a runner's <c>action</c> value.</param>
+    /// <remarks>
+    /// Compared without case, because the refusal has to hold on a file system that does not
+    /// distinguish them: on Windows an action called <c>Build</c> would occupy the same directory
+    /// as the working space and the two would silently be one.
+    /// </remarks>
+    public static bool Reserved(string segment)
+        => string.Equals(segment, HarnessLayout.ActionBuildDirectoryName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(segment, HarnessLayout.ActionArtifactsDirectoryName, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// A suggested spelling kept where the author put it, so a remedy for a nested action does not

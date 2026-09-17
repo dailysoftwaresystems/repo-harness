@@ -182,6 +182,12 @@ internal static class HelpCommand
         builder.AppendLine("A flat '<name>.yml', a path leaving the directory, and a file whose name differs from");
         builder.AppendLine("its directory's are each refused, naming the path the runner should have had.");
         builder.AppendLine();
+        builder.AppendLine($"No directory along that path may be called '{HarnessLayout.ActionBuildDirectoryName}' or "
+            + $"'{HarnessLayout.ActionArtifactsDirectoryName}', at any depth.");
+        builder.AppendLine("Every action already owns one of each, below, and a directory that was both would be");
+        builder.AppendLine("ignored by the rules that keep a run's output out of git - so the action's own file");
+        builder.AppendLine("would never be committed, and what a reviewer reads would not be what runs.");
+        builder.AppendLine();
         builder.AppendLine($"  .harness-config/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerActionsDirectoryName}/<name>/<name>.yml");
         builder.AppendLine("                                     the steps, tracked by git");
         builder.AppendLine($"  .harness-config/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerActionsDirectoryName}/<name>/...");
@@ -267,6 +273,11 @@ internal static class HelpCommand
         builder.AppendLine("may have written the file: carrying evidence out of work that did not pass is what");
         builder.AppendLine("the whole verdict vocabulary exists to refuse.");
         builder.AppendLine();
+        builder.AppendLine("This is also what survives a resumed run. A step already done is skipped, and the");
+        builder.AppendLine("build directory of the attempt that ran it is gone - so a later step reaching an");
+        builder.AppendLine("earlier one's work across a resume has to read it from the artifacts, not from");
+        builder.AppendLine("'{actionBuild}'.");
+        builder.AppendLine();
         builder.AppendLine("Carrying an artifact to another machine");
         builder.AppendLine();
         builder.AppendLine("  DssHarness sync --artifact <run id>");
@@ -281,6 +292,18 @@ internal static class HelpCommand
         builder.AppendLine("A run that kept nothing is refused by name, whether or not any host needed a copy.");
         builder.AppendLine("An ordinary sync still withholds these directories, as it withholds everything git");
         builder.AppendLine("ignores; this carries one run's, by name, and nothing else.");
+        builder.AppendLine();
+        builder.AppendLine("It writes into a copy that is already there and makes none of its own: a host with");
+        builder.AppendLine("no copy, or one the harness did not create, is refused before a single file leaves");
+        builder.AppendLine("this machine. Run 'DssHarness sync' first - with '--adopt \"<host>\"' where a");
+        builder.AppendLine("directory is already at that repositoryPath. Otherwise a mistyped repositoryPath");
+        builder.AppendLine("would be filled in rather than noticed.");
+        builder.AppendLine();
+        builder.AppendLine("A carry lands whole or not at all. Interrupted, it takes back what it had already");
+        builder.AppendLine("written and says so - a directory holding two thirds of what the producer kept is");
+        builder.AppendLine("the same path holding fewer files, and a step reading it would measure less than was");
+        builder.AppendLine("built and pass. With '--dry-run' it carries nothing and lists what it would carry,");
+        builder.AppendLine("as '--pull' does.");
 
         builder.AppendLine();
         builder.AppendLine("A step may ask for the guards the build and test verbs carry. Both are off unless");

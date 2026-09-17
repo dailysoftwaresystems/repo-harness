@@ -90,10 +90,40 @@ public sealed class RemoteSyncTransport(
     {
         ArgumentNullException.ThrowIfNull(contents);
 
-        return AskAsync<object>(
-            root,
-            [SyncServe.Write, root, relativePath, Convert.ToBase64String(contents)],
-            cancellationToken);
+        SyncServe.RefuseAFileTooLargeToCarry(contents.LongLength, relativePath, Host.ToString());
+
+        return SendAsync(root, relativePath, contents, cancellationToken);
+    }
+
+    /// <summary>Encodes one file and sends it, as its own method so the encoding is inside a try.</summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="relativePath">Where the file goes, relative to the root.</param>
+    /// <param name="contents">Its bytes.</param>
+    /// <param name="cancellationToken">Stops the write.</param>
+    private async Task SendAsync(
+        string root,
+        string relativePath,
+        byte[] contents,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await AskAsync<object>(
+                    root,
+                    [SyncServe.Write, root, relativePath, Convert.ToBase64String(contents)],
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OutOfMemoryException)
+        {
+            // The bound above is what base64 can express; this is the other ceiling, which is
+            // whatever this machine had free. Both mean one thing to the reader - the file does not
+            // fit through here - and only this one arrives as "the tool has a defect" if it is left
+            // alone. Nothing is retried and nothing continues: the exception ends the command.
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                SyncServe.TooLargeToCarry(contents.LongLength, relativePath, Host.ToString()));
+        }
     }
 
     /// <inheritdoc/>
