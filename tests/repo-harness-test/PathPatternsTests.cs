@@ -1,4 +1,5 @@
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Sync;
 
 namespace RepoHarness.Tests;
@@ -8,7 +9,7 @@ namespace RepoHarness.Tests;
 /// because a file protected by the plan and listed by the host's walk is a file one side deletes
 /// and the other keeps.
 /// </summary>
-public sealed class SyncPathPatternsTests
+public sealed class PathPatternsTests
 {
     /// <summary>
     /// An entry is rooted unless it says otherwise, which is what every configuration written
@@ -23,7 +24,7 @@ public sealed class SyncPathPatternsTests
     [InlineData("build", "src/build/app.o", false)]
     [InlineData("build", "rebuild", false)]
     public void ABareEntry_IsRooted(string pattern, string path, bool covered)
-        => Assert.Equal(covered, SyncPathPatterns.Matches([pattern], path));
+        => Assert.Equal(covered, PathPatterns.Matches([pattern], path));
 
     /// <summary>
     /// A cache directory appears wherever its language put it, and a list that can only name one
@@ -37,7 +38,7 @@ public sealed class SyncPathPatternsTests
     [InlineData("**/__pycache__", "scripts/a/x.py", false)]
     [InlineData("**/node_modules", "web/ui/node_modules/left-pad/index.js", true)]
     public void AnAnyDepthEntry_CoversThatNameWhereverItIs(string pattern, string path, bool covered)
-        => Assert.Equal(covered, SyncPathPatterns.Matches([pattern], path));
+        => Assert.Equal(covered, PathPatterns.Matches([pattern], path));
 
     /// <summary>
     /// On whole segments. Without that, '**/cache' would cover 'src/mycache', a different directory
@@ -48,7 +49,7 @@ public sealed class SyncPathPatternsTests
     [InlineData("src/mycache/x")]
     [InlineData("cacheable")]
     public void AnAnyDepthEntry_MatchesWholeSegmentsOnly(string path)
-        => Assert.False(SyncPathPatterns.Matches(["**/cache"], path));
+        => Assert.False(PathPatterns.Matches(["**/cache"], path));
 
     /// <summary>
     /// A pattern that looks like a glob and is compared as text matches nothing. Refused where the
@@ -61,14 +62,14 @@ public sealed class SyncPathPatternsTests
     [InlineData("**/")]
     [InlineData("")]
     public void APatternThisCannotUnderstand_IsRefused(string pattern)
-        => Assert.NotNull(SyncPathPatterns.Problem(pattern));
+        => Assert.NotNull(PathPatterns.Problem(pattern));
 
     [Theory]
     [InlineData("build")]
     [InlineData("**/__pycache__")]
     [InlineData(".harness-config")]
     public void APatternThisUnderstands_IsAccepted(string pattern)
-        => Assert.Null(SyncPathPatterns.Problem(pattern));
+        => Assert.Null(PathPatterns.Problem(pattern));
 
     /// <summary>Both spellings arrive, and a Windows source must match a Linux copy.</summary>
     [Theory]
@@ -76,7 +77,7 @@ public sealed class SyncPathPatternsTests
     [InlineData("./scripts/a/__pycache__")]
     [InlineData("/scripts/a/__pycache__/")]
     public void APathSpelledAnyWay_IsTheSamePath(string path)
-        => Assert.True(SyncPathPatterns.Matches(["**/__pycache__"], path));
+        => Assert.True(PathPatterns.Matches(["**/__pycache__"], path));
 }
 
 /// <summary>

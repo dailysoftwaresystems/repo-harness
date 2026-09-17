@@ -354,7 +354,7 @@ public sealed class SyncService(
                 CommandName,
                 $"sync.neverTransfer names '{name}', which is not in this tree's root though the name "
                 + $"does exist deeper in it, so this entry protects nothing. Write "
-                + $"'{SyncPathPatterns.AnyDepth}{name}' to cover that name wherever it appears.");
+                + $"'{PathPatterns.AnyDepth}{name}' to cover that name wherever it appears.");
         }
 
         if (rooted.Incomplete is { } unread)

@@ -459,7 +459,8 @@ internal static class HelpCommand
         builder.AppendLine("config.json arriving through git cannot point the harness at a machine nobody set up.");
         builder.AppendLine();
         builder.AppendLine("Exit codes");
-        builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run, or with no --legs, at least one leg can");
+        builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");
+        builder.AppendLine($"  {HarnessExit.Incomplete,3}  legs: the legs that answered can run, and a host did not answer");
         builder.AppendLine($"  {LegsExit.Unavailable,3}  legs: a leg named with --legs cannot run, or no selected leg can");
         builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set, or no name at all");
         builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Id} than this machine");

@@ -1466,7 +1466,7 @@ public sealed class SyncServiceTests
 
     /// <summary>
     /// A manifest holds files, so a plan can delete every file a directory had and never mention
-    /// the directory. Locally that is invisible \u2014 git rm takes the directory with the last file \u2014
+    /// the directory. Locally that is invisible — git rm takes the directory with the last file —
     /// and it shows up only on a host, where the husk stays and whatever reads the tree next finds
     /// a directory with nothing addressable in it. Measured on a consumer's host after a wave of
     /// twenty deletions: ten directories left behind, eight holding nothing at all.

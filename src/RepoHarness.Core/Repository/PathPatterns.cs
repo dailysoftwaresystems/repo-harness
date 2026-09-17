@@ -1,13 +1,15 @@
-namespace RepoHarness.Core.Sync;
+namespace RepoHarness.Core.Repository;
 
 /// <summary>
-/// How <c>sync.neverTransfer</c> and <c>sync.exclude</c> name what they cover, and the one place
-/// that decides whether a path is covered.
+/// How a configured list of paths names what it covers, and the one place that decides whether a
+/// path is covered.
 /// </summary>
 /// <remarks>
-/// One matcher, because the question is asked on both sides of a sync: here, to build the plan, and
-/// on the host, where the walk is told what not to list. Two implementations of it are how a file
-/// ends up transferred by one side and protected by the other.
+/// One matcher for every list of this shape: <c>sync.neverTransfer</c>, <c>sync.exclude</c>,
+/// <c>lineEndings.exclude</c> and the roots an anchor cites. The question is asked on both sides of
+/// a sync as well — here to build the plan, and on the host where the walk is told what not to list
+/// — and two implementations of it are how a file ends up transferred by one side and protected by
+/// the other, or covered by one setting and not by another that is written the same way.
 /// <para>
 /// An entry is rooted unless it says otherwise. <c>build</c> is the <c>build</c> beside the
 /// repository and nothing else, which is what it has always meant and what a configuration written
@@ -23,7 +25,7 @@ namespace RepoHarness.Core.Sync;
 /// correct.
 /// </para>
 /// </remarks>
-public static class SyncPathPatterns
+public static class PathPatterns
 {
     /// <summary>What an entry starts with to mean "this name, at any depth".</summary>
     public const string AnyDepth = "**/";
@@ -94,8 +96,8 @@ public static class SyncPathPatterns
     /// <remarks>
     /// Only the leading form is supported, and anything else holding <c>*</c> is refused rather
     /// than matched literally. A pattern that looks like a glob and is compared as text matches
-    /// nothing, so a reader who writes <c>src/**/cache</c> gets a list that silently protects
-    /// nothing instead of a message naming the line.
+    /// nothing, so a reader who writes <c>src/**/cache</c> gets a message naming the line instead of
+    /// a list that silently protects nothing.
     /// </remarks>
     public static string? Problem(string? pattern)
     {

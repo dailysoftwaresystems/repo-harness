@@ -3,6 +3,7 @@ using RepoHarness.Core.Git;
 using RepoHarness.Core.Results;
 
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Repository;
 
 namespace RepoHarness.Core.Sync;
 
@@ -129,7 +130,7 @@ public sealed class SyncExclusions
         ArgumentNullException.ThrowIfNull(fileSystem);
 
         var rooted = _neverTransfer
-            .Where(path => !path.StartsWith(SyncPathPatterns.AnyDepth, StringComparison.Ordinal))
+            .Where(path => !path.StartsWith(PathPatterns.AnyDepth, StringComparison.Ordinal))
             .Where(path => !path.Contains('/', StringComparison.Ordinal))
             .Where(path => !SyncConfig.NeverTransferFloor.Contains(path, StringComparer.Ordinal))
             .ToList();
@@ -343,7 +344,7 @@ public sealed class SyncExclusions
     }
 
     private static bool Matches(string[] paths, string relativePath)
-        => SyncPathPatterns.Matches(paths, relativePath);
+        => PathPatterns.Matches(paths, relativePath);
 
-    private static string Normalize(string path) => SyncPathPatterns.Normalize(path);
+    private static string Normalize(string path) => PathPatterns.Normalize(path);
 }

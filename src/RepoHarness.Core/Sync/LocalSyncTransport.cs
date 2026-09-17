@@ -450,16 +450,21 @@ public sealed class LocalSyncTransport(
     /// </remarks>
     private bool Adopted(string root) => Marker(root) is { Adopted: true };
 
-    /// <summary>A withheld-path test built once, rather than re-parsed for every file in a tree.</summary>
+    /// <summary>A withheld-path test over a list put into its comparison form once.</summary>
     /// <remarks>
     /// Through the one matcher the plan is built with, not a second copy of the rule. The walk on a
     /// host and the plan on the asking machine have to agree about what is covered, and two
     /// implementations are how a file ends up protected by one and deleted by the other.
+    /// <para>
+    /// The list is normalised here rather than on every comparison. A host walk asks this once per
+    /// file and the matcher normalises whatever it is handed, so an un-normalised list would be
+    /// re-parsed once per file per pattern — which is what "built once" was claiming not to do.
+    /// </para>
     /// </remarks>
     private sealed class PathSet(IReadOnlyList<string> paths)
     {
-        private readonly IReadOnlyList<string> _paths = paths;
+        private readonly IReadOnlyList<string> _paths = [.. paths.Select(PathPatterns.Normalize)];
 
-        public bool Contains(string relativePath) => SyncPathPatterns.Matches(_paths, relativePath);
+        public bool Contains(string relativePath) => PathPatterns.Matches(_paths, relativePath);
     }
 }

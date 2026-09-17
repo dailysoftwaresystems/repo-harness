@@ -86,7 +86,9 @@ public static class TestInvocationResolver
     /// <param name="excludes">Exclusions the caller asked for.</param>
     /// <param name="paths">
     /// The directories this leg runs against, which the arguments and the working directory may
-    /// name. Null leaves every placeholder as written, for a caller with no leg in hand.
+    /// name. Null is for a caller with no leg in hand: every placeholder is left as written and the
+    /// configured working directory is dropped rather than resolved, so what comes back describes
+    /// the shape of the command and not a command anybody should run.
     /// </param>
     /// <remarks>
     /// The core count goes through <c>coresEnv</c> where the runner reads a variable and

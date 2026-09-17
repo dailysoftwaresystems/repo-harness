@@ -10,7 +10,11 @@ namespace RepoHarness.Core.Execution;
 /// <param name="Leg">The leg, as the configuration names it.</param>
 /// <param name="Verdict">The one verdict it reached.</param>
 /// <param name="Duration">Its wall time, or <see cref="TimeSpan.Zero"/> when it never ran.</param>
-/// <param name="Detail">What produced the verdict, and any timing mark, in the words the table shows.</param>
+/// <param name="Detail">
+/// What produced the verdict, and nothing else. Deliberately without the timing mark: the mark is
+/// composed where the table is rendered, so a ledger carried from one machine to another is not
+/// marked again by each of them.
+/// </param>
 /// <param name="TimingsSuspect">
 /// Whether its durations mean anything. Never part of the verdict: a host that slept, or a clock
 /// that stepped, makes a duration meaningless, and whether the code passed is a separate fact.

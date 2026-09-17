@@ -61,6 +61,11 @@ public sealed class AnchorBalanceServiceTests
         Assert.Contains(
             report.Findings,
             finding => finding.Message.Contains("is not one of", StringComparison.Ordinal));
+
+        // The severity is what decides the verb's answer, and a Warning here would leave this verb
+        // saying the balance holds while --lint exits 1 on the same file. That divergence is the
+        // whole reason this test exists.
+        Assert.False(report.Passed);
     }
 
     [Fact]

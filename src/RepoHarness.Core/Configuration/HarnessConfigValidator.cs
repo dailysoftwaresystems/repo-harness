@@ -267,7 +267,14 @@ public static class HarnessConfigValidator
     }
 
     private static void ValidateLineEndings(LineEndingSettings lineEndings, List<string> problems)
-        => RequireRelativePaths(lineEndings.Exclude, "lineEndings.exclude", problems);
+    {
+        RequireRelativePaths(lineEndings.Exclude, "lineEndings.exclude", problems);
+
+        // Read by the same matcher as sync.exclude, so checked by the same rule. Left unchecked, a
+        // '*' anywhere but the leading '**/' is compared as text, matches nothing, and the line sits
+        // in the file reading as protection.
+        CheckPathPatterns(lineEndings.Exclude, "lineEndings.exclude", problems);
+    }
 
     private static void ValidateCi(CiSettings ci, List<string> problems)
     {
@@ -1148,8 +1155,8 @@ public static class HarnessConfigValidator
     {
         RequireRelativePaths(sync.Exclude, "sync.exclude", problems);
         RequireRelativePaths(sync.NeverTransfer, "sync.neverTransfer", problems);
-        CheckSyncPatterns(sync.NeverTransfer, "sync.neverTransfer", problems);
-        CheckSyncPatterns(sync.Exclude, "sync.exclude", problems);
+        CheckPathPatterns(sync.NeverTransfer, "sync.neverTransfer", problems);
+        CheckPathPatterns(sync.Exclude, "sync.exclude", problems);
 
         if (!double.IsFinite(sync.MaxDeleteFraction) || sync.MaxDeleteFraction is < 0 or > 1)
         {
@@ -1477,11 +1484,11 @@ public static class HarnessConfigValidator
     /// <param name="patterns">The entries, as written.</param>
     /// <param name="setting">What to call the setting in the problem.</param>
     /// <param name="problems">Where problems are collected.</param>
-    private static void CheckSyncPatterns(IReadOnlyList<string>? patterns, string setting, List<string> problems)
+    private static void CheckPathPatterns(IReadOnlyList<string>? patterns, string setting, List<string> problems)
     {
         foreach (var pattern in patterns ?? [])
         {
-            if (Sync.SyncPathPatterns.Problem(pattern) is { } problem)
+            if (Repository.PathPatterns.Problem(pattern) is { } problem)
             {
                 problems.Add($"{setting} names '{pattern}', which {problem}");
             }

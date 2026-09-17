@@ -16,7 +16,7 @@ public sealed class LegGuardsTests
     /// <summary>
     /// A set that is empty because nothing the build reads is tracked is not a set nobody could
     /// establish. Read as unmeasured it would fail every build in a repository that happens not to
-    /// track the language it builds \u2014 which is what this did before a test existed for it.
+    /// track the language it builds — which is what this did before a test existed for it.
     /// </summary>
     [Fact]
     public void AnEmptySetWithNoReason_ContributesNothing()

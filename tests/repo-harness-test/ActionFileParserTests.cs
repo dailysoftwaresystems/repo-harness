@@ -686,7 +686,7 @@ public sealed class ActionFileParserTests
     /// <summary>
     /// Anything that is not exactly true or false is refused, never read as false. These keys turn
     /// guards on, so a misspelling read as "off" is a step that looks guarded in the file and is
-    /// not \u2014 which is the failure the guards exist to make impossible.
+    /// not — which is the failure the guards exist to make impossible.
     /// </summary>
     [Theory]
     [InlineData("watchContention")]

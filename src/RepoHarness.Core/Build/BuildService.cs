@@ -361,11 +361,19 @@ public sealed class BuildService(
     /// <remarks>
     /// Ninja, Make and MSBuild decide what is stale by ordering timestamps, which a stepped clock
     /// defeats without a word: an object stamped during a forward step looks newer than a source
-    /// edited just after it. Three conditions rebuild the variant from clean, and the ledger names
-    /// which: the previous build spanned a clock step; an input's content differs from what this
-    /// directory was built from; or a changed input is not newer than the newest output, which is
-    /// what a stepped clock does and what a build system comparing timestamps would miss. A stale
-    /// binary reported as a pass is the one price an incremental build must never pay.
+    /// edited just after it. Six conditions rebuild the variant from clean, and the ledger names
+    /// which.
+    /// <para>
+    /// Three are answers: the previous build spanned a clock step; an input's content differs from
+    /// what this directory was built from; or a changed input is not newer than the newest output,
+    /// which is what a stepped clock does and what a build system comparing timestamps would miss.
+    /// </para>
+    /// <para>
+    /// Three are the absence of an answer, and rebuild for that reason alone: there is no record to
+    /// compare, there is no set to compare because the tracked files could not be listed, or an
+    /// input could not be read. None of them says the tree held still, and a stale binary reported
+    /// as a pass is the one price an incremental build must never pay.
+    /// </para>
     /// <para>
     /// The order matters and is the reason the input set can be narrowed at all. The clock step is
     /// tested first, so a host whose clock moves rebuilds from clean whatever the set says; what is

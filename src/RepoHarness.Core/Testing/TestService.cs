@@ -344,23 +344,6 @@ public sealed class TestService(
     }
 
     /// <summary>
-    /// The one verdict the leg reached: the most fundamental of the three it could have reached.
-    /// </summary>
-    /// <remarks>
-    /// A leg whose inputs moved is not reported as failed even when its tests failed, because what
-    /// failed was a tree that never existed. The order is <see cref="Verdicts.Worst"/>'s, so this
-    /// command cannot rank the vocabulary differently from the two that share it.
-    /// </remarks>
-    /// <summary>
-    /// The inputs to fingerprint, and why they could not be established when they could not.
-    /// </summary>
-    /// <remarks>
-    /// The caller's list, else the leg's <c>test.inputs</c>, else every file git tracks. A set that
-    /// could not be established is carried as a reason rather than as an empty list: an empty list
-    /// fingerprints cleanly, and "nothing moved" is exactly the answer an unmeasured leg must not
-    /// give.
-    /// </remarks>
-    /// <summary>
     /// Declared inputs with their glob patterns replaced by the files they match.
     /// </summary>
     /// <param name="declared">What <c>test.inputs</c> names: paths, patterns, or both.</param>

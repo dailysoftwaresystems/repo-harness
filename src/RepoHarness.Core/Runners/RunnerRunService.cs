@@ -495,7 +495,6 @@ public sealed class RunnerRunService(
         return new RunnerSteps(phases, performed);
     }
 
-    /// <summary>Runs one step, with the runner's bounds and the values it reads.</summary>
     /// <summary>
     /// Refuses a step naming something nothing can fill in, over the whole file and before its
     /// first program starts.
@@ -563,6 +562,7 @@ public sealed class RunnerRunService(
         }
     }
 
+    /// <summary>Runs one step, with the runner's bounds and the values it reads.</summary>
     private async Task<PhaseResult> RunPhaseAsync(
         HarnessConfig config,
         RunnerRunRequest request,
