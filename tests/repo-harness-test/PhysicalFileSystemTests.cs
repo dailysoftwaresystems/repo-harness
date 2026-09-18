@@ -88,10 +88,11 @@ public sealed class PhysicalFileSystemTests
     /// <summary>
     /// A walk of a tree never descends through a directory link: one leads out of the tree, to files
     /// it does not contain, and one leads back into it, round and round. Both are here - a link out,
-    /// and a link to the tree's own root - and the walk lists the tree's own file and ends.
+    /// and a link to the tree's own root - and the walk lists the tree's own file and ends. The links
+    /// it passed over are exactly the ones a caller who has to say so is told about.
     /// </summary>
     [Fact]
-    public void EnumerateFiles_Recursive_NeverDescendsThroughADirectoryLink()
+    public void EnumerateFiles_Recursive_NeverDescendsThroughADirectoryLink_AndTheLinksAreNamed()
     {
         using var temp = new TempDirectory();
         temp.WriteFile(Path.Combine("outside", "elsewhere.txt"), "x");
@@ -109,8 +110,20 @@ public sealed class PhysicalFileSystemTests
         }
 
         var files = Create().EnumerateFiles(tree, recursive: true).ToList();
+        var links = Create().EnumerateDirectoryLinks(tree).Order(StringComparer.Ordinal).ToList();
 
         Assert.Equal([own], files);
+        Assert.Equal([Path.Combine(tree, "out"), Path.Combine(tree, "sub", "loop")], links);
+    }
+
+    /// <summary>A tree with no link in it has none to name.</summary>
+    [Fact]
+    public void EnumerateDirectoryLinks_NamesNothing_WhereThereIsNoLink()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("tree", "sub", "own.txt"), "x");
+
+        Assert.Empty(Create().EnumerateDirectoryLinks(temp.Combine("tree")));
     }
 
     [Fact]

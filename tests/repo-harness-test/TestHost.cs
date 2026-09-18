@@ -46,6 +46,28 @@ internal static class TestHost
         IsolateGitConfiguration();
     }
 
+    /// <summary>
+    /// Makes a program that really starts and exits zero, named <paramref name="name"/> in
+    /// <paramref name="directory"/>, and returns its path.
+    /// </summary>
+    internal static string StartableProgram(string directory, string name)
+    {
+        Directory.CreateDirectory(directory);
+
+        if (OperatingSystem.IsWindows())
+        {
+            // A standalone system program, copied under a name no PATH can know.
+            var copy = Path.Combine(directory, name + ".exe");
+            File.Copy(Path.Combine(Environment.SystemDirectory, "hostname.exe"), copy);
+            return copy;
+        }
+
+        var path = Path.Combine(directory, name);
+        File.WriteAllText(path, "#!/bin/sh\nexit 0\n");
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return path;
+    }
+
     /// <summary>A request that runs this assembly as a child in <paramref name="mode"/>.</summary>
     internal static ProcessRequest ChildRequest(string mode, params string[] arguments) => new()
     {

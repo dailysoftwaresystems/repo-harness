@@ -14,9 +14,21 @@ namespace RepoHarness.Core.Results;
 /// harness broke" — when a run placed a leg there. A missing program on a host is that host's
 /// problem, and a defect is this tool's; sending a reader after the wrong one costs the whole of
 /// the time they spend looking.
+/// <para>
+/// Each reader says it in its own terms. A command ends with the exit code named here; a leg that
+/// was already running when one of these stopped it has failed, for the cause named - see
+/// <see cref="Names"/>.
+/// </para>
 /// </remarks>
 public static class KnownCauses
 {
+    /// <summary>
+    /// Whether <paramref name="exception"/> has a cause this build can name, rather than being a
+    /// defect in it.
+    /// </summary>
+    /// <param name="exception">What was thrown.</param>
+    public static bool Names(Exception exception) => ExitCodeFor(exception) is not null;
+
     /// <summary>
     /// The exit code <paramref name="exception"/> means, or <see langword="null"/> when its cause is
     /// not one this build can name.

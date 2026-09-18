@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
@@ -824,7 +825,10 @@ public static class HarnessConfigValidator
                 problems.Add(
                     $"toolSearchDirectories names platform '{platform}'; "
                     + $"expected one of {string.Join(", ", PlatformKeys)}");
+                continue;
             }
+
+            var every = string.Equals(platform, PlatformScope.Every, StringComparison.OrdinalIgnoreCase);
 
             foreach (var directory in directories ?? [])
             {
@@ -834,17 +838,19 @@ public static class HarnessConfigValidator
                     continue;
                 }
 
-                var rooted = directory.StartsWith("~/", StringComparison.Ordinal)
-                    || directory.StartsWith('/')
-                    || Path.IsPathRooted(directory)
-                    || (directory.Length >= 3 && directory[1] == ':' && directory[2] is '/' or '\\');
+                // Under 'all', an entry only one kind of machine can name is searched where it can
+                // be; under a platform, it has to name a directory on that platform.
+                var names = every
+                    ? PlatformNames.OperatingSystems.Any(system => ToolSearchDirectories.Names(directory, system))
+                    : ToolSearchDirectories.Names(directory, platform);
 
-                if (!rooted)
+                if (!names)
                 {
                     problems.Add(
-                        $"toolSearchDirectories.{platform} lists '{directory}', which is relative; name the "
-                        + "directory absolutely, or from the home directory as '~/...', so every command "
-                        + "looks in the same place wherever it started");
+                        $"toolSearchDirectories.{platform} lists '{directory}', which names no directory "
+                        + $"{(every ? "on any platform" : "there")} wherever a search starts; name it "
+                        + "absolutely - a drive or a share on Windows, a leading '/' elsewhere - or from "
+                        + "the home directory as '~/...'");
                 }
             }
         }

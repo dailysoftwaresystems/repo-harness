@@ -105,7 +105,7 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(kind);
 
-        return $"/{DirectoryName}/{RunnerDirectoryName}/{RunnerActionsDirectoryName}/**/{kind}/";
+        return $"/{RunnerActionsDirectoryRelative}/**/{kind}/";
     }
 
     /// <summary>One of an action's two run-keyed directories, relative to a tree root.</summary>
@@ -224,6 +224,15 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
 
     /// <summary>The harness directory, relative to a tree root.</summary>
     public static string HarnessDirectoryRelative => DirectoryName;
+
+    /// <summary>The runner directory, relative to a tree root, with forward separators.</summary>
+    public const string RunnerDirectoryRelative = DirectoryName + "/" + RunnerDirectoryName;
+
+    /// <summary>
+    /// The actions directory, relative to a tree root, with forward separators: how a sync, an ignore
+    /// rule and a message name it, whichever machine reads it.
+    /// </summary>
+    public const string RunnerActionsDirectoryRelative = RunnerDirectoryRelative + "/" + RunnerActionsDirectoryName;
 
     /// <summary>
     /// Where the values actions read live, resolved against the main checkout because they are

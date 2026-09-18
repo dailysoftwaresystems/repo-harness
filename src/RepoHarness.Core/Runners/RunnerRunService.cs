@@ -5,6 +5,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -13,14 +14,7 @@ namespace RepoHarness.Core.Runners;
 /// <summary>One predefined runner on one leg, with everything the caller has already decided.</summary>
 public sealed record RunnerRunRequest
 {
-    /// <summary>
-    /// The directories the host running this leg found its programs in off the PATH, appended to the
-    /// PATH of every process the leg starts.
-    /// </summary>
-    /// <remarks>
-    /// From the survey the host answered about itself, so the programs a phase starts by name, and
-    /// the ones those start by name in turn, are found where the survey found them.
-    /// </remarks>
+    /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 
     /// <summary>The runner, as <c>predefinedRunners</c> keys it and a run check names it.</summary>
@@ -712,12 +706,17 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    FileName = LegPathNames.Expand(
-                        phase.Command[0],
-                        paths,
-                        $"'{phase.Name}' run line",
-                        PlaceholderPolicy.LeaveAsWritten,
-                        supplied),
+                    // A relative path is the tree's own file, as the policy that allowed it read it:
+                    // left to the start, it would be read against wherever this process began,
+                    // which for a leg on a worktree is the main checkout's copy of the script.
+                    FileName = ProcessRunner.Anchored(
+                        LegPathNames.Expand(
+                            phase.Command[0],
+                            paths,
+                            $"'{phase.Name}' run line",
+                            PlaceholderPolicy.LeaveAsWritten,
+                            supplied),
+                        request.TreeRoot),
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),
@@ -1128,7 +1127,9 @@ public sealed class RunnerRunService(
     /// <param name="request">The run.</param>
     /// <param name="action">The action's own directory, relative to the actions directory.</param>
     /// <param name="cancellationToken">Stops the questions.</param>
-    /// <exception cref="HarnessException">Either directory would not be ignored. Nothing has run.</exception>
+    /// <exception cref="HarnessException">
+    /// Either directory would not be ignored, or git could not say whether it would. Nothing has run.
+    /// </exception>
     /// <remarks>
     /// Asked before anything is written, of the paths this very run would write: a file under each,
     /// because git answers a directory rule for a directory that does not exist yet only when asked
@@ -1152,8 +1153,24 @@ public sealed class RunnerRunService(
         })
         {
             var probe = Path.Combine(relative, "probe").Replace('\\', '/');
+            bool ignored;
 
-            if (!await _gitClient.IsIgnoredAsync(request.TreeRoot, probe, cancellationToken).ConfigureAwait(false))
+            try
+            {
+                ignored = await _gitClient.IsIgnoredAsync(request.TreeRoot, probe, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HarnessException ex) when (ex.ExitCode == HarnessExit.CommandFailed)
+            {
+                // A question that could not be asked is no verdict on the code, and not an answer
+                // either way: refused, in git's own words, which on a host's copy is usually a
+                // safe.directory git will not trust - and git names the fix for that itself.
+                throw new HarnessException(
+                    HarnessExit.Refused,
+                    $"git could not say whether this action's '{kind}/' is ignored in '{request.TreeRoot}', "
+                    + $"so whether this run would write where git commits is unknown. Nothing has run. {ex.Message}");
+            }
+
+            if (!ignored)
             {
                 uncovered.Add(kind);
             }
@@ -1209,7 +1226,19 @@ public sealed class RunnerRunService(
                         // samples emits a directory of them. Skipped here — which is what this did —
                         // it passed the witness, was never copied, and went with the build directory,
                         // leaving a passed run and no measurements.
-                        KeepDirectory(source, destination);
+                        var unfollowed = KeepDirectory(source, destination);
+
+                        if (unfollowed.Count > 0)
+                        {
+                            // A kept copy missing what its links led to is an incomplete copy, and one
+                            // a later sync carries to every host as though it were the whole output.
+                            _output.Warn(
+                                CommandName,
+                                $"'{phase.StepName}' asked to keep '{output}', which holds {unfollowed.Count} "
+                                + "directory link(s) that were not followed, so what they lead to is not in "
+                                + $"the kept copy: {string.Join(", ", unfollowed.Select(link => $"'{link}'"))}");
+                        }
+
                         continue;
                     }
 
@@ -1276,7 +1305,12 @@ public sealed class RunnerRunService(
     /// <summary>Copies a directory output, with everything under it.</summary>
     /// <param name="source">The directory the step produced.</param>
     /// <param name="destination">Where it is kept.</param>
-    private void KeepDirectory(string source, string destination)
+    /// <returns>
+    /// The directory links under it, relative to it, which were not followed: a link can lead out of
+    /// the output, or back into it and round again, so what it leads to is not copied - and is named
+    /// rather than left out without a word.
+    /// </returns>
+    private IReadOnlyList<string> KeepDirectory(string source, string destination)
     {
         _fileSystem.CreateDirectory(destination);
 
@@ -1288,6 +1322,8 @@ public sealed class RunnerRunService(
             _fileSystem.CreateDirectory(Path.GetDirectoryName(into) ?? destination);
             _fileSystem.CopyFile(file, into, overwrite: true);
         }
+
+        return [.. _fileSystem.EnumerateDirectoryLinks(source).Select(link => Path.GetRelativePath(source, link).Replace('\\', '/'))];
     }
 
     /// <summary>

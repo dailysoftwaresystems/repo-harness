@@ -113,8 +113,13 @@ public sealed class HostProgramResolverTests
         Assert.Equal(["sh -c command -v dotnet"], asked);
     }
 
+    /// <summary>
+    /// cmd has no portable way to test one path, so a host told to look in directories cannot, and a
+    /// program its PATH does not name is not known either way: calling it missing would have
+    /// install-missing-tools install a second copy of one a leg there can already start.
+    /// </summary>
     [Fact]
-    public async Task OnACmdShell_NoDirectoriesAreSearched_AndWhereIsAsked()
+    public async Task OnACmdShell_TheDirectoriesCannotBeLookedIn_SoAProgramOffThePathIsUnknown()
     {
         var asked = new List<string>();
 
@@ -124,10 +129,90 @@ public sealed class HostProgramResolverTests
             return HostResults.Failed(1, "INFO: Could not find files");
         });
 
-        var connection = await Resolve(commands, SshHost with { Shell = RemoteShell.Cmd }, ["dotnet"]);
+        var connection = await Resolve(commands, SshHost with { Shell = RemoteShell.Cmd }, ["cmake"], [@"C:\tools"]);
+        var located = connection.Located("cmake");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Equal(
+            "'cmake' is not on the PATH there, and its shell, cmd, gives this no way to look in the directories searched for programs",
+            located?.Reason);
+        Assert.Equal(["where"], asked);
+    }
+
+    /// <summary>With nothing to look in beyond the PATH, the PATH was everywhere there was to look.</summary>
+    [Fact]
+    public async Task OnACmdShell_WithNoDirectoriesToLookIn_AProgramOffThePathIsNowhere()
+    {
+        var commands = new ScriptedHostCommands((_, _) => HostResults.Failed(1, "INFO: Could not find files"));
+
+        var connection = await Resolve(commands, SshHost with { Shell = RemoteShell.Cmd }, ["dotnet"], []);
 
         Assert.Equal(ProgramFound.Nowhere, connection.Located("dotnet")?.Found);
-        Assert.Equal(["where"], asked);
+    }
+
+    /// <summary>
+    /// A POSIX 'ls' given files prints the ones that exist, as given, and nothing else. PowerShell -
+    /// which no probe tells apart from a POSIX shell - prints a table, and reading that as "none of
+    /// them exist" would call every program there missing.
+    /// </summary>
+    [Fact]
+    public async Task AListingThatIsNotPosixs_LeavesTheProgramUnknown_NotMissing()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Ok(Home + "\n"),
+            "ls" => HostResults.Ok("\n    Directory: /usr/local/bin\n\nMode   LastWriteTime   Length Name\n----   -------------   ------ ----\n-a---  1/1/2026 0:00  1024   dotnet\n"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["dotnet"])).Located("dotnet");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Contains("is not a listing this can read", located?.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// With no home directory to expand them against, the directories under it were not looked in,
+    /// and a program not found in the others is not known either way.
+    /// </summary>
+    [Fact]
+    public async Task AHomeThatCouldNotBeRead_LeavesAProgramFoundNowhereElseUnknown()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Failed(1, "pwd: cannot read"),
+            "ls" => HostResults.Failed(2, "ls: No such file or directory"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["dotnet"], ["~/.dotnet", "/usr/local/bin"])).Located("dotnet");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Equal(
+            "'dotnet' is not on the PATH there, and '~/.dotnet' could not be looked in, because its home directory could not be read",
+            located?.Reason);
+    }
+
+    /// <summary>
+    /// A Windows directory given to a host whose shell is not cmd - PowerShell over ssh - cannot be
+    /// listed with a POSIX 'ls', and is said to be that rather than searched and found empty.
+    /// </summary>
+    [Fact]
+    public async Task AWindowsDirectoryGivenToAShellThatIsNotCmd_IsSaidToBeUnlooked()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Ok(Home + "\n"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["cmake"], [@"C:\tools"])).Located("cmake");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Contains(@"'C:\tools' could not be looked in, because only a POSIX path can be listed there", located?.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -147,8 +232,15 @@ public sealed class HostProgramResolverTests
         });
 
         var connection = await Resolve(commands, SshHost, ["dotnet"]);
+        var located = connection.Located("dotnet");
 
-        Assert.Equal(ProgramFound.Nowhere, connection.Located("dotnet")?.Found);
+        // Looked for everywhere else, and said to be unknown rather than missing: the directories
+        // passed over are the ones it may well be in.
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Contains(
+            "'~/.dotnet', '~/.local/bin', '~/bin' could not be looked in, because a path holding a space cannot be named",
+            located?.Reason,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(candidates, path => path.Contains(' ', StringComparison.Ordinal));
         Assert.Contains("/usr/local/bin/dotnet", candidates);
     }
@@ -217,14 +309,18 @@ public sealed class HostProgramResolverTests
         return HostResults.Ok(string.Join('\n', present) + "\n");
     }
 
-    private static Task<HostConnection> Resolve(ScriptedHostCommands commands, HostConnection connection, string[] wanted)
+    private static Task<HostConnection> Resolve(
+        ScriptedHostCommands commands,
+        HostConnection connection,
+        string[] wanted,
+        IReadOnlyList<string>? directories = null)
         => new HostProgramResolver(
                 new LocalProgramResolver(HostDoubles.Platform(), Substitute.For<IFilePermissions>()),
                 commands)
             .ResolveAsync(
                 connection,
                 wanted,
-                ToolSearchDirectories.Posix,
+                directories ?? ToolSearchDirectories.Posix,
                 TimeSpan.FromSeconds(5),
                 TestContext.Current.CancellationToken);
 }

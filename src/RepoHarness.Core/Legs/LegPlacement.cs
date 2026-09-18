@@ -1,4 +1,5 @@
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 
@@ -13,16 +14,14 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// <summary>Whether a host can run the leg.</summary>
     public bool Runnable => Host is not null;
 
-    /// <summary>
-    /// Whether a host that was right for the leg in every other way turned it away only because a
-    /// program its build or test starts is not there.
-    /// </summary>
+    /// <summary>What a run records for the leg when no host can run it.</summary>
     /// <remarks>
-    /// Kept apart from the reason's wording so a run can report such a leg as skipped for a missing
-    /// tool rather than as skipped for want of a host. The two send somebody to different places:
-    /// one to install a program, the other to switch a machine on.
+    /// Decided with the reason rather than read back out of its wording, because each sends somebody
+    /// somewhere different: skipped for a missing tool, to install a program on a host that is right
+    /// in every other way; skipped as unavailable, to switch a machine on or reach it; and poisoned,
+    /// to report a defect in this tool - a host never asked about a program the leg starts.
     /// </remarks>
-    public bool ToolMissing { get; init; }
+    public LegVerdict Verdict { get; init; } = LegVerdict.SkippedUnavailable;
 
     /// <summary>
     /// The hosts that may run <paramref name="leg"/>, in the order they are tried: the one host it names,
@@ -72,20 +71,24 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// </summary>
     /// <param name="config">The whole configuration.</param>
     /// <param name="selected">The leg being placed.</param>
+    /// <param name="workload">What the command has the leg do, which says what its host must have.</param>
     /// <param name="reports">What measurement found, by host.</param>
     /// <param name="here">Whether this machine is the only candidate, whatever the leg names.</param>
     public static LegPlacement Place(
         HarnessConfig config,
         SelectedLeg selected,
+        LegWorkload workload,
         IReadOnlyDictionary<HostId, HostReport> reports,
         bool here = false)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(selected);
+        ArgumentNullException.ThrowIfNull(workload);
         ArgumentNullException.ThrowIfNull(reports);
 
+        var programs = LegPrograms.For(config, selected.Leg, workload);
         var reasons = new List<string>();
-        var toolMissing = false;
+        var verdict = LegVerdict.SkippedUnavailable;
 
         foreach (var candidate in Candidates(config, selected.Leg, here))
         {
@@ -94,50 +97,70 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 continue;
             }
 
-            if (PlatformObstacle(selected.Leg, report) is { } platform)
+            if (Refusal(selected.Leg, programs, report) is not { } refusal)
             {
-                reasons.Add($"{candidate}: {platform}");
-                continue;
+                return new LegPlacement(selected, report, null);
             }
 
-            if (MissingPrograms(config, selected.Leg, report) is { } missing)
-            {
-                reasons.Add($"{candidate}: {missing}");
-                toolMissing = true;
-                continue;
-            }
-
-            return new LegPlacement(selected, report, null);
+            reasons.Add($"{candidate}: {refusal.Reason}");
+            verdict = Graver(verdict, refusal.Verdict);
         }
 
         return new LegPlacement(selected, null, reasons.Count == 0 ? "no host was measured for it" : string.Join("; ", reasons))
         {
-            ToolMissing = toolMissing,
+            Verdict = verdict,
         };
     }
 
     /// <summary>What stops <paramref name="host"/> from running <paramref name="leg"/>, or <see langword="null"/> when nothing does.</summary>
     /// <param name="config">The whole configuration, which says what the leg's build and test start.</param>
     /// <param name="leg">The leg.</param>
+    /// <param name="workload">What the command has the leg do.</param>
     /// <param name="host">What measuring the host found.</param>
-    public static string? Obstacle(HarnessConfig config, LegConfig leg, HostReport host)
+    public static string? Obstacle(HarnessConfig config, LegConfig leg, LegWorkload workload, HostReport host)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(leg);
+        ArgumentNullException.ThrowIfNull(workload);
         ArgumentNullException.ThrowIfNull(host);
 
-        return PlatformObstacle(leg, host) ?? MissingPrograms(config, leg, host);
+        return Refusal(leg, LegPrograms.For(config, leg, workload), host)?.Reason;
     }
+
+    /// <summary>
+    /// Why <paramref name="host"/> turns <paramref name="leg"/> away, and what a run records for
+    /// that, or <see langword="null"/> when it takes the leg. The one decision placing a leg and
+    /// asking about one host both read, so the two cannot come to disagree about a host.
+    /// </summary>
+    /// <remarks>
+    /// The machine is asked about before its programs, because a host that is the wrong machine
+    /// should say so. Told instead that cmake is missing on a Windows host being considered for a
+    /// Linux leg, a reader would go and install cmake on a machine the leg will never run on.
+    /// </remarks>
+    private static (string Reason, LegVerdict Verdict)? Refusal(LegConfig leg, IReadOnlyList<string> programs, HostReport host)
+        => PlatformObstacle(leg, host) is { } platform
+            ? (platform, LegVerdict.SkippedUnavailable)
+            : MissingPrograms(programs, host);
+
+    /// <summary>
+    /// The graver of two verdicts for a leg every candidate turned away: a defect in this tool over
+    /// anything, then a program a right host lacks - which somebody can install - over a host that
+    /// could not take the leg at all.
+    /// </summary>
+    private static LegVerdict Graver(LegVerdict first, LegVerdict second)
+        => Gravity(second) > Gravity(first) ? second : first;
+
+    private static int Gravity(LegVerdict verdict) => verdict switch
+    {
+        LegVerdict.Poisoned => 2,
+        LegVerdict.SkippedToolMissing => 1,
+        _ => 0,
+    };
 
     /// <summary>
     /// What stops <paramref name="host"/> from running <paramref name="leg"/> before its programs
     /// are asked about: it is unreachable, or the wrong machine.
     /// </summary>
-    /// <remarks>
-    /// Asked first, because a host that is the wrong machine should say so. Told instead that cmake
-    /// is missing on a Windows host being considered for a Linux leg, a reader would go and install
-    /// cmake on a machine the leg will never run on.
-    /// </remarks>
     private static string? PlatformObstacle(LegConfig leg, HostReport host)
     {
         if (!host.Available)
@@ -166,27 +189,41 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     }
 
     /// <summary>
-    /// The programs <paramref name="leg"/>'s build and test start that <paramref name="host"/> does
-    /// not have, said as one reason, or <see langword="null"/> when it has them all.
+    /// The programs of <paramref name="programs"/> that <paramref name="host"/> is not known to have,
+    /// said as one reason with what a run records for it, or <see langword="null"/> when it has them all.
     /// </summary>
     /// <remarks>
-    /// Read from what the host itself found, with the search a leg there will use. A program the host
-    /// was not asked about is reported as that rather than as missing: a survey that had not looked
-    /// must not read as one that looked and found nothing, nor as one that found it.
+    /// Read from what the host itself found, with the search a leg there will use. Three different
+    /// facts, kept apart: a program the search looked for everywhere and did not find is missing; one
+    /// it could not look for everywhere is not known either way, and no refusal may call it missing;
+    /// and one the host was never asked about is a defect in this tool, since a host is asked about
+    /// every program any leg starts. A survey that had not looked must not read as one that looked
+    /// and found nothing, nor as one that found it.
     /// </remarks>
-    private static string? MissingPrograms(HarnessConfig config, LegConfig leg, HostReport host)
+    private static (string Reason, LegVerdict Verdict)? MissingPrograms(IReadOnlyList<string> programs, HostReport host)
     {
-        var missing = LegPrograms.For(config, leg)
-            .Where(program => !host.Programs.TryGetValue(program, out var location) || !location.Present)
-            .ToList();
+        var absent = new List<string>();
+        var unknown = new List<string>();
+        var unasked = new List<string>();
 
-        if (missing.Count == 0)
+        foreach (var program in programs)
         {
-            return null;
+            switch (host.Programs.GetValueOrDefault(program)?.Found)
+            {
+                case ProgramFound.OnPath or ProgramFound.OffPath:
+                    break;
+                case ProgramFound.Nowhere:
+                    absent.Add(program);
+                    break;
+                case ProgramFound.Unreadable:
+                    unknown.Add(program);
+                    break;
+                default:
+                    unasked.Add(program);
+                    break;
+            }
         }
 
-        var unasked = missing.Where(program => !host.Programs.ContainsKey(program)).ToList();
-        var absent = missing.Except(unasked, StringComparer.Ordinal).ToList();
         var said = new List<string>();
 
         if (absent.Count > 0)
@@ -197,12 +234,28 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 + $"{(absent.Count == 1 ? "it" : "them")}, or name the directory under toolSearchDirectories");
         }
 
-        if (unasked.Count > 0)
+        foreach (var program in unknown)
         {
-            said.Add($"whether {Quoted(unasked)} {(unasked.Count == 1 ? "is" : "are")} there was not asked");
+            said.Add($"whether '{program}' is there could not be established: {host.Programs[program].Reason ?? "the host did not say why"}");
         }
 
-        return string.Join("; ", said);
+        if (unasked.Count > 0)
+        {
+            said.Add(
+                $"whether {Quoted(unasked)} {(unasked.Count == 1 ? "is" : "are")} there was never asked, which is a "
+                + "defect in this tool: a host is asked about every program a leg starts");
+        }
+
+        if (said.Count == 0)
+        {
+            return null;
+        }
+
+        var verdict = unasked.Count > 0 ? LegVerdict.Poisoned
+            : absent.Count > 0 ? LegVerdict.SkippedToolMissing
+            : LegVerdict.SkippedUnavailable;
+
+        return (string.Join("; ", said), verdict);
     }
 
     private static string Quoted(IEnumerable<string> programs) => string.Join(", ", programs.Select(program => $"'{program}'"));

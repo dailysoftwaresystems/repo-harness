@@ -25,7 +25,13 @@ public static class HostAgentProtocol
     /// The protocol version. Both ends are the same build by the time a run request is sent, so a
     /// difference is a defect rather than something to negotiate.
     /// </summary>
-    public const int Version = 1;
+    /// <remarks>
+    /// Raised whenever a request or an answer changes shape. A host reads the version before anything
+    /// else, so one on another build refuses a request as coming from another protocol, naming both
+    /// and its own version. With the number left as it was, the same host refuses the request over
+    /// whichever field it happens not to know, which says nothing about why.
+    /// </remarks>
+    public const int Version = 2;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -154,8 +160,8 @@ public sealed class HostAgentInfo
     public Dictionary<string, ProgramLocation> Programs { get; init; } = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// The directories a program was found in off the PATH there, in the order the search prefers
-    /// them: what a leg there appends to the PATH of every process it starts.
+    /// The directories a program asked for by name was found in there, on the PATH or off it, in the
+    /// order the search looked: what a leg there appends to the PATH of every process it starts.
     /// </summary>
     public List<string> ProgramDirectories { get; init; } = [];
 }

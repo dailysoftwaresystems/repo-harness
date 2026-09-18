@@ -108,8 +108,9 @@ public sealed class ToolProvisionService(
 
         // Only the harness's own SDK is looked for while connecting. The declared tools are looked
         // for once the host's platform is known, in the directories this repository declares for that
-        // platform: the same list the survey and a leg's own run use there, so this command cannot
-        // call a tool present that a leg then cannot start, nor install a second copy of one a leg can.
+        // platform: the same list the survey and a leg's own run use there. Where the host's shell
+        // cannot look in one of them, the tool is unknown rather than missing, so this command never
+        // installs a second copy of a tool a leg there can already start.
         IReadOnlyList<string> wanted = host.Kind == HostKind.Local ? [] : [HostInspector.DotnetProgram];
 
         var opened = await _connector.ConnectAsync(context, host, wanted, cancellationToken).ConfigureAwait(false);
@@ -133,7 +134,7 @@ public sealed class ToolProvisionService(
         }
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
-        var searched = ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey);
+        var searched = ToolSearchDirectories.On(ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey), platformKey);
 
         connection = await _programs
             .ResolveAsync(connection, [.. config.Tools.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
@@ -177,11 +178,9 @@ public sealed class ToolProvisionService(
         const string Name = HostInspector.DotnetProgram;
         var needed = $".NET {ToolPackage.MinimumSdkMajor}";
 
-        if (connection.Located(Name) is { Found: ProgramFound.Unreadable })
+        if (connection.Located(Name) is { Found: ProgramFound.Unreadable } unreadable)
         {
-            return (
-                new ToolOutcome(Name, ToolState.Unknown, null, $"the host did not answer when asked where '{Name}' is"),
-                connection);
+            return (new ToolOutcome(Name, ToolState.Unknown, null, Unestablished(unreadable)), connection);
         }
 
         if (await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false) is { } current)
@@ -270,13 +269,11 @@ public sealed class ToolProvisionService(
         Superuser superuser,
         CancellationToken cancellationToken)
     {
-        var located = connection.Located(tool.Name);
+        var located = connection.Located(tool.Name) ?? new ProgramLocation(tool.Name, ProgramFound.Unreadable);
 
-        if (located is null or { Found: ProgramFound.Unreadable })
+        if (located.Found == ProgramFound.Unreadable)
         {
-            return (
-                new ToolOutcome(tool.Name, ToolState.Unknown, null, $"the host did not answer when asked where '{tool.Name}' is"),
-                connection);
+            return (new ToolOutcome(tool.Name, ToolState.Unknown, null, Unestablished(located)), connection);
         }
 
         var install = InstallFor(tool, platformKey);
@@ -537,6 +534,13 @@ public sealed class ToolProvisionService(
                 + "captures the version in its first group",
         };
     }
+
+    /// <summary>
+    /// Why whether a program is on a host could not be established: the search's own reason when it
+    /// could not look everywhere, and the host not answering otherwise.
+    /// </summary>
+    private static string Unestablished(ProgramLocation location)
+        => location.Reason ?? $"the host did not answer when asked where '{location.Program}' is";
 
     /// <summary>The install entry for one platform, falling back to the one declared for <c>all</c>.</summary>
     private static ToolInstall? InstallFor(ToolConfig tool, string? platformKey)

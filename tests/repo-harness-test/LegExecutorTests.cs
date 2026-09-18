@@ -377,22 +377,31 @@ public sealed class LegExecutorTests
     }
 
     /// <summary>
-    /// A program that would not start is the host missing a tool, not the harness breaking. Recorded
-    /// as poisoned, a macOS host's missing cmake read as exit 70 - a defect in this tool - and the
-    /// whole run with it, since poisoned outranks every other verdict.
+    /// A program that will not start once a leg is running is not the harness breaking: recorded as
+    /// poisoned, a macOS host's missing cmake read as exit 70, and the whole run with it. Nor is it a
+    /// skip. The survey turned away, before anything started, every leg whose host lacked a program it
+    /// knew the leg would start; what still will not start is one it could not know about - a file the
+    /// build was to make, a binary for another processor - and a leg that cannot start its own program
+    /// has failed, whichever way the system refused it.
     /// </summary>
-    [Fact]
-    public async Task ALegWhoseProgramWouldNotStart_IsSkippedForAMissingTool_NotPoisoned()
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("refused")]
+    public async Task ALegWhoseProgramWouldNotStart_HasFailed_NeverSkippedNorPoisoned(string how)
     {
         var factory = new HarnessFactory();
         var ledger = new LegLedger(factory.Output, "test");
+
+        RepoHarness.Core.Processes.ProgramStartException failure = how == "missing"
+            ? new RepoHarness.Core.Processes.ExecutableNotFoundException("build/bench")
+            : new RepoHarness.Core.Processes.ProgramStartException("build/bench", "'build/bench' could not be started: Exec format error");
 
         var execution = await Executor(factory).RunAsync(
             new LegExecutionRequest
             {
                 Legs = [Leg("mac"), Leg("fine")],
                 RunLeg = (leg, _) => leg.Name == "mac"
-                    ? throw new RepoHarness.Core.Processes.ExecutableNotFoundException("cmake")
+                    ? throw failure
                     : Task.FromResult<LegEntry?>(Passed(leg)),
             },
             ledger,
@@ -400,8 +409,9 @@ public sealed class LegExecutorTests
 
         var mac = execution.Entries.Single(entry => entry.Leg == "mac");
 
-        Assert.Equal(LegVerdict.SkippedToolMissing, mac.Verdict);
-        Assert.Contains("cmake", mac.Detail, StringComparison.Ordinal);
+        Assert.Equal(LegVerdict.Failed, mac.Verdict);
+        Assert.Equal(failure.Message, mac.Detail);
+        Assert.Contains("build/bench", mac.Detail, StringComparison.Ordinal);
         Assert.Equal(LegVerdict.Passed, execution.Entries.Single(entry => entry.Leg == "fine").Verdict);
     }
 

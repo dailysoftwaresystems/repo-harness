@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Testing;
 
@@ -102,7 +103,11 @@ internal static class TestCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
-                        RemoteArguments(arguments)),
+                        RemoteArguments(arguments))
+                    {
+                        // Built first unless told not to, and tested either way.
+                        Workload = new LegWorkload(Build: !skipBuild, Test: true, []),
+                    },
                     (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);

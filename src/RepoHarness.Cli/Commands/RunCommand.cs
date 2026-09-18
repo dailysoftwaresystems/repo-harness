@@ -3,6 +3,7 @@ using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
@@ -86,6 +87,9 @@ internal static class RunCommand
 
             var runner = Resolve(harness.Config, runnerName);
 
+            // What every leg's steps start: the runner's own phases, or its action's run lines.
+            IReadOnlyList<string> started = [.. runner.Phases.Where(phase => phase.Command.Count > 0).Select(phase => phase.Command[0])];
+
             // Before a leg is placed or a host is measured, so that a mistyped action costs nothing
             // and says so in the same terms 'legs' would have.
             if (runner.Action is { Length: > 0 } action)
@@ -101,9 +105,11 @@ internal static class RunCommand
                 // begun and its run directory exists: on an eight-leg gate that is eight started
                 // runs and eight directories for one typo. The file is the same for every leg, so
                 // the question is asked once, where nothing has been created yet.
-                await context.Get<IActionFileParser>()
+                var file = await context.Get<IActionFileParser>()
                     .LoadAsync(harness.Layout.RunnerActionsDirectory, action, cancellationToken)
                     .ConfigureAwait(false);
+
+                started = [.. file.Commands.Select(command => command.Program)];
             }
 
             // The runner's own legs when --legs was left out. Resolved here rather than left to the
@@ -123,7 +129,13 @@ internal static class RunCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
-                        RemoteArguments(arguments)),
+                        RemoteArguments(arguments))
+                    {
+                        // Built only where the runner requires it, and never tested: a host needs
+                        // cmake for a runner that measures a build product, and not for one that
+                        // only runs a script.
+                        Workload = new LegWorkload(Build: runner.RequireBuild, Test: false, started),
+                    },
                     (work, token) => RunLegAsync(runners, builds, runnerName, work, token),
                     cancellationToken)
                 .ConfigureAwait(false);

@@ -30,7 +30,7 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
 
     public void Ok(string command, string message) => Write(Progress, $"{command}: OK - {message}");
 
-    public void Fail(string command, string message) => Write(_error, $"{command}: FAIL - {message}");
+    public void Fail(string command, string message) => Write(_error, FailureLine.For(command, message));
 
     public void Warn(string command, string message) => Write(_error, $"{command}: WARN - {message}");
 

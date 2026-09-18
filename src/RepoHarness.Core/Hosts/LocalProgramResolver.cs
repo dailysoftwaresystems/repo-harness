@@ -4,21 +4,18 @@ using RepoHarness.Core.Processes;
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// Where each of a set of programs is on this machine, and the directories found off the PATH.
+/// Where each of a set of programs is on this machine, and the directories they were found in.
 /// </summary>
 /// <param name="Found">Where each program is, by the name it was asked for.</param>
-/// <param name="OffPathDirectories">
-/// The directories a program was found in that the PATH does not name, in the order the search
-/// prefers them. Appended to the PATH of every process a leg starts, so that a program which starts
-/// another one by name — cmake starting ninja and the compilers — finds it where the search did.
+/// <param name="Directories">
+/// Every directory a program asked for by name was found in, on the PATH or off it, in the order the
+/// search looked in them. Appended to the PATH of every process a leg starts, so a program that
+/// starts another by name - cmake starting ninja and the compilers - finds it where the search did,
+/// and so does the run itself where a phase's environment sets a PATH of its own.
 /// </param>
 public sealed record ProgramSearch(
     IReadOnlyDictionary<string, ProgramLocation> Found,
-    IReadOnlyList<string> OffPathDirectories)
-{
-    /// <summary>A search that looked for nothing.</summary>
-    public static ProgramSearch None { get; } = new(new Dictionary<string, ProgramLocation>(StringComparer.Ordinal), []);
-}
+    IReadOnlyList<string> Directories);
 
 /// <summary>
 /// Finds programs on this machine the way a leg on it will start them: on the PATH first, then in
@@ -51,24 +48,27 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
         ArgumentNullException.ThrowIfNull(programs);
         ArgumentNullException.ThrowIfNull(directories);
 
-        var searched = Expanded(directories);
+        var search = Plan(directories);
         var found = new Dictionary<string, ProgramLocation>(StringComparer.Ordinal);
 
         foreach (var program in programs.Where(program => !string.IsNullOrWhiteSpace(program)).Distinct(StringComparer.Ordinal))
         {
-            found[program] = Find(program, searched);
+            found[program] = Find(program, search);
         }
 
-        // In the order the search prefers them rather than the order the programs happened to be
-        // asked for, so the PATH a leg is given ranks two directories the way the search did.
-        var offPath = found.Values
-            .Where(location => location.Found == ProgramFound.OffPath && location.Path is not null)
+        // In the order the search looked in them rather than the order the programs happened to be
+        // asked for, so the PATH a leg is given ranks two directories the way the search did. A program
+        // named by its path is started by that path, and adds nothing to anybody's PATH.
+        var order = PathDirectories().Concat(search.Directories).ToList();
+
+        var directoriesFound = found.Values
+            .Where(location => location.Present && location.Path is not null && !ProcessRunner.IsPath(location.Program))
             .Select(location => Path.GetDirectoryName(location.Path!)!)
             .Distinct(PathComparer)
-            .OrderBy(directory => searched.FindIndex(candidate => PathComparer.Equals(candidate, directory)))
+            .OrderBy(directory => order.FindIndex(candidate => PathComparer.Equals(candidate, directory)) is var at and >= 0 ? at : int.MaxValue)
             .ToList();
 
-        return new ProgramSearch(found, offPath);
+        return new ProgramSearch(found, directoriesFound);
     }
 
     /// <summary>Finds one program.</summary>
@@ -79,24 +79,22 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
         ArgumentException.ThrowIfNullOrWhiteSpace(program);
         ArgumentNullException.ThrowIfNull(directories);
 
-        return Find(program, Expanded(directories));
+        return Find(program, Plan(directories));
     }
 
-    private ProgramLocation Find(string program, List<string> directories)
+    private ProgramLocation Find(string program, SearchPlan search)
     {
         var windows = _platform.Current == PlatformId.Windows;
 
         // A path is where it is, and is looked for nowhere else: a toolchain naming its compiler by
         // path means that compiler and no other, and PATH has no say in it.
-        if (program.Contains('/') || program.Contains('\\'))
+        if (ProcessRunner.IsPath(program))
         {
             string full;
 
             try
             {
-                // With the one extension Windows adds to a path, as the process runner does, so a path
-                // found here is the file that would start.
-                full = Path.GetFullPath(windows ? ProcessRunner.WithWindowsExtension(program) : program);
+                full = ProcessRunner.ProgramAtPath(program, windows);
             }
             catch (ArgumentException)
             {
@@ -115,7 +113,7 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
 
         // One directory at a time rather than joined into a PATH of its own: a directory holding the
         // separator character would otherwise be split into two that do not exist.
-        foreach (var directory in directories)
+        foreach (var directory in search.Directories)
         {
             if (ProcessRunner.ProgramInDirectory(program, directory, windows, _filePermissions.IsExecutable) is { } offPath)
             {
@@ -123,35 +121,86 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
             }
         }
 
-        return new ProgramLocation(program, ProgramFound.Nowhere);
+        // Not found, and not looked for everywhere it was meant to be: that is not "missing", and a
+        // refusal saying it was would send somebody to install a program that may well be there.
+        return search.Unsearched.Count == 0
+            ? new ProgramLocation(program, ProgramFound.Nowhere)
+            : new ProgramLocation(
+                program,
+                ProgramFound.Unreadable,
+                Reason: $"the home directory is not known here, so {string.Join(", ", search.Unsearched.Select(entry => $"'{entry}'"))} "
+                    + "could not be searched");
     }
 
-    /// <summary>The directories with <c>~</c> made this machine's home, and any this machine cannot express dropped.</summary>
-    private List<string> Expanded(IReadOnlyList<string> directories)
+    /// <summary>
+    /// The directories to look in, made full, and the ones that should have been and cannot be.
+    /// </summary>
+    /// <remarks>
+    /// An entry this machine cannot name as a whole path - <c>/opt/tools</c> declared under
+    /// <c>all</c>, read on Windows - is passed over, as the validator allowed for: it names another
+    /// platform's directory, and read here it would be one relative to wherever the search happened to
+    /// start. A <c>~/</c> entry with no home to expand it against is different: it names a directory
+    /// this machine has, which could not be looked in.
+    /// </remarks>
+    private SearchPlan Plan(IReadOnlyList<string> directories)
     {
         var home = _platform.HomeDirectory;
-        var expanded = new List<string>();
+        var searched = new List<string>();
+        var unsearched = new List<string>();
 
         foreach (var directory in directories)
         {
-            var spelled = directory.StartsWith("~/", StringComparison.Ordinal)
-                ? Path.Join(home, directory[2..])
-                : directory;
-
-            try
+            if (!directory.StartsWith("~/", StringComparison.Ordinal))
             {
-                expanded.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(spelled)));
+                if (Path.IsPathFullyQualified(directory))
+                {
+                    searched.AddRange(Full(directory));
+                }
             }
-            catch (ArgumentException)
+            else if (!string.IsNullOrEmpty(home) && Path.IsPathRooted(home))
             {
-                // A directory this machine cannot spell, such as a Windows drive on Linux, holds
-                // nothing here to find.
+                searched.AddRange(Full(Path.Join(home, directory[2..])));
+            }
+            else
+            {
+                unsearched.Add(directory);
             }
         }
 
-        return expanded;
+        return new SearchPlan(searched, unsearched);
+    }
+
+    /// <summary>The directories the PATH names, spelled the way a found program's directory is.</summary>
+    private IEnumerable<string> PathDirectories()
+        => (_path() ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .SelectMany(directory => Full(directory.Trim('"')));
+
+    /// <summary>
+    /// <paramref name="directory"/> made full, or nothing when it holds a character no path can: such
+    /// an entry holds nothing to find, here or anywhere.
+    /// </summary>
+    private static IEnumerable<string> Full(string directory)
+    {
+        string full;
+
+        try
+        {
+            full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        }
+        catch (ArgumentException)
+        {
+            yield break;
+        }
+
+        yield return full;
     }
 
     private StringComparer PathComparer
         => _platform.PathComparison == StringComparison.OrdinalIgnoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    /// <summary>Where a search looks, and the directories it was told to look in and cannot.</summary>
+    /// <param name="Directories">The directories to look in, full, in the order given.</param>
+    /// <param name="Unsearched">The entries that name a directory here that could not be expanded.</param>
+    private sealed record SearchPlan(List<string> Directories, IReadOnlyList<string> Unsearched);
 }

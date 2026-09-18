@@ -602,6 +602,8 @@ public sealed class WorktreeRemovalTests
 
         public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
 
+        public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
+
         public IEnumerable<string> EnumerateDirectories(string path)
             => Path.TrimEndingDirectorySeparator(path).EndsWith(Records, StringComparison.OrdinalIgnoreCase)
                 ? []
@@ -697,6 +699,8 @@ internal sealed class UndeletableFileSystem(IFileSystem inner) : IFileSystem
         => throw new IOException("The process cannot access the file because it is being used by another process.");
 
     public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
+
+    public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
 
     public IEnumerable<string> EnumerateDirectories(string path) => inner.EnumerateDirectories(path);
 

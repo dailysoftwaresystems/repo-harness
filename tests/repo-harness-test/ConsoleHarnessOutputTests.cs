@@ -48,6 +48,23 @@ public sealed class ConsoleHarnessOutputTests
         Assert.Empty(Lines(standardOutput));
     }
 
+    /// <summary>
+    /// A failure line reads back as what it said, through the one spelling that wrote it: a host's
+    /// refusal reaches the machine that dispatched its leg as exactly this line, and nothing but the
+    /// failure line of the command asked about is taken for it.
+    /// </summary>
+    [Fact]
+    public void AFailureLine_ReadsBackAsWhatItSaid_AndNothingElseDoes()
+    {
+        var line = FailureLine.For("run", "git does not ignore this action's 'artifacts/'");
+
+        Assert.Equal("run: FAIL - git does not ignore this action's 'artifacts/'", line);
+        Assert.True(FailureLine.TryRead(line, "run", out var said));
+        Assert.Equal("git does not ignore this action's 'artifacts/'", said);
+        Assert.False(FailureLine.TryRead(line, "test", out _));
+        Assert.False(FailureLine.TryRead("run: WARN - git does not ignore it", "run", out _));
+    }
+
     [Fact]
     public void Detail_IsShownOnlyWhenVerbose()
     {

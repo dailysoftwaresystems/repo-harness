@@ -33,6 +33,7 @@ internal static class TestChild
             "spawn-grandchild" => SpawnGrandchild(arguments),
             "print-env" => PrintEnvironment(standardOutput, arguments),
             "write-file" => WriteFile(arguments),
+            "link-directory" => LinkDirectory(arguments),
             "exit" => int.Parse(arguments[0], CultureInfo.InvariantCulture),
             _ => 99,
         };
@@ -57,6 +58,19 @@ internal static class TestChild
         // An optional exit code, so a step can produce exactly what it declared and still fail.
         // That is the case a caller has to tell apart from a step that produced nothing.
         return arguments.Length >= 3 ? int.Parse(arguments[2], CultureInfo.InvariantCulture) : 0;
+    }
+
+    /// <summary>
+    /// Makes <c>arguments[0]</c> a directory holding one file and a link, <c>latest</c>, to the
+    /// directory <c>arguments[1]</c>: what a step that keeps a directory of runs with a pointer to the
+    /// newest one produces.
+    /// </summary>
+    private static int LinkDirectory(string[] arguments)
+    {
+        Directory.CreateDirectory(arguments[0]);
+        File.WriteAllText(Path.Combine(arguments[0], "kept.txt"), "kept");
+        Directory.CreateSymbolicLink(Path.Combine(arguments[0], "latest"), arguments[1]);
+        return 0;
     }
 
     /// <summary>Writes each argument on its own line between brackets, so an empty one is visible.</summary>

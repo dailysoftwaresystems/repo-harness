@@ -230,6 +230,29 @@ public sealed class TestServiceTests
         Assert.Null(TestService.CountFrom(null, "Ran 17 cases"));
     }
 
+    /// <summary>
+    /// A runner named by a relative path is the tree's own, read from the tree root as every other
+    /// relative path in the test settings is - never from wherever this process began, which for a
+    /// leg on a worktree is the main checkout and its copy of the script.
+    /// </summary>
+    [Fact]
+    public async Task ARunnerNamedByARelativePath_IsReadFromTheLegsOwnTree()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var runner = new ScriptedRunner(() => Task.CompletedTask, 0, "tests passed");
+
+        var result = await Service(factory, runner).RunAsync(
+            Config(),
+            Request(temp, new TestInvocation { Runner = "tools/run-tests", Args = [], SuccessPattern = "tests passed" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(Path.Combine(temp.Path, "tools", "run-tests"), runner.Started?.FileName);
+    }
+
     private static TestService Service(HarnessFactory factory, IProcessRunner? phaseRunner = null)
         => new(
             new PhaseRunner(phaseRunner ?? factory.ProcessRunner, factory.FileSystem, factory.Output),
@@ -316,10 +339,14 @@ public sealed class TestServiceTests
     /// </summary>
     private sealed class ScriptedRunner(Func<Task> duringRun, int exitCode, string line) : IProcessRunner
     {
+        /// <summary>What the phase asked to start.</summary>
+        public ProcessRequest? Started { get; private set; }
+
         public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(request);
 
+            Started = request;
             await duringRun().ConfigureAwait(false);
             request.OnOutputLine?.Invoke(line);
 

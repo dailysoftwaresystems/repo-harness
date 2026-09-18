@@ -52,19 +52,26 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
     /// Checks the legs <paramref name="legNames"/> selects, or every leg when <c>--legs</c> was left out and
     /// <paramref name="legNames"/> is <see langword="null"/>.
     /// </summary>
+    /// <param name="directory">A directory in the repository.</param>
+    /// <param name="legNames">What <c>--legs</c> was given, or <see langword="null"/>.</param>
+    /// <param name="workload">What the command asking will have each leg do, which says what a host must have.</param>
+    /// <param name="here">Whether this machine is the only candidate, whatever a leg names.</param>
+    /// <param name="cancellationToken">Stops the measuring.</param>
     public async Task<LegsReport> CheckAsync(
         string directory,
         IReadOnlyList<string>? legNames,
+        LegWorkload workload,
         bool here = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentNullException.ThrowIfNull(workload);
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var config = context.Config;
         var selection = LegSelection.Resolve(config, legNames);
         var emulators = EmulatorsUsedBy(config, selection);
-        var programs = LegPrograms.Wanted(config);
+        var programs = LegPrograms.Wanted(config, workload);
         var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
@@ -79,7 +86,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
 
         var remote = candidates
             .Where(entry => !entry.Hosts.Contains(HostId.Local)
-                || LegPlacement.Obstacle(config, entry.leg.Leg, reports[HostId.Local]) is not null)
+                || LegPlacement.Obstacle(config, entry.leg.Leg, workload, reports[HostId.Local]) is not null)
             .SelectMany(entry => entry.Hosts)
             .Where(host => host.Kind != HostKind.Local)
             .Distinct()
@@ -90,7 +97,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
             reports[report.Host] = report;
         }
 
-        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, reports, here)).ToList();
+        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, workload, reports, here)).ToList();
 
         // Each leg that cannot run is its own warning, naming it and saying why, while the others go on.
         foreach (var placement in placements.Where(placement => !placement.Runnable))

@@ -1114,6 +1114,69 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A copy starts no program on a host, so a host is given one whatever it lacks: a host without a
+    /// leg's test runner is still where a runner that runs something else goes, and where its
+    /// artifacts are carried. Placed as a test would place it, the host was never reached.
+    /// </summary>
+    [Fact]
+    public async Task AHostLackingALegsPrograms_IsStillSynced()
+    {
+        var transports = Substitute.For<ISyncTransportFactory>();
+        transports.For(Arg.Any<HostReport>()).Returns(_ => throw new InvalidOperationException("reached"));
+
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" } } },
+            Legs =
+            {
+                ["arm"] = new LegConfig
+                {
+                    Os = "linux",
+                    Processor = "arm64",
+                    Config = "debug",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "ctest", SuccessPattern = "passed" } },
+                },
+            },
+        };
+
+        var loader = HostDoubles.Loader(config, here);
+
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : new HostReport
+            {
+                Host = host,
+                Os = "linux",
+                Processor = "arm64",
+                Programs = new Dictionary<string, ProgramLocation>(StringComparer.Ordinal)
+                {
+                    ["ctest"] = new("ctest", ProgramFound.Nowhere),
+                },
+            });
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            transports,
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var reached = await Assert.ThrowsAsync<InvalidOperationException>(() => service.SyncHostsAsync(
+            here, null, new SyncOptions(), [], TestContext.Current.CancellationToken));
+
+        Assert.Equal("reached", reached.Message);
+        transports.Received(1).For(Arg.Is<HostReport>(report => report.Host.Equals(HostId.Ssh("pi"))));
+    }
+
+    /// <summary>
     /// A host's name is two words and --adopt takes several names, so the spelling a refusal tells
     /// somebody to type has to survive their shell and this tool's own parser. Unquoted it arrives
     /// as two names, and following the instruction lands on a usage error.
@@ -1843,6 +1906,32 @@ public sealed class SyncServiceTests
         {
             DeleteIfPresent(copy);
         }
+    }
+
+    /// <summary>
+    /// The side that is written reads its tree through the rule the sending side reads its own with:
+    /// a host's connection data, lock and each action's scratch are never listed, so never offered
+    /// for deletion nor described to the machine that asked, while its actions are - so one the tree
+    /// no longer has can be removed there.
+    /// </summary>
+    [Fact]
+    public async Task AHostsManifest_ListsItsActions_AndNeverItsOwnState()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        temp.WriteFile(Path.Combine("src", "a.c"), "int a;");
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"), "name: probe\n");
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "build", "run-1", "leg", "x.o"), "x");
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "artifacts", "run-1", "leg", "kept.txt"), "x");
+        temp.WriteFile(Path.Combine(".harness-config", "sshItems", "vps", ".env"), "HOST=example.invalid\n");
+        temp.WriteFile(Path.Combine(".harness-config", "lock.json"), "{}");
+
+        var manifest = await Transport(harness).ReadManifestAsync(temp.Path, [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            [".harness-config/runner/actions/probe/probe.yml", "src/a.c"],
+            manifest.Entries.Keys.Order(StringComparer.Ordinal));
     }
 
     private static LocalSyncTransport Transport(HarnessFactory harness)

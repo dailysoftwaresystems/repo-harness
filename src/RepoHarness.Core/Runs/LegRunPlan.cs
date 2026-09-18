@@ -199,7 +199,7 @@ public static class LegRunPlan
                 notRun.Add(new LegEntry
                 {
                     Leg = placement.Leg.Name,
-                    Verdict = placement.ToolMissing ? LegVerdict.SkippedToolMissing : LegVerdict.SkippedUnavailable,
+                    Verdict = placement.Verdict,
                     Detail = placement.Reason ?? "no host can run it",
                 });
 
@@ -214,6 +214,27 @@ public static class LegRunPlan
 
         skipped = notRun;
         return placed;
+    }
+
+    /// <summary>
+    /// What a command reports when no selected leg can run: why each could not, under the verdict the
+    /// run would have recorded for it.
+    /// </summary>
+    /// <param name="skipped">The line each leg would have had.</param>
+    /// <remarks>
+    /// A leg turned away by a defect in this tool keeps that defect's exit code even though nothing
+    /// ran: "no selected leg can run" and nothing else would send the reader to the hosts.
+    /// </remarks>
+    public static CommandOutcome NothingRuns(IReadOnlyList<LegEntry> skipped)
+    {
+        ArgumentNullException.ThrowIfNull(skipped);
+
+        var worst = Verdicts.Describe(Verdicts.Worst(skipped.Select(entry => entry.Verdict)));
+
+        return CommandOutcome.Failed(
+            worst.IsFailure ? worst.ExitCode : LegsExit.Unavailable,
+            "no selected leg can run",
+            [.. skipped.Select(entry => $"{entry.Leg}: {Verdicts.Display(entry.Verdict)}: {entry.Detail}")]);
     }
 
     private static PlacedLeg Place(HarnessContext context, SelectedLeg selected, HostReport host)

@@ -105,8 +105,8 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
                     FileName = Program,
                     Arguments = ["-C", buildDirectory, "-t", "deps"],
 
-                    // The PATH the build itself ran with: ninja found off the PATH for the build is
-                    // the ninja this reads the records of, not "not installed".
+                    // The directories the build was given: the ninja the survey found for the build
+                    // is the ninja this reads the records of, not "not installed".
                     AppendToPath = appendToPath,
                     WorkingDirectory = buildDirectory,
                     Timeout = Budget,

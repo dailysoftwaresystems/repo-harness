@@ -45,9 +45,17 @@ public interface IFileSystem
     /// <summary>Enumerates files under <paramref name="path"/>, recursively when asked.</summary>
     /// <remarks>
     /// A directory reached through a link or a junction is never walked: a link inside a tree leads
-    /// out of it, or back into it and round again.
+    /// out of it, or back into it and round again. <see cref="EnumerateDirectoryLinks"/> names the
+    /// ones a walk passed over, for a caller whose reader has to be told.
     /// </remarks>
     IEnumerable<string> EnumerateFiles(string path, bool recursive);
+
+    /// <summary>
+    /// The directory links and junctions anywhere under <paramref name="path"/>: exactly the
+    /// directories a recursive <see cref="EnumerateFiles"/> does not walk.
+    /// </summary>
+    /// <param name="path">The directory to look under.</param>
+    IEnumerable<string> EnumerateDirectoryLinks(string path);
 
     /// <summary>Enumerates immediate subdirectories of <paramref name="path"/>.</summary>
     IEnumerable<string> EnumerateDirectories(string path);

@@ -492,6 +492,22 @@ public sealed class HostInspectorTests
         Assert.Equal("windows", report.Os);
     }
 
+    /// <summary>
+    /// cmd is Windows's own shell, whose installers put the SDK on the machine PATH, and no POSIX
+    /// directory is one a Windows host has. So nothing was left unlooked: an SDK on no PATH there is
+    /// missing, with the fix named, rather than unknown for directories that were never its.
+    /// </summary>
+    [Fact]
+    public async Task Ssh_ToACmdShellWithoutDotnetOnItsPath_SaysTheSdkIsNotInstalled()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat(dotnet: Where.Nowhere, answeredOs: "windows"));
+        fixture.Commands.ShellProbe = HostResults.Ok("C:\\WINDOWS\\system32\\cmd.exe\r\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.StartsWith("the .NET 10 SDK is not installed there", report.Reason, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Ssh_ToAWindowsHostWhoseShellIsNotCmd_IsStillTreatedAsWindows()
     {

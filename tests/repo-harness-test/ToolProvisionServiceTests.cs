@@ -110,6 +110,50 @@ public sealed class ToolProvisionServiceTests
         Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
     }
 
+    /// <summary>
+    /// A directory another platform's machine names - a Windows one under 'all', here for a Linux
+    /// distribution - is not one this host is asked to look in. Handed over anyway, it could not be
+    /// listed there, and a tool that is simply missing would read as unknown and never be installed.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryForAnotherPlatform_IsNeverLookedForOnAHost_SoAMissingToolIsStillInstalled()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            searchDirectories: new() { ["all"] = [@"C:\tools", "/opt/tools"] });
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Installed, ninja.State);
+
+        var listed = fixture.Host.Calls.Where(call => call.Program == "ls").SelectMany(call => call.Arguments).ToList();
+        Assert.Contains("/opt/tools/ninja", listed);
+        Assert.DoesNotContain(listed, path => path.StartsWith(@"C:\", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A tool the host could not look for everywhere it was told to is not known either way. It is
+    /// reported with the search's own reason, and nothing is installed: a second copy of a tool a
+    /// leg there can already start is the one outcome this must never produce.
+    /// </summary>
+    [Fact]
+    public async Task AToolTheHostCouldNotLookFor_IsUnknown_WithTheSearchsOwnReason_AndNothingIsInstalled()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            searchDirectories: new() { ["linux"] = ["/opt/two words"] });
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Unknown, ninja.State);
+        Assert.Equal(
+            "'ninja' is not on the PATH there, and '/opt/two words' could not be looked in, because a path holding a space cannot be named in a command line sent there",
+            ninja.Detail);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "sudo");
+    }
+
     [Fact]
     public async Task ATool_IsInstalledThroughItsManager_WithTheCredentialOnStandardInputAlone()
     {
@@ -849,7 +893,8 @@ public sealed class ToolProvisionServiceTests
             PlatformId localPlatform = PlatformId.Windows,
             bool secondDistro = false,
             Func<HostId, string>? rootPassword = null,
-            bool checkNeverFinishes = false)
+            bool checkNeverFinishes = false,
+            Dictionary<string, List<string>>? searchDirectories = null)
         {
             var declared = tools ?? [];
 
@@ -881,6 +926,7 @@ public sealed class ToolProvisionServiceTests
             {
                 WslDistros = { Distro },
                 Tools = [.. declared],
+                ToolSearchDirectories = new(searchDirectories ?? [], StringComparer.OrdinalIgnoreCase),
                 Hosts = new HostsConfig { Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } } },
                 Legs =
                 {

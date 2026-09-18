@@ -69,4 +69,59 @@ public static class ToolSearchDirectories
     /// </remarks>
     public static IReadOnlyList<string> For(IReadOnlyDictionary<string, List<string>>? declared, string? platformKey)
         => PlatformScope.Select(declared, platformKey) is { Count: > 0 } chosen ? chosen : BuiltIn(platformKey);
+
+    /// <summary>
+    /// The entries of <paramref name="directories"/> that name a directory on a
+    /// <paramref name="platformKey"/> machine. The rest are another platform's - <c>/opt/tools</c>
+    /// under <c>all</c>, for a Windows host - and are not looked for there.
+    /// </summary>
+    /// <param name="directories">The entries chosen for the platform.</param>
+    /// <param name="platformKey">The platform searching, as measured on the host.</param>
+    /// <remarks>
+    /// For a search made from another machine, which has only the text to go on. A search on the host
+    /// itself asks that machine, which reads the entries the same way.
+    /// </remarks>
+    public static IReadOnlyList<string> On(IReadOnlyList<string> directories, string? platformKey)
+    {
+        ArgumentNullException.ThrowIfNull(directories);
+
+        return [.. directories.Where(directory => Names(directory, platformKey))];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="directory"/> names one directory on a <paramref name="platformKey"/>
+    /// machine wherever a search there starts: <c>~/</c> for the home directory of whoever searches,
+    /// or a path that platform reads as absolute - a drive or a share on Windows, a leading <c>/</c>
+    /// everywhere else.
+    /// </summary>
+    /// <param name="directory">An entry of <c>toolSearchDirectories</c>.</param>
+    /// <param name="platformKey">The platform searching.</param>
+    /// <remarks>
+    /// Read from the text rather than by asking this machine, so a configuration is judged the same
+    /// wherever it is read - including entries meant for a platform this machine is not. A search
+    /// asks the machine it runs on instead, which reads the same entries the same way:
+    /// <c>/opt/tools</c> under <c>all</c> is searched on macOS and Linux, and on Windows, where it
+    /// would be read against whichever drive the search started on, it is passed over.
+    /// </remarks>
+    public static bool Names(string directory, string? platformKey)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+
+        if (directory.StartsWith("~/", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!string.Equals(platformKey, PlatformNames.Windows, StringComparison.OrdinalIgnoreCase))
+        {
+            return directory.StartsWith('/');
+        }
+
+        var drive = directory.Length >= 3
+            && char.IsAsciiLetter(directory[0])
+            && directory[1] == ':'
+            && directory[2] is '\\' or '/';
+
+        return drive || directory.StartsWith(@"\\", StringComparison.Ordinal) || directory.StartsWith("//", StringComparison.Ordinal);
+    }
 }

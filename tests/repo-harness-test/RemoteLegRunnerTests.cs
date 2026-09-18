@@ -1,6 +1,7 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Output;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 
@@ -108,6 +109,66 @@ public sealed class RemoteLegRunnerTests
             "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
 
         Assert.Contains("exited 11", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that refused the whole run - a configuration, a command line or a policy its copy cannot
+    /// satisfy - refused this run: the same refusal on this machine stops the run, and read as a host
+    /// that could not be reached it became a skipped leg, with its reason and fix left on the host.
+    /// </summary>
+    [Theory]
+    [InlineData(HarnessExit.Refused)]
+    [InlineData(HarnessExit.ConfigInvalid)]
+    [InlineData(HarnessExit.UsageError)]
+    public async Task AHostsRefusalOfTheRun_IsThisRunsRefusal_InTheHostsOwnWords(int code)
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "git does not ignore this action's 'artifacts/'. Nothing has run."));
+
+            return HostResults.Finished(command, code);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(code, refusal.ExitCode);
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': git does not ignore this action's 'artifacts/'. Nothing has run.",
+            refusal.Message);
+    }
+
+    [Fact]
+    public async Task AHostsRefusalThatSaidNothing_StillRefuses_NamingTheCode()
+    {
+        var hosts = new ScriptedHostCommands((_, command) => HostResults.Finished(command, HarnessExit.Refused));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.EndsWith($"it exited {HarnessExit.Refused} and said nothing more", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Any other end without a ledger is still no verdict about the code, and now says what the host
+    /// said about it rather than only the code it exited with.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerWithNoLedger_QuotesWhatTheHostSaid()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("build", "no selected leg can run"));
+
+            return HostResults.Finished(command, 1);
+        });
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, failure.ExitCode);
+        Assert.EndsWith("exited 1 without a ledger entry for it, saying: no selected leg can run", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]

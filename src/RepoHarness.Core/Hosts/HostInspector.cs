@@ -58,8 +58,8 @@ public sealed record HostReport
         = new Dictionary<string, ProgramLocation>(StringComparer.Ordinal);
 
     /// <summary>
-    /// The directories a program was found in off the PATH there, in the order the search prefers
-    /// them. A leg run there appends them to the PATH of every process it starts.
+    /// The directories a program asked for by name was found in there, on the PATH or off it, in the
+    /// order the search looked. A leg run there appends them to the PATH of every process it starts.
     /// </summary>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 

@@ -36,7 +36,14 @@ public sealed record LegRunRequest(
     bool UseStaged = false,
     bool Time = false,
     bool Here = false,
-    IReadOnlyList<string>? RemoteArguments = null);
+    IReadOnlyList<string>? RemoteArguments = null)
+{
+    /// <summary>
+    /// What the command has each leg do, which decides the programs a host must have to be given
+    /// one. Said by every command, because what one needs is not what another does.
+    /// </summary>
+    public required LegWorkload Workload { get; init; }
+}
 
 /// <summary>What one leg is asked to do once its tree is ready.</summary>
 /// <param name="Leg">The placed leg.</param>
@@ -109,17 +116,14 @@ public sealed class LegRunService(
         // Hosts are measured before anything runs, and DssHarness on each is brought to this
         // machine's build there, so a leg never starts on a host that turns out not to answer.
         var report = await _legsService
-            .CheckAsync(request.Directory, request.LegNames, request.Here, cancellationToken)
+            .CheckAsync(request.Directory, request.LegNames, request.Workload, request.Here, cancellationToken)
             .ConfigureAwait(false);
 
         var placed = LegRunPlan.From(context, report, _platform, out var skipped);
 
         if (placed.Count == 0)
         {
-            return CommandOutcome.Failed(
-                LegsExit.Unavailable,
-                "no selected leg can run",
-                [.. skipped.Select(entry => $"{entry.Leg}: {entry.Detail}")]);
+            return LegRunPlan.NothingRuns(skipped);
         }
 
         var runId = RunId.New();

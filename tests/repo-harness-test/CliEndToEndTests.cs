@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -506,12 +507,13 @@ public sealed partial class CliEndToEndTests
 
     /// <summary>
     /// The chain the consumer's gate broke on, end to end: a leg whose test runner no directory on
-    /// this machine holds is turned away by the survey, naming the program, and a run that selects it
-    /// reports it as skipped for a missing tool - incomplete, exit 21 - rather than starting it and
-    /// poisoning the run, exit 70. Its sibling still runs.
+    /// this machine holds is turned away by the survey, naming the program, and a test run that
+    /// selects it reports it as skipped for a missing tool - incomplete, exit 21 - rather than starting
+    /// it and poisoning the run, exit 70. Its sibling still runs. And only a command that starts the
+    /// runner turns the leg away for it: a runner whose steps run something else runs there.
     /// </summary>
     [Fact]
-    public async Task ALegWhoseTestRunnerIsNowhere_IsTurnedAwayByTheSurvey_AndSkippedByTheRun()
+    public async Task ALegWhoseTestRunnerIsNowhere_IsTurnedAwayForItsTests_AndOnlyForThem()
     {
         using var temp = new TempDirectory();
         var harness = new HarnessFactory();
@@ -525,7 +527,13 @@ public sealed partial class CliEndToEndTests
             Tools = { new ToolConfig { Name = "dotnet" } },
             Legs =
             {
-                ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" },
+                ["native"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                },
                 ["broken"] = new LegConfig
                 {
                     Os = platform.PlatformKey,
@@ -545,16 +553,85 @@ public sealed partial class CliEndToEndTests
 
         Assert.Contains($"'{missing}' is not installed there", legs.StandardError, StringComparison.Ordinal);
 
-        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native,broken", "--json", "-C", temp.Path], token);
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native,broken", "--json", "-C", temp.Path], token);
 
-        Assert.Equal(HarnessExit.Incomplete, run.ExitCode);
+        Assert.Equal(HarnessExit.Incomplete, test.ExitCode);
 
-        using var document = JsonDocument.Parse(run.StandardOutput);
-        var verdicts = document.RootElement.GetProperty("legs").EnumerateArray()
-            .ToDictionary(leg => leg.GetProperty("leg").GetString()!, leg => leg.GetProperty("verdict").GetString());
+        using (var document = JsonDocument.Parse(test.StandardOutput))
+        {
+            var verdicts = document.RootElement.GetProperty("legs").EnumerateArray()
+                .ToDictionary(leg => leg.GetProperty("leg").GetString()!, leg => leg.GetProperty("verdict").GetString());
 
-        Assert.Equal("passed", verdicts["native"]);
-        Assert.Equal("skipped-tool-missing", verdicts["broken"]);
+            Assert.Equal("passed", verdicts["native"]);
+            Assert.Equal("skipped-tool-missing", verdicts["broken"]);
+        }
+
+        // A runner whose steps never start the test runner is not turned away for it.
+        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "broken", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, run.ExitCode);
+    }
+
+    /// <summary>
+    /// Each command asks a host only for what it will start there. A leg whose compiler no machine
+    /// has is turned away by the survey and by a build, and still tested when the build is skipped;
+    /// a runner whose step starts a program nothing has is turned away before it starts, with the
+    /// program named, rather than failing halfway through.
+    /// </summary>
+    [Fact]
+    public async Task EachCommand_TurnsALegAwayOnlyForWhatItWillStart()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var compiler = "rh-missing-cc-" + Guid.NewGuid().ToString("N")[..8];
+        var tool = "rh-missing-tool-" + Guid.NewGuid().ToString("N")[..8];
+
+        var toolchain = new ToolchainConfig { Platforms = [platform.PlatformKey] };
+        toolchain.Env["CC"] = compiler;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = toolchain },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                },
+            },
+            Tools = { new ToolConfig { Name = tool } },
+            Legs = { ["compiled"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+            PredefinedRunners = { ["absent"] = new RunnerConfig { Action = "absent/absent.yml" } },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "absent", "absent.yml"),
+            $"name: absent\nsteps:\n  - name: use\n    run: {tool} --version\n");
+
+        var legs = await CliRunner.RunAsync(["legs", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, legs.ExitCode);
+        Assert.Contains($"'{compiler}'", legs.StandardError, StringComparison.Ordinal);
+
+        var build = await CliRunner.RunAsync(["build", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, build.ExitCode);
+        Assert.Contains($"'{compiler}'", build.StandardError, StringComparison.Ordinal);
+
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, test.ExitCode);
+
+        var run = await CliRunner.RunAsync(["run", "absent", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, run.ExitCode);
+        Assert.Contains($"'{tool}' is not installed there", run.StandardError, StringComparison.Ordinal);
     }
 
     /// <summary>

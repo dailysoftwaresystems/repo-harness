@@ -1,6 +1,7 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -124,12 +125,17 @@ public sealed class HostAgentService(
         // By the function the leg's own run uses, on the machine that will run it. Answered from
         // anywhere else this would be a second opinion about this machine's PATH, and a second
         // opinion is how a survey came to call a leg runnable whose build tool could not be found.
-        var found = _programs.Resolve(programs, ToolSearchDirectories.For(searchDirectories, _platform.PlatformKey));
+        // The emulators' own programs are found by the same search, in the same pass, so a launcher
+        // installed off the PATH is found - and handed on - exactly as a build tool would be.
+        var found = _programs.Resolve(
+            programs.Concat(emulators.Values.SelectMany(EmulatorProbe.ProgramsOf)),
+            ToolSearchDirectories.For(searchDirectories, _platform.PlatformKey));
+
         var checks = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (name, emulator) in emulators)
         {
-            checks[name] = await _emulatorProbe.CheckAsync(emulator, found.OffPathDirectories, cancellationToken).ConfigureAwait(false);
+            checks[name] = await _emulatorProbe.CheckAsync(emulator, found, cancellationToken).ConfigureAwait(false);
         }
 
         var current = _identity.Current;
@@ -142,7 +148,7 @@ public sealed class HostAgentService(
             Processor = _platform.Processor,
             Emulators = checks,
             Programs = new Dictionary<string, ProgramLocation>(found.Found, StringComparer.Ordinal),
-            ProgramDirectories = [.. found.OffPathDirectories],
+            ProgramDirectories = [.. found.Directories],
         };
     }
 
@@ -295,7 +301,7 @@ public sealed class HostAgentService(
 
     private static async Task<int> RefuseAsync(TextWriter error, int exitCode, string message)
     {
-        await error.WriteLineAsync($"{HostAgentProtocol.CommandName}: FAIL - {message}").ConfigureAwait(false);
+        await error.WriteLineAsync(FailureLine.For(HostAgentProtocol.CommandName, message)).ConfigureAwait(false);
         return exitCode;
     }
 }

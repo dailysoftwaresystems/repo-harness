@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Core.Hosts;
@@ -22,7 +22,10 @@ public enum ProgramFound
     /// <summary>The host answered, and it is neither on that PATH nor in any directory that was searched.</summary>
     Nowhere,
 
-    /// <summary>The host could not be asked, so nothing is known and no refusal may claim it is missing.</summary>
+    /// <summary>
+    /// The host could not be asked, or could not look everywhere it was told to, so nothing is known
+    /// and no refusal may claim it is missing.
+    /// </summary>
     Unreadable,
 }
 
@@ -30,7 +33,11 @@ public enum ProgramFound
 /// <param name="Program">The name it was asked for.</param>
 /// <param name="Found">What the search established.</param>
 /// <param name="Path">Where it is, when it was found; <see langword="null"/> otherwise.</param>
-public sealed record ProgramLocation(string Program, ProgramFound Found, string? Path = null)
+/// <param name="Reason">
+/// Why nothing could be established, when the search could not look everywhere it was told to: a
+/// directory it could not name, or a shell that gave it no way to look.
+/// </param>
+public sealed record ProgramLocation(string Program, ProgramFound Found, string? Path = null, string? Reason = null)
 {
     /// <summary>Whether the host has it at all, wherever it is.</summary>
     public bool Present => Found is ProgramFound.OnPath or ProgramFound.OffPath;
@@ -57,7 +64,9 @@ public interface IHostProgramResolver
     /// <param name="directories">
     /// Where to look when the PATH does not name one, <c>~</c> being the host's home: the built-in
     /// list for the harness's own SDK, and the repository's <c>toolSearchDirectories</c> for its
-    /// declared tools. See <see cref="ToolSearchDirectories"/>.
+    /// declared tools, each one the host's platform names - see <see cref="ToolSearchDirectories.On"/>.
+    /// A directory given that cannot be looked in leaves a program found nowhere else unknown,
+    /// never missing.
     /// </param>
     /// <param name="budget">Longest one lookup may take.</param>
     /// <param name="cancellationToken">Stops the lookups.</param>
@@ -126,39 +135,60 @@ public sealed class HostProgramResolver(LocalProgramResolver local, IHostCommand
             return onPath;
         }
 
-        // cmd has no portable way to test one absolute path, and the failure this searching exists for
-        // was measured on macOS and in WSL. A Windows host's installers put a program on the machine
-        // PATH, which a command run without a login shell already carries.
+        // Every directory given is one this host was told to look in: its caller chose them for the
+        // host's platform. Nothing to look in, and the PATH was everywhere there was to look.
+        if (directories.Count == 0)
+        {
+            return onPath;
+        }
+
+        // cmd has no portable way to test one absolute path. Its host was told where to look, and
+        // saying the program is not there would be a claim about directories nobody looked in.
         if (connection.Shell == RemoteShell.Cmd)
         {
-            return onPath;
+            return Unlooked(program, "its shell, cmd, gives this no way to look in the directories searched for programs");
         }
 
-        var candidates = Candidates(program, directories, await home.Value.ConfigureAwait(false), connection.Shell);
+        var (candidates, unsearched) = Candidates(program, directories, await home.Value.ConfigureAwait(false), connection.Shell);
 
-        if (candidates.Count == 0)
+        if (candidates.Count > 0)
         {
-            return onPath;
+            // One listing for every candidate at once: a separate command for each would open a
+            // separate ssh connection for each, and a host that is merely far away would take a
+            // minute to answer.
+            var listing = await RunAsync(connection, "ls", candidates, budget, cancellationToken).ConfigureAwait(false);
+
+            if (!Answered(listing))
+            {
+                return new ProgramLocation(program, ProgramFound.Unreadable);
+            }
+
+            var lines = listing.StandardOutput
+                .Split('\n')
+                .Select(line => line.Trim())
+                .Where(line => line.Length > 0)
+                .ToList();
+
+            // A POSIX 'ls' given files prints each one that exists as it was given, and nothing else.
+            // Anything else is some other shell's listing - PowerShell's is a table - and reading it
+            // as "none of them exist" would call every program there missing.
+            if (lines.Any(line => !candidates.Contains(line, StringComparer.Ordinal)))
+            {
+                return Unlooked(program, "what its shell printed for the directories searched for programs is not a listing this can read");
+            }
+
+            if (candidates.FirstOrDefault(lines.Contains) is { } path)
+            {
+                return new ProgramLocation(program, ProgramFound.OffPath, path);
+            }
         }
 
-        // One listing for every candidate at once: a separate command for each would open a separate
-        // ssh connection for each, and a host that is merely far away would take a minute to answer.
-        var listing = await RunAsync(connection, "ls", candidates, budget, cancellationToken).ConfigureAwait(false);
-
-        if (!Answered(listing))
-        {
-            return new ProgramLocation(program, ProgramFound.Unreadable);
-        }
-
-        var present = listing.StandardOutput
-            .Split('\n')
-            .Select(line => line.Trim())
-            .ToHashSet(StringComparer.Ordinal);
-
-        return candidates.FirstOrDefault(present.Contains) is { } path
-            ? new ProgramLocation(program, ProgramFound.OffPath, path)
-            : new ProgramLocation(program, ProgramFound.Nowhere);
+        return unsearched is { } reason ? Unlooked(program, reason) : new ProgramLocation(program, ProgramFound.Nowhere);
     }
+
+    /// <summary>A program that is not on the PATH, with directories it could be in that were not looked in.</summary>
+    private static ProgramLocation Unlooked(string program, string why)
+        => new(program, ProgramFound.Unreadable, Reason: $"'{program}' is not on the PATH there, and {why}");
 
     /// <summary>
     /// Whether the PATH of a command run without a login shell names <paramref name="program"/>.
@@ -223,22 +253,73 @@ public sealed class HostProgramResolver(LocalProgramResolver local, IHostCommand
         yield return ("where", new[] { program });
     }
 
-    /// <summary>The candidate paths for one program, in the order they are preferred.</summary>
-    private static IReadOnlyList<string> Candidates(
+    /// <summary>
+    /// The candidate paths for one program, in the order they are preferred, and why any directory
+    /// that should have been looked in cannot be.
+    /// </summary>
+    private static (IReadOnlyList<string> Candidates, string? Unsearched) Candidates(
         string program,
         IReadOnlyList<string> directories,
         string? home,
         RemoteShell shell)
-        => [.. directories
-            .Select(directory => directory.StartsWith("~/", StringComparison.Ordinal)
-                ? home is null ? null : home.TrimEnd('/') + directory[1..]
-                : directory)
-            .OfType<string>()
-            .Select(directory => directory + "/" + program)
+    {
+        var candidates = new List<string>();
+        var homeless = new List<string>();
+        var foreign = new List<string>();
+        var unspeakable = new List<string>();
 
-            // A home directory holding a space cannot travel in a command line built here, so it is
-            // passed over rather than sent in a form the shell would split.
-            .Where(path => RemoteCommandLine.IsLiteral(path, shell))];
+        foreach (var directory in directories)
+        {
+            if (directory.StartsWith("~/", StringComparison.Ordinal) && home is null)
+            {
+                homeless.Add(directory);
+                continue;
+            }
+
+            // Listed with a POSIX 'ls', which a Windows directory given to a host whose shell is not
+            // cmd - PowerShell - cannot be.
+            if (!ToolSearchDirectories.Names(directory, PlatformNames.Linux))
+            {
+                foreign.Add(directory);
+                continue;
+            }
+
+            var path = (directory.StartsWith("~/", StringComparison.Ordinal) ? home!.TrimEnd('/') + directory[1..] : directory)
+                + "/" + program;
+
+            // A path holding a space cannot travel in a command line built here, so it is not sent in
+            // a form the shell would split - and is not reported as looked in either.
+            if (RemoteCommandLine.IsLiteral(path, shell))
+            {
+                candidates.Add(path);
+            }
+            else
+            {
+                unspeakable.Add(directory);
+            }
+        }
+
+        var reasons = new List<string>();
+
+        if (homeless.Count > 0)
+        {
+            reasons.Add($"{Quoted(homeless)} could not be looked in, because its home directory could not be read");
+        }
+
+        if (foreign.Count > 0)
+        {
+            reasons.Add($"{Quoted(foreign)} could not be looked in, because only a POSIX path can be listed there");
+        }
+
+        if (unspeakable.Count > 0)
+        {
+            reasons.Add($"{Quoted(unspeakable)} could not be looked in, because a path holding a space cannot be named in a command line sent there");
+        }
+
+        return (candidates, reasons.Count == 0 ? null : string.Join("; ", reasons));
+    }
+
+    private static string Quoted(IEnumerable<string> directories) => string.Join(", ", directories.Select(directory => $"'{directory}'"));
 
     private Task<ProcessResult> RunAsync(
         HostConnection connection,

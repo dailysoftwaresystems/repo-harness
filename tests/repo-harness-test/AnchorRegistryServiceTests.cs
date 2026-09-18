@@ -617,6 +617,8 @@ public sealed class AnchorRegistryServiceTests
 
         public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
 
+        public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
+
         public IEnumerable<string> EnumerateDirectories(string path) => inner.EnumerateDirectories(path);
 
         public string ReadAllText(string path) => inner.ReadAllText(path);

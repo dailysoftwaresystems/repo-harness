@@ -120,15 +120,29 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
     }
 
     public IEnumerable<string> EnumerateFiles(string path, bool recursive)
-        => new FileSystemEnumerable<string>(
+        => Walk(path, recursive, (ref FileSystemEntry entry) => !entry.IsDirectory);
+
+    public IEnumerable<string> EnumerateDirectoryLinks(string path)
+        => Walk(path, recursive: true, (ref FileSystemEntry entry) => entry.IsDirectory && IsLink(ref entry));
+
+    /// <summary>
+    /// The entries under <paramref name="path"/> that <paramref name="include"/> accepts, never
+    /// walking a directory reached through a link.
+    /// </summary>
+    /// <remarks>
+    /// What the plain overload did - nothing skipped, and a directory that cannot be read said so -
+    /// with one difference: a directory reached through a link or a junction is never walked. A link
+    /// inside a tree leads either out of it, to files that tree does not contain, or back into it,
+    /// which a walk follows until the stack goes. One walk for the files and for the links it passed
+    /// over, so the links a caller is told about are exactly the directories it did not see.
+    /// </remarks>
+    private static FileSystemEnumerable<string> Walk(
+        string path,
+        bool recursive,
+        FileSystemEnumerable<string>.FindPredicate include)
+        => new(
             path,
             (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath(),
-
-            // What the plain overload did - nothing skipped, and a directory that cannot be read
-            // said so - with one difference: a directory reached through a link or a junction is
-            // never walked. Every caller walks a tree the harness owns, and a link inside one leads
-            // either out of it, to files that tree does not contain, or back into it, which a walk
-            // follows until the stack goes.
             new EnumerationOptions
             {
                 RecurseSubdirectories = recursive,
@@ -137,9 +151,11 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
                 MatchType = MatchType.Win32,
             })
         {
-            ShouldIncludePredicate = (ref FileSystemEntry entry) => !entry.IsDirectory,
-            ShouldRecursePredicate = (ref FileSystemEntry entry) => (entry.Attributes & FileAttributes.ReparsePoint) == 0,
+            ShouldIncludePredicate = include,
+            ShouldRecursePredicate = (ref FileSystemEntry entry) => !IsLink(ref entry),
         };
+
+    private static bool IsLink(ref FileSystemEntry entry) => (entry.Attributes & FileAttributes.ReparsePoint) != 0;
 
     public IEnumerable<string> EnumerateDirectories(string path) => Directory.EnumerateDirectories(path);
 

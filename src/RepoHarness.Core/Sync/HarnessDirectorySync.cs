@@ -35,11 +35,11 @@ namespace RepoHarness.Core.Sync;
 /// </remarks>
 public static class HarnessDirectorySync
 {
-    private static readonly string Harness = HarnessLayout.DirectoryName;
+    private const string Harness = HarnessLayout.DirectoryName;
 
-    private static readonly string Runner = $"{Harness}/{HarnessLayout.RunnerDirectoryName}";
+    private const string Runner = HarnessLayout.RunnerDirectoryRelative;
 
-    private static readonly string Actions = $"{Runner}/{HarnessLayout.RunnerActionsDirectoryName}";
+    private const string Actions = HarnessLayout.RunnerActionsDirectoryRelative;
 
     /// <summary>
     /// Whether <paramref name="relativePath"/> is inside the harness's own directory and is never

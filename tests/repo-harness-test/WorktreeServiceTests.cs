@@ -229,6 +229,39 @@ public sealed class WorktreeServiceTests
         var listed = await harness.WorktreeService.ListAsync(temp.Path, token);
 
         Assert.Equal(["wt"], listed.Select(listing => listing.Name));
+
+        // A data directory is passed over without a word unless asked: it was never a worktree.
+        Assert.DoesNotContain(".manifests", harness.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A directory holding a .git entry that git no longer records is what a removal leaves when git's
+    /// record went and a file in use did not. It is not listed - git does not count it - and it is
+    /// said, without being asked: its name is still taken, and dropped from the listing silently it
+    /// looks free.
+    /// </summary>
+    [Fact]
+    public async Task ListAsync_WarnsOfALeftoverThatStillHoldsAGitEntry()
+    {
+        using var temp = new TempDirectory();
+        var harness = await PrepareAsync(temp);
+        var token = TestContext.Current.CancellationToken;
+
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "wt", useRandomName: false, token);
+        Assert.True(created.Succeeded, created.Outcome.Message);
+
+        var leftover = Path.Combine(Path.GetDirectoryName(created.Path)!, "gone");
+        Directory.CreateDirectory(leftover);
+        File.WriteAllText(Path.Combine(leftover, ".git"), "gitdir: /nowhere/.git/worktrees/gone\n");
+
+        var listed = await harness.WorktreeService.ListAsync(temp.Path, token);
+
+        Assert.Equal(["wt"], listed.Select(listing => listing.Name));
+        Assert.Contains(
+            "list-worktree: WARN - 'gone' holds a .git entry, and git records no worktree there",
+            harness.StandardError.ToString(),
+            StringComparison.Ordinal);
+        Assert.Contains($"then delete '{leftover}'", harness.StandardError.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

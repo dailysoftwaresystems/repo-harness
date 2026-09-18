@@ -74,12 +74,16 @@ A missing working directory is reported as exactly that. Linux and macOS report 
 with the same error number as a missing executable, which would otherwise surface as
 "git is not installed".
 
-A program named without a path is looked up in the `PATH` directories and nowhere else.
-Left to the runtime, it would be looked for beside the running executable and in the
-current directory first, and the current directory is usually the repository, so a file
+A program named without a path is looked up in the `PATH` directories and nowhere else -
+the `PATH` the child is given, which ends with the directories the survey found a leg's
+programs in. Left to the runtime, it would be looked for beside the running executable and in
+the current directory first, and the current directory is usually the repository, so a file
 committed there under a tool's name would run in place of the tool. On Windows a name
 without an extension starts only `<name>.exe`, never a batch file, whose arguments cmd.exe
-would parse a second time.
+would parse a second time, and a path without one starts that path with `.exe` added. A
+program a leg's configuration names by a relative path is read from the leg's own tree, never
+from wherever the harness was started: for a leg on a worktree those are different copies of
+the same file.
 
 ### Paths come from git
 
@@ -449,7 +453,12 @@ is not dependable on such a host.
   from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
   are resolved to an absolute path once per connection, measured rather than assumed, the same
   way the remote shell is. A host whose SDK is installed but off that PATH is reported as exactly
-  that, never as "not installed": the remedy differs.
+  that, never as "not installed": the remedy differs. A leg's own programs are found by the
+  DssHarness on the host that runs it, with the function the leg's run uses: on that PATH, then
+  in the searched directories (`toolSearchDirectories`, or a built-in list). The directory each
+  was found in is appended to the PATH of every process the leg starts, so the run finds what
+  the survey found even where a phase's environment sets a PATH of its own. A directory the
+  search could not look in leaves a program unknown, never missing.
 - **No quoting.** An ssh server hands its command line to a shell, and which shell is not
   known in advance: sh, bash, zsh, fish, cmd or PowerShell. The harness quotes for none of
   them. The command line holds only words every one of them reads literally (letters,
@@ -564,8 +573,8 @@ repository's own code.
   `.harness-config/sshItems/`, which git ignores, and ssh reads no configuration file of its
   own. A `config.json` that arrives through git cannot point the harness at a machine nobody
   set up here.
-- A launcher and a required file are each a program name, looked up on the host's `PATH`,
-  or an absolute path. A relative path would resolve against whichever directory a host
+- A launcher and a required file are each a program name, found the way a leg's programs are -
+  on the host's `PATH`, then in the searched directories - or an absolute path. A relative path would resolve against whichever directory a host
   starts programs in, and would let a file shipped in the repository stand in for the tool
   it is named after. A witness with no launcher is named the same way. Behind a launcher it
   is an absolute path: the launcher finds it, not the `PATH`, and qemu's user mode opens a
@@ -685,8 +694,12 @@ tool replaces, where a green result had quietly stopped meaning anything.
   entries name programs, and cannot express a name differing by more than its suffix.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
-- Executables are resolved on the host before a leg starts, so a missing tool is
-  `skipped-tool-missing` and named, not a failure halfway through.
+- The programs a command will start are resolved on the host before a leg starts - each command
+  its own: a build its build's, a test its runner too, a run its steps', a sync none - so a
+  missing tool is `skipped-tool-missing` and named, not a failure halfway through. Only a
+  program named by name can be looked for beforehand. One named by a path, or one that still
+  will not start once the leg is running, fails the leg, naming the program and the reason the
+  system gave: never a skip, and never `poisoned`.
 - An emulated leg's emulator has passed its witness on that host before the leg starts.
 
 ### Inputs that hold still

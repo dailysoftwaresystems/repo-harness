@@ -1,6 +1,7 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Runners;
@@ -59,7 +60,7 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
         ArgumentNullException.ThrowIfNull(tools);
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
 
-        if (LooksLikePath(program))
+        if (ProcessRunner.IsPath(program))
         {
             return IsInsideRepository(program, repositoryRoot)
                 ? ProgramAllowance.RepositoryPath
@@ -127,19 +128,6 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
             HarnessExit.Refused,
             $"'{action.Path}' names {problems.Count} program(s) that may not run:"
             + $"{Environment.NewLine}{detail}");
-    }
-
-    /// <summary>
-    /// Whether <paramref name="program"/> is written as a path rather than as a bare program name.
-    /// </summary>
-    /// <param name="program">The first token of a <c>run</c> line.</param>
-    public static bool LooksLikePath(string program)
-    {
-        ArgumentNullException.ThrowIfNull(program);
-
-        return program.Contains('/', StringComparison.Ordinal)
-            || program.Contains('\\', StringComparison.Ordinal)
-            || Path.IsPathRooted(program);
     }
 
     private bool IsInsideRepository(string program, string repositoryRoot)

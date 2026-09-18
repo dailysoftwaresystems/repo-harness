@@ -19,21 +19,36 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IFileSystem _fileSystem = fileSystem;
 
+    /// <summary>
+    /// The programs <paramref name="emulator"/> needs found by name: what its requirements name, and
+    /// the program its witness starts. What a search for them has to include.
+    /// </summary>
+    /// <param name="emulator">The emulator.</param>
+    public static IEnumerable<string> ProgramsOf(EmulatorConfig emulator)
+    {
+        ArgumentNullException.ThrowIfNull(emulator);
+
+        return WitnessCommand(emulator).Take(1)
+            .Concat(emulator.Requires)
+            .Where(program => !string.IsNullOrWhiteSpace(program) && !ProcessRunner.IsPath(program));
+    }
+
     /// <summary>Checks <paramref name="emulator"/> on this machine.</summary>
     /// <param name="emulator">The emulator.</param>
-    /// <param name="appendToPath">
-    /// The directories a leg here appends to its PATH, so a launcher installed beside its build tools
-    /// is found by the witness exactly as a leg's own run would find it.
+    /// <param name="found">
+    /// Where the search a leg here uses found this machine's programs, <see cref="ProgramsOf"/> among
+    /// them. A requirement installed off the PATH is then present, and the witness is started with
+    /// the PATH a leg's own run is given, rather than either being looked for on a PATH no leg uses.
     /// </param>
     /// <param name="cancellationToken">Stops the witness.</param>
+    /// <exception cref="ArgumentException">A requirement named by name was not searched for.</exception>
     public async Task<EmulatorCheck> CheckAsync(
         EmulatorConfig emulator,
-        IReadOnlyList<string> appendToPath,
+        ProgramSearch found,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(appendToPath);
-
         ArgumentNullException.ThrowIfNull(emulator);
+        ArgumentNullException.ThrowIfNull(found);
 
         if (!Same(emulator.HostOs, _platform.PlatformKey) || !Same(emulator.HostProcessor, _platform.Processor))
         {
@@ -41,12 +56,15 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                 $"it runs on {emulator.HostOs} {emulator.HostProcessor} hosts, and this one is {_platform.PlatformKey} {_platform.Processor}");
         }
 
-        if (emulator.Requires.FirstOrDefault(requirement => !IsPresent(requirement)) is { } missing)
+        foreach (var requirement in emulator.Requires)
         {
-            return EmulatorCheck.Unavailable($"{missing} is missing");
+            if (Absence(requirement, found) is { } absent)
+            {
+                return EmulatorCheck.Unavailable(absent);
+            }
         }
 
-        string[] command = [.. emulator.Launcher ?? [], .. emulator.Witness.Command];
+        var command = WitnessCommand(emulator);
         ProcessResult result;
 
         try
@@ -57,7 +75,7 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                     FileName = command[0],
                     Arguments = command[1..],
                     Environment = emulator.Env.ToDictionary(pair => pair.Key, pair => (string?)pair.Value, StringComparer.Ordinal),
-                    AppendToPath = appendToPath,
+                    AppendToPath = found.Directories,
                     Timeout = WitnessBudget,
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -100,11 +118,35 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
         }
     }
 
-    /// <summary>A requirement naming a path is checked where it points; any other is a program looked up on the PATH.</summary>
-    private bool IsPresent(string requirement)
-        => requirement.Contains('/') || requirement.Contains('\\')
-            ? _fileSystem.FileExists(requirement) || _fileSystem.DirectoryExists(requirement)
-            : _processRunner.FindExecutable(requirement) is not null;
+    /// <summary>The command the witness runs: the launcher, when there is one, and then the witness's own.</summary>
+    private static string[] WitnessCommand(EmulatorConfig emulator) => [.. emulator.Launcher ?? [], .. emulator.Witness.Command];
+
+    /// <summary>
+    /// Why <paramref name="requirement"/> is not there, or <see langword="null"/> when it is. One
+    /// naming a path is checked where it points, since a sysroot is a directory rather than a
+    /// program; one naming a program is read from where the search found it.
+    /// </summary>
+    private string? Absence(string requirement, ProgramSearch found)
+    {
+        if (ProcessRunner.IsPath(requirement))
+        {
+            return _fileSystem.FileExists(requirement) || _fileSystem.DirectoryExists(requirement)
+                ? null
+                : $"{requirement} is missing";
+        }
+
+        if (!found.Found.TryGetValue(requirement, out var location))
+        {
+            throw new ArgumentException($"'{requirement}' was not among the programs searched for.", nameof(found));
+        }
+
+        return location.Found switch
+        {
+            ProgramFound.OnPath or ProgramFound.OffPath => null,
+            ProgramFound.Unreadable => $"whether {requirement} is there could not be established: {location.Reason ?? "nothing was said"}",
+            _ => $"{requirement} is missing",
+        };
+    }
 
     private static bool Same(string first, string second) => string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
 }

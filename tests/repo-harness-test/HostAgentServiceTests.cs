@@ -231,15 +231,20 @@ public sealed class HostAgentServiceTests
     {
         using var error = new StringWriter();
 
+        var other = HostAgentProtocol.Version + 1;
+
         var exitCode = await Service().ServeAsync(
-            new StringReader("""{"kind":"info","protocol":2,"addedLater":true}"""),
+            new StringReader($$"""{"kind":"info","protocol":{{other}},"addedLater":true}"""),
             new StringWriter(),
             error,
             NothingRuns,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.UsageError, exitCode);
-        Assert.Contains("speaks protocol 2, and DssHarness 1.2.3 on this host speaks 1", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains(
+            $"speaks protocol {other}, and DssHarness 1.2.3 on this host speaks {HostAgentProtocol.Version}",
+            error.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Fact]

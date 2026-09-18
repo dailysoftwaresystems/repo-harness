@@ -57,7 +57,7 @@ internal static class LegsCommand
                 context.Get<IHostPlatform>().PathComparison);
 
             var report = await context.Get<LegsService>()
-                .CheckAsync(context.Directory, legs, here: false, cancellationToken)
+                .CheckAsync(context.Directory, legs, LegWorkload.BuildAndTest, here: false, cancellationToken)
                 .ConfigureAwait(false);
 
             return LegsReports.Render(report, arguments.GetValue(JsonOption));

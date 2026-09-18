@@ -99,6 +99,9 @@ public sealed class WorktreeService(
     /// <summary>The command a creation reports under.</summary>
     internal const string CreateCommand = "create-worktree";
 
+    /// <summary>The command a listing reports under.</summary>
+    internal const string ListCommand = "list-worktree";
+
     /// <summary>
     /// Where the commit a worktree was made from is recorded. Under <c>refs/harness/</c> rather than
     /// under heads, tags or remotes, so the record can never be mistaken for somewhere work is kept.
@@ -520,10 +523,22 @@ public sealed class WorktreeService(
             {
                 names.Add(name);
             }
+            else if (_fileSystem.FileExists(Path.Combine(directory, ".git")) || _fileSystem.DirectoryExists(Path.Combine(directory, ".git")))
+            {
+                // Said without being asked. A directory holding a .git entry that git no longer
+                // records is what a removal leaves when git's record went and a file in use did not,
+                // and its name stays taken: dropped from the listing silently, it looks free.
+                _output.Warn(
+                    ListCommand,
+                    $"'{name}' holds a .git entry, and git records no worktree there: what a removal leaves "
+                    + "when git's record goes and something in the directory could not. It is not listed, "
+                    + "and a new worktree cannot take its name until it is gone; look inside for anything "
+                    + $"wanted, then delete '{directory}'.");
+            }
             else
             {
                 _output.Detail(
-                    "list-worktree",
+                    ListCommand,
                     $"'{name}' is under the worktrees root and is not a worktree git records, so it is not listed");
             }
         }

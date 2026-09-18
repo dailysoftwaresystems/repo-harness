@@ -7,6 +7,7 @@ using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Sync;
 
@@ -20,14 +21,7 @@ namespace RepoHarness.Core.Testing;
 /// </remarks>
 public sealed record TestRequest
 {
-    /// <summary>
-    /// The directories the host running this leg found its programs in off the PATH, appended to the
-    /// PATH of every process the leg starts.
-    /// </summary>
-    /// <remarks>
-    /// From the survey the host answered about itself, so the programs a phase starts by name, and
-    /// the ones those start by name in turn, are found where the survey found them.
-    /// </remarks>
+    /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 
     /// <summary>The leg, as the configuration names it and as the ledger shows it.</summary>
@@ -250,7 +244,12 @@ public sealed class TestService(
                 {
                     Leg = request.Leg,
                     Phase = request.PhaseName,
-                    FileName = command.Program,
+
+                    // A runner named by a relative path is the tree's own, read from the tree root
+                    // as every other relative path in the test settings is: left to the start, it
+                    // is read against wherever this process began, which for a leg on a worktree is
+                    // the main checkout.
+                    FileName = ProcessRunner.Anchored(command.Program, request.TreeRoot),
                     Arguments = command.Arguments,
                     LogFile = logFile,
                     AppendToPath = request.ProgramDirectories,

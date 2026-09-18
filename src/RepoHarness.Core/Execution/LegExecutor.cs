@@ -331,8 +331,7 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // not read one. What was left is named in the report.
             return null;
         }
-        catch (HarnessException ex)
-            when (ex.ExitCode is HarnessExit.ConfigInvalid or HarnessExit.UsageError or HarnessExit.Refused)
+        catch (HarnessException ex) when (HarnessExit.RefusesTheRun(ex.ExitCode))
         {
             // Left to propagate, and it ends the run. A configuration or a policy a leg cannot
             // satisfy — an action file naming an undeclared program, a leg whose project declares no
@@ -351,13 +350,18 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // neither of them a defect in the tool. The other legs still report.
             entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(ex.ExitCode), ex.Message));
         }
-        catch (Exception ex) when (KnownCauses.ExitCodeFor(ex) is { } code)
+        catch (Exception ex) when (KnownCauses.Names(ex))
         {
-            // A cause this build can name, read from the table the command runner reads too. A
-            // program that would not start is the host missing a tool, not the harness breaking:
-            // recorded as poisoned it reported a machine's missing cmake as a defect in this tool,
-            // exit 70, and sent the reader looking for a bug that was not there.
-            entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(code), ex.Message));
+            // A cause this build can name, read from the table the command runner reads too, is not
+            // a defect in this tool: recorded as poisoned, a program that would not start read as
+            // exit 70 and sent the reader looking for a bug that was not there. Nor is it a skip. The
+            // survey turned away, before anything started, every leg whose host lacks a program it
+            // knew the leg would start; a program that still will not start once the leg is running is
+            // one it could not know - a file the build was to make, a script in the tree, a binary
+            // for another processor - and a leg that cannot start its own program has failed. Read
+            // as a skip, a build that never produced what its next step runs would pass a gate
+            // that accepts an incomplete run.
+            entry = Entry(leg, ReachedVerdict.Of(LegVerdict.Failed, ex.Message));
         }
         catch (Exception ex)
         {

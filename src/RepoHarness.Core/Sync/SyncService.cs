@@ -248,10 +248,6 @@ public sealed class SyncService(
     /// <summary>The command this service reports under.</summary>
     public const string CommandName = "sync";
 
-    /// <summary>Where a tree's actions are, as a message names them.</summary>
-    private static readonly string Actions =
-        $"{HarnessLayout.DirectoryName}/{HarnessLayout.RunnerDirectoryName}/{HarnessLayout.RunnerActionsDirectoryName}";
-
     private readonly IHarnessContextLoader _contextLoader = contextLoader;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
     private readonly ISyncTransport _localTransport = localTransport;
@@ -289,13 +285,16 @@ public sealed class SyncService(
             return CommandOutcome.Failed(
                 HarnessExit.UsageError,
                 $"no run '{named}' has kept anything: nothing under "
-                + $"'{HarnessLayout.DirectoryName}/{HarnessLayout.RunnerDirectoryName}/"
-                + $"{HarnessLayout.RunnerActionsDirectoryName}' holds artifacts for it. A step keeps "
+                + $"'{HarnessLayout.RunnerActionsDirectoryRelative}' holds artifacts for it. A step keeps "
                 + "what it declares under 'outputs' and asks for with 'persist', and only when it "
                 + "passes.");
         }
 
-        var report = await _legsService.CheckAsync(directory, legNames, here: false, cancellationToken).ConfigureAwait(false);
+        // A copy starts no program on a host, so a host is given one whatever it has installed: a host
+        // without cmake is still where a runner that builds nothing runs, and where its artifacts go.
+        var report = await _legsService
+            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: false, cancellationToken)
+            .ConfigureAwait(false);
 
         var hosts = report.Placements
             .Where(placement => placement is { Runnable: true, Host: not null })
@@ -599,7 +598,7 @@ public sealed class SyncService(
             }
 
             _output.Warn(CommandName, $"{transport.Host}:   replace  {HarnessLayout.DirectoryName}/config.json, with this tree's");
-            _output.Warn(CommandName, $"{transport.Host}:   mirror   {Actions}, to this tree's actions");
+            _output.Warn(CommandName, $"{transport.Host}:   mirror   {HarnessLayout.RunnerActionsDirectoryRelative}, to this tree's actions");
 
             // Marked as begun before anything is deleted, and marked as finished only once the copy
             // is one. A takeover that stops part way is neither the checkout somebody had nor a copy
@@ -1077,7 +1076,7 @@ public sealed class SyncService(
         var take = $"'--adopt \"{transport.Host}\"'";
 
         var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
-            + $"there with this tree's, and makes {Actions} there match this tree's, action by action.";
+            + $"there with this tree's, and makes {HarnessLayout.RunnerActionsDirectoryRelative} there match this tree's, action by action.";
 
         var survives = $"Its .git and every commit in it, the harness's own state in {HarnessLayout.DirectoryName} "
             + "- connection data, secrets, runner values, locks, runs, and each action's own build and "

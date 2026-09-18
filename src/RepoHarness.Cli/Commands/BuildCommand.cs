@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Runs;
 
 namespace RepoHarness.Cli.Commands;
@@ -78,7 +79,10 @@ internal static class BuildCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
-                        RemoteArguments(arguments)),
+                        RemoteArguments(arguments))
+                    {
+                        Workload = LegWorkload.BuildOnly,
+                    },
                     (work, token) => BuildLegAsync(builds, work, token),
                     cancellationToken)
                 .ConfigureAwait(false);
