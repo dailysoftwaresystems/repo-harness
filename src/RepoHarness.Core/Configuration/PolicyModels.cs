@@ -63,15 +63,22 @@ public sealed class SyncConfig
     public const double DefaultMaxDeleteFraction = 0.25;
 
     /// <summary>
-    /// Paths sync must never transfer, whatever the configuration says: repository
-    /// metadata, and the harness's own state including every host's connection data.
+    /// Paths sync must never transfer, whatever the configuration says: the repository's own
+    /// metadata.
     /// </summary>
     /// <remarks>
     /// A constant rather than a default value. A default is replaced by whatever list a
     /// configuration supplies, so a floor held that way can be removed by the very
     /// configuration it exists to constrain.
+    /// <para>
+    /// The harness's own directory is no longer listed here, and is no less protected for it. Its
+    /// state - connection data, credentials, runner values, locks, runs - is withheld by
+    /// <see cref="Sync.HarnessDirectorySync"/>, in code that no configuration and no ignore rule
+    /// reaches. What left this list is the one part of that directory that belongs to the tree:
+    /// its actions, which a leg on another host has to be able to run.
+    /// </para>
     /// </remarks>
-    public static IReadOnlyList<string> NeverTransferFloor { get; } = [".git", ".harness-config"];
+    public static IReadOnlyList<string> NeverTransferFloor { get; } = [".git"];
 
     /// <summary>Paths to exclude in addition to those git already ignores.</summary>
     public List<string> Exclude { get; init; } = [];

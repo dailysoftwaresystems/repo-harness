@@ -261,6 +261,53 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A run refuses to write its scratch where git would commit it, before a single step runs. The
+    /// rules were written by init and nothing checked them afterwards, so a repository whose
+    /// .gitignore predated them wrote a run's kept output where git status showed it. Both
+    /// directories are asked about, and only the one git would not ignore is named.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false, "'build/' and 'artifacts/'")]
+    [InlineData(true, false, "'artifacts/'")]
+    [InlineData(false, true, "'build/'")]
+    public async Task AnActionWhoseScratchGitWouldCommit_IsRefused_BeforeAnythingRuns(
+        bool ignoreBuild,
+        bool ignoreArtifacts,
+        string named)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        WriteAction(
+            temp,
+            $$"""
+            name: corpus
+            steps:
+              - name: pack
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" 0
+            """,
+            ignoreBuild,
+            ignoreArtifacts);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"does not ignore this action's {named}", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("init", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("Nothing has run", refusal.Message, StringComparison.Ordinal);
+
+        // And nothing did: no working space was made for the run.
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, ".harness-config", "runner", "actions", "corpus", "build")));
+    }
+
+    /// <summary>
     /// A step that exits zero having written nothing it declared is unwitnessed, not passed. An
     /// exit code alone cannot tell that apart from work that was done.
     /// </summary>
@@ -701,8 +748,46 @@ public sealed class RunnerRunServiceTests
         ],
     };
 
-    private static void WriteAction(TempDirectory temp, string yaml)
-        => temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "corpus", "corpus.yml"), yaml);
+    private static void WriteAction(TempDirectory temp, string yaml, bool ignoreBuild = true, bool ignoreArtifacts = true)
+    {
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "corpus", "corpus.yml"), yaml);
+        Repository(temp, ignoreBuild, ignoreArtifacts);
+    }
+
+    /// <summary>
+    /// Makes <paramref name="temp"/> a repository that ignores what a run writes, as init leaves one
+    /// - or leaves out a rule, for a test about a repository whose .gitignore predates it. A run
+    /// asks git before it writes an action's scratch, and a run always happens inside a repository.
+    /// </summary>
+    private static void Repository(TempDirectory temp, bool ignoreBuild, bool ignoreArtifacts)
+    {
+        if (!Directory.Exists(temp.Combine(".git")))
+        {
+            using var git = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("git")
+            {
+                ArgumentList = { "init", "--quiet", temp.Path },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            })!;
+
+            git.WaitForExit();
+            Assert.Equal(0, git.ExitCode);
+        }
+
+        var rules = new List<string>();
+
+        if (ignoreBuild)
+        {
+            rules.Add(HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName));
+        }
+
+        if (ignoreArtifacts)
+        {
+            rules.Add(HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName));
+        }
+
+        temp.WriteFile(".gitignore", string.Join("\n", rules) + "\n");
+    }
 
     private static void WriteSecret(TempDirectory temp)
         => temp.WriteFile(

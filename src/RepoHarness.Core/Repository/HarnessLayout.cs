@@ -92,6 +92,22 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     public static string ActionArtifactsRelative(string actionDirectory, string runId, string leg)
         => ActionScratchRelative(actionDirectory, ActionArtifactsDirectoryName, runId, leg);
 
+    /// <summary>
+    /// The ignore rule that keeps every action's <paramref name="kind"/> directory out of git, at
+    /// whatever depth the action is grouped.
+    /// </summary>
+    /// <param name="kind"><see cref="ActionBuildDirectoryName"/> or <see cref="ActionArtifactsDirectoryName"/>.</param>
+    /// <remarks>
+    /// Spelled here once, for init to write and for a run that finds it missing to quote, so the line
+    /// somebody is told to add is exactly the line init would have added.
+    /// </remarks>
+    public static string ActionScratchIgnoreRule(string kind)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+
+        return $"/{DirectoryName}/{RunnerDirectoryName}/{RunnerActionsDirectoryName}/**/{kind}/";
+    }
+
     /// <summary>One of an action's two run-keyed directories, relative to a tree root.</summary>
     private static string ActionScratchRelative(string actionDirectory, string kind, string runId, string leg)
     {

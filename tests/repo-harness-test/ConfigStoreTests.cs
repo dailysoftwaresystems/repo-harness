@@ -576,7 +576,16 @@ public sealed class ConfigStoreTests
         Assert.Equal(SyncConfig.NeverTransferFloor, emptied.Sync.EffectiveNeverTransfer);
         Assert.Equal([.. SyncConfig.NeverTransferFloor, "out"], replaced.Sync.EffectiveNeverTransfer);
         Assert.Contains(".git", SyncConfig.NeverTransferFloor);
-        Assert.Contains(".harness-config", SyncConfig.NeverTransferFloor);
+
+        // The harness's own state is withheld by code rather than by that list, so emptying the list
+        // reaches it no more than it reaches .git: a host's credentials are neither sent nor deleted.
+        var exclusions = new RepoHarness.Core.Sync.SyncExclusions(emptied.Sync, emptied.Worktrees.Root);
+
+        foreach (var local in new[] { ".git/config", ".harness-config/sshItems/vps/.env", ".harness-config/runner/.secrets/ci.env" })
+        {
+            Assert.True(exclusions.IsWithheldFromTransfer(local), $"'{local}' should never be sent");
+            Assert.True(exclusions.IsProtectedFromDeletion(local), $"'{local}' should never be deleted");
+        }
     }
 
     [Fact]

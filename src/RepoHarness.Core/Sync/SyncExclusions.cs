@@ -82,7 +82,9 @@ public sealed class SyncExclusions
     /// </summary>
     /// <param name="relativePath">A path relative to the tree root, with forward separators.</param>
     public bool IsWithheldFromTransfer(string relativePath)
-        => Matches(_withheld, relativePath) || Matches(_excluded, relativePath);
+        => HarnessDirectorySync.Withholds(relativePath)
+            || Matches(_withheld, relativePath)
+            || Matches(_excluded, relativePath);
 
     /// <summary>
     /// Whether <paramref name="relativePath"/> is protected from deletion. True only for the
@@ -90,7 +92,8 @@ public sealed class SyncExclusions
     /// it for ever is a copy of a tree that no longer exists.
     /// </summary>
     /// <param name="relativePath">A path relative to the tree root, with forward separators.</param>
-    public bool IsProtectedFromDeletion(string relativePath) => Matches(_withheld, relativePath);
+    public bool IsProtectedFromDeletion(string relativePath)
+        => HarnessDirectorySync.Withholds(relativePath) || Matches(_withheld, relativePath);
 
     /// <summary>
     /// Names every rooted <c>sync.neverTransfer</c> entry that matches nothing here while that name

@@ -9,7 +9,19 @@ namespace RepoHarness.Core.Repository;
 /// <summary>Everything a command needs to know about where it is running.</summary>
 /// <param name="Layout">Resolved paths for this repository.</param>
 /// <param name="Config">Parsed configuration.</param>
-public sealed record HarnessContext(HarnessLayout Layout, HarnessConfig Config);
+public sealed record HarnessContext(HarnessLayout Layout, HarnessConfig Config)
+{
+    /// <summary>
+    /// The file <see cref="Config"/> was read from: the tree's own, or the main checkout's for a
+    /// worktree that has none of its own.
+    /// </summary>
+    /// <remarks>
+    /// Recorded because something else has to send the same file: a sync places the configuration
+    /// a leg on a host will run with, and placing any file but the one this command read is how a
+    /// worktree's remote legs came to run with the main checkout's configuration.
+    /// </remarks>
+    public string ConfigFile { get; init; } = Layout.ConfigFile;
+}
 
 /// <summary>
 /// Resolves the repository and its configuration. Every command begins this way,
@@ -92,7 +104,7 @@ public sealed class HarnessContextLoader(
                     + $"so the main checkout's is being used: '{fallback}'. Anything this tree changes "
                     + "about its configuration is not what is running.");
 
-                return new HarnessContext(layout, _configStore.Load(fallback));
+                return new HarnessContext(layout, _configStore.Load(fallback)) { ConfigFile = fallback };
             }
 
             throw new HarnessException(

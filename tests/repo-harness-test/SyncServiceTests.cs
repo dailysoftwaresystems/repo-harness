@@ -1515,6 +1515,199 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// Inside the harness's own directory, the actions are carried by the rule the rest of the tree
+    /// follows and nothing else is: an action crosses unless ignored, each action's build and
+    /// artifacts never do, and the directory's state - connection data, secrets, locks - never
+    /// does whatever any list says. The walk has to be able to open the way down to the actions.
+    /// </summary>
+    [Theory]
+    [InlineData(".harness-config", false)]
+    [InlineData(".harness-config/runner", false)]
+    [InlineData(".harness-config/runner/actions", false)]
+    [InlineData(".harness-config/runner/actions/corpus/corpus.yml", false)]
+    [InlineData(".harness-config/runner/actions/real-examples/c/probe/fixture.sql", false)]
+    [InlineData(".harness-config/runner/actions/corpus/build/run1/leg/x.o", true)]
+    [InlineData(".harness-config/runner/actions/group/corpus/artifacts/run1/leg/pack/p.txt", true)]
+    [InlineData(".harness-config/runner/actions/corpus/Build/x.o", true)]
+    [InlineData(".harness-config/config.json", true)]
+    [InlineData(".harness-config/sshItems/vps/item.env", true)]
+    [InlineData(".harness-config/runner/.secrets/ci.env", true)]
+    [InlineData(".harness-config/runner/.env/values.env", true)]
+    [InlineData(".harness-config/lock.json", true)]
+    [InlineData("src/a.c", false)]
+    public void TheHarnessDirectory_CarriesItsActions_AndNothingElse(string path, bool withheld)
+    {
+        var exclusions = new SyncExclusions(new SyncConfig { NeverTransfer = [] }, WorktreeSettings.DefaultRoot);
+
+        Assert.Equal(withheld, exclusions.IsWithheldFromTransfer(path));
+
+        // What is withheld is also never deleted: it is that machine's own.
+        if (withheld)
+        {
+            Assert.True(exclusions.IsProtectedFromDeletion(path));
+        }
+    }
+
+    /// <summary>
+    /// An ignored file under an action stays home, as an ignored file anywhere else in the tree does:
+    /// the actions are carried by the ordinary rule, and that rule includes git's ignore list.
+    /// </summary>
+    [Fact]
+    public void AnIgnoredFileUnderAnAction_StaysHome()
+    {
+        var exclusions = new SyncExclusions(
+            new SyncConfig(),
+            WorktreeSettings.DefaultRoot,
+            [".harness-config/runner/actions/corpus/local.env"]);
+
+        Assert.True(exclusions.IsWithheldFromTransfer(".harness-config/runner/actions/corpus/local.env"));
+        Assert.False(exclusions.IsWithheldFromTransfer(".harness-config/runner/actions/corpus/corpus.yml"));
+    }
+
+    /// <summary>
+    /// A leg placed on a host runs its runner there, from the host's copy: an action that never
+    /// crosses is a runner no remote leg can run. Measured before this: every file under the actions
+    /// directory was withheld. A new action nobody has committed crosses too - it is the one a lane
+    /// most needs to try on a remote leg.
+    /// </summary>
+    [Fact]
+    public async Task AnAction_CrossesToAHostsCopy_WhetherOrNotItIsCommitted()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        temp.WriteFile(".harness-config/runner/actions/committed/committed.yml", "steps: []\n");
+        await harness.CommitAllAsync(temp.Path, "an action", cancellationToken);
+        temp.WriteFile(".harness-config/runner/actions/fresh/fresh.yml", "steps: []\n");
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.True(File.Exists(Path.Combine(copy, ".harness-config", "runner", "actions", "committed", "committed.yml")));
+            Assert.True(File.Exists(Path.Combine(copy, ".harness-config", "runner", "actions", "fresh", "fresh.yml")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// An action the tree no longer has is removed from the host, or a stale one would sit above a
+    /// new grouped action there and be refused as an action inside an action. What the host's own
+    /// runs left under it - its build and artifacts - stays, because it is that machine's.
+    /// </summary>
+    [Fact]
+    public async Task AnActionTheTreeNoLongerHas_IsRemovedFromAHost_AndTheHostsOwnRunStateStays()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        temp.WriteFile(".harness-config/runner/actions/old/old.yml", "steps: []\n");
+        await harness.CommitAllAsync(temp.Path, "an action", cancellationToken);
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var old = Path.Combine(copy, ".harness-config", "runner", "actions", "old");
+            Directory.CreateDirectory(Path.Combine(old, "build", "r1", "leg"));
+            Directory.CreateDirectory(Path.Combine(old, "artifacts", "r1", "leg", "pack"));
+            await File.WriteAllTextAsync(Path.Combine(old, "build", "r1", "leg", "x.o"), "o", cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(old, "artifacts", "r1", "leg", "pack", "p.txt"), "kept", cancellationToken);
+
+            // Moved under a group, which the stale file would otherwise sit above.
+            File.Delete(temp.Combine(".harness-config", "runner", "actions", "old", "old.yml"));
+            temp.WriteFile(".harness-config/runner/actions/group/new/new.yml", "steps: []\n");
+            await harness.CommitAllAsync(temp.Path, "moved", cancellationToken);
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.False(File.Exists(Path.Combine(old, "old.yml")), "the tree no longer has this action");
+            Assert.True(File.Exists(Path.Combine(copy, ".harness-config", "runner", "actions", "group", "new", "new.yml")));
+            Assert.True(File.Exists(Path.Combine(old, "build", "r1", "leg", "x.o")), "a host's own working space is its own");
+            Assert.True(File.Exists(Path.Combine(old, "artifacts", "r1", "leg", "pack", "p.txt")), "a host's kept output is its own");
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// The harness's state on either side stays where it is: this tree's connection data is not
+    /// sent, and the host's own locks and run records are not touched.
+    /// </summary>
+    [Fact]
+    public async Task TheHarnessState_OnEitherSide_StaysOnItsMachine()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        temp.WriteFile(".harness-config/sshItems/vps/item.env", "SECRET=1\n");
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var hostLock = Path.Combine(copy, ".harness-config", "lock.json");
+            await File.WriteAllTextAsync(hostLock, "{}", cancellationToken);
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.False(File.Exists(Path.Combine(copy, ".harness-config", "sshItems", "vps", "item.env")));
+            Assert.True(File.Exists(hostLock), "the host's own lock is its own");
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A worktree's legs on a host run with the worktree's configuration. The configuration placed
+    /// on a host was read from the main checkout whatever tree was synced, so a lane's remote legs
+    /// ran a configuration the lane did not have - the defect round three fixed for commands run
+    /// here, surviving in the sync.
+    /// </summary>
+    [Fact]
+    public async Task AWorktreeSync_PlacesTheWorktreesOwnConfiguration()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var worktree = Path.GetFullPath(Path.Combine(temp.Path, "..", "wt-" + Guid.NewGuid().ToString("N")[..8]));
+        var copy = Path.GetFullPath(Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]));
+
+        try
+        {
+            await harness.RunGitAsync(temp.Path, ["worktree", "add", "--detach", worktree], cancellationToken);
+
+            // A setting only the lane has, written the way the tool writes its own file.
+            harness.ConfigStore.Save(
+                Path.Combine(worktree, ".harness-config", "config.json"),
+                new HarnessConfig { Worktrees = new WorktreeSettings { MaxNameLength = 17 } });
+
+            await service.SyncAsync(worktree, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var placed = harness.ConfigStore.Load(Path.Combine(copy, ".harness-config", "config.json"));
+            Assert.Equal(17, placed.Worktrees.MaxNameLength);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+            DeleteIfPresent(worktree);
+        }
+    }
+
+    /// <summary>
     /// Writes the source tree's own files into <paramref name="copy"/>, so what a sync would change
     /// there is a delta rather than the whole directory. The deletion bound measures against what the
     /// copy holds, so a copy holding none of the source is over any bound before the case under test

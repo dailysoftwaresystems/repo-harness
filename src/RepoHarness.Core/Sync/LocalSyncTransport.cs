@@ -465,6 +465,10 @@ public sealed class LocalSyncTransport(
     {
         private readonly IReadOnlyList<string> _paths = [.. paths.Select(PathPatterns.Normalize)];
 
-        public bool Contains(string relativePath) => PathPatterns.Matches(_paths, relativePath);
+        // The harness's own directory is decided in code on this side as on the sending one, so a
+        // file the source would carry is one this side sees and can remove when the source no
+        // longer has it, and this machine's own state there is never listed at all.
+        public bool Contains(string relativePath)
+            => HarnessDirectorySync.Withholds(relativePath) || PathPatterns.Matches(_paths, relativePath);
     }
 }

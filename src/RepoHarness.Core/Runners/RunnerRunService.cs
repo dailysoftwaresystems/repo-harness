@@ -243,6 +243,11 @@ public sealed class RunnerRunService(
                 Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
             : null;
 
+        if (steps.ActionDirectory is { Length: > 0 } action)
+        {
+            await RefuseUnignoredScratchAsync(request, action, cancellationToken).ConfigureAwait(false);
+        }
+
         Refuse(request, steps.Phases, values);
 
         var record = await _runSegments
@@ -1110,6 +1115,59 @@ public sealed class RunnerRunService(
             .ToList();
 
         return missing.Count == 0 ? result : result with { MissingOutputs = missing };
+    }
+
+    /// <summary>
+    /// Refuses a run whose action's working space or kept output git would not ignore in this tree.
+    /// </summary>
+    /// <param name="request">The run.</param>
+    /// <param name="action">The action's own directory, relative to the actions directory.</param>
+    /// <param name="cancellationToken">Stops the questions.</param>
+    /// <exception cref="HarnessException">Either directory would not be ignored. Nothing has run.</exception>
+    /// <remarks>
+    /// Asked before anything is written, of the paths this very run would write: a file under each,
+    /// because git answers a directory rule for a directory that does not exist yet only when asked
+    /// about something inside it. The rules were written by init and nothing checked they were still
+    /// in effect, so a repository whose .gitignore predates them wrote a run's kept output where git
+    /// status shows it and the next 'git add -A' commits it - output committed beside the thing that
+    /// produced it is a measurement nobody can reproduce.
+    /// <para>
+    /// A sync does not carry these either way: each action's build and artifacts are withheld by name,
+    /// whatever .gitignore says. What the rule protects is the repository's own history.
+    /// </para>
+    /// </remarks>
+    private async Task RefuseUnignoredScratchAsync(RunnerRunRequest request, string action, CancellationToken cancellationToken)
+    {
+        var uncovered = new List<string>();
+
+        foreach (var (kind, relative) in new[]
+        {
+            (HarnessLayout.ActionBuildDirectoryName, HarnessLayout.ActionBuildRelative(action, request.RunId, request.Leg)),
+            (HarnessLayout.ActionArtifactsDirectoryName, HarnessLayout.ActionArtifactsRelative(action, request.RunId, request.Leg)),
+        })
+        {
+            var probe = Path.Combine(relative, "probe").Replace('\\', '/');
+
+            if (!await _gitClient.IsIgnoredAsync(request.TreeRoot, probe, cancellationToken).ConfigureAwait(false))
+            {
+                uncovered.Add(kind);
+            }
+        }
+
+        if (uncovered.Count == 0)
+        {
+            return;
+        }
+
+        var directories = string.Join(" and ", uncovered.Select(kind => $"'{kind}/'"));
+        var rules = string.Join(", ", uncovered.Select(kind => $"'{HarnessLayout.ActionScratchIgnoreRule(kind)}'"));
+
+        throw new HarnessException(
+            HarnessExit.Refused,
+            $"git does not ignore this action's {directories} in '{request.TreeRoot}', so what this run "
+            + "writes there would show in git status and be committed by the next 'git add -A'. "
+            + $"'{Hosts.ToolPackage.Command} init' writes the rule{(uncovered.Count == 1 ? string.Empty : "s")} "
+            + $"into the managed block of .gitignore, or add {rules} by hand. Nothing has run.");
     }
 
     /// <summary>
