@@ -70,8 +70,8 @@ public sealed record LegEntry
     public IReadOnlyList<TimingMark> Timings { get; init; } = [];
 
     /// <summary>
-    /// Anything already known to make this leg's timings meaningless, such as a host that can sleep
-    /// with no <c>keepAwake</c> holding it open.
+    /// Anything already known to make this leg's timings meaningless, such as a phase that spanned a
+    /// clock step or a host sleep.
     /// </summary>
     public IReadOnlyList<string> TimingNotes { get; init; } = [];
 

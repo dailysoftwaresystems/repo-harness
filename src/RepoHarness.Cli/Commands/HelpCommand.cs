@@ -908,6 +908,14 @@ internal static class HelpCommand
         builder.AppendLine("A host running a leg another machine sent it reads the section that machine");
         builder.AppendLine("names it by, never 'local', which in their shared file is the machine that sent it.");
         builder.AppendLine();
+        builder.AppendLine("A host's keepAwake - [\"caffeinate\", \"-dimsu\", \"-w\", \"{pid}\"] on macOS - runs on that");
+        builder.AppendLine("host while a leg's own work does, {pid} filled in with the DssHarness process");
+        builder.AppendLine("running the leg, and is stopped when the work ends. One that cannot start, or");
+        builder.AppendLine("ends early, is said and fails nothing: a sleep it did not prevent still marks the");
+        builder.AppendLine("phase it interrupted suspect, as on a host that declares none. A host's compiler");
+        builder.AppendLine("cache is its own variable in env, CCACHE_DIR for ccache; compilerCacheDirectory");
+        builder.AppendLine("is retired, and refused where it is read.");
+        builder.AppendLine();
         builder.AppendLine("Selected legs run at the same time, and a command waits for all of them. Within");
         builder.AppendLine("a leg the order is fixed: sync when the host needs it, then build on buildCores");
         builder.AppendLine("cores, then test on testCores cores. Where a leg runs is measured before anything");

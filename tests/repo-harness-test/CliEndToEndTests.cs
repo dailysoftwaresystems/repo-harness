@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
@@ -876,6 +877,61 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal(HarnessExit.UsageError, misnamed.ExitCode);
         Assert.Contains("names a host as 'local', 'wsl <distribution>' or 'ssh <name>'", misnamed.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host's keepAwake is started while a leg's own work runs, filled in with the DssHarness
+    /// process running it. Here the command writes what it was given, and the leg's test waits for
+    /// that file before it can pass: the command ran during the work, and was given a process - the
+    /// CLI's own, which runs apart from this test and whose id only it knows.
+    /// </summary>
+    [Fact]
+    public async Task AHostsKeepAwake_RunsDuringALegsWork_GivenTheProcessRunningIt()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var awake = temp.Combine("awake.txt");
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig
+            {
+                Local = new LocalHostConfig
+                {
+                    KeepAwake = [TestHost.DotnetExecutable, "exec", TestHost.AssemblyPath, awake, "{pid}"],
+                    Env = { [TestHost.ChildModeVariable] = "write-file" },
+                },
+            },
+            Legs =
+            {
+                ["native"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig
+                    {
+                        All = new TestInvocation
+                        {
+                            Runner = TestHost.DotnetExecutable,
+                            Args = ["exec", TestHost.AssemblyPath, awake],
+                            Env = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "stream" },
+                            SuccessPattern = "second",
+                        },
+                    },
+                },
+            },
+        });
+
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, test.ExitCode);
+        Assert.True(
+            int.TryParse(await File.ReadAllTextAsync(awake, token), NumberStyles.None, CultureInfo.InvariantCulture, out var pid) && pid > 0,
+            "keepAwake was not given the process running the leg");
     }
 
     /// <summary>

@@ -833,9 +833,20 @@ while a gate ran turned a green suite red, with four test processes live at once
   separately. A phase slower than `defaults.durationWarningFactor` times the same phase
   on sibling legs of the same kind is marked suspect. A timing mark never
   changes a verdict. An emulated leg is never compared with a native one.
-- `keepAwake` holds a host awake for the leg. A host that slept once reported a
-  4 millisecond test at 729 seconds. Without it, timings from a host that can sleep are
-  marked suspect.
+- `keepAwake` holds a host awake while a leg's own work runs there. A host that slept once
+  reported a 4 millisecond test at 729 seconds. The command is started on the machine that
+  runs the work - by the DssHarness on a host a leg was dispatched to, under that host's own
+  section - with `{pid}`, the one name it is filled in with, replaced by the DssHarness process
+  running the leg, and it is stopped when the work ends. `["caffeinate", "-dimsu", "-w",
+  "{pid}"]` on macOS also stops by itself should that process end first. A command that cannot
+  start, or ends early, is said and fails nothing: a sleep it did not prevent is still seen, as
+  wall time outrunning the monotonic clock, and marks the phase it interrupted suspect, as it
+  does on a host that declares no command at all. The survey asks about the command, so a
+  directory it is found in reaches its PATH, and turns no leg away for it.
+- A host's compiler cache is that cache's own variable in the host's `env` - `CCACHE_DIR` for
+  ccache - so two hosts never share one store, and a build keys it against the leg's own tree.
+  The `compilerCacheDirectory` key that once said the same is retired, and refused where it is
+  read, naming `env` instead.
 
 ### Hosts and trees
 

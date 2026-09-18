@@ -76,7 +76,9 @@ public static class LegPrograms
     /// <see cref="For"/> is, so a program a leg needs is never one its host was not asked about. One
     /// started under an environment that sets PATH is asked about too, though no leg is turned away
     /// for it: the directory the survey finds it in is appended to that PATH like any other. So is a
-    /// compiler any host names in its own environment, wherever a leg might land.
+    /// compiler any host names in its own environment, wherever a leg might land, and the command a
+    /// host's <c>keepAwake</c> starts - which no leg is turned away for either: a host it cannot hold
+    /// awake still runs its legs, and a sleep there still marks their timings suspect.
     /// </remarks>
     public static IReadOnlyList<string> Wanted(HarnessConfig config, LegWorkload workload)
     {
@@ -89,17 +91,20 @@ public static class LegPrograms
             .SelectMany(leg => HostEnvironments(config).SelectMany(environment => Starts(config, leg, everything, environment)))
             .Select(start => start.Program)
             .Concat(config.Tools.Select(tool => tool.Name).Where(name => Surveyable(name, platformKey: null)))
+            .Concat(DeclaredHosts(config)
+                .Select(host => host.KeepAwake is [var program, ..] ? program : null)
+                .OfType<string>()
+                .Where(program => Surveyable(program, platformKey: null)))
             .Distinct(StringComparer.Ordinal)];
     }
 
     /// <summary>What every host declares under <c>env</c>, and the nothing a host with no section declares.</summary>
     private static IEnumerable<IReadOnlyDictionary<string, string>> HostEnvironments(HarnessConfig config)
-        => [
-            new Dictionary<string, string>(),
-            config.Hosts.Local.Env,
-            .. config.Hosts.Wsl.Values.Select(host => host.Env),
-            .. config.Hosts.Ssh.Values.Select(host => host.Env),
-        ];
+        => [new Dictionary<string, string>(), .. DeclaredHosts(config).Select(host => host.Env)];
+
+    /// <summary>Every host section the configuration declares.</summary>
+    private static IEnumerable<HostSettings> DeclaredHosts(HarnessConfig config)
+        => [config.Hosts.Local, .. config.Hosts.Wsl.Values, .. config.Hosts.Ssh.Values];
 
     /// <summary>
     /// Every program <paramref name="leg"/> starts for <paramref name="workload"/> that a survey can

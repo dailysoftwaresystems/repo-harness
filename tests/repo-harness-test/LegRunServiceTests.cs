@@ -244,6 +244,52 @@ public sealed class LegRunServiceTests
     }
 
     /// <summary>
+    /// A leg's own work is held awake by the command its host declares, for exactly as long as the
+    /// work runs - and on a host running a leg another machine dispatched to it, by that host's own
+    /// command, never by the one 'local' declares for the machine that dispatched it.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALegsOwnWork_IsHeldAwake_ByItsHostsCommand_UntilItEnds(bool sentHere)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var held = new HeldProcesses();
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig
+            {
+                Local = new LocalHostConfig { KeepAwake = ["local-awake", "-w", "{pid}"] },
+                Ssh = { [HostName] = new SshHostConfig { RepositoryPath = HostTree, KeepAwake = ["pi-awake", "-w", "{pid}"] } },
+            },
+            Legs = { ["native"] = HostDoubles.Leg(platform.PlatformKey, platform.Processor) },
+        };
+
+        bool? stoppedDuringTheWork = null;
+
+        var verdicts = await RunAsync(
+            temp,
+            harness,
+            config,
+            SshAndLocal(harness),
+            new LegRunRequest(temp.Path, null, Json: true, Here: sentHere ? HostId.Ssh(HostName) : null) { Workload = LegWorkload.Copy },
+            ran: _ => stoppedDuringTheWork = Assert.Single(held.Started).Stopping.IsCancellationRequested,
+            keepAwake: held);
+
+        Assert.Equal("passed", verdicts["native"].Verdict);
+        Assert.False(stoppedDuringTheWork);
+
+        var (request, stopping) = Assert.Single(held.Started);
+
+        Assert.Equal(sentHere ? "pi-awake" : "local-awake", request.FileName);
+        Assert.True(stopping.IsCancellationRequested);
+    }
+
+    /// <summary>
     /// A leg goes where a sync puts its tree whether or not the run syncs, and a program that host
     /// lacks turns it away there. Moved by what each command starts, a run on what a build had staged
     /// went to a host that had the program and never had the tree.
@@ -322,9 +368,10 @@ public sealed class LegRunServiceTests
         LegRunRequest request,
         RunLock? runLock = null,
         ISyncService? sync = null,
-        Action<PlacedLeg>? ran = null)
+        Action<PlacedLeg>? ran = null,
+        IProcessRunner? keepAwake = null)
     {
-        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync, ran);
+        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync, ran, keepAwake);
 
         using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
 
@@ -342,7 +389,8 @@ public sealed class LegRunServiceTests
         LegRunRequest request,
         RunLock? runLock = null,
         ISyncService? sync = null,
-        Action<PlacedLeg>? ran = null)
+        Action<PlacedLeg>? ran = null,
+        IProcessRunner? keepAwake = null)
     {
         var loader = HostDoubles.Loader(config, temp.Path);
 
@@ -355,6 +403,7 @@ public sealed class LegRunServiceTests
             sync ?? Substitute.For<ISyncService>(),
             Substitute.For<ISyncTransportFactory>(),
             new RemoteLegRunner(new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
+            new KeepAwake(keepAwake ?? new HeldProcesses(), harness.Output),
             harness.Platform,
             harness.Output);
 

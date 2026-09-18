@@ -517,6 +517,21 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// The command a host's keepAwake starts is asked about, so a directory the survey finds it in
+    /// reaches that host's PATH, and it is required of no host: one it cannot hold awake still runs
+    /// its legs, and a sleep there still marks their timings suspect.
+    /// </summary>
+    [Fact]
+    public void AKeepAwakeCommand_IsAskedAbout_AndRequiredOfNoHost()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Hosts.Ssh["pi"] = new SshHostConfig { RepositoryPath = "~/repo", KeepAwake = ["rh-awake", "-w", "{pid}"] };
+
+        Assert.Contains("rh-awake", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
+        Assert.DoesNotContain("rh-awake", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, config.Hosts.Ssh["pi"]));
+    }
+
+    /// <summary>
     /// A host running a leg another machine dispatched to it judges the leg by the section that
     /// machine's configuration gives it, not by 'local' - which, in the configuration the two share,
     /// is the machine that dispatched it.

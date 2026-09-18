@@ -64,19 +64,20 @@ public abstract class HostSettings
     public int? TestCores { get; init; }
 
     /// <summary>
-    /// Command that keeps this machine awake while a leg runs on it, with <c>{pid}</c> replaced
-    /// by the process it should outlive, such as <c>["caffeinate", "-dimsu", "-w", "{pid}"]</c> on
-    /// macOS. A host that sleeps mid-leg charges the sleep to whatever was running, which once
-    /// reported a 4 ms test at 729 s. Without it, the leg's timings are marked suspect.
+    /// Command that keeps this machine awake while a leg's own work runs on it, such as
+    /// <c>["caffeinate", "-dimsu", "-w", "{pid}"]</c> on macOS. Started on this machine when the
+    /// leg's work starts, with <c>{pid}</c> - the one name it is filled in with - replaced by the
+    /// DssHarness process running the leg, and stopped when that work ends.
     /// </summary>
+    /// <remarks>
+    /// A host that sleeps mid-leg charges the sleep to whatever was running, which once reported a
+    /// 4 ms test at 729 s. A command that cannot start, or ends early, is said and fails nothing: a
+    /// sleep it did not prevent is still seen, as wall time outrunning the monotonic clock, and marks
+    /// the phase it interrupted suspect - as it does on a machine that declares no command at all.
+    /// A compiler cache, which once had a key of its own here, is its own variable under
+    /// <see cref="Env"/>: <c>CCACHE_DIR</c> for ccache.
+    /// </remarks>
     public List<string>? KeepAwake { get; init; }
-
-    /// <summary>
-    /// Compiler cache directory on this machine, set explicitly so that two hosts never share
-    /// one store. A shared store lets one host's objects satisfy another host's build, which is
-    /// a contamination this prevents by construction.
-    /// </summary>
-    public string? CompilerCacheDirectory { get; init; }
 
     /// <summary>
     /// Environment for every process a leg starts on this machine: each phase of its build and the

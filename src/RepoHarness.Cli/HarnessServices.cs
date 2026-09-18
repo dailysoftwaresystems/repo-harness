@@ -109,6 +109,7 @@ internal static class HarnessServices
         services.AddSingleton<InputFingerprint>();
         services.AddSingleton<ProcessSampler>();
         services.AddSingleton<RemoteLegRunner>();
+        services.AddSingleton<KeepAwake>();
         services.AddSingleton<LegRunService>();
 
         services.AddSingleton<BuildDirectoryGuard>();

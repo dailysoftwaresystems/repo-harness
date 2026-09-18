@@ -78,6 +78,7 @@ public sealed class LegRunService(
     ISyncService syncService,
     ISyncTransportFactory transportFactory,
     RemoteLegRunner remoteLegs,
+    KeepAwake keepAwake,
     IHostPlatform platform,
     IHarnessOutput output)
 {
@@ -89,6 +90,7 @@ public sealed class LegRunService(
     private readonly ISyncService _syncService = syncService;
     private readonly ISyncTransportFactory _transportFactory = transportFactory;
     private readonly RemoteLegRunner _remoteLegs = remoteLegs;
+    private readonly KeepAwake _keepAwake = keepAwake;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
@@ -385,6 +387,10 @@ public sealed class LegRunService(
                         cancellationToken)
                     .ConfigureAwait(false);
             }
+
+            // Held awake for as long as the leg's own work runs here, by the command this machine
+            // declares - under the section the machine that dispatched the leg knows it by.
+            await using var awake = _keepAwake.Hold(commandName, leg.Name, leg.HostSettings, leg.Host.ProgramDirectories, cancellationToken);
 
             return await work(
                     new LegWork(leg, context, runId, runDirectory, request.Time),

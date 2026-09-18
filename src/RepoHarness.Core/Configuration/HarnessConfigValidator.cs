@@ -564,9 +564,30 @@ public static class HarnessConfigValidator
             RequireAtLeastOne(testCores, $"{owner} testCores", problems);
         }
 
-        if (host.KeepAwake is { } keepAwake && IsBlankCommand(keepAwake))
+        if (host.KeepAwake is { } keepAwake)
         {
-            problems.Add($"{owner} keepAwake has an empty command");
+            if (IsBlankCommand(keepAwake))
+            {
+                problems.Add($"{owner} keepAwake has an empty command");
+            }
+            else
+            {
+                CheckProgram(keepAwake[0], $"{owner} keepAwake", problems);
+
+                // Here rather than when a leg runs: a name nothing fills in would reach the command
+                // as its own text, and the host would sleep with nothing to say why.
+                foreach (var part in keepAwake)
+                {
+                    try
+                    {
+                        _ = LegPathNames.Fill(part, KeepAwake.Names(0), $"{owner} keepAwake");
+                    }
+                    catch (HarnessException ex)
+                    {
+                        problems.Add(ex.Message);
+                    }
+                }
+            }
         }
     }
 

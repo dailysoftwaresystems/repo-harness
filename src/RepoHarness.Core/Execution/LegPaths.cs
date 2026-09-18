@@ -306,6 +306,42 @@ public static partial class LegPathNames
     }
 
     /// <summary>
+    /// <paramref name="value"/> filled in from <paramref name="names"/> alone, by the grammar every
+    /// configured string is filled in by: a doubled brace reduced to one, a <c>${...}</c> left as
+    /// written, and any other name refused. For a setting that is no leg's, and so owns none of a
+    /// leg's names, only the ones it is given.
+    /// </summary>
+    /// <param name="value">The configured string.</param>
+    /// <param name="names">Every name the setting may hold, and what each is filled in with.</param>
+    /// <param name="setting">What to call the setting in a refusal.</param>
+    /// <exception cref="HarnessException">A placeholder names something <paramref name="names"/> does not hold.</exception>
+    public static string Fill(string value, IReadOnlyDictionary<string, string> names, string setting)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(names);
+
+        return Placeholder.Replace(value, match =>
+        {
+            if (match.Groups["doubled"].Success)
+            {
+                return match.Value[..1];
+            }
+
+            if (match.Groups["other"].Success)
+            {
+                return match.Value;
+            }
+
+            return names.TryGetValue(match.Groups["name"].Value, out var filled)
+                ? filled
+                : throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"{setting} names '{match.Value}', which nothing fills in: it can hold only "
+                    + $"{string.Join(", ", names.Keys.Select(name => $"{{{name}}}"))}.");
+        });
+    }
+
+    /// <summary>
     /// Refuses a configured string holding a placeholder nothing replaces, without needing the
     /// values it would be expanded against.
     /// </summary>

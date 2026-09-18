@@ -685,6 +685,8 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "defaults": { "processSampleSeconds": 0 } }""", "defaults.processSampleSeconds")]
     [InlineData("""{ "contention": { "buildTools": ["ninja", " "] } }""", "contention.buildTools contains a blank name")]
     [InlineData("""{ "hosts": { "local": { "keepAwake": [] } } }""", "keepAwake has an empty command")]
+    [InlineData("""{ "hosts": { "local": { "keepAwake": ["caffeinate", "-w", "{leg}"] } } }""", "keepAwake names '{leg}', which nothing fills in: it can hold only {pid}")]
+    [InlineData("""{ "hosts": { "local": { "keepAwake": ["./awake.sh"] } } }""", "keepAwake './awake.sh' must be a program name")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "connectTimeoutSeconds": 0 } } } }""", "connectTimeoutSeconds")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "keepAliveSeconds": 0 } } } }""", "keepAliveSeconds")]
     [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "buildOutputs": ["../other/bin"] } ] }""", "buildOutputs entry '../other/bin'")]
@@ -1204,6 +1206,33 @@ public sealed class ConfigStoreTests
     {
         using var temp = new TempDirectory();
         return CreateStore().Load(temp.WriteFile("config.json", json));
+    }
+
+    /// <summary>
+    /// A key this tool retired is refused like any unknown one, saying what took its place: told only
+    /// that compilerCacheDirectory is unknown, a reader deletes the line and loses the per-host store
+    /// it was there for.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "hosts": { "local": { "compilerCacheDirectory": "/cache" } } }""", "hosts.local compilerCacheDirectory")]
+    [InlineData("""{ "hosts": { "ssh": { "mac.mini": { "repositoryPath": "/r", "CompilerCacheDirectory": "/cache" } } } }""", "hosts.ssh 'mac.mini' compilerCacheDirectory")]
+    [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "~/r", "compilerCacheDirectory": "/cache" } } } }""", "hosts.wsl 'Ubuntu' compilerCacheDirectory")]
+    public void ARetiredKey_IsRefused_SayingWhatTookItsPlace(string json, string where)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains($"{where} is no longer read", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("\"CCACHE_DIR\"", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An unknown key that was never read is refused as unknown, with nothing said to take its place.</summary>
+    [Fact]
+    public void AnUnknownKey_IsNotMistakenForARetiredOne()
+    {
+        var exception = LoadInvalid("""{ "hosts": { "local": { "compilerCache": "/cache" } } }""");
+
+        Assert.Contains("compilerCache", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer read", exception.Message, StringComparison.Ordinal);
     }
 
     private static ConfigException LoadInvalid(string json)
