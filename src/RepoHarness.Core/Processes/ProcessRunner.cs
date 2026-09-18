@@ -275,11 +275,18 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// every program spells it where the name is that one.
     /// </summary>
     private static List<string> Spellings(IDictionary<string, string?> environment, string name)
-        => [.. environment.Keys
+    {
+        var spellings = environment.Keys
             .Where(existing => string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
-            .Append(name)
-            .Append(string.Equals(name, PathVariable, StringComparison.OrdinalIgnoreCase) ? PathVariable : name)
-            .Distinct(StringComparer.Ordinal)];
+            .Append(name);
+
+        if (string.Equals(name, PathVariable, StringComparison.OrdinalIgnoreCase))
+        {
+            spellings = spellings.Append(PathVariable);
+        }
+
+        return [.. spellings.Distinct(StringComparer.Ordinal)];
+    }
 
     /// <summary>
     /// The first file that would start as <paramref name="name"/> in the directories
