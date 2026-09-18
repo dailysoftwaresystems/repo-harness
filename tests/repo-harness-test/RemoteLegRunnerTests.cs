@@ -43,7 +43,7 @@ public sealed class RemoteLegRunnerTests
         // the host told to run it on itself: a host free to dispatch onward would put the verdict one
         // further hop from the reader, and could not terminate by construction.
         Assert.Equal(
-            ["test", "--legs", "wsl-debug", "--json", RemoteLegRunner.HereOption, "--filter", "auth"],
+            ["test", "--legs", "wsl-debug", "--json", RemoteLegRunner.HereOption, "wsl Example-Linux", "--filter", "auth"],
             request.Arguments);
 
         Assert.Equal(LegVerdict.Passed, entry.Verdict);

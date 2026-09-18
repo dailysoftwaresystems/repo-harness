@@ -1,3 +1,5 @@
+using RepoHarness.Core.Hosts;
+
 namespace RepoHarness.Core.Configuration;
 
 /// <summary>
@@ -23,6 +25,26 @@ public sealed class HostsConfig
     /// with the private key in its <c>.key</c>. Nothing here names any of them: this file is tracked.
     /// </summary>
     public Dictionary<string, SshHostConfig> Ssh { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What <paramref name="host"/> declares for itself.</summary>
+    /// <param name="host">The host, named as this configuration names it.</param>
+    /// <remarks>
+    /// A host with no section declares nothing, which is what the local section means when it is
+    /// left out too: every setting falls back to its default.
+    /// </remarks>
+    public HostSettings SettingsFor(HostId host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+
+        HostSettings? declared = host.Kind switch
+        {
+            HostKind.Local => Local,
+            HostKind.Wsl => Wsl.GetValueOrDefault(host.Name),
+            _ => Ssh.GetValueOrDefault(host.Name),
+        };
+
+        return declared ?? new LocalHostConfig();
+    }
 }
 
 /// <summary>Settings every kind of host accepts.</summary>
@@ -53,9 +75,18 @@ public abstract class HostSettings
     public string? CompilerCacheDirectory { get; init; }
 
     /// <summary>
-    /// Environment applied to every phase run on this machine. Names compare ignoring case on
-    /// every platform, as they do on Windows.
+    /// Environment for every process a leg starts on this machine: each phase of its build and the
+    /// ninja that reads the build's dependency records, its test runner, and each step of a runner.
+    /// Beneath every environment more specific than a machine's own, each of which can still say
+    /// otherwise: the variant's - its toolchain's, build config's and sanitizer's - the test
+    /// invocation's, and a runner's values, its secrets, its own environment and each step's. Names
+    /// compare ignoring case on every platform, as they do on Windows.
     /// </summary>
+    /// <remarks>
+    /// A PATH set here is where every one of those programs is found on this machine, and no survey
+    /// can see it: none of them is required of the machine before a leg starts, and each is the run's
+    /// to find, as under any environment that sets PATH.
+    /// </remarks>
     public Dictionary<string, string> Env { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 

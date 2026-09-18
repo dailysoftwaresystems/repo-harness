@@ -675,6 +675,22 @@ sync (when the host needs it)  →  build on buildCores  →  test on testCores
   `buildCores` and `testCores`, because a remote host rarely has the same core count
   as the machine that wrote the configuration, and a test invocation can replace the
   test count again with its own `cores`.
+- **A host's `env` reaches every process a leg starts there** - each build phase, the
+  ninja that reads the build's dependency records, the test runner and each step of a
+  runner - as the lowest layer, so everything more specific still says otherwise. From
+  lowest to highest: for a build, the host's `env` then the variant's (its toolchain's,
+  build config's and sanitizer's); for a test, the host's then the test invocation's; for
+  a runner, the host's, then the runner's values and secrets, its own `env`, and the
+  step's. Names compare ignoring case on every platform, as they do on Windows.
+- **A PATH a host sets is the run's.** It is where that host finds every program a leg
+  starts there, and no survey can see it, so none of those programs is required of the
+  host before the leg starts - each is looked for, so the directory it is found in still
+  reaches that PATH, and a program that is then not found fails the leg, naming it.
+- **A host running a leg another machine dispatched to it is told which host it is.** To
+  itself it is `local`, and `hosts.local` in the configuration the two share describes the
+  machine that dispatched it: read that way, a leg on a Mac ran with the Windows machine's
+  core counts and environment. The dispatch names the host, and its cores, its `env`, and
+  the `{host}` a label records are all read under that name.
 
 ## Leg integrity
 

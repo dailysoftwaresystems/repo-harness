@@ -55,12 +55,6 @@ internal static class TestCommand
         Description = "Test what is already built, without building first.",
     };
 
-    private static readonly Option<bool> HereOption = new(RemoteLegRunner.HereOption)
-    {
-        Description = "Run every selected leg on this machine rather than on the host it was placed on.",
-        Hidden = true,
-    };
-
     internal static Command Create()
     {
         var command = new Command(
@@ -75,7 +69,7 @@ internal static class TestCommand
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
         command.Options.Add(SkipBuildOption);
-        command.Options.Add(HereOption);
+        command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -102,7 +96,7 @@ internal static class TestCommand
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
-                        arguments.GetValue(HereOption),
+                        arguments.GetValue(DispatchOptions.Here),
                         RemoteArguments(arguments))
                     {
                         // Built first unless told not to, and tested either way.
@@ -176,20 +170,7 @@ internal static class TestCommand
         if (!skipBuild)
         {
             var build = await builds
-                .BuildAsync(
-                    config,
-                    new BuildRequest(
-                        leg.Name,
-                        leg.TreeRoot,
-                        leg.BuildableProject(),
-                        leg.Variant,
-                        leg.Host.Os ?? string.Empty,
-                        CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory)
-                    {
-                        ProgramDirectories = leg.Host.ProgramDirectories,
-                    },
-                    cancellationToken)
+                .BuildAsync(config, leg.BuildRequestFor(config, work.RunDirectory), cancellationToken)
                 .ConfigureAwait(false);
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
@@ -225,6 +206,7 @@ internal static class TestCommand
                     Product = testProduct,
                     ProductProblem = testProductProblem,
                     HostTestCores = leg.HostSettings.TestCores,
+                    HostEnvironment = leg.HostSettings.Env,
                     Filter = filter,
                     Excludes = excludes,
                     Emulated = leg.Emulated,

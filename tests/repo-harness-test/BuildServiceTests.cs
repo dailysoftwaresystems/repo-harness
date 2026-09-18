@@ -317,9 +317,9 @@ public sealed class BuildServiceTests
         return (Service(factory, exitCode), factory);
     }
 
-    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null)
+    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null, IProcessRunner? phases = null)
         => new(
-            new PhaseRunner(new QuietRunner(exitCode), factory.FileSystem, factory.Output),
+            new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
@@ -491,6 +491,52 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A host's own environment reaches every phase of the build and the ninja that reads its
+    /// records, beneath the variant's: a name only the host sets is the host's, one the toolchain
+    /// sets too is the toolchain's, and a compiler cache the host declares is keyed against the leg's
+    /// own tree.
+    /// </summary>
+    [Fact]
+    public async Task TheHostsEnvironment_ReachesEveryPhaseAndTheCheck_BeneathTheVariants()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string>
+            {
+                ["RH_HOST"] = "host",
+                ["RH_BOTH"] = "host",
+                ["CCACHE_DIR"] = temp.Combine("cache"),
+            },
+        };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
+
+        var config = Config();
+        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], Env = { ["RH_BOTH"] = "variant" } };
+
+        var phases = new RecordingRunner(string.Empty);
+        var dependencies = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await Service(factory, exitCode: 0, dependencies, phases).BuildAsync(config, request, cancellationToken);
+
+        Assert.NotEmpty(phases.Started);
+        Assert.Single(dependencies.Started);
+
+        foreach (var started in phases.Started.Concat(dependencies.Started))
+        {
+            Assert.Equal("host", started.Environment["RH_HOST"]);
+            Assert.Equal("variant", started.Environment["RH_BOTH"]);
+            Assert.Equal(temp.Path, started.Environment["CCACHE_BASEDIR"]);
+        }
+    }
+
+    /// <summary>
     /// A relative program the build recorded is read from the build directory, where the check starts,
     /// never from wherever this process began.
     /// </summary>
@@ -505,7 +551,7 @@ public sealed class BuildServiceTests
         var runner = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
 
         _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
-            .CheckAsync(buildDirectory, [], "tools/ninja", TestContext.Current.CancellationToken);
+            .CheckAsync(buildDirectory, [], "tools/ninja", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(Path.Combine(buildDirectory, "tools", "ninja"), Assert.Single(runner.Started).FileName);
     }
@@ -527,7 +573,7 @@ public sealed class BuildServiceTests
             .ThrowsAsync(new ProgramStartException("/opt/arm/bin/ninja", "'/opt/arm/bin/ninja' could not be started: Text file busy"));
 
         var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
-            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", TestContext.Current.CancellationToken));
+            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.CommandFailed, failure.ExitCode);
         Assert.Contains("could not be started", failure.Message, StringComparison.Ordinal);

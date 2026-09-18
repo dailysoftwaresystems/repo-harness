@@ -21,9 +21,11 @@ namespace RepoHarness.Core.Runs;
 /// <param name="UseStaged">Whether to act on what is already staged on a host, without syncing again.</param>
 /// <param name="Time">Whether to report the profile timing.</param>
 /// <param name="Here">
-/// Whether every selected leg runs on this machine rather than on the host it was placed on. What a
-/// host is asked when the machine that reached it dispatches a leg there: without it the host would
-/// be free to dispatch the leg onward, putting the verdict one further hop from the reader.
+/// The host this machine is to the machine that dispatched the legs here, which runs every selected
+/// leg on this machine, under that host's settings; <see langword="null"/> where this machine places
+/// them itself. Without it the host would be free to dispatch the leg onward, putting the verdict
+/// one further hop from the reader, and would read its settings as 'local' - which, in the
+/// configuration the two machines share, is the one that dispatched it.
 /// </param>
 /// <param name="RemoteArguments">
 /// The command's own options, passed on to a host running a leg for this run so that it runs the
@@ -36,7 +38,7 @@ public sealed record LegRunRequest(
     bool Json = false,
     bool UseStaged = false,
     bool Time = false,
-    bool Here = false,
+    HostId? Here = null,
     IReadOnlyList<string>? RemoteArguments = null)
 {
     /// <summary>
@@ -372,7 +374,7 @@ public sealed class LegRunService(
             // would produce a verdict about the machine that typed the command, under the name of
             // the leg that was supposed to check a different one — which is the whole failure a
             // harness exists to prevent, wearing a green colour.
-            if (leg.Host.Host.Kind != HostKind.Local && !request.Here)
+            if (leg.Host.Host.Kind != HostKind.Local && request.Here is null)
             {
                 return await _remoteLegs
                     .RunAsync(

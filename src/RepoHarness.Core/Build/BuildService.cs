@@ -27,6 +27,9 @@ public sealed record BuildRequest(
 {
     /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
+    /// <summary>What the host the leg runs on declares under <c>env</c>, beneath the variant's own environment.</summary>
+    public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
 }
 
 /// <summary>What one leg's build did.</summary>
@@ -221,7 +224,7 @@ public sealed class BuildService(
                 .ConfigureAwait(false);
         }
 
-        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, cancellationToken)
+        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, BuildAdapters.EnvironmentFor(overlay, request), cancellationToken)
             .ConfigureAwait(false);
 
         if (unreadable is not null)
@@ -708,6 +711,7 @@ public sealed class BuildService(
     private async Task<(NinjaDependencyReport? Report, string? Unreadable)> ReadDependenciesAsync(
         BuildRequest request,
         string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
         CancellationToken cancellationToken)
     {
         if (!string.Equals(request.Project.Type, "cmake", StringComparison.OrdinalIgnoreCase))
@@ -717,10 +721,12 @@ public sealed class BuildService(
 
         try
         {
-            // The ninja the build itself ran, which only its own environment may have found.
+            // The ninja the build itself ran, which only its own environment may have found - and
+            // started in that environment, so one looked up by name is found on the PATH the build's
+            // phases had, a host's own among them.
             var recorded = _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram;
 
-            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, cancellationToken).ConfigureAwait(false), null);
+            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, environment, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {

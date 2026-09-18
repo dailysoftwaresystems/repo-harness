@@ -27,6 +27,12 @@ public static class LegsExit
 public sealed record LegsReport(IReadOnlyList<LegPlacement> Placements, IReadOnlyList<HostReport> Hosts, bool Named)
 {
     /// <summary>
+    /// The host this machine is to the machine that dispatched the legs here, or <see langword="null"/>
+    /// where this machine placed them itself.
+    /// </summary>
+    public HostId? Here { get; init; }
+
+    /// <summary>
     /// Whether the check passed. A leg named with <c>--legs</c> that cannot run fails it, because it
     /// was asked for; one that was merely declared does not, because a switched-off machine is normal.
     /// Either way at least one leg must be able to run, or nothing would - and a leg turned away
@@ -69,13 +75,17 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
     /// <param name="directory">A directory in the repository.</param>
     /// <param name="legNames">What <c>--legs</c> was given, or <see langword="null"/>.</param>
     /// <param name="workload">What the command asking will have each leg do, which says what a host must have.</param>
-    /// <param name="here">Whether this machine is the only candidate, whatever a leg names.</param>
+    /// <param name="here">
+    /// The host this machine is to the machine that dispatched the legs here, which makes this machine
+    /// the only candidate for each of them and names the settings they run with; <see langword="null"/>
+    /// where this machine places them itself.
+    /// </param>
     /// <param name="cancellationToken">Stops the measuring.</param>
     public async Task<LegsReport> CheckAsync(
         string directory,
         IReadOnlyList<string>? legNames,
         LegWorkload workload,
-        bool here = false,
+        HostId? here = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
@@ -86,7 +96,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         var selection = LegSelection.Resolve(config, legNames);
         var emulators = EmulatorsUsedBy(config, selection);
         var programs = LegPrograms.Wanted(config, workload);
-        var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here))).ToList();
+        var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here is not null))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
         // This machine costs nothing to reach, so it is measured first. Other hosts are measured only
@@ -121,7 +131,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
             _output.Warn(CommandName, $"leg '{placement.Leg.Name}' cannot run: {placement.Reason}");
         }
 
-        return new LegsReport(placements, [.. reports.Values], selection.Named);
+        return new LegsReport(placements, [.. reports.Values], selection.Named) { Here = here };
     }
 
     /// <summary>

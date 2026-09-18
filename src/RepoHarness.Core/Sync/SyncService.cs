@@ -293,7 +293,7 @@ public sealed class SyncService(
         // A copy starts no program on a host, so a host is given one whatever it has installed: a host
         // without cmake is still where a runner that builds nothing runs, and where its artifacts go.
         var report = await _legsService
-            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: false, cancellationToken)
+            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: null, cancellationToken)
             .ConfigureAwait(false);
 
         var hosts = report.Placements

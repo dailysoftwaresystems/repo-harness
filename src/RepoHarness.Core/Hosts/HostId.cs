@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>How a host is reached.</summary>
@@ -78,4 +80,23 @@ public sealed class HostId : IEquatable<HostId>
         HostKind.Wsl => $"wsl {Name}",
         _ => $"ssh {Name}",
     };
+
+    /// <summary>
+    /// Reads a host as <see cref="ToString"/> spells it, which is how a machine that dispatches a leg
+    /// tells the host it sends it to which host that is.
+    /// </summary>
+    /// <param name="text">The host as it was spelled.</param>
+    /// <param name="host">The host, when <paramref name="text"/> names one.</param>
+    public static bool TryParse(string? text, [NotNullWhen(true)] out HostId? host)
+    {
+        host = (text?.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? []) switch
+        {
+            ["local"] => Local,
+            ["wsl", var distribution] => Wsl(distribution),
+            ["ssh", var name] => Ssh(name),
+            _ => null,
+        };
+
+        return host is not null;
+    }
 }

@@ -712,6 +712,51 @@ public sealed class RunnerRunServiceTests
         Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A host's own environment reaches every step, beneath everything the runner declares: a name
+    /// only the host sets is the host's, and one the runner's values, its own environment or the
+    /// step's also set is theirs.
+    /// </summary>
+    [Fact]
+    public async Task TheHostsEnvironment_ReachesEveryStep_BeneathWhatTheRunnerDeclares()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Path.Combine(".harness-config", "runner", ".env", "ci.env"), "RH_VALUE=value\n");
+
+        var step = Phase("step", "print-env", ["RH_STEP"], successPattern: "^step$");
+        step.Env["RH_STEP"] = "step";
+
+        var runner = new RunnerConfig
+        {
+            Env = { ["RH_RUNNER"] = "runner" },
+            Phases =
+            [
+                Phase("host", "print-env", ["RH_HOST"], successPattern: "^host$"),
+                Phase("value", "print-env", ["RH_VALUE"], successPattern: "^value$"),
+                Phase("runner", "print-env", ["RH_RUNNER"], successPattern: "^runner$"),
+                step,
+            ],
+        };
+
+        var result = await Service(factory).RunAsync(
+            Config(),
+            Request(temp, runner) with
+            {
+                HostEnvironment = new Dictionary<string, string>
+                {
+                    ["RH_HOST"] = "host",
+                    ["RH_VALUE"] = "host",
+                    ["RH_RUNNER"] = "host",
+                    ["RH_STEP"] = "host",
+                },
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(4, result.Phases.Count);
+    }
+
     private static string Child => TestHost.DotnetExecutable;
 
     private const string Exec = "exec";

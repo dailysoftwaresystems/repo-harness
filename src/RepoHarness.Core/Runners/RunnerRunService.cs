@@ -17,6 +17,12 @@ public sealed record RunnerRunRequest
     /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 
+    /// <summary>
+    /// What the host the leg runs on declares under <c>env</c>, beneath the runner's values, its
+    /// secrets, its own environment and each step's.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
+
     /// <summary>The runner, as <c>predefinedRunners</c> keys it and a run check names it.</summary>
     public required string RunnerName { get; init; }
 
@@ -718,8 +724,8 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>
-    /// The environment a step runs with: the values it reads, the secrets among them, then the
-    /// runner's own environment and the step's over the top.
+    /// The environment a step runs with: the host's own, the values it reads and the secrets among
+    /// them over that, then the runner's own environment and the step's over the top.
     /// </summary>
     /// <remarks>
     /// <see cref="ActionValues.RevealSecrets"/> is called here and in no other place. This is the
@@ -730,31 +736,7 @@ public sealed class RunnerRunService(
         RunnerRunRequest request,
         RunnerPhase phase,
         ActionValues values)
-    {
-        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (name, value) in values.Values)
-        {
-            environment[name] = value;
-        }
-
-        foreach (var (name, value) in values.RevealSecrets())
-        {
-            environment[name] = value;
-        }
-
-        foreach (var (name, value) in request.Runner.Env)
-        {
-            environment[name] = value;
-        }
-
-        foreach (var (name, value) in phase.Env)
-        {
-            environment[name] = value;
-        }
-
-        return environment;
-    }
+        => PhaseEnvironment.Layered(request.HostEnvironment, values.Values, values.RevealSecrets(), request.Runner.Env, phase.Env);
 
     /// <summary>Records what one step did, and whether the run goes on.</summary>
     private void Record(RunState state, RunnerPhase phase, PhaseResult result, ActionValues values)

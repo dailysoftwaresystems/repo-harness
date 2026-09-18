@@ -156,6 +156,61 @@ public sealed class LegRunServiceTests
     }
 
     /// <summary>
+    /// A host running a leg another machine dispatched to it runs it with the settings that machine's
+    /// configuration gives it - its cores and its environment - and under its name wherever a reader
+    /// sees one. Read as 'local', it ran with those of the machine that dispatched it.
+    /// </summary>
+    [Fact]
+    public async Task ALegDispatchedHere_RunsWithTheSettingsOfTheHostItWasSentTo()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        var config = new HarnessConfig
+        {
+            Toolchains = { ["gcc"] = new ToolchainConfig { Platforms = [platform.PlatformKey] } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects = { new ProjectConfig { Name = "app", Type = "cmake", Path = "." } },
+            Hosts = new HostsConfig
+            {
+                Local = new LocalHostConfig { BuildCores = 7, Env = { ["RH_HOST"] = "local" } },
+                Ssh = { [HostName] = new SshHostConfig { RepositoryPath = HostTree, BuildCores = 3, Env = { ["RH_HOST"] = "pi" } } },
+            },
+            Legs =
+            {
+                ["arm"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "gcc", Ssh = HostName },
+            },
+        };
+
+        PlacedLeg? ran = null;
+
+        var verdicts = await RunAsync(
+            temp,
+            harness,
+            config,
+            SshAndLocal(harness),
+            new LegRunRequest(temp.Path, null, Json: true, Here: HostId.Ssh(HostName)) { Workload = LegWorkload.Copy },
+            ran: leg => ran = leg);
+
+        Assert.Equal("passed", verdicts["arm"].Verdict);
+        Assert.NotNull(ran);
+
+        // Run here, on this machine, and locked and scheduled as it - but read, and named, as the
+        // host the machine that dispatched it knows.
+        Assert.Equal(HostId.Local, ran.Host.Host);
+        Assert.Equal(HostId.Ssh(HostName), ran.Named);
+        Assert.Equal(3, ran.HostSettings.BuildCores);
+        Assert.Equal($"ssh {HostName}", ran.IdentityFor("run").Host);
+        Assert.Equal($"ssh {HostName}", ran.ToPlan().Host);
+
+        var build = ran.BuildRequestFor(config, temp.Path);
+
+        Assert.Equal(3, build.Cores);
+        Assert.Equal("pi", build.HostEnvironment["RH_HOST"]);
+    }
+
+    /// <summary>
     /// A leg goes where a sync puts its tree whether or not the run syncs, and a program that host
     /// lacks turns it away there. Moved by what each command starts, a run on what a build had staged
     /// went to a host that had the program and never had the tree.
@@ -233,9 +288,10 @@ public sealed class LegRunServiceTests
         RecordingInspector inspector,
         LegRunRequest request,
         RunLock? runLock = null,
-        ISyncService? sync = null)
+        ISyncService? sync = null,
+        Action<PlacedLeg>? ran = null)
     {
-        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync);
+        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync, ran);
 
         using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
 
@@ -252,7 +308,8 @@ public sealed class LegRunServiceTests
         RecordingInspector inspector,
         LegRunRequest request,
         RunLock? runLock = null,
-        ISyncService? sync = null)
+        ISyncService? sync = null,
+        Action<PlacedLeg>? ran = null)
     {
         var loader = HostDoubles.Loader(config, temp.Path);
 
@@ -271,7 +328,11 @@ public sealed class LegRunServiceTests
         return await service.RunAsync(
             "test",
             request,
-            (work, _) => Task.FromResult(new LegEntry { Leg = work.Leg.Name, Verdict = LegVerdict.Passed }),
+            (work, _) =>
+            {
+                ran?.Invoke(work.Leg);
+                return Task.FromResult(new LegEntry { Leg = work.Leg.Name, Verdict = LegVerdict.Passed });
+            },
             TestContext.Current.CancellationToken);
     }
 }

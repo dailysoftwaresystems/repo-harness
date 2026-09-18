@@ -48,12 +48,6 @@ internal static class RunCommand
         Description = "Run against what is already staged on each host, without syncing again.",
     };
 
-    private static readonly Option<bool> HereOption = new(RemoteLegRunner.HereOption)
-    {
-        Description = "Run every selected leg on this machine rather than on the host it was placed on.",
-        Hidden = true,
-    };
-
     internal static Command Create()
     {
         var command = new Command(
@@ -66,7 +60,7 @@ internal static class RunCommand
         command.Options.Add(TimeOption);
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
-        command.Options.Add(HereOption);
+        command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -124,7 +118,7 @@ internal static class RunCommand
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
-                        arguments.GetValue(HereOption),
+                        arguments.GetValue(DispatchOptions.Here),
                         RemoteArguments(arguments))
                     {
                         // Built only where the runner requires it, and never tested: a host needs
@@ -190,20 +184,7 @@ internal static class RunCommand
         if (runner.RequireBuild)
         {
             var build = await builds
-                .BuildAsync(
-                    config,
-                    new BuildRequest(
-                        leg.Name,
-                        leg.TreeRoot,
-                        leg.BuildableProject(),
-                        leg.Variant,
-                        leg.Host.Os ?? string.Empty,
-                        CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory)
-                    {
-                        ProgramDirectories = leg.Host.ProgramDirectories,
-                    },
-                    cancellationToken)
+                .BuildAsync(config, leg.BuildRequestFor(config, work.RunDirectory), cancellationToken)
                 .ConfigureAwait(false);
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
@@ -219,37 +200,12 @@ internal static class RunCommand
             }
         }
 
-        // Derived from the very directory this request carries, so a run line naming {product} and
-        // one naming {buildDir} cannot come from two different tree roots. They do differ: a leg
-        // placed on another machine re-invokes this there, where its own tree is the one that
-        // resolves.
-        var buildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot);
-        var (product, productProblem) = leg.ProductFor(buildDirectory);
-
         var result = await runners
             .RunAsync(
                 config,
-                new RunnerRunRequest
+                RequestFor(work, runnerName, runner) with
                 {
-                    ProgramDirectories = leg.Host.ProgramDirectories,
-                    RunnerName = runnerName,
-                    Runner = runner,
-                    Leg = leg.Name,
-                    Layout = work.Context.Layout,
-                    RunId = work.RunId.Value,
-
-                    // A new segment each attempt, so resuming a run cannot record its work into the
-                    // attempt it is resuming.
-                    SegmentId = Guid.NewGuid().ToString("N")[..8],
-                    TreeRoot = leg.TreeRoot,
-                    WorkingDirectory = leg.TreeRoot,
-                    BuildDirectory = buildDirectory,
-                    Identity = leg.IdentityFor(work.RunId.Value),
-                    Product = product,
-                    ProductProblem = productProblem,
-                    ResolvedLegs = [leg.Name],
                     Time = work.Time,
-                    Emulated = leg.Emulated,
 
                     // One level deep by construction: the runner a check names carries no checks of
                     // its own, and this delegate reaches the service only for that one.
@@ -278,35 +234,50 @@ internal static class RunCommand
         string runnerName,
         CancellationToken cancellationToken)
     {
-        var leg = work.Leg;
-        var confirmBuildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot);
-        var (confirmProduct, confirmProductProblem) = leg.ProductFor(confirmBuildDirectory);
-
         var result = await runners
-            .RunAsync(
-                config,
-                new RunnerRunRequest
-                {
-                    ProgramDirectories = leg.Host.ProgramDirectories,
-                    RunnerName = runnerName,
-                    Runner = Resolve(config, runnerName),
-                    Leg = leg.Name,
-                    Layout = work.Context.Layout,
-                    RunId = work.RunId.Value,
-                    SegmentId = Guid.NewGuid().ToString("N")[..8],
-                    TreeRoot = leg.TreeRoot,
-                    WorkingDirectory = leg.TreeRoot,
-                    BuildDirectory = confirmBuildDirectory,
-                    Identity = leg.IdentityFor(work.RunId.Value),
-                    Product = confirmProduct,
-                    ProductProblem = confirmProductProblem,
-                    ResolvedLegs = [leg.Name],
-                    Emulated = leg.Emulated,
-                    InvokeRunner = null,
-                },
-                cancellationToken)
+            .RunAsync(config, RequestFor(work, runnerName, Resolve(config, runnerName)), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Outcome;
+    }
+
+    /// <summary>
+    /// A run of <paramref name="runner"/> on the leg <paramref name="work"/> carries, with what the
+    /// leg's host declares for it. Made once, for the runner a leg runs and for the one a check names,
+    /// so what the host declares reaches both or neither.
+    /// </summary>
+    private static RunnerRunRequest RequestFor(LegWork work, string runnerName, RunnerConfig runner)
+    {
+        var leg = work.Leg;
+
+        // Derived from the very directory this request carries, so a run line naming {product} and
+        // one naming {buildDir} cannot come from two different tree roots. They do differ: a leg
+        // placed on another machine re-invokes this there, where its own tree is the one that
+        // resolves.
+        var buildDirectory = leg.Variant.DirectoryUnder(leg.TreeRoot);
+        var (product, productProblem) = leg.ProductFor(buildDirectory);
+
+        return new RunnerRunRequest
+        {
+            ProgramDirectories = leg.Host.ProgramDirectories,
+            HostEnvironment = leg.HostSettings.Env,
+            RunnerName = runnerName,
+            Runner = runner,
+            Leg = leg.Name,
+            Layout = work.Context.Layout,
+            RunId = work.RunId.Value,
+
+            // A new segment each attempt, so resuming a run cannot record its work into the
+            // attempt it is resuming.
+            SegmentId = Guid.NewGuid().ToString("N")[..8],
+            TreeRoot = leg.TreeRoot,
+            WorkingDirectory = leg.TreeRoot,
+            BuildDirectory = buildDirectory,
+            Identity = leg.IdentityFor(work.RunId.Value),
+            Product = product,
+            ProductProblem = productProblem,
+            ResolvedLegs = [leg.Name],
+            Emulated = leg.Emulated,
+        };
     }
 }

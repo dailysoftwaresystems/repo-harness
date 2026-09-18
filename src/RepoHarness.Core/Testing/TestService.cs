@@ -66,6 +66,9 @@ public sealed record TestRequest
     /// </summary>
     public int? HostTestCores { get; init; }
 
+    /// <summary>What the host the leg runs on declares under <c>env</c>, beneath the test invocation's own environment.</summary>
+    public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
+
     /// <summary>A filter the caller asked for, passed through the invocation's <c>filterArg</c>.</summary>
     public string? Filter { get; init; }
 
@@ -262,7 +265,7 @@ public sealed class TestService(
                     LogFile = logFile,
                     AppendToPath = request.ProgramDirectories,
                     WorkingDirectory = working,
-                    Environment = Environment(command),
+                    Environment = PhaseEnvironment.Layered(request.HostEnvironment, command.Environment),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
                     TimingPatterns = request.Time ? config.TestTimingRegex : [],
@@ -467,20 +470,4 @@ public sealed class TestService(
             ? [$"'{phase.Phase}' spanned a clock step or a host sleep (wall and monotonic time "
                 + $"disagreed by {phase.ClockDrift}), so its duration and every mtime it stamped are suspect"]
             : [];
-
-    /// <summary>
-    /// The invocation's environment as a phase takes it. A <see langword="null"/> value removes a
-    /// variable, and a test invocation never asks for that, so every value survives the widening.
-    /// </summary>
-    private static IReadOnlyDictionary<string, string?> Environment(TestCommand command)
-    {
-        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (name, value) in command.Environment)
-        {
-            environment[name] = value;
-        }
-
-        return environment;
-    }
 }

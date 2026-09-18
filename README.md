@@ -153,7 +153,7 @@ its emulator - and is turned away there when that host lacks a program its comma
 {
   "hosts": {
     "wsl": { "Ubuntu": { "repositoryPath": "~/src/app" } },
-    "ssh": { "mac-mini": { "repositoryPath": "/Users/dev/src/app" } }
+    "ssh": { "mac-mini": { "repositoryPath": "/Users/dev/src/app", "env": { "CCACHE_DIR": "/Users/dev/.cache/app-ccache" } } }
   },
   "emulators": {
     "rosetta": {
@@ -174,6 +174,12 @@ DssHarness legs                                       # every leg: where it runs
 DssHarness legs --legs linux-release,mac-x64-release
 DssHarness host-exec --ssh mac-mini -- verify-git
 ```
+
+A host's section can also give its own `buildCores` and `testCores`, and an `env` that every
+process a leg starts there sees - each build phase, the test runner, each step of a runner - as
+the lowest layer, beneath the variant's, the test invocation's and the runner's own. A `PATH`
+set there is where that host finds those programs, so none of them is required of it before a
+leg starts: each is the run's to find.
 
 An ssh host's connection data lives in its own directory under `.harness-config/sshItems/`,
 which git ignores: an `.env` naming the address, the user and the port, a `.key`, and a

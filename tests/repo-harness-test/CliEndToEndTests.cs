@@ -5,6 +5,7 @@ using RepoHarness.Core.Git;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Runs;
 
 namespace RepoHarness.Tests;
 
@@ -777,6 +778,104 @@ public sealed partial class CliEndToEndTests
         using var document = JsonDocument.Parse(result.StandardOutput);
 
         Assert.Equal(HarnessExit.Refused, document.RootElement.GetProperty("exitCode").GetInt32());
+    }
+
+    /// <summary>
+    /// A host's own environment reaches what a leg starts - its test runner and a runner's steps -
+    /// beneath what each declares itself. A host running a leg another machine dispatched to it takes
+    /// the section that machine names it by, not 'local', which in the configuration the two share is
+    /// the machine that dispatched it; and a host that is named in no spelling a host has is a usage
+    /// error, never a guess.
+    /// </summary>
+    [Fact]
+    public async Task TheHostsEnvironment_ReachesWhatALegStarts_AsTheHostItRunsAs()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+
+        // The test child prints the variable it is given; its own mode is set the way every other
+        // variable here is, so what it prints is what the leg's environment held.
+        static TestInvocation Printing(string variable, string expected, params (string Name, string Value)[] env)
+        {
+            var environment = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "print-env" };
+
+            foreach (var (name, value) in env)
+            {
+                environment[name] = value;
+            }
+
+            return new TestInvocation
+            {
+                Runner = TestHost.DotnetExecutable,
+                Args = ["exec", TestHost.AssemblyPath, variable],
+                SuccessPattern = $"^{expected}$",
+                Env = environment,
+            };
+        }
+
+        LegConfig Leg(TestInvocation invocation) => new()
+        {
+            Os = platform.PlatformKey,
+            Processor = platform.Processor,
+            Config = "debug",
+            Test = new TestConfig { All = invocation },
+        };
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            SshItems = { "pi" },
+            Hosts = new HostsConfig
+            {
+                Local = new LocalHostConfig { Env = { ["RH_HOST_VAR"] = "from-local", ["RH_ORDER"] = "host" } },
+                Ssh = { ["pi"] = new SshHostConfig { RepositoryPath = "~/repo", Env = { ["RH_HOST_VAR"] = "from-pi" } } },
+            },
+            Legs =
+            {
+                ["host-var"] = Leg(Printing("RH_HOST_VAR", "from-local")),
+                ["invocation-wins"] = Leg(Printing("RH_ORDER", "invocation", ("RH_ORDER", "invocation"))),
+                ["sent-here"] = Leg(Printing("RH_HOST_VAR", "from-pi")),
+            },
+            PredefinedRunners =
+            {
+                ["print"] = new RunnerConfig
+                {
+                    Phases =
+                    [
+                        new RunnerPhase
+                        {
+                            Name = "print",
+                            Command = [TestHost.DotnetExecutable, "exec", TestHost.AssemblyPath, "RH_HOST_VAR"],
+                            Env = { [TestHost.ChildModeVariable] = "print-env" },
+                            SuccessPattern = "^from-local$",
+                        },
+                    ],
+                },
+            },
+        });
+
+        // One at a time: legs of one variant would share a build directory, which a run refuses.
+        foreach (var leg in new[] { "host-var", "invocation-wins" })
+        {
+            var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", leg, "--json", "-C", temp.Path], token);
+
+            Assert.Equal(HarnessExit.Success, test.ExitCode);
+        }
+
+        var sent = await CliRunner.RunAsync(["test", "--no-build", "--legs", "sent-here", "--json", RemoteLegRunner.HereOption, "ssh pi", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, sent.ExitCode);
+
+        var run = await CliRunner.RunAsync(["run", "print", "--legs", "host-var", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, run.ExitCode);
+
+        var misnamed = await CliRunner.RunAsync(["test", "--no-build", "--legs", "host-var", RemoteLegRunner.HereOption, "pi", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.UsageError, misnamed.ExitCode);
+        Assert.Contains("names a host as 'local', 'wsl <distribution>' or 'ssh <name>'", misnamed.StandardError, StringComparison.Ordinal);
     }
 
     /// <summary>

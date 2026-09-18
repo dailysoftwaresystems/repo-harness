@@ -55,6 +55,52 @@ public sealed record PlacedLeg(
     public string TreeKey => CompositeKey.Of(Host.Host.ToString(), HostTreeRoot);
 
     /// <summary>
+    /// The host as the machine that typed the command names it: the one this leg landed on, or, where
+    /// a host runs a leg another machine dispatched to it, the name that machine knows it by.
+    /// </summary>
+    /// <remarks>
+    /// What the leg is called wherever a reader sees its host - a <c>{host}</c> a label records, the
+    /// progress a dispatching machine shows - and what its settings were read under. Never what it
+    /// is locked or scheduled by: that is the machine the work physically runs on, which to itself
+    /// is always this one.
+    /// </remarks>
+    public HostId Named
+    {
+        get => _named ?? Host.Host;
+        init => _named = value;
+    }
+
+    private readonly HostId? _named;
+
+    /// <summary>The build this leg runs, with what its host declares for it.</summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="runDirectory">Where this run's logs go.</param>
+    /// <param name="time">Whether to report the profile timing.</param>
+    /// <remarks>
+    /// Made here once, for every command that builds a leg - a build, a test that builds first, a run
+    /// whose runner needs the compiler - so what the host declares reaches every one of them or none.
+    /// </remarks>
+    /// <exception cref="HarnessException">The leg builds nothing; see <see cref="BuildableProject"/>.</exception>
+    public BuildRequest BuildRequestFor(HarnessConfig config, string runDirectory, bool time = false)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        return new BuildRequest(
+            Name,
+            TreeRoot,
+            BuildableProject(),
+            Variant,
+            Host.Os ?? string.Empty,
+            CoreCounts.Resolve(null, HostSettings.BuildCores, config.Defaults.BuildCores).Value,
+            runDirectory,
+            time)
+        {
+            ProgramDirectories = Host.ProgramDirectories,
+            HostEnvironment = HostSettings.Env,
+        };
+    }
+
+    /// <summary>
     /// The project this leg builds, or a refusal naming what is missing.
     /// </summary>
     /// <exception cref="HarnessException">
@@ -95,7 +141,7 @@ public sealed record PlacedLeg(
         Toolchain: Variant.Toolchain,
         Config: Variant.Config,
         Variant: Variant.DirectoryName,
-        Host: Host.Host.ToString(),
+        Host: Named.ToString(),
         RunId: runId);
 
     /// <summary>
@@ -157,7 +203,7 @@ public sealed record PlacedLeg(
         TreeKey = Host.Host.Kind == HostKind.Local ? string.Empty : TreeKey,
         Emulated = Emulated,
         MachineKey = Host.Host.MachineKey,
-        Host = Host.Host.ToString(),
+        Host = Named.ToString(),
     };
 }
 
@@ -206,7 +252,7 @@ public static class LegRunPlan
                 continue;
             }
 
-            placed.Add(Place(context, placement.Leg, placement.Host));
+            placed.Add(Place(context, placement.Leg, placement.Host, report.Here));
         }
 
         RefuseSharedBuildDirectories(placed, platform);
@@ -237,7 +283,7 @@ public static class LegRunPlan
             [.. skipped.Select(entry => $"{entry.Leg}: {Verdicts.Display(entry.Verdict)}: {entry.Detail}")]);
     }
 
-    private static PlacedLeg Place(HarnessContext context, SelectedLeg selected, HostReport host)
+    private static PlacedLeg Place(HarnessContext context, SelectedLeg selected, HostReport host, HostId? here)
     {
         var config = context.Config;
         var leg = selected.Leg;
@@ -262,6 +308,12 @@ public static class LegRunPlan
             ? treeRoot
             : SyncService.RepositoryPathOf(config, host);
 
+        // Read under the name the reader knows the host by. A host running a leg another machine
+        // dispatched to it is 'local' to itself, and 'local' in the configuration the two share is
+        // the machine that dispatched it: that machine's cores and environment were the ones the leg
+        // ran with.
+        var named = here ?? host.Host;
+
         return new PlacedLeg(
             selected.Name,
             leg,
@@ -271,25 +323,11 @@ public static class LegRunPlan
             treeRoot,
             hostTreeRoot,
             variant.DirectoryUnder(hostTreeRoot),
-            SettingsOf(config, host),
-            leg.Emulator is { Length: > 0 });
-    }
-
-    /// <summary>What <paramref name="host"/> declares for itself, or the empty set when it declares nothing.</summary>
-    /// <param name="config">The whole configuration.</param>
-    /// <param name="host">The host the leg landed on.</param>
-    private static HostSettings SettingsOf(HarnessConfig config, HostReport host)
-    {
-        HostSettings? declared = host.Host.Kind switch
+            config.Hosts.SettingsFor(named),
+            leg.Emulator is { Length: > 0 })
         {
-            HostKind.Local => config.Hosts.Local,
-            HostKind.Wsl => config.Hosts.Wsl.GetValueOrDefault(host.Host.Name),
-            _ => config.Hosts.Ssh.GetValueOrDefault(host.Host.Name),
+            Named = named,
         };
-
-        // A host with no section declares nothing, which is what the local section means when it is
-        // left out too: every setting falls back to defaults.
-        return declared ?? new LocalHostConfig();
     }
 
     /// <summary>

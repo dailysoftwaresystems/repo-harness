@@ -77,6 +77,10 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// ninja only the build's own environment could find is found all the same. A relative one is read
     /// from the build directory, where the check starts.
     /// </param>
+    /// <param name="environment">
+    /// The environment the build's phases ran in, which the check runs in too: a ninja looked up by
+    /// name is found on the PATH the build had.
+    /// </param>
     /// <param name="cancellationToken">Stops the check.</param>
     /// <exception cref="HarnessException">
     /// The check could not run: the directory is missing, ninja could not be started, or it answered
@@ -88,6 +92,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
         string buildDirectory,
         IReadOnlyList<string> appendToPath,
         string? program = null,
+        IReadOnlyDictionary<string, string?>? environment = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(appendToPath);
@@ -122,6 +127,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
                         // The directories the build was given, for a ninja looked up by name: the one
                         // the survey found for the build, not "not installed".
                         AppendToPath = appendToPath,
+                        Environment = environment ?? new Dictionary<string, string?>(StringComparer.Ordinal),
                         WorkingDirectory = buildDirectory,
                         Timeout = Budget,
                     },
