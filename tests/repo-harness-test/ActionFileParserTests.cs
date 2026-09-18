@@ -396,8 +396,8 @@ public sealed class ActionFileParserTests
     [InlineData("tree", "sub", "sub")]
     [InlineData("harness", null, ".harness-config")]
     [InlineData("harness", "sub", ".harness-config/sub")]
-    [InlineData("action", null, ".harness-config/runner/actions/build")]
-    [InlineData("action", "lib", ".harness-config/runner/actions/build/lib")]
+    [InlineData("action", null, ".harness-config/runner/actions/compile")]
+    [InlineData("action", "lib", ".harness-config/runner/actions/compile/lib")]
     public void AStepResolvesItsWorkingDirectoryAgainstTheRootItNames(string root, string? path, string? expected)
     {
         var declared = path is null ? string.Empty : $"\n    workingDirectory: {path}";
@@ -497,14 +497,14 @@ public sealed class ActionFileParserTests
     {
         using var temp = new TempDirectory();
         temp.WriteFile(
-            Path.Combine("build", "build.yml"),
+            Path.Combine("compile", "compile.yml"),
             "steps:\n  - name: build\n    run: cmake --build build\n");
 
         var action = await CreateParser()
-            .LoadAsync(temp.Path, "build/build.yml", TestContext.Current.CancellationToken);
+            .LoadAsync(temp.Path, "compile/compile.yml", TestContext.Current.CancellationToken);
 
         Assert.Equal("build", Assert.Single(action.Steps).Name);
-        Assert.Equal("build", action.DirectoryName);
+        Assert.Equal("compile", action.DirectoryName);
     }
 
     [Fact]
@@ -512,11 +512,11 @@ public sealed class ActionFileParserTests
     {
         using var temp = new TempDirectory();
         temp.WriteFile(
-            Path.Combine("build", "build.yaml"),
+            Path.Combine("compile", "compile.yaml"),
             "steps:\n  - name: build\n    run: cmake --build build\n");
 
         var action = await CreateParser()
-            .LoadAsync(temp.Path, "build/build.yaml", TestContext.Current.CancellationToken);
+            .LoadAsync(temp.Path, "compile/compile.yaml", TestContext.Current.CancellationToken);
 
         Assert.Equal("build", Assert.Single(action.Steps).Name);
     }
@@ -530,11 +530,11 @@ public sealed class ActionFileParserTests
     public async Task LoadAsync_Refuses_TheFlatSpelling_NamingThePathItExpected()
     {
         using var temp = new TempDirectory();
-        temp.WriteFile("build.yml", "steps:\n  - name: build\n    run: cmake --build build\n");
+        temp.WriteFile("compile.yml", "steps:\n  - name: build\n    run: cmake --build build\n");
 
-        var exception = await Refused(temp, "build.yml");
+        var exception = await Refused(temp, "compile.yml");
 
-        Assert.Contains("build/build.yml", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("compile/compile.yml", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -556,9 +556,9 @@ public sealed class ActionFileParserTests
     [InlineData("../outside.yml")]
     [InlineData("a/../../outside.yml")]
     [InlineData("../actions-evil/x.yml")]
-    [InlineData("build/nested/build.yml")]
-    [InlineData("build/build.txt")]
-    [InlineData("./build/build.yml")]
+    [InlineData("compile/nested/compile.yml")]
+    [InlineData("compile/compile.txt")]
+    [InlineData("./compile/compile.yml")]
     public async Task LoadAsync_Refuses_APathThatDoesNotNameAnActionInsideTheDirectory(string action)
     {
         using var temp = new TempDirectory();
@@ -713,7 +713,7 @@ public sealed class ActionFileParserTests
             new HostPlatform());
 
     private static ActionFile Parse(string text)
-        => CreateParser().Parse(Path.Combine("actions", "build", "build.yml"), text);
+        => CreateParser().Parse(Path.Combine("actions", "compile", "compile.yml"), text);
 
     private static HarnessException Refused(string text)
         => Assert.Throws<HarnessException>(() => Parse(text));

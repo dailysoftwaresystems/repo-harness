@@ -66,7 +66,18 @@ public sealed record PhaseResult(
     /// declared that pattern matched its own output. A zero exit code alone is not proof a command
     /// ran, which was measured three separate ways.
     /// </summary>
-    public bool Passed => !Stalled && ExitCode == 0 && Witnessed != false;
+    public bool Passed => !Stalled && ExitCode == 0 && Witnessed != false && MissingOutputs.Count == 0;
+
+    /// <summary>
+    /// What this phase declared it would produce and did not, or empty when it produced everything
+    /// it named.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Witnessed"/> so the verdict can say which witness failed. A pattern
+    /// that never matched and a file that was never written are both "exited zero having done
+    /// nothing", and a reader who is told only the first goes looking in the output.
+    /// </remarks>
+    public IReadOnlyList<string> MissingOutputs { get; init; } = [];
 
     /// <summary>
     /// The verdict this phase gives its leg, with the sentence the ledger shows for it. A phase that
@@ -85,6 +96,16 @@ public sealed record PhaseResult(
         if (ExitCode != 0)
         {
             return ReachedVerdict.Of(LegVerdict.Failed, $"{Phase} exited {ExitCode}");
+        }
+
+        if (MissingOutputs.Count > 0)
+        {
+            // Exited zero having written nothing it said it would. A step that declares an output
+            // is a step that can prove it did its work, and this is that proof failing rather than
+            // a program failing: the distinction is what an exit code alone can never make.
+            return ReachedVerdict.Of(
+                LegVerdict.Unwitnessed,
+                $"{Phase} exited 0 without producing {string.Join(", ", MissingOutputs)}");
         }
 
         return Witnessed == false

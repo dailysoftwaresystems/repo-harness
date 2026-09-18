@@ -1,5 +1,6 @@
 using System.CommandLine.Parsing;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
@@ -87,6 +88,8 @@ public sealed class ActionFileParser(
         "continueOnError",
         "watchContention",
         "requireInputsUnmoved",
+        "outputs",
+        "persist",
     ];
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -111,7 +114,13 @@ public sealed class ActionFileParser(
 
         _output.Detail("run", $"reading action file '{path}'");
 
-        return Task.FromResult(Parse(path, _fileSystem.ReadAllText(path)));
+        // The directory as the runner spelled it, so a grouped action keeps every segment above
+        // its own. Derived from the configured value rather than from the resolved path, which has
+        // followed links and no longer says where in the actions tree the author put it.
+        return Task.FromResult(Parse(path, _fileSystem.ReadAllText(path)) with
+        {
+            Directory = ActionPath.DirectoryOf(action),
+        });
     }
 
     public ActionFile Parse(string path, string text)
@@ -328,6 +337,8 @@ public sealed class ActionFileParser(
                 }
             }
 
+            RefuseShadowedInput(keyNode, inputName, problems);
+
             yield return new ActionInput(inputName, fallback, required, inputDescription);
         }
     }
@@ -382,6 +393,8 @@ public sealed class ActionFileParser(
         string? successPattern = null;
         int? stallSeconds = null;
         var continueOnError = false;
+        var outputs = (IReadOnlyList<string>)[];
+        var persist = false;
         var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (keyNode, valueNode) in mapping.Children)
@@ -426,6 +439,14 @@ public sealed class ActionFileParser(
                     requireInputsUnmoved = ReadFlag(valueNode, "requireInputsUnmoved", problems);
                     break;
 
+                case "outputs":
+                    outputs = ReadOutputs(valueNode, problems);
+                    break;
+
+                case "persist":
+                    persist = ReadFlag(valueNode, "persist", problems);
+                    break;
+
                 case "workingDirectoryRoot":
                     workingDirectoryNode ??= valueNode;
                     workingDirectoryKey ??= key;
@@ -459,6 +480,15 @@ public sealed class ActionFileParser(
             problems.Add(At(node, "a step has no 'name'; a step names its own log file, and two "
                 + "unnamed steps would write one file, the second overwriting the first's evidence."));
             name = string.Empty;
+        }
+        else if (RunSegments.FileNameFor(name).Trim('.', ' ') is { Length: 0 })
+        {
+            // A step's name becomes a directory under the action's build directory as well as a log
+            // file's name. Everything a path cannot carry is already replaced, but a name that is
+            // only dots survives that and means 'the directory above' to every file system there is.
+            problems.Add(At(node, $"a step named '{name}' has no name a directory can carry; a step "
+                + "writes into a directory of its own, and this one would name the directory above "
+                + "it."));
         }
 
         var action = ReadUses(usesNode, uses, run is not null, node, problems);
@@ -497,7 +527,84 @@ public sealed class ActionFileParser(
             SuccessPattern = successPattern,
             StallSeconds = stallSeconds,
             ContinueOnError = continueOnError,
+            Outputs = outputs,
+            Persist = persist,
         };
+    }
+
+    /// <summary>
+    /// Records a problem for a declared input whose name is one this tool already fills in.
+    /// </summary>
+    /// <param name="node">The input's own node, for the line number.</param>
+    /// <param name="name">The declared name.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <remarks>
+    /// Refused rather than resolved one way or the other, because the two halves would answer
+    /// differently: a run line naming it gets this tool's value, while the environment a
+    /// <c>harness/read-inputs</c> step fills gets the file's. An action declaring <c>config</c> would
+    /// invoke its program with the leg's build configuration while telling it, in
+    /// <c>INPUT_CONFIG</c>, the corpus the author meant — and both halves would report success.
+    /// </remarks>
+    private static void RefuseShadowedInput(YamlNode node, string name, List<string> problems)
+    {
+        if (!LegPathNames.All.Contains(name, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        problems.Add(At(
+            node,
+            $"an input named '{name}' is a name this tool already fills in, so a run line naming "
+            + $"'{{{name}}}' would get this tool's value while INPUT_{name.ToUpperInvariant()} carried "
+            + "the action's. Give the input another name."));
+    }
+
+    /// <summary>
+    /// The paths a step declares it produces, each relative to its own directory under the action's
+    /// build directory.
+    /// </summary>
+    /// <param name="node">The <c>outputs</c> value.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    /// <remarks>
+    /// Relative, and refused otherwise. An output is something this step wrote in the directory the
+    /// harness gave it; a path that climbs out of that directory names a file the harness did not
+    /// create, cannot clean up, and would move somewhere else when the step asked to persist it.
+    /// </remarks>
+    private static IReadOnlyList<string> ReadOutputs(YamlNode node, List<string> problems)
+    {
+        if (node is not YamlSequenceNode sequence)
+        {
+            problems.Add(At(node, "a step's 'outputs' is a list of paths the step produces."));
+            return [];
+        }
+
+        var outputs = new List<string>();
+
+        foreach (var item in sequence.Children)
+        {
+            if (RequireScalar(item, "a step's output", problems) is not { Length: > 0 } path)
+            {
+                continue;
+            }
+
+            var normalised = path.Replace('\\', '/').Trim();
+
+            if (Path.IsPathRooted(normalised)
+                || normalised.StartsWith('/')
+                || normalised.Split('/').Any(segment => segment is ".." or "." or ""))
+            {
+                problems.Add(At(
+                    item,
+                    $"a step's output '{path}' is not a path inside the step's own directory; an "
+                    + "output is something the step wrote where the harness put it, without '.' or "
+                    + "'..' and never rooted."));
+                continue;
+            }
+
+            outputs.Add(normalised);
+        }
+
+        return outputs;
     }
 
     private static PredefinedAction ReadUses(

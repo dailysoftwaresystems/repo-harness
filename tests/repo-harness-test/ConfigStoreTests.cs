@@ -815,7 +815,7 @@ public sealed class ConfigStoreTests
     [InlineData("./corpus/corpus.yml", "without '.' or '..'")]
     [InlineData("/etc/passwd.yml", "absolute path")]
     [InlineData("C:/windows/evil.yml", "absolute path")]
-    [InlineData("corpus/nested/corpus.yml", "each action owns one directory")]
+    [InlineData("corpus/nested/corpus.yml", "carries its directory's name")]
     [InlineData("corpus/steps.yml", "carries its directory's name")]
     [InlineData("corpus/corpus.txt", "does not end in")]
     public void Load_RejectsARunnerActionThatIsNotOneDirectoryPerAction(string action, string expected)
@@ -830,9 +830,17 @@ public sealed class ConfigStoreTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Directories above an action's own group actions and are the author's to arrange. A corpus
+    /// large enough to be a harness of its own is unreadable as a flat pile of names carrying their
+    /// grouping as a prefix, and what identifies an action is unchanged: the file carries the name
+    /// of the directory that directly contains it.
+    /// </summary>
     [Theory]
     [InlineData("corpus/corpus.yml")]
     [InlineData("corpus/corpus.yaml")]
+    [InlineData("real-examples/sqlite/sqlite.yml")]
+    [InlineData("real-examples/c/probe-nest/probe-nest.yml")]
     public void Load_AcceptsARunnerActionInItsOwnDirectory(string action)
     {
         var config = LoadValid($$"""

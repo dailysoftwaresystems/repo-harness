@@ -5,7 +5,35 @@ using RepoHarness.Core.Results;
 namespace RepoHarness.Core.Execution;
 
 /// <summary>
-/// The directories one leg runs against, and the names configuration spells them by.
+/// Which leg a piece of work is, in the words a configured command can spell.
+/// </summary>
+/// <remarks>
+/// Derived, never supplied. An instrument that records which host it measured has to get that name
+/// from somewhere, and a value typed into a run line by hand can be typed wrongly: a benchmark
+/// labelled with the wrong processor is worse than one labelled with nothing, because the number
+/// looks comparable and is not. The harness already knows every one of these at the moment a step
+/// starts; until now it had no way to say them.
+/// </remarks>
+/// <param name="Leg">The leg's name, as <c>legs</c> declares it.</param>
+/// <param name="Os">The operating system the work ran on.</param>
+/// <param name="Processor">The processor the leg targets, which under emulation is not the host's.</param>
+/// <param name="Toolchain">The toolchain, or <c>none</c> for a leg that builds nothing.</param>
+/// <param name="Config">The build configuration.</param>
+/// <param name="Variant">The variant directory's name: processor, toolchain, config and any sanitizer.</param>
+/// <param name="Host">The host the work ran on, as this tool names it.</param>
+/// <param name="RunId">The run this work belongs to.</param>
+public sealed record LegIdentity(
+    string Leg,
+    string Os,
+    string Processor,
+    string Toolchain,
+    string Config,
+    string Variant,
+    string Host,
+    string RunId);
+
+/// <summary>
+/// The directories one leg runs against, who that leg is, and what its build produces.
 /// </summary>
 /// <remarks>
 /// The build directory is derived from the processor, the toolchain and the configuration, so no
@@ -46,40 +74,94 @@ public sealed record LegPaths
 
     /// <summary>The tree's <c>.harness-config</c> directory.</summary>
     public string HarnessDirectory => Path.Combine(TreeRoot, HarnessLayout.DirectoryName);
+
+    /// <summary>
+    /// Which leg this is, or <see langword="null"/> for a caller that has no leg in hand.
+    /// </summary>
+    public LegIdentity? Identity { get; init; }
+
+    /// <summary>
+    /// The one file this leg's build is declared to produce, or <see langword="null"/> when the
+    /// project declares none for this platform, or declares several.
+    /// </summary>
+    /// <remarks>
+    /// One, or nothing. <c>buildOutputs</c> is a list and every entry in it must exist for the build
+    /// to be witnessed, so "the product" is only a well-formed question when the list holds exactly
+    /// one answer for this platform. Where it holds several, naming it is refused rather than
+    /// guessed: an instrument pointed at the wrong one of three binaries reports a measurement of
+    /// something nobody asked about, and reports it as a success.
+    /// </remarks>
+    public string? Product { get; init; }
+
+    /// <summary>Why <see cref="Product"/> is null, for a refusal that can say which case it is.</summary>
+    public string? ProductProblem { get; init; }
+
+    /// <summary>
+    /// Where this run of the action writes while it runs, or <see langword="null"/> outside an
+    /// action.
+    /// </summary>
+    public string? ActionBuild { get; init; }
+
+    /// <summary>
+    /// Where this run of the action's persisted outputs are kept, or <see langword="null"/> outside
+    /// an action.
+    /// </summary>
+    public string? ActionArtifacts { get; init; }
+
+    /// <summary>
+    /// This step's own directory under <see cref="ActionBuild"/>, or <see langword="null"/> outside
+    /// a step.
+    /// </summary>
+    public string? StepBuild { get; init; }
+
+    /// <summary>
+    /// This run's artifacts across every leg, holding one directory per leg, or
+    /// <see langword="null"/> outside an action.
+    /// </summary>
+    /// <remarks>
+    /// How a step reads what another leg produced. <see cref="ActionArtifacts"/> is this leg's own,
+    /// which is the wrong half of the question for a round trip: the point of one is that what was
+    /// built on one machine runs on another, so the consumer has to be able to name the producer.
+    /// </remarks>
+    public string? RunArtifacts { get; init; }
 }
 
 /// <summary>
 /// What a caller means by a brace group this vocabulary does not own.
 /// </summary>
 /// <remarks>
-/// The distinction is whose text the string is. A setting in <c>config.json</c> is written for this
-/// tool, so a name it cannot fill in is a typo and refusing it names the line to fix. A step's run
-/// line is a program's own text, where <c>${HOME}</c>, <c>${PWD}</c> and <c>awk '{print}'</c> are
-/// ordinary and this tool owns none of them — refusing there would reject working action files for
-/// using the shell.
+/// The distinction is whose text the string is. A setting in <c>config.json</c> and a step's run
+/// line are both written for this tool, so a name it cannot fill in is a typo and refusing it names
+/// the line to fix. What a brace group is never allowed to be is passed through silently: a run line
+/// holding <c>{greeting}</c> reached the program as those nine characters and the leg reported
+/// passed, which is a wrapper reporting success without doing what it was asked.
+/// <para>
+/// <c>${NAME}</c> is another expander's syntax and is always left alone, and a literal brace is
+/// written doubled: <c>{{</c> and <c>}}</c>. That is what keeps <c>awk '{{print}}'</c> expressible
+/// while <c>{print}</c> is still refused rather than guessed at.
+/// </para>
 /// </remarks>
 public enum PlaceholderPolicy
 {
-    /// <summary>A name this vocabulary cannot fill in is a mistake. For settings this tool owns.</summary>
+    /// <summary>A name this vocabulary cannot fill in is a mistake.</summary>
     Refuse,
 
-    /// <summary>A brace group this vocabulary does not own is left exactly as written, for whoever does.</summary>
+    /// <summary>A brace group this vocabulary does not own is left exactly as written.</summary>
     LeaveAsWritten,
 }
 
 /// <summary>
-/// The directories a configured command may name, and how a name is replaced with a path.
+/// The names a configured command may spell, and how a name is replaced with its value.
 /// </summary>
 /// <remarks>
 /// One vocabulary, expanded wherever a configured string may hold one, rather than a key per
-/// question. <c>coresArgs</c> already established the shape with <c>{cores}</c>; this is the same
-/// idea for the directories a leg runs against, and the same refusal when a name is not one of
-/// them.
+/// question. <c>coresArgs</c> established the shape with <c>{cores}</c>; this is the same idea for
+/// the directories a leg runs against, who that leg is, and what its build produces.
 /// <para>
-/// A name nothing replaces is refused when <c>config.json</c> is read, never passed through. Passed
-/// through it reaches the runner as the literal text <c>{buildDir}</c>, and what a runner does with
-/// a directory that cannot exist is its own business: ctest reports no tests and exits 8, which
-/// reads as a suite that ran and found nothing.
+/// A name nothing replaces is refused, never passed through. Passed through it reaches the runner as
+/// the literal text <c>{buildDir}</c>, and what a runner does with a directory that cannot exist is
+/// its own business: ctest reports no tests and exits 8, which reads as a suite that ran and found
+/// nothing.
 /// </para>
 /// </remarks>
 public static partial class LegPathNames
@@ -93,26 +175,83 @@ public static partial class LegPathNames
     /// <summary>Names the tree's <c>.harness-config</c> directory.</summary>
     public const string HarnessDirectory = "harnessDir";
 
+    /// <summary>Names the leg, as <c>legs</c> declares it.</summary>
+    public const string Leg = "leg";
+
+    /// <summary>Names the operating system the work ran on.</summary>
+    public const string Os = "os";
+
+    /// <summary>Names the processor the leg targets.</summary>
+    public const string Processor = "processor";
+
+    /// <summary>Names the toolchain.</summary>
+    public const string Toolchain = "toolchain";
+
+    /// <summary>Names the build configuration.</summary>
+    public const string Config = "config";
+
+    /// <summary>Names the variant directory: processor, toolchain, config and any sanitizer.</summary>
+    public const string Variant = "variant";
+
+    /// <summary>Names the host the work ran on.</summary>
+    public const string Host = "host";
+
+    /// <summary>Names the run this work belongs to.</summary>
+    public const string RunId = "runId";
+
+    /// <summary>Names the one file this leg's build is declared to produce.</summary>
+    public const string Product = "product";
+
+    /// <summary>Names where this run of the action writes while it runs.</summary>
+    public const string ActionBuild = "actionBuild";
+
+    /// <summary>Names where this run of the action's persisted outputs are kept.</summary>
+    public const string ActionArtifacts = "actionArtifacts";
+
+    /// <summary>Names this step's own directory under the action's build directory.</summary>
+    public const string StepBuild = "stepBuild";
+
+    /// <summary>Names this run's artifacts across every leg, one directory per leg.</summary>
+    public const string RunArtifacts = "runArtifacts";
+
     /// <summary>Every name, in the order a refusal lists them.</summary>
-    public static IReadOnlyList<string> All { get; } = [BuildDirectory, TreeRoot, HarnessDirectory];
+    public static IReadOnlyList<string> All { get; } =
+    [
+        BuildDirectory, TreeRoot, HarnessDirectory,
+        Leg, Os, Processor, Toolchain, Config, Variant, Host, RunId,
+        Product, ActionBuild, ActionArtifacts, StepBuild, RunArtifacts,
+    ];
 
     /// <summary>
-    /// A placeholder as it is written: a name in braces. Matched rather than searched for by name so
-    /// that one nobody declared is found and refused, instead of surviving into a command line.
+    /// A brace group as it is written. Three shapes, in the order they are recognised: a doubled
+    /// brace, which is how a literal one is written; another expander's <c>${NAME}</c>, which this
+    /// one never touches; and a name in braces, which is this vocabulary's.
     /// </summary>
-    [GeneratedRegex(@"\{(?<name>[A-Za-z][A-Za-z0-9]*)\}", RegexOptions.CultureInvariant)]
+    /// <remarks>
+    /// Matched rather than searched for by name, so that a name nobody declared is found and refused
+    /// instead of surviving into a command line.
+    /// <para>
+    /// The name may carry <c>_</c>, <c>-</c> and <c>.</c>, because the things that get named here do:
+    /// a runner value directory holds <c>CORPUS_PATH</c>, and a name the pattern cannot see is a name
+    /// neither half of this can refuse — it reaches the program as its own text and the step exits
+    /// zero having done nothing, which is the failure this whole rule exists to end.
+    /// </para>
+    /// </remarks>
+    [GeneratedRegex(
+        @"(?<doubled>\{\{|\}\})|(?<other>\$\{[^}]*\})|\{(?<name>[A-Za-z][A-Za-z0-9_.-]*)\}",
+        RegexOptions.CultureInvariant)]
     private static partial Regex Placeholder { get; }
 
     /// <summary>
-    /// <paramref name="value"/> with every placeholder this vocabulary owns replaced by the
-    /// directory or value it names.
+    /// <paramref name="value"/> with every placeholder this vocabulary owns replaced by what it
+    /// names, every doubled brace reduced to one, and everything else left as written.
     /// </summary>
     /// <param name="value">The configured string.</param>
-    /// <param name="paths">The leg's directories.</param>
+    /// <param name="paths">The leg's directories, identity and product.</param>
     /// <param name="setting">What to call the setting in a refusal.</param>
     /// <param name="policy">What to do with a brace group this vocabulary does not own.</param>
     /// <param name="extra">
-    /// Names this caller supplies beyond the directories, such as an action's declared inputs.
+    /// Names this caller supplies beyond the built-in ones, such as an action's declared inputs.
     /// Matched exactly: a lookup that ignored case would let an action declaring <c>home</c> replace
     /// a step's <c>${HOME}</c> with it.
     /// </param>
@@ -126,29 +265,31 @@ public static partial class LegPathNames
     {
         ArgumentNullException.ThrowIfNull(paths);
 
-        if (value is null || !value.Contains('{', StringComparison.Ordinal))
+        if (value is null || (!value.Contains('{', StringComparison.Ordinal)
+            && !value.Contains('}', StringComparison.Ordinal)))
         {
             return value ?? string.Empty;
         }
 
         return Placeholder.Replace(value, match =>
         {
-            var name = match.Groups["name"].Value;
-
-            if (name == BuildDirectory && paths.BuildDirectory is null)
+            if (match.Groups["doubled"].Success)
             {
-                // Refused, not filled in with the tree root. Substituting the tree root is exactly
-                // the failure this vocabulary was written to end: ctest started at the tree root of
-                // an out-of-source project reports no tests and exits in under a fifth of a second.
-                throw new HarnessException(
-                    HarnessExit.UsageError,
-                    $"{setting} names '{{{BuildDirectory}}}', and this run reaches no leg, so there is "
-                    + "no build directory to put there. Run it for a leg, or take the name out.");
+                // '{{' is how a run line writes a brace it means literally, so awk '{{print}}'
+                // reaches awk as '{print}' and this vocabulary never guesses at it.
+                return match.Value[..1];
             }
 
-            if (Path(name, paths) is { } directory)
+            if (match.Groups["other"].Success)
             {
-                return directory;
+                return match.Value;
+            }
+
+            var name = match.Groups["name"].Value;
+
+            if (Value(name, paths) is { } resolved)
+            {
+                return resolved;
             }
 
             if (extra is not null && extra.TryGetValue(name, out var supplied))
@@ -156,6 +297,7 @@ public static partial class LegPathNames
                 return supplied;
             }
 
+            RefuseKnownButAbsent(setting, name, paths);
             Refuse(setting, name, policy, extra?.Keys);
 
             // Left exactly as written, braces and all, for whoever does own it.
@@ -165,12 +307,12 @@ public static partial class LegPathNames
 
     /// <summary>
     /// Refuses a configured string holding a placeholder nothing replaces, without needing the
-    /// directories it would be expanded against.
+    /// values it would be expanded against.
     /// </summary>
     /// <param name="value">The configured string.</param>
     /// <param name="setting">What to call the setting in a refusal.</param>
     /// <param name="policy">What to do with a brace group this vocabulary does not own.</param>
-    /// <param name="extra">Names this caller will supply beyond the directories.</param>
+    /// <param name="extra">Names this caller will supply beyond the built-in ones.</param>
     /// <exception cref="HarnessException">A placeholder names nothing this caller can fill in.</exception>
     /// <remarks>
     /// Called when the configuration is read, where no leg has been placed and no build directory
@@ -190,14 +332,61 @@ public static partial class LegPathNames
 
         foreach (Match match in Placeholder.Matches(value))
         {
+            if (match.Groups["doubled"].Success || match.Groups["other"].Success)
+            {
+                continue;
+            }
+
             var name = match.Groups["name"].Value;
 
-            if (Path(name, null) is not null || (extra is not null && extra.Contains(name)))
+            if (Known(name) || (extra is not null && extra.Contains(name)))
             {
                 continue;
             }
 
             Refuse(setting, name, policy, extra);
+        }
+    }
+
+    /// <summary>
+    /// Throws where the name is one of this vocabulary's but this leg has nothing to put there, so
+    /// the message says which case it is instead of claiming nothing can fill it in.
+    /// </summary>
+    private static void RefuseKnownButAbsent(string setting, string name, LegPaths paths)
+    {
+        switch (name)
+        {
+            case BuildDirectory when paths.BuildDirectory is null:
+                // Refused, not filled in with the tree root. Substituting the tree root is exactly
+                // the failure this vocabulary was written to end: ctest started at the tree root of
+                // an out-of-source project reports no tests and exits in under a fifth of a second.
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"{setting} names '{{{BuildDirectory}}}', and this run reaches no leg, so there is "
+                    + "no build directory to put there. Run it for a leg, or take the name out.");
+
+            case Product:
+                throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"{setting} names '{{{Product}}}', and {paths.ProductProblem ?? "this leg has no build product"}.");
+
+            case ActionBuild or ActionArtifacts or StepBuild or RunArtifacts
+                when paths.ActionBuild is null:
+                throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"{setting} names '{{{name}}}', and this runner declares phases rather than an "
+                    + "action, so there is no action directory to put there. Only a step of an "
+                    + "action file has one.");
+
+            case Leg or Os or Processor or Toolchain or Config or Variant or Host or RunId
+                when paths.Identity is null:
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"{setting} names '{{{name}}}', and this run reaches no leg, so there is nothing "
+                    + "to put there. Run it for a leg, or take the name out.");
+
+            default:
+                break;
         }
     }
 
@@ -232,15 +421,28 @@ public static partial class LegPathNames
         throw Unknown(setting, name, extra);
     }
 
-    /// <summary>
-    /// The directory <paramref name="name"/> spells, or null when nothing does. With no
-    /// <paramref name="paths"/> it answers only whether the name is known.
-    /// </summary>
-    private static string? Path(string name, LegPaths? paths) => name switch
+    /// <summary>Whether <paramref name="name"/> is one this vocabulary owns.</summary>
+    private static bool Known(string name) => All.Contains(name, StringComparer.Ordinal);
+
+    /// <summary>What <paramref name="name"/> spells for this leg, or null when nothing does.</summary>
+    private static string? Value(string name, LegPaths paths) => name switch
     {
-        BuildDirectory => paths is null ? name : paths.BuildDirectory,
-        TreeRoot => paths?.TreeRoot ?? name,
-        HarnessDirectory => paths?.HarnessDirectory ?? name,
+        BuildDirectory => paths.BuildDirectory,
+        TreeRoot => paths.TreeRoot,
+        HarnessDirectory => paths.HarnessDirectory,
+        Product => paths.Product,
+        ActionBuild => paths.ActionBuild,
+        ActionArtifacts => paths.ActionArtifacts,
+        StepBuild => paths.StepBuild,
+        RunArtifacts => paths.RunArtifacts,
+        Leg => paths.Identity?.Leg,
+        Os => paths.Identity?.Os,
+        Processor => paths.Identity?.Processor,
+        Toolchain => paths.Identity?.Toolchain,
+        Config => paths.Identity?.Config,
+        Variant => paths.Identity?.Variant,
+        Host => paths.Identity?.Host,
+        RunId => paths.Identity?.RunId,
         _ => null,
     };
 
@@ -251,6 +453,7 @@ public static partial class LegPathNames
         return new HarnessException(
             HarnessExit.ConfigInvalid,
             $"{setting} names '{{{name}}}', which nothing here can fill in. "
-            + $"The names are {string.Join(", ", known)}.");
+            + $"The names are {string.Join(", ", known)}. "
+            + "Write '{{' for a brace this tool should leave alone.");
     }
 }

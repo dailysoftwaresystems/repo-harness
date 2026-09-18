@@ -59,6 +59,29 @@ public sealed record ActionStep
     /// <summary>Seconds without output after which this step is treated as hung.</summary>
     public int? StallSeconds { get; init; }
 
+    /// <summary>
+    /// What this step produces, by path relative to its own directory under the action's
+    /// <c>build</c>.
+    /// </summary>
+    /// <remarks>
+    /// A witness, and the thing a later step consumes. Declared outputs are checked to exist when
+    /// the step finishes, so a program that exits zero having written nothing is reported as
+    /// unwitnessed rather than passed — which is the failure class an action replacing a hand-written
+    /// script most needs to be able to state about itself.
+    /// </remarks>
+    public IReadOnlyList<string> Outputs { get; init; } = [];
+
+    /// <summary>
+    /// Whether this step's outputs survive the run, moved into the action's <c>artifacts</c> when it
+    /// finishes.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, because the build directory is emptied when the action ends and anything a
+    /// later run needs has to say so. A run that persisted everything by default would grow a tree
+    /// nobody pruned, on every host.
+    /// </remarks>
+    public bool Persist { get; init; }
+
     /// <summary>Whether a failure here ends the leg or is recorded and passed over.</summary>
     public bool ContinueOnError { get; init; }
 
@@ -124,6 +147,16 @@ public sealed record ActionStep
             .. Commands.Select((command, index) => new RunnerPhase
             {
                 Name = total == 1 ? Name : $"{Name} ({index + 1}/{total})",
+
+                // The step's own name, not the phase's. A step of three commands is three phases
+                // sharing one directory, because it is one step's work: keyed by the phase name
+                // each command would write somewhere the next could not find.
+                StepName = Name,
+
+                // Checked on the last command, for the reason the success pattern is: that is the
+                // one whose finishing means the step did its work.
+                Outputs = index == total - 1 ? Outputs : [],
+                Persist = Persist,
                 Command = [.. command.Arguments],
                 WorkingDirectory = working,
                 WatchContention = WatchContention,

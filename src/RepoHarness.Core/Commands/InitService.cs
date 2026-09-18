@@ -94,6 +94,14 @@ public sealed class InitService(
             $"!/{runner}/{HarnessLayout.RunnerEnvDirectoryName}/{keep}",
             $"/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/*",
             $"!/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/{keep}",
+
+            // What an action's steps write, and what they asked to keep. Both sit beside the
+            // action's own tracked files, at whatever depth the author grouped it to, so these are
+            // matched at any depth rather than rooted. Neither is ever tracked: one is this run's
+            // working space and the other is output, and output committed beside the thing that
+            // produced it is how a repository comes to hold a measurement nobody can reproduce.
+            $"/{runner}/{HarnessLayout.RunnerActionsDirectoryName}/**/{HarnessLayout.ActionBuildDirectoryName}/",
+            $"/{runner}/{HarnessLayout.RunnerActionsDirectoryName}/**/{HarnessLayout.ActionArtifactsDirectoryName}/",
         ];
     }
 

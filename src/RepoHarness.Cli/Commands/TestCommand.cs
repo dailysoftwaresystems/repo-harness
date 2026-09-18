@@ -197,6 +197,9 @@ internal static class TestCommand
             }
         }
 
+        // Derived once from the placed leg, the same way the runner derives it.
+        var (testProduct, testProductProblem) = leg.ProductFor(leg.BuildDirectory);
+
         var result = await tests
             .RunAsync(
                 config,
@@ -209,6 +212,9 @@ internal static class TestCommand
                     LegSettings = leg.Leg,
                     Project = leg.Project,
                     PlatformKey = leg.Host.Os ?? string.Empty,
+                    Identity = leg.IdentityFor(work.RunId.Value),
+                    Product = testProduct,
+                    ProductProblem = testProductProblem,
                     HostTestCores = leg.HostSettings.TestCores,
                     Filter = filter,
                     Excludes = excludes,
