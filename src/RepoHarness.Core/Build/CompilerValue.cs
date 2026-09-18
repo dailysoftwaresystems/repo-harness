@@ -26,6 +26,38 @@ public sealed record CompilerValue(string Program, IReadOnlyList<string> Argumen
     public static IReadOnlyList<string> Variables { get; } = [C, Cxx];
 
     /// <summary>
+    /// The compiler a build uses for <paramref name="variable"/>'s language: the cache variable CMake
+    /// is given for it, when the variant gives one, and otherwise what the environment names.
+    /// </summary>
+    /// <param name="variable"><see cref="C"/> or <see cref="Cxx"/>.</param>
+    /// <param name="cacheVariables">What the variant hands CMake with <c>-D</c>.</param>
+    /// <param name="environment">What the build's phases start with: the host's, then the variant's.</param>
+    /// <remarks>
+    /// CMake's own order, measured on CMake 4.3: <c>CC=clang</c> with <c>-DCMAKE_C_COMPILER=gcc</c>
+    /// caches gcc, and a list, <c>ccache;gcc</c>, caches its first entry alone, with nothing recorded
+    /// after it. Read from the environment alone, a toolchain that names its compiler this way was
+    /// compared with a host's CC that CMake never used, and every rebuild was refused.
+    /// </remarks>
+    public static CompilerValue? For(
+        string variable,
+        IReadOnlyDictionary<string, string> cacheVariables,
+        IReadOnlyDictionary<string, string?> environment)
+    {
+        ArgumentNullException.ThrowIfNull(cacheVariables);
+        ArgumentNullException.ThrowIfNull(environment);
+
+        var cached = variable == C ? "CMAKE_C_COMPILER" : "CMAKE_CXX_COMPILER";
+
+        if (cacheVariables.TryGetValue(cached, out var named)
+            && named.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is [var program, ..])
+        {
+            return new CompilerValue(program, []);
+        }
+
+        return Read(environment.GetValueOrDefault(variable));
+    }
+
+    /// <summary>
     /// What <paramref name="value"/> starts, where the value alone can say: the whole value when it
     /// holds no space, and its first word, with the rest as its arguments, when that word is a name.
     /// </summary>

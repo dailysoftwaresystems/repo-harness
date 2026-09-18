@@ -28,6 +28,21 @@ public sealed class CompilerValueTests
     /// A value with a space whose first word is a path cannot be read from the value alone - that
     /// word may be half a file name - so it is left to CMake, as an unset one is.
     /// </summary>
+    /// <summary>
+    /// A compiler the variant gives CMake as a cache variable is the one it uses, whatever the
+    /// environment names - measured on CMake 4.3 - and a list caches its first entry alone.
+    /// </summary>
+    [Fact]
+    public void ACompilerGivenAsACacheVariable_IsTheOneTheBuildUses()
+    {
+        var environment = new Dictionary<string, string?> { ["CC"] = "clang", ["CXX"] = "clang++" };
+
+        Assert.Equal(new CompilerValue("gcc", []).ToString(), CompilerValue.For(CompilerValue.C, new Dictionary<string, string> { ["CMAKE_C_COMPILER"] = "gcc" }, environment)?.ToString());
+        Assert.Equal("ccache", CompilerValue.For(CompilerValue.C, new Dictionary<string, string> { ["CMAKE_C_COMPILER"] = "ccache;gcc" }, environment)?.ToString());
+        Assert.Equal("g++", CompilerValue.For(CompilerValue.Cxx, new Dictionary<string, string> { ["CMAKE_CXX_COMPILER"] = "g++" }, environment)?.ToString());
+        Assert.Equal("clang", CompilerValue.For(CompilerValue.C, new Dictionary<string, string>(), environment)?.ToString());
+    }
+
     [Theory]
     [InlineData(@"C:\Program Files\LLVM\bin\clang-cl.exe")]
     [InlineData("/opt/my tools/cc")]

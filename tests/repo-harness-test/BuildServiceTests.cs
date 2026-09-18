@@ -589,6 +589,34 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A toolchain that gives CMake its compiler as a cache variable builds with that one, whatever
+    /// the host's env names, so its directory rebuilds: compared with the host's CC, which CMake never
+    /// used, every rebuild was refused.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerGivenAsACacheVariable_RebuildsTheDirectoryItConfigured_WhateverTheHostNames()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang" } };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:STRING=/usr/bin/gcc\n",
+            cancellationToken);
+
+        var config = Config();
+        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], CacheVars = { ["CMAKE_C_COMPILER"] = "gcc" } };
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(config, request, cancellationToken);
+
+        Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+    }
+
+    /// <summary>
     /// A relative program the build recorded is read from the build directory, where the check starts,
     /// never from wherever this process began.
     /// </summary>

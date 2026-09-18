@@ -1,3 +1,4 @@
+using System.Text;
 using NSubstitute;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
@@ -306,6 +307,7 @@ public sealed class GitClientTests
         temp.WriteFile(Path.Combine("src", "naïve name.txt"), "日本語\n");
         await File.WriteAllBytesAsync(temp.Combine("bom.txt"), [0xEF, 0xBB, 0xBF, (byte)'b', (byte)'o', (byte)'m'], cancellationToken);
         await File.WriteAllBytesAsync(temp.Combine("data.bin"), [0x00, 0xFF, 0x0A, 0x41], cancellationToken);
+        await File.WriteAllBytesAsync(temp.Combine("wide.txt"), [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes("wide ✅\n")], cancellationToken);
         await harness.CommitAllAsync(temp.Path, "files", cancellationToken);
 
         var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
@@ -314,15 +316,39 @@ public sealed class GitClientTests
         var read = await new GitClient(processes, harness.Output).ReadFilesAtCommitAsync(
             temp.Path,
             head!,
-            ["docs/notes.md", "src/naïve name.txt", "bom.txt", "data.bin", "docs/absent.md"],
+            ["docs/notes.md", "src/naïve name.txt", "bom.txt", "data.bin", "wide.txt", "docs/absent.md"],
             cancellationToken);
 
         Assert.Equal("committed ✅\r\nline two\n", read["docs/notes.md"]);
         Assert.Equal("日本語\n", read["src/naïve name.txt"]);
         Assert.Equal("bom", read["bom.txt"]);
         Assert.Equal("\0\uFFFD\nA", read["data.bin"]);
+        Assert.Equal("wide ✅\n", read["wide.txt"]);
         Assert.Null(read["docs/absent.md"]);
         Assert.Equal(["cat-file"], processes.Started.Select(request => request.Arguments[0]));
+    }
+
+    /// <summary>
+    /// A path is read as git spells it. A backslash is an ordinary character in a name on Linux and
+    /// macOS; rewritten as a separator, the name read another file, and its answer was filed under a
+    /// key nobody had asked for.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_ReadsAPathAsGitSpellsIt()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows cannot hold a backslash in a file name.");
+
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, @"odd\name.txt"), "odd\n", cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "odd", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+        var read = await harness.GitClient.ReadFilesAtCommitAsync(temp.Path, head!, [@"odd\name.txt"], cancellationToken);
+
+        Assert.Equal("odd\n", read[@"odd\name.txt"]);
     }
 
     /// <summary>

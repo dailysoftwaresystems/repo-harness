@@ -144,11 +144,11 @@ public interface IGitClient
 
     /// <summary>
     /// Each file's content at <paramref name="commit"/>, keyed by its path as given, with
-    /// <see langword="null"/> for one that did not exist there - all of them read by one git process.
+    /// <see langword="null"/> for one that is not a file there - all of them read by one git process.
     /// </summary>
     /// <param name="directory">The repository's root, which the paths are relative to.</param>
     /// <param name="commit">A commit id, as <see cref="ResolveCommitAsync"/> returns.</param>
-    /// <param name="relativePaths">The files, relative to the repository root.</param>
+    /// <param name="relativePaths">The files, relative to the repository root and spelled as git spells them.</param>
     /// <param name="cancellationToken">Cancels the git processes.</param>
     /// <exception cref="HarnessException">git could not read the commit.</exception>
     Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(

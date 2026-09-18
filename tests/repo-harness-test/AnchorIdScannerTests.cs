@@ -13,6 +13,21 @@ public sealed class AnchorIdScannerTests
 {
     private static readonly AnchorIdScanner Scanner = new(AnchorIdRules.From(new AnchorSettings()));
 
+    /// <summary>
+    /// A citation that runs into a hyphen at the end of its line - trailing spaces and a carriage
+    /// return aside - is cut there, as a wrapped line cuts one; an id with anything after that hyphen,
+    /// or none at all, is not.
+    /// </summary>
+    [Fact]
+    public void ACitationRunningIntoAHyphenAtTheEndOfItsLine_IsCut()
+    {
+        var found = Scanner.Scan("notes.md", "see D-AREA-TOPIC-\nDETAIL and D-AREA-TOPIC-TWO-  \r\nD-AREA-TOPIC-THREE-(x) D-AREA-TOPIC-FOUR\n");
+
+        Assert.Equal(
+            [("D-AREA-TOPIC", true), ("D-AREA-TOPIC-TWO", true), ("D-AREA-TOPIC-THREE", false), ("D-AREA-TOPIC-FOUR", false)],
+            found.Select(citation => (citation.Id, citation.Cut)));
+    }
+
     [Fact]
     public void AnIdWrittenStraightAfterAnEscape_IsFound()
     {

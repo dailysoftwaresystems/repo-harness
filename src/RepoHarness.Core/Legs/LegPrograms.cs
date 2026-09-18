@@ -175,9 +175,9 @@ public static class LegPrograms
 
         foreach (var variable in CompilerValue.Variables)
         {
-            if (environment.TryGetValue(variable, out var compiler) && CompilerValue.Read(compiler) is { } read)
+            if (CompilerValue.For(variable, overlay.CacheVars, environment) is { } compiler)
             {
-                yield return (read.Program, ownPath);
+                yield return (compiler.Program, ownPath);
             }
         }
     }

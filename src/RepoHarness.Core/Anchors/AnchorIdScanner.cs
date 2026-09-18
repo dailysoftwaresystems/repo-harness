@@ -6,7 +6,16 @@ namespace RepoHarness.Core.Anchors;
 /// <param name="Id">The id exactly as written.</param>
 /// <param name="Path">The file, relative to the repository root, with forward slashes.</param>
 /// <param name="LineNumber">The line the id is on, counting from one.</param>
-public sealed record AnchorCitation(string Id, string Path, int LineNumber);
+public sealed record AnchorCitation(string Id, string Path, int LineNumber)
+{
+    /// <summary>
+    /// Whether the id runs into a hyphen at the end of its line: cut there, as a wrapped line cuts
+    /// one, with the rest of it on the next. What it spells is not the id it was cut from, so it
+    /// cannot resolve, whatever rows exist - not even to a row that happens to be named by the part
+    /// before the cut.
+    /// </summary>
+    public bool Cut { get; init; }
+}
 
 /// <summary>
 /// Finds anchor ids cited in text. The shape comes from <see cref="AnchorIdRules"/>, so a repository
@@ -88,9 +97,9 @@ public sealed class AnchorIdScanner
         {
             lineNumber++;
 
-            foreach (var id in ScanLine(line))
+            foreach (var match in Matches(line))
             {
-                citations.Add(new AnchorCitation(id, path, lineNumber));
+                citations.Add(new AnchorCitation(match.Value, path, lineNumber) { Cut = IsCut(line, match) });
             }
         }
 
@@ -99,7 +108,22 @@ public sealed class AnchorIdScanner
 
     /// <summary>Every id cited on one line, in the order it appears, repeats included.</summary>
     /// <param name="line">One line of text.</param>
-    public IEnumerable<string> ScanLine(string line)
+    public IEnumerable<string> ScanLine(string line) => Matches(line).Select(match => match.Value);
+
+    /// <summary>
+    /// Whether <paramref name="match"/> runs into a hyphen with nothing but spaces after it to the end
+    /// of <paramref name="line"/>: an id a wrapped line cut short, which the pattern - an id cannot
+    /// end in a hyphen - reads as the shorter id before the cut.
+    /// </summary>
+    private static bool IsCut(string line, Match match)
+    {
+        var after = match.Index + match.Length;
+
+        return after < line.Length && line[after] == '-' && string.IsNullOrWhiteSpace(line[(after + 1)..]);
+    }
+
+    /// <summary>Every id-shaped run on one line that is a citation, in the order it appears.</summary>
+    private IEnumerable<Match> Matches(string line)
     {
         ArgumentNullException.ThrowIfNull(line);
 
@@ -116,7 +140,7 @@ public sealed class AnchorIdScanner
 
             if (IsSeparated(line, match.Index) && Rules.IsWellFormed(match.Value))
             {
-                yield return match.Value;
+                yield return match;
                 from = match.Index + match.Length;
             }
             else

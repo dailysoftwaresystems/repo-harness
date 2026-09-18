@@ -107,8 +107,8 @@ public sealed class BuildService(
         _buildDirectoryGuard.Check(
             buildDirectory,
             Path.Combine(request.TreeRoot, request.Project.Path),
-            CompilerValue.Read(environment.GetValueOrDefault(CompilerValue.C)),
-            CompilerValue.Read(environment.GetValueOrDefault(CompilerValue.Cxx)),
+            CompilerValue.For(CompilerValue.C, overlay.CacheVars, environment),
+            CompilerValue.For(CompilerValue.Cxx, overlay.CacheVars, environment),
             adapter.BuildTypeOf(config, request.Variant.Config));
 
         var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);

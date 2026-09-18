@@ -532,6 +532,23 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// A compiler the variant gives CMake as a cache variable is the one the survey requires, whatever
+    /// the host's env names: it is the one the build starts.
+    /// </summary>
+    [Fact]
+    public void ACompilerGivenAsACacheVariable_IsTheOneRequired()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Toolchains["gcc"].CacheVars["CMAKE_C_COMPILER"] = "gcc-13";
+        config.Hosts.Local.Env["CC"] = "clang-17";
+
+        var programs = LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildOnly, config.Hosts.Local);
+
+        Assert.Contains("gcc-13", programs);
+        Assert.DoesNotContain("clang-17", programs);
+    }
+
+    /// <summary>
     /// A host running a leg another machine dispatched to it judges the leg by the section that
     /// machine's configuration gives it, not by 'local' - which, in the configuration the two share,
     /// is the machine that dispatched it.

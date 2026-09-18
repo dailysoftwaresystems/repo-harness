@@ -85,6 +85,80 @@ public sealed class AnchorCitationServiceTests
     }
 
     /// <summary>
+    /// A citation cut at the end of its line is reported whatever rows exist - even when the part
+    /// before the cut is itself a row, which it does not mean: the id it was cut from is on the next
+    /// line, and would stop resolving without the gate saying so.
+    /// </summary>
+    [Fact]
+    public async Task ACitationCutAtTheEndOfItsLine_IsReported_EvenWhereThePartBeforeTheCutIsARow()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+        await WriteAnchorAsync(harness, temp, Known);
+        await WriteAnchorAsync(harness, temp, Known + "-DETAIL");
+
+        temp.WriteFile(Path.Combine("src", "thing.cpp"), $"// (see {Known}-\n// DETAIL)\n");
+
+        var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken);
+
+        var cut = Assert.Single(report.Unresolved);
+        Assert.Equal(Known, cut.Id);
+        Assert.True(cut.Cut);
+        Assert.Equal($"src/thing.cpp:1: {Known}- (cut at the end of the line)", Assert.Single(AnchorCitationReports.Render(report, json: false).Data));
+    }
+
+    /// <summary>
+    /// A file the commit lists that git cannot read refuses the check, naming it: skipped, a file
+    /// whose object was gone passed a check that read nothing in it.
+    /// </summary>
+    [Fact]
+    public async Task AFileTheCommitListsButGitCannotRead_RefusesTheCheck()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        temp.WriteFile(Path.Combine("src", "lost.cpp"), "// D-AREA-TOPIC-LOST\n");
+        await harness.CommitAllAsync(temp.Path, "src", cancellationToken);
+
+        var blob = (await harness.GitClient.RunAsync(temp.Path, ["rev-parse", "HEAD:src/lost.cpp"], cancellationToken: cancellationToken)).StandardOutput.Trim();
+        var loose = Path.Combine(temp.Path, ".git", "objects", blob[..2], blob[2..]);
+        File.SetAttributes(loose, FileAttributes.Normal);
+        File.Delete(loose);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken));
+
+        Assert.Contains("'src/lost.cpp'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("git fsck", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A submodule's entry names a commit in another repository, which is no file here: it is not
+    /// read, and not mistaken for a file git could not read.
+    /// </summary>
+    [Fact]
+    public async Task ASubmodulesEntry_IsNotReadAsAFile()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        temp.WriteFile(Path.Combine("src", "thing.cpp"), "// D-AREA-TOPIC-THING\n");
+        await harness.CommitAllAsync(temp.Path, "src", cancellationToken);
+
+        var head = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        await harness.GitClient.RunAsync(temp.Path, ["update-index", "--add", "--cacheinfo", $"160000,{head},src/sub"], cancellationToken: cancellationToken);
+        await harness.GitClient.RunAsync(temp.Path, ["commit", "-q", "-m", "submodule"], cancellationToken: cancellationToken);
+
+        var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken);
+
+        Assert.Equal(1, report.FilesScanned);
+        Assert.Equal(["D-AREA-TOPIC-THING"], report.Unresolved.Select(citation => citation.Id));
+    }
+
+    /// <summary>
     /// A commit's files are read by one git process however many there are. Asked for one at a time,
     /// each cost two, and 2,385 files took twenty minutes where reading the disk took seconds.
     /// </summary>

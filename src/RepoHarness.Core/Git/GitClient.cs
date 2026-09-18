@@ -403,9 +403,12 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
 
-        var read = await ReadFilesAtCommitAsync(directory, commit, [relativePath], cancellationToken).ConfigureAwait(false);
+        // Spelled by this machine, so its own separator is turned into git's; nothing else is, as a
+        // backslash is an ordinary character in a name on Linux.
+        var path = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+        var read = await ReadFilesAtCommitAsync(directory, commit, [path], cancellationToken).ConfigureAwait(false);
 
-        return read[relativePath.Replace('\\', '/')];
+        return read[path];
     }
 
     public async Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
@@ -417,7 +420,10 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         ArgumentException.ThrowIfNullOrWhiteSpace(commit);
         ArgumentNullException.ThrowIfNull(relativePaths);
 
-        var paths = relativePaths.Select(path => path.Replace('\\', '/')).Distinct(StringComparer.Ordinal).ToList();
+        // As git spells them, and keyed as given: rewritten, a name holding a backslash - an ordinary
+        // character on Linux - named another file, and its answer was filed under a key the caller
+        // never asked for.
+        var paths = relativePaths.Distinct(StringComparer.Ordinal).ToList();
         var read = new Dictionary<string, string?>(StringComparer.Ordinal);
 
         // Named to git one to a line, so a path holding a line break - which git allows and no line
@@ -489,14 +495,22 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         return [.. paths.Select(_ => answers.Next() is { Type: "blob" } blob ? Decoded(blob.Content) : null)];
     }
 
-    /// <summary>A file's bytes, carried one to a character, as the UTF-8 text they are.</summary>
+    /// <summary>A file's bytes, carried one to a character, as the text they are.</summary>
+    /// <remarks>
+    /// Read as a file on disk is read: a byte order mark says which encoding the rest is in - UTF-16,
+    /// as a Windows PowerShell 5.1 redirect writes it - and is not part of the text, and UTF-8 is
+    /// assumed where there is none. Read as UTF-8 regardless, a UTF-16 file became every other
+    /// character a NUL, was taken for binary and skipped, and the commit passed a check that the
+    /// same file on disk failed.
+    /// </remarks>
     private static string Decoded(string bytes)
     {
-        var text = Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(bytes));
+        using var reader = new StreamReader(
+            new MemoryStream(Encoding.Latin1.GetBytes(bytes)),
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true);
 
-        // A byte order mark says how the file is encoded, and is not its text: reading the file on
-        // its own dropped it, as every reader of UTF-8 does.
-        return text.StartsWith('\uFEFF') ? text[1..] : text;
+        return reader.ReadToEnd();
     }
 
     /// <summary>

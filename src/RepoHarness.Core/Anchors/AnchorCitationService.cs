@@ -131,7 +131,7 @@ public sealed class AnchorCitationService(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var text = committed is not null ? committed[path] : ReadFromDisk(root, path);
+            var text = committed is not null ? committed[path] ?? throw Unread(path, selection.Commit!) : ReadFromDisk(root, path);
 
             if (text is null || IsBinary(text))
             {
@@ -147,9 +147,10 @@ public sealed class AnchorCitationService(
             .ConfigureAwait(false);
 
         // By the rule read-anchor finds a row by, so the two verbs cannot disagree about whether a
-        // row exists.
+        // row exists - and a citation cut at the end of its line is reported whatever rows exist,
+        // because the id it was cut from is not the one it spells.
         var ids = rows.Select(entry => entry.Row.Id).ToHashSet(AnchorIdMatch.Comparer);
-        var unresolved = citations.Where(citation => !ids.Contains(citation.Id)).ToList();
+        var unresolved = citations.Where(citation => citation.Cut || !ids.Contains(citation.Id)).ToList();
 
         return new AnchorCitationReport(
             subject,
@@ -160,6 +161,16 @@ public sealed class AnchorCitationService(
             rows.Count,
             unresolved);
     }
+
+    /// <summary>
+    /// The refusal for a file the commit lists that git could not read. Skipped, a file whose object
+    /// is gone passed a check that read nothing in it.
+    /// </summary>
+    private static HarnessException Unread(string path, string commit)
+        => new(
+            HarnessExit.CommandFailed,
+            $"git lists '{path}' at {Short(commit)} but could not read it, so the citations in it were not checked. "
+            + "Check the repository with 'git fsck'.");
 
     /// <summary>
     /// Whether a repository-relative path lies inside a declared root. A root names a file or a
@@ -175,6 +186,17 @@ public sealed class AnchorCitationService(
 
     private static bool IsBinary(string text)
         => text.AsSpan(0, Math.Min(text.Length, BinaryProbeLength)).IndexOf('\0') >= 0;
+
+    /// <summary>
+    /// The files in <c>git ls-tree -z</c>'s entries - <c>&lt;mode&gt; &lt;type&gt; &lt;object&gt;TAB&lt;path&gt;</c> -
+    /// leaving out what is not one.
+    /// </summary>
+    private static IReadOnlyList<string> Files(string output)
+        => [.. output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => entry.TrimStart('\n', '\r'))
+            .Where(entry => entry.IndexOf('\t', StringComparison.Ordinal) is var tab and > 0
+                && entry[..tab].Split(' ') is [_, "blob", _])
+            .Select(entry => entry[(entry.IndexOf('\t', StringComparison.Ordinal) + 1)..])];
 
     /// <summary>Splits git's NUL-separated output, which needs no quoting and so loses no path.</summary>
     private static IReadOnlyList<string> SplitPaths(string output)
@@ -225,10 +247,12 @@ public sealed class AnchorCitationService(
                         HarnessExit.Refused,
                         "HEAD names no commit, so there is no commit to check. Commit first, or use --current-tree.");
 
-                var listed = await RunAsync(root, ["ls-tree", "-r", "-z", "--name-only", commit], cancellationToken)
+                // Files alone: a submodule's entry names a commit in another repository, which is
+                // no file here, and every file listed is one git must then be able to read.
+                var listed = await RunAsync(root, ["ls-tree", "-r", "-z", commit], cancellationToken)
                     .ConfigureAwait(false);
 
-                return new AnchorCitationSelection(SplitPaths(listed), $"the files at HEAD ({Short(commit)})", commit);
+                return new AnchorCitationSelection(Files(listed), $"the files at HEAD ({Short(commit)})", commit);
             }
         }
     }
@@ -317,7 +341,9 @@ public static class AnchorCitationReports
 
         IReadOnlyList<string> data = json
             ? [Json(report)]
-            : [.. report.Unresolved.Select(citation => $"{citation.Path}:{citation.LineNumber}: {citation.Id}")];
+            : [.. report.Unresolved.Select(citation => citation.Cut
+                ? $"{citation.Path}:{citation.LineNumber}: {citation.Id}- (cut at the end of the line)"
+                : $"{citation.Path}:{citation.LineNumber}: {citation.Id}")];
 
         var looked =
             $"{report.CitationsFound} citation(s) over {report.FilesScanned} file(s) of {report.SubjectDescription}, "
@@ -355,6 +381,7 @@ public static class AnchorCitationReports
                 ["anchor"] = citation.Id,
                 ["file"] = citation.Path,
                 ["line"] = citation.LineNumber,
+                ["cut"] = citation.Cut,
             })]),
         };
 
