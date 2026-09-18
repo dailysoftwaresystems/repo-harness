@@ -98,7 +98,12 @@ public sealed class HostConnector(
     private async Task<HostConnectionResult> LocalAsync(IReadOnlyList<string> wanted, CancellationToken cancellationToken)
     {
         var connection = await _programs
-            .ResolveAsync(new HostConnection { Host = HostId.Local }, wanted, ProbeBudget, cancellationToken)
+            .ResolveAsync(
+                new HostConnection { Host = HostId.Local },
+                wanted,
+                ToolSearchDirectories.BuiltIn(_platform.PlatformKey),
+                ProbeBudget,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return new HostConnectionResult
@@ -149,7 +154,9 @@ public sealed class HostConnector(
 
         return new HostConnectionResult
         {
-            Connection = await _programs.ResolveAsync(connection, wanted, ProbeBudget, cancellationToken).ConfigureAwait(false),
+            Connection = await _programs
+                .ResolveAsync(connection, wanted, ToolSearchDirectories.Posix, ProbeBudget, cancellationToken)
+                .ConfigureAwait(false),
             Superuser = item.Superuser,
             Os = os,
             Processor = processor,
@@ -223,7 +230,11 @@ public sealed class HostConnector(
 
         return new HostConnectionResult
         {
-            Connection = await _programs.ResolveAsync(connection, wanted, budget, cancellationToken).ConfigureAwait(false),
+            // Before the host's platform is known, so the built-in list: what is looked for here is
+            // the harness's own SDK, which a repository's toolSearchDirectories must never hide.
+            Connection = await _programs
+                .ResolveAsync(connection, wanted, ToolSearchDirectories.Posix, budget, cancellationToken)
+                .ConfigureAwait(false),
             Superuser = item.Superuser,
         };
     }

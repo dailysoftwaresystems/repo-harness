@@ -13,6 +13,16 @@ namespace RepoHarness.Core.Runners;
 /// <summary>One predefined runner on one leg, with everything the caller has already decided.</summary>
 public sealed record RunnerRunRequest
 {
+    /// <summary>
+    /// The directories the host running this leg found its programs in off the PATH, appended to the
+    /// PATH of every process the leg starts.
+    /// </summary>
+    /// <remarks>
+    /// From the survey the host answered about itself, so the programs a phase starts by name, and
+    /// the ones those start by name in turn, are found where the survey found them.
+    /// </remarks>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>The runner, as <c>predefinedRunners</c> keys it and a run check names it.</summary>
     public required string RunnerName { get; init; }
 
@@ -705,6 +715,7 @@ public sealed class RunnerRunService(
                         LogNameFor(phase.Name) + ".log"),
                     WorkingDirectory = working,
                     Environment = EnvironmentFor(request, phase, values),
+                    AppendToPath = request.ProgramDirectories,
                     SuccessPattern = phase.SuccessPattern,
 
                     // The step's own bound, else the runner's, else the repository's. A stall bound

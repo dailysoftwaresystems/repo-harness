@@ -376,6 +376,35 @@ public sealed class LegExecutorTests
         Assert.Equal(LegVerdict.Passed, execution.Entries.Single(entry => entry.Leg == "fine").Verdict);
     }
 
+    /// <summary>
+    /// A program that would not start is the host missing a tool, not the harness breaking. Recorded
+    /// as poisoned, a macOS host's missing cmake read as exit 70 - a defect in this tool - and the
+    /// whole run with it, since poisoned outranks every other verdict.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseProgramWouldNotStart_IsSkippedForAMissingTool_NotPoisoned()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "test");
+
+        var execution = await Executor(factory).RunAsync(
+            new LegExecutionRequest
+            {
+                Legs = [Leg("mac"), Leg("fine")],
+                RunLeg = (leg, _) => leg.Name == "mac"
+                    ? throw new RepoHarness.Core.Processes.ExecutableNotFoundException("cmake")
+                    : Task.FromResult<LegEntry?>(Passed(leg)),
+            },
+            ledger,
+            TestContext.Current.CancellationToken);
+
+        var mac = execution.Entries.Single(entry => entry.Leg == "mac");
+
+        Assert.Equal(LegVerdict.SkippedToolMissing, mac.Verdict);
+        Assert.Contains("cmake", mac.Detail, StringComparison.Ordinal);
+        Assert.Equal(LegVerdict.Passed, execution.Entries.Single(entry => entry.Leg == "fine").Verdict);
+    }
+
     [Fact]
     public async Task AnInterruptedRun_ReportsWhatWasLeft()
     {

@@ -52,6 +52,18 @@ public sealed class HarnessConfig
     public List<ToolConfig> Tools { get; init; } = [];
 
     /// <summary>
+    /// Where a program is looked for when the PATH a command sees does not name it, by platform or
+    /// <c>all</c>. A platform's list replaces the built-in one only when it has something in it.
+    /// </summary>
+    /// <remarks>
+    /// Left out, or declared empty, a host searches the directories this build already knows to look
+    /// in: see <see cref="Hosts.ToolSearchDirectories"/>. Declared, it is the whole list for that
+    /// platform, so a tool installed somewhere unusual is found by naming its directory here rather
+    /// than by editing a shell's startup files on every host.
+    /// </remarks>
+    public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = Map<List<string>>();
+
+    /// <summary>
     /// Multi-phase procedures such as a corpus build-and-test or a benchmark, keyed by the name
     /// <c>run</c> selects them by and a run check names them by. Keyed rather than listed because a
     /// check selects one by name, and an unnamed entry could not be selected at all.

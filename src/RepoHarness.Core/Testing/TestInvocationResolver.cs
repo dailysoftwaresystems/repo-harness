@@ -47,15 +47,7 @@ public static class TestInvocationResolver
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        var platform = platformKey switch
-        {
-            PlatformNames.Windows => settings.Windows,
-            PlatformNames.Linux => settings.Linux,
-            PlatformNames.MacOs => settings.Macos,
-            _ => null,
-        };
-
-        var merged = Merge(settings.All, platform);
+        var merged = Merge(settings.All, SectionFor(settings, platformKey));
 
         if (string.IsNullOrWhiteSpace(merged.Runner))
         {
@@ -180,6 +172,33 @@ public static class TestInvocationResolver
     /// </remarks>
     private static string Rooted(string path, string treeRoot)
         => Path.IsPathRooted(path) ? path : Path.Combine(treeRoot, path);
+
+    /// <summary>
+    /// The program a leg's tests start on <paramref name="platformKey"/>, or <see langword="null"/>
+    /// when the settings name none there.
+    /// </summary>
+    /// <param name="settings">The test settings.</param>
+    /// <param name="platformKey">The operating system the leg runs on.</param>
+    /// <remarks>
+    /// Read by the same merge <see cref="Resolve"/> uses, and without its refusals: a survey asks
+    /// which program a host must have, and settings that name none are the test command's to refuse,
+    /// in its own words, when somebody runs it.
+    /// </remarks>
+    public static string? RunnerFor(TestConfig settings, string platformKey)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        return Merge(settings.All, SectionFor(settings, platformKey)).Runner is { Length: > 0 } runner ? runner : null;
+    }
+
+    /// <summary>The section of <paramref name="settings"/> for one operating system, if it has one.</summary>
+    private static TestInvocation? SectionFor(TestConfig settings, string platformKey) => platformKey switch
+    {
+        PlatformNames.Windows => settings.Windows,
+        PlatformNames.Linux => settings.Linux,
+        PlatformNames.MacOs => settings.Macos,
+        _ => null,
+    };
 
     private static ResolvedTestInvocation Merge(TestInvocation? all, TestInvocation? platform)
         => new(

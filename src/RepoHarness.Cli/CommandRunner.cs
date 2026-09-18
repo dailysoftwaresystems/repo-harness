@@ -72,6 +72,14 @@ internal static class CommandRunner
     /// </summary>
     internal static int Fail(IHarnessOutput output, string commandName, Exception exception)
     {
+        // A cause both this and the leg executor know, read from the one table they share, so the
+        // same missing program means the same thing whether it stopped a command or a leg.
+        if (KnownCauses.ExitCodeFor(exception) is { } known)
+        {
+            output.Fail(commandName, exception.Message);
+            return known;
+        }
+
         switch (exception)
         {
             case HarnessException harness:
@@ -82,11 +90,6 @@ internal static class CommandRunner
             case ConfigException:
                 output.Fail(commandName, exception.Message);
                 return HarnessExit.ConfigInvalid;
-
-            case ProgramStartException:
-                // Missing, or there and unable to start: either way the instrument never ran.
-                output.Fail(commandName, exception.Message);
-                return HarnessExit.ToolMissing;
 
             case OperationCanceledException:
                 // Not CommandFailed: nothing ran to completion, and a caller reading

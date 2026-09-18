@@ -89,7 +89,7 @@ public sealed class HostExecService(
         var host = target.Host;
 
         var report = await _inspector
-            .InspectAsync(context, host, new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase), cancellationToken)
+            .InspectAsync(context, host, new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase), [], cancellationToken)
             .ConfigureAwait(false);
 
         foreach (var action in report.Actions)

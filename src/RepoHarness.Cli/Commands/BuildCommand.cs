@@ -106,7 +106,10 @@ internal static class BuildCommand
                     leg.Host.Os ?? string.Empty,
                     CoreCounts.Resolve(null, leg.HostSettings.BuildCores, work.Context.Config.Defaults.BuildCores).Value,
                     work.RunDirectory,
-                    work.Time),
+                    work.Time)
+                {
+                    ProgramDirectories = leg.Host.ProgramDirectories,
+                },
                 cancellationToken)
             .ConfigureAwait(false);
 

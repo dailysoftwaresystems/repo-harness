@@ -53,6 +53,7 @@ public static class HarnessConfigValidator
         ValidateEmulators(config, problems);
         ValidateLegs(config, problems);
         ValidateTools(config, problems);
+        ValidateToolSearchDirectories(config, problems);
         ValidateRunnersAndExec(config, problems);
         ValidateCommit(config.Commit, problems);
         ValidateSync(config.Sync, problems);
@@ -802,6 +803,50 @@ public static class HarnessConfigValidator
         if (!SameName(emulator.HostOs, leg.Os))
         {
             problems.Add($"{owner} runs on {leg.Os}, but emulator '{emulatorName}' runs on {emulator.HostOs} hosts");
+        }
+    }
+
+    /// <summary>
+    /// Refuses a <c>toolSearchDirectories</c> entry naming a platform that does not exist, and a
+    /// directory that is blank or relative.
+    /// </summary>
+    /// <remarks>
+    /// A relative directory would be looked in relative to wherever the command happened to start,
+    /// so one leg would find a tool and the next, started elsewhere, would not. <c>~/</c> is allowed
+    /// and means the home directory of whoever searches, on each host its own.
+    /// </remarks>
+    private static void ValidateToolSearchDirectories(HarnessConfig config, List<string> problems)
+    {
+        foreach (var (platform, directories) in config.ToolSearchDirectories)
+        {
+            if (!PlatformKeys.Contains(platform, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"toolSearchDirectories names platform '{platform}'; "
+                    + $"expected one of {string.Join(", ", PlatformKeys)}");
+            }
+
+            foreach (var directory in directories ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    problems.Add($"toolSearchDirectories.{platform} has a blank entry");
+                    continue;
+                }
+
+                var rooted = directory.StartsWith("~/", StringComparison.Ordinal)
+                    || directory.StartsWith('/')
+                    || Path.IsPathRooted(directory)
+                    || (directory.Length >= 3 && directory[1] == ':' && directory[2] is '/' or '\\');
+
+                if (!rooted)
+                {
+                    problems.Add(
+                        $"toolSearchDirectories.{platform} lists '{directory}', which is relative; name the "
+                        + "directory absolutely, or from the home directory as '~/...', so every command "
+                        + "looks in the same place wherever it started");
+                }
+            }
         }
     }
 

@@ -54,84 +54,60 @@ public interface IHostProgramResolver
     /// </summary>
     /// <param name="connection">The connection to measure on.</param>
     /// <param name="programs">The program names, as a command would name them.</param>
+    /// <param name="directories">
+    /// Where to look when the PATH does not name one, <c>~</c> being the host's home: the built-in
+    /// list for the harness's own SDK, and the repository's <c>toolSearchDirectories</c> for its
+    /// declared tools. See <see cref="ToolSearchDirectories"/>.
+    /// </param>
     /// <param name="budget">Longest one lookup may take.</param>
     /// <param name="cancellationToken">Stops the lookups.</param>
     Task<HostConnection> ResolveAsync(
         HostConnection connection,
         IReadOnlyList<string> programs,
+        IReadOnlyList<string> directories,
         TimeSpan budget,
         CancellationToken cancellationToken = default);
 }
 
 /// <inheritdoc cref="IHostProgramResolver"/>
-public sealed class HostProgramResolver(IProcessRunner processRunner, IHostCommandRunner hostCommands) : IHostProgramResolver
+public sealed class HostProgramResolver(LocalProgramResolver local, IHostCommandRunner hostCommands) : IHostProgramResolver
 {
     /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
     private const int SshFailed = 255;
 
-    /// <summary>
-    /// Directories searched when the PATH of a command run without a login shell does not name a
-    /// program, in the order they are preferred. <c>~</c> is this host's home directory, measured with
-    /// <c>pwd</c>, because a command run this way expands nothing and <c>$HOME</c> reaches it as five
-    /// characters.
-    /// </summary>
-    public static readonly ImmutableArray<string> SearchedDirectories =
-    [
-        // Where dotnet-install.sh puts the SDK, and where install-missing-tools therefore puts it.
-        "~/.dotnet",
-        "~/.local/bin",
-        "~/bin",
-
-        // Homebrew on Apple silicon, absent from an ssh command's PATH; then Homebrew on Intel, which
-        // is also where a great many installers put a program.
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-
-        // The .NET installers' own directories, per operating system and packaging.
-        "/usr/local/share/dotnet",
-        "/usr/share/dotnet",
-        "/usr/lib/dotnet",
-        "/opt/dotnet",
-        "/snap/bin",
-    ];
-
-    private readonly IProcessRunner _processRunner = processRunner;
+    private readonly LocalProgramResolver _local = local;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
 
     public async Task<HostConnection> ResolveAsync(
         HostConnection connection,
         IReadOnlyList<string> programs,
+        IReadOnlyList<string> directories,
         TimeSpan budget,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(programs);
+        ArgumentNullException.ThrowIfNull(directories);
 
         var found = new Dictionary<string, ProgramLocation>(connection.Programs, StringComparer.Ordinal);
         var home = new Lazy<Task<string?>>(() => HomeAsync(connection, budget, cancellationToken));
 
         foreach (var program in programs.Distinct(StringComparer.Ordinal).Where(program => !found.ContainsKey(program)))
         {
+            // This machine is asked the way a leg on it will be: the same function the survey and the
+            // run use, so install-missing-tools cannot call a tool present that a leg then cannot start.
             found[program] = connection.Host.Kind == HostKind.Local
-                ? Here(program)
-                : await ThereAsync(connection, program, home, budget, cancellationToken).ConfigureAwait(false);
+                ? _local.Find(program, directories)
+                : await ThereAsync(connection, program, directories, home, budget, cancellationToken).ConfigureAwait(false);
         }
 
         return connection with { Programs = found };
     }
 
-    /// <summary>
-    /// Where a program is on this machine, which the process runner already answers: it looks a name up
-    /// in the PATH directories and nowhere else, which is what a child of this process would find.
-    /// </summary>
-    private ProgramLocation Here(string program)
-        => _processRunner.FindExecutable(program) is { } path
-            ? new ProgramLocation(program, ProgramFound.OnPath, path)
-            : new ProgramLocation(program, ProgramFound.Nowhere);
-
     private async Task<ProgramLocation> ThereAsync(
         HostConnection connection,
         string program,
+        IReadOnlyList<string> directories,
         Lazy<Task<string?>> home,
         TimeSpan budget,
         CancellationToken cancellationToken)
@@ -158,7 +134,7 @@ public sealed class HostProgramResolver(IProcessRunner processRunner, IHostComma
             return onPath;
         }
 
-        var candidates = Candidates(program, await home.Value.ConfigureAwait(false), connection.Shell);
+        var candidates = Candidates(program, directories, await home.Value.ConfigureAwait(false), connection.Shell);
 
         if (candidates.Count == 0)
         {
@@ -248,8 +224,12 @@ public sealed class HostProgramResolver(IProcessRunner processRunner, IHostComma
     }
 
     /// <summary>The candidate paths for one program, in the order they are preferred.</summary>
-    private static IReadOnlyList<string> Candidates(string program, string? home, RemoteShell shell)
-        => [.. SearchedDirectories
+    private static IReadOnlyList<string> Candidates(
+        string program,
+        IReadOnlyList<string> directories,
+        string? home,
+        RemoteShell shell)
+        => [.. directories
             .Select(directory => directory.StartsWith("~/", StringComparison.Ordinal)
                 ? home is null ? null : home.TrimEnd('/') + directory[1..]
                 : directory)

@@ -23,7 +23,18 @@ public sealed record BuildRequest(
     string PlatformKey,
     int Cores,
     string RunDirectory,
-    bool Time = false);
+    bool Time = false)
+{
+    /// <summary>
+    /// The directories the host running this leg found its programs in off the PATH, appended to the
+    /// PATH of every process the leg starts.
+    /// </summary>
+    /// <remarks>
+    /// From the survey the host answered about itself, so the programs a phase starts by name, and
+    /// the ones those start by name in turn, are found where the survey found them.
+    /// </remarks>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+}
 
 /// <summary>What one leg's build did.</summary>
 /// <param name="Verdict">The verdict, and the sentence the ledger shows for it.</param>
@@ -85,7 +96,7 @@ public sealed class BuildService(
 
         var adapter = BuildAdapters.For(request.Project.Type);
         var buildDirectory = request.Variant.DirectoryUnder(request.TreeRoot);
-        var overlay = Overlay(config, request);
+        var overlay = request.Variant.Overlay(config, request.Project);
 
         // Before configuring, not after: a directory configured from another worktree watches that
         // tree's sources, which produced both a false refusal and a silent wrong answer. Compared
@@ -309,50 +320,6 @@ public sealed class BuildService(
         {
             _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
         }
-    }
-
-    /// <summary>
-    /// The environment and cache variables this leg builds with: the toolchain, then the build
-    /// configuration, then the sanitizer, then the project, each layered over the last.
-    /// </summary>
-    private static VariantOverlay Overlay(HarnessConfig config, BuildRequest request)
-    {
-        var merged = new VariantOverlay();
-
-        foreach (var layer in Layers(config, request))
-        {
-            foreach (var (name, value) in layer.Env)
-            {
-                merged.Env[name] = value;
-            }
-
-            foreach (var (name, value) in layer.CacheVars)
-            {
-                merged.CacheVars[name] = value;
-            }
-        }
-
-        return merged;
-    }
-
-    private static IEnumerable<VariantOverlay> Layers(HarnessConfig config, BuildRequest request)
-    {
-        if (config.Toolchains.TryGetValue(request.Variant.Toolchain, out var toolchain))
-        {
-            yield return toolchain;
-        }
-
-        if (config.BuildConfigs.TryGetValue(request.Variant.Config, out var buildConfig))
-        {
-            yield return buildConfig;
-        }
-
-        if (request.Variant.Sanitizer is { } sanitizer && config.Sanitizers.TryGetValue(sanitizer, out var overlay))
-        {
-            yield return overlay;
-        }
-
-        yield return request.Project;
     }
 
     /// <summary>
@@ -728,7 +695,7 @@ public sealed class BuildService(
 
         try
         {
-            return (await _dependencyCheck.CheckAsync(buildDirectory, cancellationToken).ConfigureAwait(false), null);
+            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {

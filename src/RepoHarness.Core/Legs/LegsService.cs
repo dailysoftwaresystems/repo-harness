@@ -64,6 +64,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         var config = context.Config;
         var selection = LegSelection.Resolve(config, legNames);
         var emulators = EmulatorsUsedBy(config, selection);
+        var programs = LegPrograms.Wanted(config);
         var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
@@ -71,17 +72,20 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         // for the legs it cannot run, and all of those hosts at once.
         if (candidates.Any(entry => entry.Hosts.Contains(HostId.Local)))
         {
-            reports[HostId.Local] = await _inspector.InspectAsync(context, HostId.Local, emulators, cancellationToken).ConfigureAwait(false);
+            reports[HostId.Local] = await _inspector
+                .InspectAsync(context, HostId.Local, emulators, programs, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var remote = candidates
-            .Where(entry => !entry.Hosts.Contains(HostId.Local) || LegPlacement.Obstacle(entry.leg.Leg, reports[HostId.Local]) is not null)
+            .Where(entry => !entry.Hosts.Contains(HostId.Local)
+                || LegPlacement.Obstacle(config, entry.leg.Leg, reports[HostId.Local]) is not null)
             .SelectMany(entry => entry.Hosts)
             .Where(host => host.Kind != HostKind.Local)
             .Distinct()
             .ToList();
 
-        foreach (var report in await InspectAllAsync(context, remote, emulators, cancellationToken).ConfigureAwait(false))
+        foreach (var report in await InspectAllAsync(context, remote, emulators, programs, cancellationToken).ConfigureAwait(false))
         {
             reports[report.Host] = report;
         }
@@ -106,9 +110,10 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         HarnessContext context,
         List<HostId> hosts,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken)
     {
-        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, cancellationToken)).ToList();
+        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, programs, cancellationToken)).ToList();
 
         try
         {
@@ -126,8 +131,9 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken)
-        => await _inspector.InspectAsync(context, host, emulators, cancellationToken).ConfigureAwait(false);
+        => await _inspector.InspectAsync(context, host, emulators, programs, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Reports what the measurements that finished changed, warns about every failure but one, and raises that

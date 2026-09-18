@@ -104,6 +104,21 @@ public sealed class HostAgentRequest
     /// <summary>The emulators to check, by name. Info only.</summary>
     public Dictionary<string, EmulatorConfig> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The programs to find there, the way a leg on that host will start them. Info only.
+    /// </summary>
+    public List<string> Programs { get; init; } = [];
+
+    /// <summary>
+    /// The repository's <c>toolSearchDirectories</c>, of which the host takes its own platform's.
+    /// Info only.
+    /// </summary>
+    /// <remarks>
+    /// Sent whole rather than chosen here, because only the host knows which platform it is until it
+    /// has answered, and asking twice would be a second round trip for one question.
+    /// </remarks>
+    public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The host's copy of the repository, absolute or from the home directory. Run only.</summary>
     public string? Directory { get; init; }
 
@@ -134,6 +149,15 @@ public sealed class HostAgentInfo
 
     /// <summary>What checking each requested emulator found.</summary>
     public Dictionary<string, EmulatorCheck> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Where each requested program is there, by the name it was asked for.</summary>
+    public Dictionary<string, ProgramLocation> Programs { get; init; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The directories a program was found in off the PATH there, in the order the search prefers
+    /// them: what a leg there appends to the PATH of every process it starts.
+    /// </summary>
+    public List<string> ProgramDirectories { get; init; } = [];
 }
 
 /// <summary>Whether an emulator works on a host.</summary>

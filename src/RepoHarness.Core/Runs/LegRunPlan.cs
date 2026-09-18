@@ -199,7 +199,7 @@ public static class LegRunPlan
                 notRun.Add(new LegEntry
                 {
                     Leg = placement.Leg.Name,
-                    Verdict = LegVerdict.SkippedUnavailable,
+                    Verdict = placement.ToolMissing ? LegVerdict.SkippedToolMissing : LegVerdict.SkippedUnavailable,
                     Detail = placement.Reason ?? "no host can run it",
                 });
 

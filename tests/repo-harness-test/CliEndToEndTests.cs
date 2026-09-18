@@ -505,6 +505,59 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// The chain the consumer's gate broke on, end to end: a leg whose test runner no directory on
+    /// this machine holds is turned away by the survey, naming the program, and a run that selects it
+    /// reports it as skipped for a missing tool - incomplete, exit 21 - rather than starting it and
+    /// poisoning the run, exit 70. Its sibling still runs.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseTestRunnerIsNowhere_IsTurnedAwayByTheSurvey_AndSkippedByTheRun()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var missing = "rh-missing-" + Guid.NewGuid().ToString("N")[..8];
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs =
+            {
+                ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" },
+                ["broken"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig { All = new TestInvocation { Runner = missing, SuccessPattern = "passed" } },
+                },
+            },
+            PredefinedRunners = { ["probe"] = new RunnerConfig { Action = "probe/probe.yml" } },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
+
+        var legs = await CliRunner.RunAsync(["legs", "-C", temp.Path], token);
+
+        Assert.Contains($"'{missing}' is not installed there", legs.StandardError, StringComparison.Ordinal);
+
+        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native,broken", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Incomplete, run.ExitCode);
+
+        using var document = JsonDocument.Parse(run.StandardOutput);
+        var verdicts = document.RootElement.GetProperty("legs").EnumerateArray()
+            .ToDictionary(leg => leg.GetProperty("leg").GetString()!, leg => leg.GetProperty("verdict").GetString());
+
+        Assert.Equal("passed", verdicts["native"]);
+        Assert.Equal("skipped-tool-missing", verdicts["broken"]);
+    }
+
+    /// <summary>
     /// A repository with one leg this machine can run and one no host can, and a runner that does
     /// something trivial on whichever of them runs.
     /// </summary>

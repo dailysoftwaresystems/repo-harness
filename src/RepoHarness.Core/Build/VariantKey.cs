@@ -83,6 +83,61 @@ public sealed record VariantKey(string Processor, string Toolchain, string Confi
     /// <summary>Whether this variant names a compiler, and so can be built.</summary>
     public bool Buildable => !string.Equals(Toolchain, NoToolchain, StringComparison.Ordinal);
 
+    /// <summary>
+    /// The environment and cache variables this variant builds <paramref name="project"/> with: the
+    /// toolchain, then the build configuration, then the sanitizer, then the project, each layered
+    /// over the last.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="project">The project being built.</param>
+    /// <remarks>
+    /// Here rather than in the build, because the build is not the only reader: a survey deciding
+    /// whether a host can run a leg reads the compilers out of it, and a merge done twice is two
+    /// answers to which compiler a leg uses.
+    /// </remarks>
+    public VariantOverlay Overlay(HarnessConfig config, ProjectConfig project)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(project);
+
+        var merged = new VariantOverlay();
+
+        foreach (var layer in Layers(config, project))
+        {
+            foreach (var (name, value) in layer.Env)
+            {
+                merged.Env[name] = value;
+            }
+
+            foreach (var (name, value) in layer.CacheVars)
+            {
+                merged.CacheVars[name] = value;
+            }
+        }
+
+        return merged;
+    }
+
+    private IEnumerable<VariantOverlay> Layers(HarnessConfig config, ProjectConfig project)
+    {
+        if (config.Toolchains.TryGetValue(Toolchain, out var toolchain))
+        {
+            yield return toolchain;
+        }
+
+        if (config.BuildConfigs.TryGetValue(Config, out var buildConfig))
+        {
+            yield return buildConfig;
+        }
+
+        if (Sanitizer is { } sanitizer && config.Sanitizers.TryGetValue(sanitizer, out var overlay))
+        {
+            yield return overlay;
+        }
+
+        yield return project;
+    }
+
     /// <summary>The project a leg builds, which is its own or the configured default.</summary>
     /// <param name="config">The whole configuration.</param>
     /// <param name="leg">The leg.</param>

@@ -37,6 +37,9 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// <summary>The file a ninja build directory describes itself in.</summary>
     public const string ManifestFileName = "build.ninja";
 
+    /// <summary>The program the check starts, which is also what a Ninja generator starts to build.</summary>
+    public const string Program = "ninja";
+
     /// <summary>
     /// How long <c>ninja -t deps</c> may take. A probe, not a phase: it reads a log and prints, so a
     /// budget here bounds a hang rather than guessing at a workload.
@@ -64,6 +67,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
 
     /// <summary>Checks one build directory.</summary>
     /// <param name="buildDirectory">The directory to read.</param>
+    /// <param name="appendToPath">The directories the build appended to its PATH, which ninja is looked up on too.</param>
     /// <param name="cancellationToken">Stops the check.</param>
     /// <exception cref="HarnessException">
     /// The check could not run: the directory is missing, ninja could not be started, or it answered
@@ -73,8 +77,11 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// </exception>
     public async Task<NinjaDependencyReport> CheckAsync(
         string buildDirectory,
+        IReadOnlyList<string> appendToPath,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(appendToPath);
+
         if (!_fileSystem.DirectoryExists(buildDirectory))
         {
             throw new HarnessException(
@@ -95,8 +102,12 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
             .RunAsync(
                 new ProcessRequest
                 {
-                    FileName = "ninja",
+                    FileName = Program,
                     Arguments = ["-C", buildDirectory, "-t", "deps"],
+
+                    // The PATH the build itself ran with: ninja found off the PATH for the build is
+                    // the ninja this reads the records of, not "not installed".
+                    AppendToPath = appendToPath,
                     WorkingDirectory = buildDirectory,
                     Timeout = Budget,
                 },

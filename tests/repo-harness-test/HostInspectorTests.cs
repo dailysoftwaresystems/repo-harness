@@ -642,10 +642,15 @@ public sealed class HostInspectorTests
             _context = new HarnessContext(new HarnessLayout(Repository.Path, Repository.Path), config);
 
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
-            var agent = new HostAgentService(platform, identity, new EmulatorProbe(platform, processRunner, fileSystem), fileSystem);
+            var agent = new HostAgentService(
+                platform,
+                identity,
+                new EmulatorProbe(platform, processRunner, fileSystem),
+                fileSystem,
+                new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
             var addresses = new HostAddressResolver(new FixedLookup(resolves), TimeProvider.System, TimeSpan.Zero);
-            var programs = new HostProgramResolver(processRunner, Commands);
+            var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
             var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
 
             _inspector = new HostInspector(Commands, connector, identity, agent);
@@ -657,11 +662,15 @@ public sealed class HostInspectorTests
 
         public IFilePermissions Permissions { get; }
 
-        public Task<HostReport> InspectAsync(HostId host, IReadOnlyDictionary<string, EmulatorConfig>? emulators = null)
+        public Task<HostReport> InspectAsync(
+            HostId host,
+            IReadOnlyDictionary<string, EmulatorConfig>? emulators = null,
+            IReadOnlyList<string>? programs = null)
             => _inspector.InspectAsync(
                 _context,
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
+                programs ?? [],
                 TestContext.Current.CancellationToken);
 
         public void Dispose() => Repository.Dispose();

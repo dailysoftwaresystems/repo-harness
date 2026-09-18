@@ -922,11 +922,17 @@ public sealed class ToolProvisionServiceTests
             var permissions = Substitute.For<IFilePermissions>();
             permissions.IsPrivate(Arg.Any<string>()).Returns(true);
 
+            // The same answer, given where this machine's resolver asks it: a file on the one PATH
+            // entry below starts exactly when the program it is named for is one this host has.
+            permissions.IsExecutable(Arg.Any<string>()).Returns(call =>
+                localPlatform == PlatformId.Windows
+                || Host.Has(HostId.Local, Path.GetFileNameWithoutExtension(call.Arg<string>())));
+
             var commands = new ScriptedHostCommands(Host.Respond);
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
             var secrets = new HostSecretsStore(fileSystem, permissions, platform);
             var addresses = new HostAddressResolver(new NoLookup(), TimeProvider.System, TimeSpan.Zero);
-            var programs = new HostProgramResolver(processRunner, commands);
+            var programs = new HostProgramResolver(new LocalProgramResolver(platform, permissions, () => "/usr/bin"), commands);
             var connector = new HostConnector(platform, processRunner, commands, secrets, addresses, programs);
 
             _service = new ToolProvisionService(

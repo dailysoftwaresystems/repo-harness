@@ -1,5 +1,6 @@
 using NSubstitute;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Tests;
@@ -176,16 +177,19 @@ public sealed class HostProgramResolverTests
     [Fact]
     public async Task OnThisMachine_ThePathIsWhatAChildOfThisProcessWouldFind()
     {
-        var processRunner = Substitute.For<IProcessRunner>();
-        processRunner.FindExecutable("dotnet").Returns("/usr/bin/dotnet");
-        processRunner.FindExecutable("ninja").Returns((string?)null);
+        var permissions = Substitute.For<IFilePermissions>();
+        permissions.IsExecutable(Arg.Any<string>())
+            .Returns(call => Path.GetFileNameWithoutExtension(call.Arg<string>()) == "dotnet");
 
         var commands = new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command));
-        var resolver = new HostProgramResolver(processRunner, commands);
+        var resolver = new HostProgramResolver(
+            new LocalProgramResolver(HostDoubles.Platform(), permissions, () => "/usr/bin"),
+            commands);
 
         var connection = await resolver.ResolveAsync(
             new HostConnection { Host = HostId.Local },
             ["dotnet", "ninja"],
+            [],
             TimeSpan.FromSeconds(5),
             TestContext.Current.CancellationToken);
 
@@ -214,13 +218,13 @@ public sealed class HostProgramResolverTests
     }
 
     private static Task<HostConnection> Resolve(ScriptedHostCommands commands, HostConnection connection, string[] wanted)
-    {
-        var processRunner = Substitute.For<IProcessRunner>();
-
-        return new HostProgramResolver(processRunner, commands).ResolveAsync(
-            connection,
-            wanted,
-            TimeSpan.FromSeconds(5),
-            TestContext.Current.CancellationToken);
-    }
+        => new HostProgramResolver(
+                new LocalProgramResolver(HostDoubles.Platform(), Substitute.For<IFilePermissions>()),
+                commands)
+            .ResolveAsync(
+                connection,
+                wanted,
+                ToolSearchDirectories.Posix,
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
 }

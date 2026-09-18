@@ -17,7 +17,7 @@ public sealed class EmulatorProbeTests
     [Fact]
     public async Task CheckAsync_Passes_WhenTheWitnessPrintsWhatOnlyTheEmulatedProcessorWould()
     {
-        var check = await Probe().CheckAsync(Emulator(prints: "aarch64", pattern: @"^\[aarch64\]$"), TestContext.Current.CancellationToken);
+        var check = await Probe().CheckAsync(Emulator(prints: "aarch64", pattern: @"^\[aarch64\]$"), [], TestContext.Current.CancellationToken);
 
         Assert.True(check.Available, check.Reason);
         Assert.Equal("[aarch64]", check.Witnessed);
@@ -27,7 +27,7 @@ public sealed class EmulatorProbeTests
     public async Task CheckAsync_Refuses_AWitnessWhoseOutputDoesNotMatch()
     {
         // A launcher that quietly ran the program natively would print the host's own processor.
-        var check = await Probe().CheckAsync(Emulator(prints: "x86_64", pattern: @"^\[aarch64\]$"), TestContext.Current.CancellationToken);
+        var check = await Probe().CheckAsync(Emulator(prints: "x86_64", pattern: @"^\[aarch64\]$"), [], TestContext.Current.CancellationToken);
 
         Assert.False(check.Available);
         Assert.Contains("does not match", check.Reason, StringComparison.Ordinal);
@@ -39,7 +39,7 @@ public sealed class EmulatorProbeTests
         var runner = Substitute.For<IProcessRunner>();
         var probe = new EmulatorProbe(Platform("macos", "arm64"), runner, FileSystem());
 
-        var check = await probe.CheckAsync(Emulator(prints: "aarch64", pattern: "x"), TestContext.Current.CancellationToken);
+        var check = await probe.CheckAsync(Emulator(prints: "aarch64", pattern: "x"), [], TestContext.Current.CancellationToken);
 
         Assert.False(check.Available);
         Assert.Contains("it runs on linux x86_64 hosts, and this one is macos arm64", check.Reason, StringComparison.Ordinal);
@@ -53,6 +53,7 @@ public sealed class EmulatorProbeTests
     {
         var check = await Probe().CheckAsync(
             Emulator(prints: "aarch64", pattern: "x", requires: [requirement]),
+            [],
             TestContext.Current.CancellationToken);
 
         Assert.False(check.Available);
@@ -80,7 +81,7 @@ public sealed class EmulatorProbeTests
             Witness = new EmulatorWitness { Command = [witness], Pattern = "x" },
         };
 
-        var check = await Probe().CheckAsync(emulator, TestContext.Current.CancellationToken);
+        var check = await Probe().CheckAsync(emulator, [], TestContext.Current.CancellationToken);
 
         Assert.False(check.Available);
         Assert.StartsWith("its witness could not start: ", check.Reason, StringComparison.Ordinal);
@@ -99,7 +100,7 @@ public sealed class EmulatorProbeTests
             Witness = new EmulatorWitness { Command = ["7"], Pattern = "x" },
         };
 
-        var check = await Probe().CheckAsync(emulator, TestContext.Current.CancellationToken);
+        var check = await Probe().CheckAsync(emulator, [], TestContext.Current.CancellationToken);
 
         Assert.False(check.Available);
         Assert.Contains("exited 7", check.Reason, StringComparison.Ordinal);

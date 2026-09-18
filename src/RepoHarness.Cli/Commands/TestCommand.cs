@@ -180,7 +180,10 @@ internal static class TestCommand
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
                         CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory),
+                        work.RunDirectory)
+                    {
+                        ProgramDirectories = leg.Host.ProgramDirectories,
+                    },
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -206,6 +209,7 @@ internal static class TestCommand
                 new TestRequest
                 {
                     Leg = leg.Name,
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     TreeRoot = leg.TreeRoot,
                     BuildDirectory = leg.BuildDirectory,
                     RunDirectory = work.RunDirectory,

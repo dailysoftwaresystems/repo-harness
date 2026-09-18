@@ -14,6 +14,17 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     public bool Runnable => Host is not null;
 
     /// <summary>
+    /// Whether a host that was right for the leg in every other way turned it away only because a
+    /// program its build or test starts is not there.
+    /// </summary>
+    /// <remarks>
+    /// Kept apart from the reason's wording so a run can report such a leg as skipped for a missing
+    /// tool rather than as skipped for want of a host. The two send somebody to different places:
+    /// one to install a program, the other to switch a machine on.
+    /// </remarks>
+    public bool ToolMissing { get; init; }
+
+    /// <summary>
     /// The hosts that may run <paramref name="leg"/>, in the order they are tried: the one host it names,
     /// or else this machine, then the WSL distributions when the leg runs on Linux, then the ssh hosts, each
     /// in the order the configuration declares them, and each named as the configuration declares it.
@@ -74,6 +85,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         ArgumentNullException.ThrowIfNull(reports);
 
         var reasons = new List<string>();
+        var toolMissing = false;
 
         foreach (var candidate in Candidates(config, selected.Leg, here))
         {
@@ -82,25 +94,52 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 continue;
             }
 
-            var obstacle = Obstacle(selected.Leg, report);
-
-            if (obstacle is null)
+            if (PlatformObstacle(selected.Leg, report) is { } platform)
             {
-                return new LegPlacement(selected, report, null);
+                reasons.Add($"{candidate}: {platform}");
+                continue;
             }
 
-            reasons.Add($"{candidate}: {obstacle}");
+            if (MissingPrograms(config, selected.Leg, report) is { } missing)
+            {
+                reasons.Add($"{candidate}: {missing}");
+                toolMissing = true;
+                continue;
+            }
+
+            return new LegPlacement(selected, report, null);
         }
 
-        return new LegPlacement(selected, null, reasons.Count == 0 ? "no host was measured for it" : string.Join("; ", reasons));
+        return new LegPlacement(selected, null, reasons.Count == 0 ? "no host was measured for it" : string.Join("; ", reasons))
+        {
+            ToolMissing = toolMissing,
+        };
     }
 
     /// <summary>What stops <paramref name="host"/> from running <paramref name="leg"/>, or <see langword="null"/> when nothing does.</summary>
-    public static string? Obstacle(LegConfig leg, HostReport host)
+    /// <param name="config">The whole configuration, which says what the leg's build and test start.</param>
+    /// <param name="leg">The leg.</param>
+    /// <param name="host">What measuring the host found.</param>
+    public static string? Obstacle(HarnessConfig config, LegConfig leg, HostReport host)
     {
+        ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(leg);
         ArgumentNullException.ThrowIfNull(host);
 
+        return PlatformObstacle(leg, host) ?? MissingPrograms(config, leg, host);
+    }
+
+    /// <summary>
+    /// What stops <paramref name="host"/> from running <paramref name="leg"/> before its programs
+    /// are asked about: it is unreachable, or the wrong machine.
+    /// </summary>
+    /// <remarks>
+    /// Asked first, because a host that is the wrong machine should say so. Told instead that cmake
+    /// is missing on a Windows host being considered for a Linux leg, a reader would go and install
+    /// cmake on a machine the leg will never run on.
+    /// </remarks>
+    private static string? PlatformObstacle(LegConfig leg, HostReport host)
+    {
         if (!host.Available)
         {
             return host.Reason;
@@ -125,6 +164,48 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
         return check.Available ? null : $"emulator '{leg.Emulator}' cannot run there: {check.Reason}";
     }
+
+    /// <summary>
+    /// The programs <paramref name="leg"/>'s build and test start that <paramref name="host"/> does
+    /// not have, said as one reason, or <see langword="null"/> when it has them all.
+    /// </summary>
+    /// <remarks>
+    /// Read from what the host itself found, with the search a leg there will use. A program the host
+    /// was not asked about is reported as that rather than as missing: a survey that had not looked
+    /// must not read as one that looked and found nothing, nor as one that found it.
+    /// </remarks>
+    private static string? MissingPrograms(HarnessConfig config, LegConfig leg, HostReport host)
+    {
+        var missing = LegPrograms.For(config, leg)
+            .Where(program => !host.Programs.TryGetValue(program, out var location) || !location.Present)
+            .ToList();
+
+        if (missing.Count == 0)
+        {
+            return null;
+        }
+
+        var unasked = missing.Where(program => !host.Programs.ContainsKey(program)).ToList();
+        var absent = missing.Except(unasked, StringComparer.Ordinal).ToList();
+        var said = new List<string>();
+
+        if (absent.Count > 0)
+        {
+            said.Add(
+                $"{Quoted(absent)} {(absent.Count == 1 ? "is" : "are")} not installed there: neither on the PATH a "
+                + "command run there sees nor in any directory searched for programs; install "
+                + $"{(absent.Count == 1 ? "it" : "them")}, or name the directory under toolSearchDirectories");
+        }
+
+        if (unasked.Count > 0)
+        {
+            said.Add($"whether {Quoted(unasked)} {(unasked.Count == 1 ? "is" : "are")} there was not asked");
+        }
+
+        return string.Join("; ", said);
+    }
+
+    private static string Quoted(IEnumerable<string> programs) => string.Join(", ", programs.Select(program => $"'{program}'"));
 
     private static bool Same(string? first, string? second) => string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
 }

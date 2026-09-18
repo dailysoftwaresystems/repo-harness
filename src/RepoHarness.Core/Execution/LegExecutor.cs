@@ -351,6 +351,14 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // neither of them a defect in the tool. The other legs still report.
             entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(ex.ExitCode), ex.Message));
         }
+        catch (Exception ex) when (KnownCauses.ExitCodeFor(ex) is { } code)
+        {
+            // A cause this build can name, read from the table the command runner reads too. A
+            // program that would not start is the host missing a tool, not the harness breaking:
+            // recorded as poisoned it reported a machine's missing cmake as a defect in this tool,
+            // exit 70, and sent the reader looking for a bug that was not there.
+            entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(code), ex.Message));
+        }
         catch (Exception ex)
         {
             // The harness could not produce a verdict, which is what poisoned means. Recorded

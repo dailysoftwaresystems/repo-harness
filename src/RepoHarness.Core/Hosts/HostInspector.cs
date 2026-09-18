@@ -50,6 +50,19 @@ public sealed record HostReport
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Where each program the survey asked about is there, found by the host itself the way a leg
+    /// there will start it.
+    /// </summary>
+    public IReadOnlyDictionary<string, ProgramLocation> Programs { get; init; }
+        = new Dictionary<string, ProgramLocation>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The directories a program was found in off the PATH there, in the order the search prefers
+    /// them. A leg run there appends them to the PATH of every process it starts.
+    /// </summary>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>What inspection changed on the host, such as installing DssHarness.</summary>
     public IReadOnlyList<string> Actions { get; init; } = [];
 
@@ -69,12 +82,27 @@ public interface IHostInspector
     /// The host has a newer DssHarness than this machine. Versions only move up, so nothing runs until
     /// this machine is updated.
     /// </exception>
+    /// <param name="context">The repository and its configuration.</param>
+    /// <param name="host">The host to measure.</param>
+    /// <param name="emulators">The emulators to check there, by name.</param>
+    /// <param name="programs">The programs to find there, the way a leg there will start them.</param>
+    /// <param name="cancellationToken">Stops the measuring.</param>
     Task<HostReport> InspectAsync(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>What a host is asked when it is measured.</summary>
+/// <param name="Emulators">The emulators to check, by name.</param>
+/// <param name="Programs">The programs to find.</param>
+/// <param name="SearchDirectories">The repository's <c>toolSearchDirectories</c>.</param>
+internal sealed record HostQuestions(
+    IReadOnlyDictionary<string, EmulatorConfig> Emulators,
+    IReadOnlyList<string> Programs,
+    IReadOnlyDictionary<string, List<string>> SearchDirectories);
 
 /// <inheritdoc cref="IHostInspector"/>
 public sealed class HostInspector(
@@ -101,23 +129,28 @@ public sealed class HostInspector(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(emulators);
+        ArgumentNullException.ThrowIfNull(programs);
+
+        var questions = new HostQuestions(emulators, programs, context.Config.ToolSearchDirectories);
 
         return host.Kind == HostKind.Local
-            ? InspectLocalAsync(emulators, cancellationToken)
-            : InspectRemoteAsync(context, host, emulators, cancellationToken);
+            ? InspectLocalAsync(questions, cancellationToken)
+            : InspectRemoteAsync(context, host, questions, cancellationToken);
     }
 
     /// <summary>This machine is measured in-process: the build doing the measuring is the one that would run its legs.</summary>
-    private async Task<HostReport> InspectLocalAsync(
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
-        CancellationToken cancellationToken)
+    private async Task<HostReport> InspectLocalAsync(HostQuestions questions, CancellationToken cancellationToken)
     {
-        var info = await _agent.DescribeAsync(emulators, cancellationToken).ConfigureAwait(false);
+        var info = await _agent
+            .DescribeAsync(questions.Emulators, questions.Programs, questions.SearchDirectories, cancellationToken)
+            .ConfigureAwait(false);
+
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
     }
 
@@ -128,14 +161,14 @@ public sealed class HostInspector(
     private async Task<HostReport> InspectRemoteAsync(
         HarnessContext context,
         HostId host,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         CancellationToken cancellationToken)
     {
         var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
         var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
 
         return opened.Connection is { } connection
-            ? await PrepareAsync(found, connection, emulators, cancellationToken).ConfigureAwait(false)
+            ? await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false)
             : found with { Reason = opened.Problem };
     }
 
@@ -143,7 +176,7 @@ public sealed class HostInspector(
     private async Task<HostReport> PrepareAsync(
         HostReport found,
         HostConnection connection,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         CancellationToken cancellationToken)
     {
         var root = _identity.Current;
@@ -186,7 +219,7 @@ public sealed class HostInspector(
             return found with { Reason = reason };
         }
 
-        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, emulators, root, cancellationToken)
+        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, questions, root, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -272,10 +305,12 @@ public sealed class HostInspector(
         HostReport found,
         HostConnection connection,
         bool windowsHost,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         ToolIdentity root,
         CancellationToken cancellationToken)
     {
+        var emulators = questions.Emulators;
+
         // Global tools are installed under the home directory, which is where programs start on every
         // kind of host. They are usually not on the PATH of a command run over ssh or with wsl.exe
         // --exec, which reads no login profile, so the path is spelt out.
@@ -287,6 +322,10 @@ public sealed class HostInspector(
             {
                 Kind = HostAgentRequestKind.Info,
                 Emulators = new Dictionary<string, EmulatorConfig>(emulators, StringComparer.OrdinalIgnoreCase),
+                Programs = [.. questions.Programs],
+                ToolSearchDirectories = new Dictionary<string, List<string>>(
+                    questions.SearchDirectories,
+                    StringComparer.OrdinalIgnoreCase),
             },
             HostAgentProtocol.JsonOptions);
 
@@ -432,6 +471,8 @@ public sealed class HostInspector(
         ToolVersion = info.Version,
         ToolPath = session?.ToolPath,
         Emulators = info.Emulators,
+        Programs = info.Programs,
+        ProgramDirectories = info.ProgramDirectories,
         Session = session,
     };
 

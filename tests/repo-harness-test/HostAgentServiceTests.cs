@@ -275,6 +275,11 @@ public sealed class HostAgentServiceTests
         var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
         var processRunner = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
 
-        return new HostAgentService(platform, identity, new EmulatorProbe(platform, processRunner, fileSystem), fileSystem);
+        return new HostAgentService(
+            platform,
+            identity,
+            new EmulatorProbe(platform, processRunner, fileSystem),
+            fileSystem,
+            new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
     }
 }

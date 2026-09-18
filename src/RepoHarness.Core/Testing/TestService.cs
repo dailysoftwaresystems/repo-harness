@@ -20,6 +20,16 @@ namespace RepoHarness.Core.Testing;
 /// </remarks>
 public sealed record TestRequest
 {
+    /// <summary>
+    /// The directories the host running this leg found its programs in off the PATH, appended to the
+    /// PATH of every process the leg starts.
+    /// </summary>
+    /// <remarks>
+    /// From the survey the host answered about itself, so the programs a phase starts by name, and
+    /// the ones those start by name in turn, are found where the survey found them.
+    /// </remarks>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>The leg, as the configuration names it and as the ledger shows it.</summary>
     public required string Leg { get; init; }
 
@@ -243,6 +253,7 @@ public sealed class TestService(
                     FileName = command.Program,
                     Arguments = command.Arguments,
                     LogFile = logFile,
+                    AppendToPath = request.ProgramDirectories,
 
                     // Where the invocation said, and the tree root when it said nothing — which is
                     // what every test phase written before this ran in. A project that builds out

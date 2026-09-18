@@ -105,14 +105,12 @@ public sealed class ToolProvisionService(
     private async Task<LegProvision> ProvisionHostAsync(HarnessContext context, HostId host, CancellationToken cancellationToken)
     {
         var config = context.Config;
-        var wanted = new List<string>();
 
-        if (host.Kind != HostKind.Local)
-        {
-            wanted.Add(HostInspector.DotnetProgram);
-        }
-
-        wanted.AddRange(config.Tools.Select(tool => tool.Name));
+        // Only the harness's own SDK is looked for while connecting. The declared tools are looked
+        // for once the host's platform is known, in the directories this repository declares for that
+        // platform: the same list the survey and a leg's own run use there, so this command cannot
+        // call a tool present that a leg then cannot start, nor install a second copy of one a leg can.
+        IReadOnlyList<string> wanted = host.Kind == HostKind.Local ? [] : [HostInspector.DotnetProgram];
 
         var opened = await _connector.ConnectAsync(context, host, wanted, cancellationToken).ConfigureAwait(false);
 
@@ -135,13 +133,18 @@ public sealed class ToolProvisionService(
         }
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
+        var searched = ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey);
+
+        connection = await _programs
+            .ResolveAsync(connection, [.. config.Tools.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
 
         // A tool this platform does not need is not probed here, rather than probed and excused.
         // Probing costs a round trip to the host for an answer nothing would read, and an outcome
         // recorded for it would have to be excused again by everything that counts outcomes.
         foreach (var tool in config.Tools.Where(tool => PlatformScope.Applies(tool.Platforms, platformKey)))
         {
-            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, superuser, cancellationToken)
+            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, searched, superuser, cancellationToken)
                 .ConfigureAwait(false);
 
             connection = updated;
@@ -219,7 +222,7 @@ public sealed class ToolProvisionService(
         // Measured again rather than assumed: the installer's own directory is what the next command
         // has to spell, and the run that put it there is the only one that can find out where it went.
         connection = await _programs
-            .ResolveAsync(connection.Forget(Name), [Name], ProbeBudget, cancellationToken)
+            .ResolveAsync(connection.Forget(Name), [Name], ToolSearchDirectories.Posix, ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
         var installed = await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false);
@@ -263,6 +266,7 @@ public sealed class ToolProvisionService(
         HostConnection connection,
         ToolConfig tool,
         string? platformKey,
+        IReadOnlyList<string> searched,
         Superuser superuser,
         CancellationToken cancellationToken)
     {
@@ -286,7 +290,7 @@ public sealed class ToolProvisionService(
                 return (new ToolOutcome(tool.Name, ToolState.Missing, null, Needed(tool, platformKey)), connection);
             }
 
-            return await RunInstallAsync(host, connection, tool, install, superuser, update: false, cancellationToken)
+            return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: false, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -324,7 +328,7 @@ public sealed class ToolProvisionService(
                 connection);
         }
 
-        return await RunInstallAsync(host, connection, tool, install, superuser, update: true, cancellationToken)
+        return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: true, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -334,6 +338,7 @@ public sealed class ToolProvisionService(
         HostConnection connection,
         ToolConfig tool,
         ToolInstall install,
+        IReadOnlyList<string> searched,
         Superuser superuser,
         bool update,
         CancellationToken cancellationToken)
@@ -373,7 +378,7 @@ public sealed class ToolProvisionService(
         }
 
         connection = await _programs
-            .ResolveAsync(connection.Forget(tool.Name), [tool.Name], ProbeBudget, cancellationToken)
+            .ResolveAsync(connection.Forget(tool.Name), [tool.Name], searched, ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
         if (connection.Located(tool.Name) is not { Present: true })

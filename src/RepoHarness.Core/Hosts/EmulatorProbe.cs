@@ -20,8 +20,19 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
     private readonly IFileSystem _fileSystem = fileSystem;
 
     /// <summary>Checks <paramref name="emulator"/> on this machine.</summary>
-    public async Task<EmulatorCheck> CheckAsync(EmulatorConfig emulator, CancellationToken cancellationToken = default)
+    /// <param name="emulator">The emulator.</param>
+    /// <param name="appendToPath">
+    /// The directories a leg here appends to its PATH, so a launcher installed beside its build tools
+    /// is found by the witness exactly as a leg's own run would find it.
+    /// </param>
+    /// <param name="cancellationToken">Stops the witness.</param>
+    public async Task<EmulatorCheck> CheckAsync(
+        EmulatorConfig emulator,
+        IReadOnlyList<string> appendToPath,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(appendToPath);
+
         ArgumentNullException.ThrowIfNull(emulator);
 
         if (!Same(emulator.HostOs, _platform.PlatformKey) || !Same(emulator.HostProcessor, _platform.Processor))
@@ -46,6 +57,7 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                     FileName = command[0],
                     Arguments = command[1..],
                     Environment = emulator.Env.ToDictionary(pair => pair.Key, pair => (string?)pair.Value, StringComparer.Ordinal),
+                    AppendToPath = appendToPath,
                     Timeout = WitnessBudget,
                 },
                 cancellationToken).ConfigureAwait(false);

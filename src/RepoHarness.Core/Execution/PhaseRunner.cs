@@ -38,6 +38,9 @@ public sealed record PhaseRequest
     public IReadOnlyDictionary<string, string?> Environment { get; init; }
         = new Dictionary<string, string?>(StringComparer.Ordinal);
 
+    /// <summary>Directories added to the end of the PATH the command runs with, and looks its program up on.</summary>
+    public IReadOnlyList<string> AppendToPath { get; init; } = [];
+
     /// <summary>
     /// The pattern proving the command ran, or <see langword="null"/> where the phase declares none.
     /// An empty or blank pattern matches anything, so it is refused rather than honoured.
@@ -184,6 +187,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             Arguments = request.Arguments,
             WorkingDirectory = request.WorkingDirectory,
             Environment = request.Environment,
+            AppendToPath = request.AppendToPath,
             OnStarted = clock.Saw,
             OnOutputLine = line => Line(line, error: false),
             OnErrorLine = line => Line(line, error: true),

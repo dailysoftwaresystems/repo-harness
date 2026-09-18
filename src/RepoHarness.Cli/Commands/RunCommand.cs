@@ -191,7 +191,10 @@ internal static class RunCommand
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
                         CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory),
+                        work.RunDirectory)
+                    {
+                        ProgramDirectories = leg.Host.ProgramDirectories,
+                    },
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -220,6 +223,7 @@ internal static class RunCommand
                 config,
                 new RunnerRunRequest
                 {
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     RunnerName = runnerName,
                     Runner = runner,
                     Leg = leg.Name,
@@ -275,6 +279,7 @@ internal static class RunCommand
                 config,
                 new RunnerRunRequest
                 {
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     RunnerName = runnerName,
                     Runner = Resolve(config, runnerName),
                     Leg = leg.Name,

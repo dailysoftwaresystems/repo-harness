@@ -27,6 +27,12 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     private readonly IHostPlatform _platform = platform;
     private readonly IFilePermissions _filePermissions = filePermissions;
 
+    /// <summary>
+    /// The variable a program is looked up on. Spelled once: on Windows the environment a child is
+    /// given compares names without case, so this also finds the 'Path' Windows itself writes.
+    /// </summary>
+    private const string PathVariable = "PATH";
+
     public async Task<ProcessResult> RunAsync(
         ProcessRequest request,
         CancellationToken cancellationToken = default)
@@ -44,7 +50,6 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = ResolveProgram(request.FileName),
             WorkingDirectory = request.WorkingDirectory ?? string.Empty,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -77,6 +82,22 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
                 startInfo.Environment[key] = value;
             }
         }
+
+        if (request.AppendToPath.Count > 0)
+        {
+            var current = startInfo.Environment.TryGetValue(PathVariable, out var inherited) ? inherited : null;
+
+            startInfo.Environment[PathVariable] = string.Join(
+                Path.PathSeparator,
+                new[] { current }.Concat(request.AppendToPath).Where(part => !string.IsNullOrEmpty(part)));
+        }
+
+        // Looked up on the PATH the child is given, not on this process's own. The two used to differ
+        // whenever a request changed PATH, and then the program started was one the child's own
+        // lookups could not see: cmake resolved from one PATH and the ninja it starts from another.
+        startInfo.FileName = ResolveProgram(
+            request.FileName,
+            startInfo.Environment.TryGetValue(PathVariable, out var effective) ? effective : null);
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stopwatch = Stopwatch.StartNew();
@@ -184,30 +205,45 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             return null;
         }
 
-        var fileName = windows ? WithWindowsExtension(name) : name;
-
         foreach (var directory in pathVariable.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            string candidate;
-            try
+            if (ProgramInDirectory(name, directory.Trim('"'), windows, isExecutable) is { } found)
             {
-                // A relative PATH entry is relative to the working directory, exactly as a shell treats
-                // it; an entry that is not a path at all is skipped. Joined rather than combined, so a name
-                // Windows reads as rooted, such as C:tool, cannot step out of the directory.
-                candidate = Path.Join(Path.GetFullPath(directory.Trim('"')), fileName);
-            }
-            catch (ArgumentException)
-            {
-                continue;
-            }
-
-            if (isExecutable(candidate))
-            {
-                return candidate;
+                return found;
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The file that would start as <paramref name="name"/> in <paramref name="directory"/>, or
+    /// <see langword="null"/> when there is none.
+    /// </summary>
+    /// <remarks>
+    /// The one rule for turning a name into a candidate file, used for every PATH entry and for every
+    /// directory searched beyond the PATH, so a program found in one place is found the same way in
+    /// the other. A relative directory is relative to the working directory, exactly as a shell treats
+    /// a PATH entry; one that is not a path at all holds nothing. Joined rather than combined, so a
+    /// name Windows reads as rooted, such as C:tool, cannot step out of the directory.
+    /// </remarks>
+    internal static string? ProgramInDirectory(string name, string directory, bool windows, Func<string, bool> isExecutable)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(isExecutable);
+
+        string candidate;
+
+        try
+        {
+            candidate = Path.Join(Path.GetFullPath(directory), windows ? WithWindowsExtension(name) : name);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+
+        return isExecutable(candidate) ? candidate : null;
     }
 
     /// <summary>
@@ -221,11 +257,14 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// root would run in place of the real tool. A relative path is made absolute for the same reason: .NET
     /// would otherwise look for it beside its own executable first.
     /// </remarks>
+    /// <param name="fileName">The program as the request names it.</param>
+    /// <param name="pathVariable">The PATH the child is given.</param>
     /// <exception cref="ExecutableNotFoundException">A name is in none of the PATH directories.</exception>
-    private string ResolveProgram(string fileName)
+    private string ResolveProgram(string fileName, string? pathVariable)
         => IsPath(fileName)
             ? Path.GetFullPath(fileName)
-            : OnPath(fileName) ?? throw new ExecutableNotFoundException(fileName);
+            : ProgramOnPath(fileName, pathVariable, _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable)
+                ?? throw new ExecutableNotFoundException(fileName);
 
     private string? OnPath(string name)
         => ProgramOnPath(name, Environment.GetEnvironmentVariable("PATH"), _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable);
@@ -265,7 +304,7 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// found for a bare name: cmd.exe would parse its arguments a second time, so they would not arrive as
     /// they were passed.
     /// </summary>
-    private static string WithWindowsExtension(string name) => Path.HasExtension(name) ? name : name + ".exe";
+    internal static string WithWindowsExtension(string name) => Path.HasExtension(name) ? name : name + ".exe";
 
     /// <summary>
     /// Reads one stream to its end, keeping the text exactly as the child wrote it, and hands
