@@ -76,13 +76,19 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
 
         foreach (var (key, value) in request.Environment)
         {
+            // One variable per name, whatever case the configuration spelled it in, as on Windows,
+            // where that rule comes from. On Linux and macOS the system tells spellings apart, and a
+            // name spelled otherwise than this machine already has it was a second variable beside
+            // it that no program read: 'Path' set beside 'PATH' changed nothing.
+            var name = Spelled(startInfo.Environment, key);
+
             if (value is null)
             {
-                startInfo.Environment.Remove(key);
+                startInfo.Environment.Remove(name);
             }
             else
             {
-                startInfo.Environment[key] = value;
+                startInfo.Environment[name] = value;
             }
         }
 
@@ -253,6 +259,25 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
         return IsPath(program) && !Path.IsPathFullyQualified(program)
             ? Path.GetFullPath(program, directory)
             : program;
+    }
+
+    /// <summary>
+    /// The one spelling <paramref name="environment"/> keeps for <paramref name="name"/>: the one it
+    /// already has, ignoring case, or <paramref name="name"/> itself when it has none. Any other
+    /// spelling of the same name is removed, so the child is left one variable, not two.
+    /// </summary>
+    private static string Spelled(IDictionary<string, string?> environment, string name)
+    {
+        var spellings = environment.Keys
+            .Where(existing => string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var other in spellings.Skip(1))
+        {
+            environment.Remove(other);
+        }
+
+        return spellings.Count > 0 ? spellings[0] : name;
     }
 
     /// <summary>

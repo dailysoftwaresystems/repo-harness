@@ -11,7 +11,8 @@ public static class PhaseEnvironment
     /// <remarks>
     /// Names compare ignoring case on every platform, as they do on Windows and as every environment
     /// the configuration declares compares them, so a layer that sets PATH replaces a lower layer's
-    /// Path rather than setting a second variable beside it.
+    /// Path rather than setting a second variable beside it - its spelling along with its value, as
+    /// the more specific layer is the one that says what the program reads.
     /// </remarks>
     public static Dictionary<string, string?> Layered(params IEnumerable<KeyValuePair<string, string>>[] layers)
     {
@@ -23,6 +24,7 @@ public static class PhaseEnvironment
         {
             foreach (var (name, value) in layer)
             {
+                environment.Remove(name);
                 environment[name] = value;
             }
         }

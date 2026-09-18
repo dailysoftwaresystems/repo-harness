@@ -537,6 +537,32 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A compiler the host's env names is the one the build uses wherever the variant names none, so
+    /// a directory CMake configured with another is refused, as it is for a variant's compiler -
+    /// never reused with the compiler CMake cached, the leg passing on a compiler nobody chose.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryConfiguredWithAnotherCompilerThanTheHostNames_IsRefused()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang-17" } };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc\n",
+            cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("clang-17", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A relative program the build recorded is read from the build directory, where the check starts,
     /// never from wherever this process began.
     /// </summary>

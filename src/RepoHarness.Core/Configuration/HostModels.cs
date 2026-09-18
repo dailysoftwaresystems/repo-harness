@@ -13,7 +13,11 @@ namespace RepoHarness.Core.Configuration;
 /// </remarks>
 public sealed class HostsConfig
 {
-    /// <summary>Settings for the machine running the harness.</summary>
+    /// <summary>
+    /// Settings for the machine the command was typed on. A host running a leg another machine
+    /// dispatched to it reads the section that machine names it by instead: to itself it is this
+    /// machine, and this section describes the one that dispatched it.
+    /// </summary>
     public LocalHostConfig Local { get; init; } = new();
 
     /// <summary>WSL distributions, keyed by the distribution's name as WSL lists it.</summary>
@@ -78,7 +82,7 @@ public abstract class HostSettings
     /// Environment for every process a leg starts on this machine: each phase of its build and the
     /// ninja that reads the build's dependency records, its test runner, and each step of a runner.
     /// Beneath every environment more specific than a machine's own, each of which can still say
-    /// otherwise: the variant's - its toolchain's, build config's and sanitizer's - the test
+    /// otherwise: the variant's - its toolchain's, build config's, sanitizer's and project's - the test
     /// invocation's, and a runner's values, its secrets, its own environment and each step's. Names
     /// compare ignoring case on every platform, as they do on Windows.
     /// </summary>

@@ -54,11 +54,16 @@ public interface IBuildAdapter
     /// <param name="request">The leg's build.</param>
     /// <param name="buildDirectory">Where this variant builds.</param>
     /// <param name="overlay">The environment and cache variables this variant builds with.</param>
+    /// <param name="environment">
+    /// The environment every phase starts with - the host's, then the variant's - made once for the
+    /// whole build, so every phase and every check of it agrees on which compiler it uses.
+    /// </param>
     IEnumerable<PhaseRequest> Phases(
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay);
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment);
 }
 
 /// <summary>
@@ -251,13 +256,13 @@ public sealed class CMakeAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(overlay);
 
-        var environment = BuildAdapters.EnvironmentFor(overlay, request);
         var source = Path.Combine(request.TreeRoot, request.Project.Path);
         var configure = new List<string> { "-S", source, "-B", buildDirectory };
 
@@ -352,7 +357,8 @@ public sealed class DotnetAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
@@ -386,7 +392,7 @@ public sealed class DotnetAdapter : IBuildAdapter
             FileName = Program,
             Arguments = arguments,
             WorkingDirectory = request.TreeRoot,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "build"),
             AppendToPath = request.ProgramDirectories,
         };
@@ -423,7 +429,8 @@ public sealed class DartAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
@@ -438,7 +445,7 @@ public sealed class DartAdapter : IBuildAdapter
             FileName = Program,
             Arguments = ["pub", "get"],
             WorkingDirectory = project,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "pub-get"),
             AppendToPath = request.ProgramDirectories,
         };
@@ -465,7 +472,7 @@ public sealed class DartAdapter : IBuildAdapter
             FileName = Program,
             Arguments = arguments,
             WorkingDirectory = project,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "build"),
             AppendToPath = request.ProgramDirectories,
         };

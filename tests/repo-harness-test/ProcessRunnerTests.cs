@@ -270,6 +270,27 @@ public sealed class ProcessRunnerTests
             TestContext.Current.CancellationToken));
     }
 
+    /// <summary>
+    /// A name is one variable whatever case it is spelled in, as the configuration's rule says. On
+    /// Linux and macOS, where the system tells spellings apart, a request that sets 'Path' sets the
+    /// PATH this machine already has, rather than a second variable beside it that no program reads.
+    /// </summary>
+    [Fact]
+    public async Task ANameSpelledInAnotherCase_SetsTheVariableThisMachineAlreadyHas()
+    {
+        // Ahead of the PATH this process has, so the child can still be started by name.
+        var configured = Path.Combine(Path.GetTempPath(), "rh-configured-bin") + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
+        var child = TestHost.ChildRequest("print-env", "PATH");
+        var request = child with
+        {
+            Environment = new Dictionary<string, string?>(child.Environment, StringComparer.Ordinal) { ["Path"] = configured },
+        };
+
+        var result = await CreateRunner().RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(configured, result.StandardOutput.Trim());
+    }
+
     [Fact]
     public async Task RunAsync_ReportsAMissingWorkingDirectory_AsThat_RatherThanAsAMissingExecutable()
     {

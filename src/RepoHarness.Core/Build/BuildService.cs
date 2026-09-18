@@ -94,6 +94,12 @@ public sealed class BuildService(
         var buildDirectory = request.Variant.DirectoryUnder(request.TreeRoot);
         var overlay = request.Variant.Overlay(config, request.Project);
 
+        // Made once, and read by everything that asks which compiler this build uses: the guard, every
+        // phase and the dependency check. A compiler the host's env names is the one the build starts
+        // wherever the variant names none, and a guard reading the variant alone let a directory CMake
+        // had configured with another be reused, the leg passing on a compiler nobody chose.
+        var environment = BuildAdapters.EnvironmentFor(overlay, request);
+
         // Before configuring, not after: a directory configured from another worktree watches that
         // tree's sources, which produced both a false refusal and a silent wrong answer. Compared
         // against the directory the build is actually configured from, which is the project's own
@@ -101,8 +107,8 @@ public sealed class BuildService(
         _buildDirectoryGuard.Check(
             buildDirectory,
             Path.Combine(request.TreeRoot, request.Project.Path),
-            overlay.Env.GetValueOrDefault("CC"),
-            overlay.Env.GetValueOrDefault("CXX"),
+            environment.GetValueOrDefault("CC"),
+            environment.GetValueOrDefault("CXX"),
             adapter.BuildTypeOf(config, request.Variant.Config));
 
         var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
@@ -145,7 +151,7 @@ public sealed class BuildService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay))
+        foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay, environment))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -224,7 +230,7 @@ public sealed class BuildService(
                 .ConfigureAwait(false);
         }
 
-        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, BuildAdapters.EnvironmentFor(overlay, request), cancellationToken)
+        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, environment, cancellationToken)
             .ConfigureAwait(false);
 
         if (unreadable is not null)

@@ -898,7 +898,7 @@ internal static class HelpCommand
         builder.AppendLine("a runner - as the lowest layer, so everything more specific still says");
         builder.AppendLine("otherwise. From lowest to highest:");
         builder.AppendLine();
-        builder.AppendLine("  build    host env, then the variant's (toolchain, build config, sanitizer)");
+        builder.AppendLine("  build    host env, then the variant's (toolchain, build config, sanitizer, project)");
         builder.AppendLine("  test     host env, then the test invocation's env");
         builder.AppendLine("  run      host env, then the runner's values and secrets, its env, the step's");
         builder.AppendLine();

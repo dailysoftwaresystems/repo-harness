@@ -352,7 +352,7 @@ public static class LegRunPlan
             .Where(group => group.Select(leg => leg.TreeRoot).Distinct(comparer).Count() > 1)
             .Select(group =>
                 $"{string.Join(" and ", group.Select(leg => $"'{leg.Name}'"))} would each put a different tree in "
-                + $"'{group.First().HostTreeRoot}' on {group.First().Host.Host}: "
+                + $"'{group.First().HostTreeRoot}' on {group.First().Named}: "
                 + string.Join(", ", group.Select(leg => leg.TreeRoot).Distinct(comparer)))
             .ToList();
 
@@ -395,7 +395,7 @@ public static class LegRunPlan
 
         var described = byDirectory.Select(group =>
             $"{string.Join(" and ", group.Select(leg => $"'{leg.Name}'"))} both build in "
-            + $"'{group.First().BuildDirectory}' on {group.First().Host.Host}");
+            + $"'{group.First().BuildDirectory}' on {group.First().Named}");
 
         throw new HarnessException(
             HarnessExit.Refused,

@@ -211,6 +211,39 @@ public sealed class LegRunServiceTests
     }
 
     /// <summary>
+    /// A refusal is read by whoever typed the command, so it names the host as they know it: on a
+    /// host running legs another machine dispatched to it, two legs sharing a build directory share
+    /// it on that host, never on 'local' - which, to that reader, is their own machine.
+    /// </summary>
+    [Fact]
+    public async Task ARefusalOnAHostSentLegs_NamesItAsTheMachineThatSentThemKnowsIt()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { [HostName] = new SshHostConfig { RepositoryPath = HostTree } } },
+            Legs =
+            {
+                ["one"] = HostDoubles.Leg(platform.PlatformKey, platform.Processor),
+                ["two"] = HostDoubles.Leg(platform.PlatformKey, platform.Processor),
+            },
+        };
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => OutcomeAsync(
+            temp,
+            harness,
+            config,
+            SshAndLocal(harness),
+            new LegRunRequest(temp.Path, null, Json: true, Here: HostId.Ssh(HostName)) { Workload = LegWorkload.Copy }));
+
+        Assert.Contains($"on ssh {HostName}", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A leg goes where a sync puts its tree whether or not the run syncs, and a program that host
     /// lacks turns it away there. Moved by what each command starts, a run on what a build had staged
     /// went to a host that had the program and never had the tree.
