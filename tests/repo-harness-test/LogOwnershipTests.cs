@@ -139,6 +139,29 @@ public sealed class LogOwnershipTests
         Assert.Null(ownership.Owner(directory));
     }
 
+    /// <summary>
+    /// A log path that could not be given up is said, and never stands in for what the run found:
+    /// the run is over by then, and the record is reclaimed once it has ended.
+    /// </summary>
+    [Fact]
+    public async Task ALogPathThatCouldNotBeGivenUp_IsSaid_AndNotRaised()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "unreadable");
+        var runId = RunId.New();
+
+        await ownership.ClaimAsync(directory, runId, cancellationToken: TestContext.Current.CancellationToken);
+
+        // The record no longer readable by the time the run gives it up.
+        await File.WriteAllTextAsync(LogOwnership.OwnerFile(directory), "not an owner", TestContext.Current.CancellationToken);
+
+        await ownership.ReleaseAsync(directory, runId, TestContext.Current.CancellationToken);
+
+        Assert.Contains("could not be given up", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARunReclaimsItsOwnLogPath()
     {
@@ -211,10 +234,12 @@ public sealed class LogOwnershipTests
                 StringComparison.Ordinal),
             TestContext.Current.CancellationToken);
 
-        await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
             directory,
             RunId.New(),
             cancellationToken: TestContext.Current.CancellationToken));
-    }
 
+        // The parser's reason is joined into the sentence, not closed twice.
+        Assert.DoesNotContain("..", refusal.Message, StringComparison.Ordinal);
+    }
 }

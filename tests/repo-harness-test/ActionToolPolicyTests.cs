@@ -2,6 +2,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
 
@@ -157,6 +158,102 @@ public sealed class ActionToolPolicyTests
         var policy = new ActionToolPolicy(new HostPlatform());
 
         Assert.Equal(ProgramAllowance.RepositoryPath, policy.Classify($"{Root[..2]}tool", Config.Tools, Root, "engine"));
+    }
+
+    /// <summary>
+    /// A refusal says what a line was read as only where the file does not say it: an absolute
+    /// program outside the repository is quoted as written, with no '../../usr/bin' beside it.
+    /// </summary>
+    [Fact]
+    public void AnAbsoluteProgramOutsideTheRepository_IsQuotedAsWritten()
+    {
+        var outside = OperatingSystem.IsWindows() ? @"C:\Windows\System32\curl.exe" : "/usr/bin/curl";
+        var action = Parse($"""
+            steps:
+              - name: fetch
+                run: |
+                  "{outside}" --version
+            """);
+
+        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(action, Config, Root, AsWritten(action)));
+
+        Assert.Contains($"'{outside}' is not declared under 'tools'", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("read as", problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A relative program read from a directory other than the repository's own says where it was
+    /// read from: '../elsewhere/tool' says why a './tool' is not inside the repository.
+    /// </summary>
+    [Fact]
+    public void ARelativeProgramReadFromElsewhere_SaysWhereItWasRead()
+    {
+        var elsewhere = Path.Combine(Path.GetTempPath(), "harness-policy-elsewhere");
+        var action = Parse("""
+            steps:
+              - name: fetch
+                run: |
+                  ./tool
+            """);
+
+        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(
+            action,
+            Config,
+            Root,
+            (_, command) => (ProcessRunner.Anchored(command.Program, elsewhere), elsewhere)));
+
+        Assert.Contains("'./tool' (read as '../harness-policy-elsewhere/tool')", problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Writing a refusal never becomes an error of its own: a line filled in with what no path can
+    /// hold is still refused, and said as it was filled in.
+    /// </summary>
+    [Fact]
+    public void ALineFilledInWithWhatNoPathCanHold_IsStillRefused_NotRaised()
+    {
+        var action = Parse("""
+            steps:
+              - name: fetch
+                run: |
+                  {dir}/tool
+            """);
+
+        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(
+            action,
+            Config,
+            Root,
+            (_, _) => ("/sub\0dir/tool", Root)));
+
+        Assert.Contains("(read as '/sub\0dir/tool') is not declared under 'tools'", problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// What a line was filled in with is masked before anything is made of it: a secret holding a
+    /// separator, made into a path first, is no longer the text a mask finds.
+    /// </summary>
+    [Fact]
+    public void WhatALineWasReadAs_IsMaskedBeforeItIsMadeIntoAPath()
+    {
+        const string Secret = @"s3cr\t";
+        var outside = Path.Combine(Path.GetTempPath(), "harness-policy-elsewhere", Secret, "tool");
+        var action = Parse("""
+            steps:
+              - name: fetch
+                run: |
+                  {dir}/tool
+            """);
+
+        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(
+            action,
+            Config,
+            Root,
+            (_, _) => (outside, Root),
+            text => text.Replace(Secret, "***", StringComparison.Ordinal)));
+
+        Assert.Contains("(read as '", problem, StringComparison.Ordinal);
+        Assert.Contains("***", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cr", problem, StringComparison.Ordinal);
     }
 
     private static string Root => Path.Combine(Path.GetTempPath(), "harness-policy-root");

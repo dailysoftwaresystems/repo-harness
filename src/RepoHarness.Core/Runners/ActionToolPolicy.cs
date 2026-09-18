@@ -143,18 +143,49 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
             return null;
         }
 
-        // What it was read as, where that is not what the file says: what its names were filled in
-        // with, or a path read from where its step starts - '../elsewhere/tool' says why a './tool'
-        // is not inside the repository. Masked, as every line that leaves a run is.
-        var read = (ProcessRunner.IsPath(started.Program)
-            ? Path.GetRelativePath(repositoryRoot, Resolved(started.Program, repositoryRoot, started.WorkingDirectory))
-            : started.Program).Replace('\\', '/');
+        return $"{line}{ReadAs(command, started, repositoryRoot, redact)} is not declared under 'tools' and is not a path inside the repository ({declared}).";
+    }
 
-        var shown = string.Equals(read, command.Program.Replace('\\', '/'), StringComparison.Ordinal)
-            ? string.Empty
-            : $" (read as '{redact(read)}')";
+    /// <summary>
+    /// What a line was read as, where that is what the file does not say - its names filled in, or
+    /// a relative path read from a directory other than the repository's own - and nothing where the
+    /// file already says it: '../elsewhere/tool' says why a './tool' is not inside the repository.
+    /// </summary>
+    /// <remarks>
+    /// Masked before anything is made of it, as every line that leaves a run is: a value the line was
+    /// filled in with may be a secret, and a path made of it would no longer be the text a mask finds.
+    /// Worked out whole inside one guard, so writing a refusal never becomes an error of its own.
+    /// </remarks>
+    private static string ReadAs(
+        ActionCommand command,
+        (string Program, string WorkingDirectory) started,
+        string repositoryRoot,
+        Func<string, string> redact)
+    {
+        try
+        {
+            var filled = !string.Equals(started.Program, ProcessRunner.Anchored(command.Program, started.WorkingDirectory), StringComparison.Ordinal);
+            var elsewhere = ProcessRunner.IsPath(command.Program)
+                && !Path.IsPathFullyQualified(command.Program)
+                && !string.Equals(Path.TrimEndingDirectorySeparator(started.WorkingDirectory), Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryRoot)), StringComparison.Ordinal);
 
-        return $"{line}{shown} is not declared under 'tools' and is not a path inside the repository ({declared}).";
+            if (!filled && !elsewhere)
+            {
+                return string.Empty;
+            }
+
+            var masked = redact(started.Program);
+
+            return $" (read as '{(ProcessRunner.IsPath(masked) ? Path.GetRelativePath(repositoryRoot, masked) : masked).Replace('\\', '/')}')";
+        }
+        catch (ArgumentException)
+        {
+            // A line the platform cannot read as a path: shown as it was filled in, masked, where
+            // that is not what the file says.
+            return string.Equals(started.Program, command.Program, StringComparison.Ordinal)
+                ? string.Empty
+                : $" (read as '{redact(started.Program)}')";
+        }
     }
 
     /// <summary>

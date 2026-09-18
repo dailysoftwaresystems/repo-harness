@@ -340,13 +340,14 @@ public sealed class LedgerReport
     /// dispatched a leg reads a host's standard output as this document, and text there - a table, a
     /// list of reasons - read as a host whose answer could not be read, where the host had said
     /// exactly what happened. The legs that had a line by then are in it, and nothing is claimed of
-    /// the run itself: it neither passed nor completed, and reached no verdict of its own.
+    /// the run itself: it neither passed nor completed, and reached no verdict of its own. An
+    /// interruption is said as one, from the code it ends with, so a script never reads it as red.
     /// </remarks>
     public string ToJson(int exitCode, string stoppedBecause)
     {
         ArgumentNullException.ThrowIfNull(stoppedBecause);
 
-        return Json(exitCode, stoppedBecause, cancelled: false, [], stopped: true);
+        return Json(exitCode, stoppedBecause, cancelled: exitCode == HarnessExit.Cancelled, [], stopped: true);
     }
 
     /// <summary>

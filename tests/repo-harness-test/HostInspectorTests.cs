@@ -172,6 +172,44 @@ public sealed class HostInspectorTests
     }
 
     /// <summary>
+    /// A host whose transport would not start is one host that cannot take legs, in the transport's
+    /// own words - whether it failed on the first command or part way through - never an end to the
+    /// whole survey, which took every leg on every other host with it.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseTransportWouldNotStart_IsUnavailable_AndTheSurveyGoesOn()
+    {
+        using var atConnect = new Fixture(PlatformId.Windows, respond: (_, _) => throw HostResults.TransportWouldNotStart(HostId.Wsl(Distro)));
+
+        var refused = await atConnect.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.False(refused.Available);
+        Assert.Equal("'wsl' could not be started: The file cannot be accessed by the system.", refused.Reason);
+
+        var host = HostThat();
+
+        using var partWay = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Arguments.Contains("--list-sdks")
+                ? throw HostResults.TransportWouldNotStart(HostId.Wsl(Distro))
+                : host(connection, command));
+
+        var stopped = await partWay.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.False(stopped.Available);
+        Assert.Equal("'wsl' could not be started: The file cannot be accessed by the system.", stopped.Reason);
+
+        // And ssh, whose first command is the probe that learns its shell.
+        using var ssh = new Fixture(PlatformId.Windows);
+        ssh.Commands.ShellProbeRaises = HostResults.TransportWouldNotStart(HostId.Ssh(SshName));
+
+        var unreached = await ssh.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(unreached.Available);
+        Assert.Equal("'ssh' could not be started: The file cannot be accessed by the system.", unreached.Reason);
+    }
+
+    /// <summary>
     /// Two programs whose names differ only in case are two files on Linux, and the host's answer
     /// about both is kept whole: read into a map that ignored case, it was refused, and every leg on
     /// the host read as unavailable.

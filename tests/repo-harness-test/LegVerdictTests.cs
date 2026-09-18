@@ -153,7 +153,6 @@ public sealed class LegVerdictTests
         // would send the reader looking for one.
         Assert.Equal(LegVerdict.SkippedUnavailable, Verdicts.ForRefusal(HarnessExit.HostUnavailable));
         Assert.Equal(LegVerdict.SkippedToolMissing, Verdicts.ForRefusal(HarnessExit.ToolMissing));
-        Assert.Equal(LegVerdict.RefusedLocked, Verdicts.ForRefusal(HarnessExit.Refused));
         Assert.Equal(LegVerdict.LogHeld, Verdicts.ForRefusal(LegExit.LogHeld));
         Assert.Equal(LegVerdict.Poisoned, Verdicts.ForRefusal(HarnessExit.InternalError));
     }

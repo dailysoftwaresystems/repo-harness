@@ -333,7 +333,7 @@ public sealed class WorktreeService(
             _output.Warn(
                 DeleteCommand,
                 $"'{worktreeName}' was deleted, and the commit it was made from is still recorded at "
-                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage}. Remove it with "
+                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage.TrimEnd('.')}. Remove it with "
                 + $"'git update-ref -d {BaseCommitRef(worktreeName)}', or the next worktree of this name "
                 + "inherits it.");
         }

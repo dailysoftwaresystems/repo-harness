@@ -3,7 +3,6 @@ using System.Text.Json.Serialization;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
-using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Runs;
@@ -159,7 +158,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     /// <param name="leg">The leg asked for.</param>
     /// <param name="commandName">The command the host ran.</param>
     /// <param name="exitCode">How that command finished.</param>
-    /// <param name="failure">What its failure line said, when it wrote one.</param>
+    /// <param name="failure">What its failure line said, and every line after it, when it wrote one.</param>
     /// <exception cref="HarnessException">
     /// The host wrote no entry for the leg. A refusal of the whole run there is raised as that same
     /// refusal; anything else as a host that said nothing about the leg.
@@ -202,9 +201,10 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             }
 
             // The exit code is named because it may be the only thing the host did say. A copy with
-            // no configuration, a leg that cannot be placed there, a tool that refused before it
-            // began: each ends with its own code and no ledger, and without the code every one of
-            // them reads as the same shrug.
+            // no configuration, a command line the host refused, a request its agent turned away
+            // before starting the command: each ends with its own code and no line for this leg - a
+            // ledger with no legs, or none at all - and without the code every one of them reads as
+            // the same shrug.
             throw new HarnessException(
                 HarnessExit.HostUnavailable,
                 $"{leg.Host.Host} ran '{commandName}' for leg '{leg.Name}' and exited {exitCode} without "
@@ -212,11 +212,19 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                 + (failure is null ? "so nothing there said what happened." : $"saying: {failure}"));
         }
 
+        var verdict = Verdicts.Parse(entry.Verdict) ?? LegVerdict.Poisoned;
+
         return new LegEntry
         {
             Leg = leg.Name,
-            Verdict = Verdicts.Parse(entry.Verdict) ?? LegVerdict.Poisoned,
-            Detail = entry.Detail ?? string.Empty,
+            Verdict = verdict,
+
+            // Why a leg did not run there is that host's reason, and is named by the host this
+            // machine knows: the host places the leg on itself, and has no name for itself but
+            // "this machine".
+            Detail = !string.IsNullOrEmpty(entry.Detail) && (Verdicts.IsSkip(verdict) || verdict is LegVerdict.RefusedLocked or LegVerdict.LogHeld)
+                ? $"{leg.Host.Host}: {entry.Detail}"
+                : entry.Detail ?? string.Empty,
             Duration = TimeSpan.FromSeconds(entry.DurationSeconds),
             CommandTime = TimeSpan.FromSeconds(entry.CommandSeconds),
             Emulated = leg.Emulated,

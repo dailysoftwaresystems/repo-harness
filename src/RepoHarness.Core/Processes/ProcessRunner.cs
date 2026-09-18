@@ -42,10 +42,13 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
         // Checked before starting. On Linux and macOS a missing working directory fails with
         // the same error number as a missing executable, so it would otherwise be reported
         // as "git is not installed" when git is installed and it is the directory that is gone.
+        // Raised as the program not starting, which it did not, so every reader names the cause:
+        // a leg already running has failed, and a command ends as one whose program never ran.
         if (!string.IsNullOrEmpty(request.WorkingDirectory) && !Directory.Exists(request.WorkingDirectory))
         {
-            throw new DirectoryNotFoundException(
-                $"Cannot run '{request.FileName}': the working directory '{request.WorkingDirectory}' does not exist.");
+            throw new ProgramStartException(
+                request.FileName,
+                $"'{request.FileName}' could not be started: the working directory '{request.WorkingDirectory}' does not exist.");
         }
 
         var startInfo = new ProcessStartInfo

@@ -1,6 +1,7 @@
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Secrets;
 
 namespace RepoHarness.Core.Hosts;
@@ -87,9 +88,39 @@ public sealed class HostConnector(
         return host.Kind switch
         {
             HostKind.Local => LocalAsync(programs, cancellationToken),
-            HostKind.Wsl => WslAsync(context, host, programs, cancellationToken),
-            _ => SshAsync(context, host, programs, cancellationToken),
+            HostKind.Wsl => ReachedAsync(WslAsync(context, host, programs, cancellationToken)),
+            _ => ReachedAsync(SshAsync(context, host, programs, cancellationToken)),
         };
+    }
+
+    /// <summary>
+    /// A host whose transport would not start was never reached, and is refused as that - one host
+    /// that cannot be used - rather than ending whatever asked for it, in the transport's own words.
+    /// </summary>
+    private static async Task<HostConnectionResult> ReachedAsync(Task<HostConnectionResult> connecting)
+    {
+        try
+        {
+            return await connecting.ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (Unreached(ex) is { } reason)
+        {
+            return HostConnectionResult.Refused(reason);
+        }
+    }
+
+    /// <summary>
+    /// Why the transport that reaches a host would not start, when that is what
+    /// <paramref name="exception"/> says, or <see langword="null"/>.
+    /// </summary>
+    /// <param name="exception">What reaching the host raised.</param>
+    public static string? Unreached(HarnessException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        return exception.ExitCode == HarnessExit.HostUnavailable && exception.InnerException is ProgramStartException start
+            ? start.Message
+            : null;
     }
 
     private async Task<HostConnectionResult> LocalAsync(IReadOnlyList<string> wanted, CancellationToken cancellationToken)

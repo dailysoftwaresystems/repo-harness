@@ -162,8 +162,9 @@ public static class TestInvocationResolver
     }
 
     /// <summary>
-    /// <paramref name="path"/> as an absolute path, resolving a relative one against
-    /// <paramref name="treeRoot"/>.
+    /// <paramref name="path"/> read against <paramref name="treeRoot"/> when it is relative, and as
+    /// written when it is already rooted - which on Windows may still lack a drive, for the machine
+    /// that starts the runner to make whole.
     /// </summary>
     /// <remarks>
     /// So a working directory can be written either way: <c>{buildDir}</c> expands to an absolute

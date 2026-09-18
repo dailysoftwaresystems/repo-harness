@@ -167,9 +167,21 @@ public sealed class HostInspector(
         var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
         var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
 
-        return opened.Connection is { } connection
-            ? await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false)
-            : found with { Reason = opened.Problem };
+        if (opened.Connection is not { } connection)
+        {
+            return found with { Reason = opened.Problem };
+        }
+
+        try
+        {
+            return await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
+        {
+            // Its transport stopped starting part way through: this host cannot take legs, and the
+            // others are still measured.
+            return found with { Reason = reason };
+        }
     }
 
     /// <summary>Brings DssHarness on a reachable host to this machine's build, then asks it what the host is.</summary>

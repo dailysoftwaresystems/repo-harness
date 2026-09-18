@@ -733,6 +733,27 @@ public sealed class ToolProvisionServiceTests
         Assert.Equal(ToolState.AlreadyCurrent, Assert.Single(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja").State);
     }
 
+    /// <summary>
+    /// A host whose transport stops starting part way through is named as unreachable, and the other
+    /// hosts are still provisioned: ended there, the command lost what it had done everywhere else.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseTransportStopsStarting_IsNamed_AndTheOtherHostsAreStillProvisioned()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            present: new() { ["ninja"] = "1.12.0" },
+            secondDistro: true,
+            transportStops: (host, command) => host.Equals(HostId.Wsl(Distro)) && command.Program == "sh" && command.Arguments.Count == 0);
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Equal(
+            "'wsl' could not be started: The file cannot be accessed by the system.",
+            Assert.Single(report.Legs, leg => leg.Leg == "on-distro").Unreachable);
+        Assert.Null(Assert.Single(report.Legs, leg => leg.Leg == "on-other").Unreachable);
+    }
+
     [Fact]
     public void RepositoryPath_IsRequiredOfEveryRemoteHost()
     {
@@ -802,7 +823,8 @@ public sealed class ToolProvisionServiceTests
         string? kernel,
         Func<HostId, string> rootPassword,
         bool checkNeverFinishes,
-        bool homeUnreadable)
+        bool homeUnreadable,
+        Func<HostId, HostCommand, bool>? transportStops)
     {
         private readonly Dictionary<string, Dictionary<string, string>> _present = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dotnet = new(StringComparer.Ordinal);
@@ -816,6 +838,11 @@ public sealed class ToolProvisionServiceTests
         {
             var host = connection.Host;
             Calls.Add(new HostCall(host, command.Program, command.Arguments, command.StandardInput));
+
+            if (transportStops?.Invoke(host, command) == true)
+            {
+                throw HostResults.TransportWouldNotStart(host);
+            }
 
             if (!exists && host.Kind != HostKind.Local)
             {
@@ -928,7 +955,8 @@ public sealed class ToolProvisionServiceTests
             bool checkNeverFinishes = false,
             Dictionary<string, List<string>>? searchDirectories = null,
             bool homeUnreadable = false,
-            bool ssh = false)
+            bool ssh = false,
+            Func<HostId, HostCommand, bool>? transportStops = null)
         {
             var declared = tools ?? [];
 
@@ -943,7 +971,8 @@ public sealed class ToolProvisionServiceTests
                 kernel,
                 rootPassword ?? (_ => Credential),
                 checkNeverFinishes,
-                homeUnreadable);
+                homeUnreadable,
+                transportStops);
 
             _repository.WriteFile(
                 Path.Combine(".harness-config", "wslDistros", Distro, ".env"),

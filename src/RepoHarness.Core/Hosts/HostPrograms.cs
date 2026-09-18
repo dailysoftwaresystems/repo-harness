@@ -13,13 +13,19 @@ public enum ProgramFound
     /// <summary>The host was never asked about it.</summary>
     Unknown,
 
-    /// <summary>The PATH of a command run without a login shell names it, so its bare name starts it.</summary>
+    /// <summary>
+    /// The PATH of a command run without a login shell names it, so its bare name starts it - or,
+    /// for a program named by its path, that file is there.
+    /// </summary>
     OnPath,
 
     /// <summary>It is installed, in a directory that PATH does not name, so only its absolute path starts it.</summary>
     OffPath,
 
-    /// <summary>The host answered, and it is neither on that PATH nor in any directory that was searched.</summary>
+    /// <summary>
+    /// The host answered, and it is neither on that PATH nor in any directory that was searched - or,
+    /// for a program named by its path, nothing is at that path.
+    /// </summary>
     Nowhere,
 
     /// <summary>
@@ -49,7 +55,7 @@ public sealed record ProgramLocation(string Program, ProgramFound Found, string?
     /// </summary>
     public string WhyUnestablished() => Reason ?? $"the host did not answer when asked where '{Program}' is";
 
-    /// <summary>That whether it is there could not be established, and why: the one sentence every refusal says it in.</summary>
+    /// <summary>That whether it is there could not be established, and why: the sentence a refusal about one program says it in.</summary>
     public string Unestablished() => $"whether '{Program}' is there could not be established: {WhyUnestablished()}";
 }
 

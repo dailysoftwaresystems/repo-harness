@@ -656,6 +656,62 @@ public sealed class RunnerRunServiceTests
         Assert.Contains("'{WRAPPER}' starts nothing once its names are filled in", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// And a runner's own phase whose program fills in to nothing is refused the same way, before the
+    /// first step: it has no policy to judge its lines, and reached the start as a program with no
+    /// name, which read as a defect in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ARunnersOwnPhaseThatFillsInToNothing_IsRefused_BeforeAnythingRuns()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Path.Combine(".harness-config", "runner", ".env", "ci.env"), "WRAPPER=\n");
+
+        var runner = new RunnerConfig
+        {
+            Phases = [new RunnerPhase { Name = "bench", Command = ["{WRAPPER}", "./bench"] }],
+        };
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, runner),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("'bench' of runner 'corpus' starts nothing once its names are filled in", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A step whose directory fills in to nothing, or whose names hold a character no path can, is
+    /// refused naming the step before the first one runs: read as a path, either raised an error
+    /// that read as a defect in this tool.
+    /// </summary>
+    [Theory]
+    [InlineData("{WORKDIR}", "./bench", "runs in no directory once its names are filled in")]
+    [InlineData(null, "./be\0nch", "holding a NUL character")]
+    [InlineData("sub\0dir", "./bench", "holding a NUL character")]
+    public async Task AStepNamingWhatNoPathCanHold_IsRefused_BeforeAnythingRuns(string? workingDirectory, string program, string expected)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Path.Combine(".harness-config", "runner", ".env", "ci.env"), "WORKDIR=\n");
+
+        var runner = new RunnerConfig
+        {
+            Phases = [new RunnerPhase { Name = "bench", Command = [program], WorkingDirectory = workingDirectory }],
+        };
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, runner),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("'bench' of runner 'corpus'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
+    }
+
     private static string Child => TestHost.DotnetExecutable;
 
     private const string Exec = "exec";

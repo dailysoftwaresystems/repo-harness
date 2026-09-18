@@ -466,6 +466,27 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// A host running a leg for the machine that dispatched it names no candidate in why it cannot:
+    /// it is the only one, and its name for itself - "local" - would send the reader to the machine
+    /// that asked.
+    /// </summary>
+    [Fact]
+    public void AHostRunningALegItWasSent_NamesNoCandidate_InWhyItCannot()
+    {
+        var config = Configured(generator: "Ninja");
+        var here = Host(HostId.Local, config, ("cmake", ProgramFound.Nowhere));
+
+        var placement = LegPlacement.Place(
+            config,
+            new SelectedLeg("lin", config.Legs["lin"]),
+            LegWorkload.BuildAndTest,
+            new Dictionary<HostId, HostReport> { [HostId.Local] = here },
+            here: true);
+
+        Assert.StartsWith("'cmake' is not installed there", placement.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A leg the survey turned away through a defect of its own fails 'legs', with the defect's
     /// code, even when another leg can run and none was named: whether it could run was never
     /// established, which is no switched-off machine.

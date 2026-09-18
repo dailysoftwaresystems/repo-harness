@@ -170,8 +170,8 @@ public static class LegPrograms
 
     /// <summary>
     /// Whether <paramref name="program"/> is one a survey can look for on a
-    /// <paramref name="platformKey"/> host: a name, or a path absolute there, and nothing a
-    /// placeholder completes.
+    /// <paramref name="platformKey"/> host: a name, or a path absolute there - absolute anywhere, for
+    /// a declared tool, which is no one platform's - and nothing a placeholder completes.
     /// </summary>
     /// <remarks>
     /// A relative path is the run's to find: it is read from the directory the leg's phase starts in,
@@ -184,5 +184,6 @@ public static class LegPrograms
     private static bool Surveyable(string program, string? platformKey)
         => !string.IsNullOrWhiteSpace(program)
             && !program.Contains('{', StringComparison.Ordinal)
-            && (!ProcessRunner.IsPath(program) || PlatformPaths.IsAbsoluteOn(program, platformKey));
+            && (!ProcessRunner.IsPath(program)
+                || (platformKey is null ? PlatformPaths.IsAbsoluteOnAnyPlatform(program) : PlatformPaths.IsAbsoluteOn(program, platformKey)));
 }

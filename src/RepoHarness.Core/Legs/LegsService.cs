@@ -50,7 +50,8 @@ public sealed record LegsReport(IReadOnlyList<LegPlacement> Placements, IReadOnl
 /// <summary>
 /// Finds where each selected leg can run before anything runs. It measures the hosts that could run
 /// them, bringing DssHarness on each to this machine's build, and places each leg on the first host
-/// that provides its operating system, its processor and its emulator.
+/// that provides its operating system, its processor and its emulator - turning it away there when
+/// that host lacks a program the command requires.
 /// </summary>
 public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspector inspector, IHarnessOutput output)
 {

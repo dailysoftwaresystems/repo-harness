@@ -40,7 +40,11 @@ public enum LegVerdict
     /// <summary>Filtered out by <c>--legs</c>. Not a failure: nobody asked for it.</summary>
     SkippedNotSelected,
 
-    /// <summary>No host can run the leg. A warning: a switched-off machine is normal.</summary>
+    /// <summary>
+    /// No host can take the leg, its host or its tree could not be reached, whether a program it
+    /// starts is there could not be established, or git could not answer in its tree. A warning: a
+    /// switched-off machine is normal.
+    /// </summary>
     SkippedUnavailable,
 
     /// <summary>
@@ -247,7 +251,6 @@ public static class Verdicts
     /// <param name="exitCode">The code the refusal carried, as <see cref="HarnessException.ExitCode"/> reports it.</param>
     public static LegVerdict ForRefusal(int exitCode) => exitCode switch
     {
-        HarnessExit.Refused => LegVerdict.RefusedLocked,
         HarnessExit.ToolMissing => LegVerdict.SkippedToolMissing,
         HarnessExit.HostUnavailable => LegVerdict.SkippedUnavailable,
         HarnessExit.CommandFailed => LegVerdict.Failed,

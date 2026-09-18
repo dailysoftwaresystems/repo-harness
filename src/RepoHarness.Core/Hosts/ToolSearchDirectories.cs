@@ -106,4 +106,16 @@ public static class ToolSearchDirectories
 
         return PlatformPaths.IsHomeRelative(directory) || PlatformPaths.IsAbsoluteOn(directory, platformKey);
     }
+
+    /// <summary>
+    /// Whether <paramref name="directory"/> names one directory on some platform: an entry under
+    /// <c>all</c>, which is searched where it can be.
+    /// </summary>
+    /// <param name="directory">An entry of <c>toolSearchDirectories</c>.</param>
+    public static bool NamesOnAnyPlatform(string directory)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+
+        return PlatformPaths.IsHomeRelative(directory) || PlatformPaths.IsAbsoluteOnAnyPlatform(directory);
+    }
 }

@@ -11,6 +11,22 @@ namespace RepoHarness.Tests;
 /// </summary>
 public sealed class LedgerReportTests
 {
+    /// <summary>
+    /// A command stopped before any leg had a line answers with a ledger holding none - and one it
+    /// was interrupted in says so, from the code it ends with, so a script never reads it as red.
+    /// </summary>
+    [Fact]
+    public void AStoppedLedger_SaysWhetherItWasInterrupted()
+    {
+        using var interrupted = System.Text.Json.JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Cancelled, "Interrupted before completion."));
+        using var refused = System.Text.Json.JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Refused, "refused"));
+
+        Assert.True(interrupted.RootElement.GetProperty("cancelled").GetBoolean());
+        Assert.False(interrupted.RootElement.GetProperty("passed").GetBoolean());
+        Assert.False(refused.RootElement.GetProperty("cancelled").GetBoolean());
+        Assert.Empty(refused.RootElement.GetProperty("legs").EnumerateArray());
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

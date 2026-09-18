@@ -390,8 +390,8 @@ Where it runs is measured before anything starts, never declared:
   its connect timeout once.
 - A leg runs on the first candidate whose measured operating system matches and whose
   processor matches, or, for an emulated leg, where that emulator's check passed. A program is
-  never part of the choice: a host that lacks one the command starts turns the leg away there,
-  rather than the leg moving to a host that has it and measuring a machine nobody chose. Every
+  never part of the choice: a host that lacks one the command requires there turns the leg away
+  there, rather than the leg moving to a host that has it and measuring a machine nobody chose. Every
   command places a leg the same way, so a run with `--use-staged` finds the tree where a sync
   put it. To run a leg elsewhere, the leg names that host.
 - `--legs` takes leg names and leg set names, separated by commas or spaces. A name that is
@@ -399,10 +399,13 @@ Where it runs is measured before anything starts, never declared:
   `--legs` given without a name is a usage error rather than every leg, so an empty
   variable cannot pass a gate. A leg or leg set name holding a comma or a space could never
   be selected, so the file refuses one.
-- A leg no host can run is a warning naming the leg and each candidate's reason, and the
-  other legs still go ahead. The check fails, and `legs` exits 1, when a leg named with
-  `--legs` cannot run, or when no selected leg can: a declared leg on a machine that is
-  switched off is normal, and a leg asked for by name is not.
+- A leg that cannot run is a warning naming the leg and why - each candidate's reason when none
+  could take it, or what the host it went to lacks - and the other legs still go ahead. The
+  check fails, and `legs` exits 1, when a leg named with `--legs` cannot run, or when no
+  selected leg can: a declared leg on a machine that is switched off is normal, and a leg asked
+  for by name is not. It exits 70, named or not, when whether a leg can run was never
+  established - a host never asked about a program the leg starts, which is a defect in this
+  tool.
 
 A native run and an emulated run are different legs. Neither their timings nor their
 failures compare.
@@ -600,7 +603,7 @@ from the report.
 | `unmeasured` | Whether those files held still could not be established | **yes** |
 | `contended` | Another process used the leg's build directory while it ran | **yes** |
 | `skipped-not-selected` | Filtered out by `--legs` | no |
-| `skipped-unavailable` | No host can take the leg, its host or its tree could not be reached, or git could not answer in its tree | warning |
+| `skipped-unavailable` | No host can take the leg; its host or its tree could not be reached; whether a program it starts is there could not be established; or git could not answer in its tree | warning |
 | `skipped-tool-missing` | A required tool is not installed | warning |
 | `refused-locked` | Another run holds the lock for this leg, or its host's tree | **yes** |
 | `log-held` | Another live run owns this leg's log path | **yes** |
@@ -614,9 +617,9 @@ settle and running again, the third for waiting for the other run.
 `refused-locked` and `log-held` are deliberately distinct, though both mean another run got
 there first. A lock is taken for the duration of the work and is released by the run that
 took it; a log path is owned by a run id, and one already owning it means two runs would
-write one file and each would read the other's output as its own. The remedies differ — wait,
-against find out which run is still holding a finished run's logs — and a reader who cannot
-tell which fired cannot pick either.
+write one file and each would read the other's output as its own. The remedies differ -
+waiting for the lock, against finding out which run still holds a finished run's logs - and a
+reader who cannot tell which fired cannot pick either.
 
 When several apply, the more fundamental one is reported: `poisoned`, then
 `unmeasured`, `inputs-moved`, `contended`, `log-held`, `refused-locked`, `failed`, and
@@ -710,7 +713,8 @@ tool replaces, where a green result had quietly stopped meaning anything.
 - A leg-running command asked for `--json` answers with its ledger whatever ended it, once its
   command line was read: a refusal before any leg was placed, a selection no host could take, a
   log another run holds, a refusal while the legs ran - each is the document too, with the code
-  the process exits with and the line it ends on. A machine that dispatched a leg reads the
+  the process exits with and the line it ends on. An interruption is said as one: `cancelled`,
+  with exit 130, so a script never reads it as red. A machine that dispatched a leg reads the
   host's answer this way, so a host's refusal arrives as that refusal, in the host's words.
 - An emulated leg's emulator has passed its witness on that host before the leg starts.
 
@@ -904,6 +908,12 @@ while their sources are being replaced. A lock is released only by the run that 
   host it is the only way out of an id that has come back around to something live,
   which would otherwise hold a tree until the file was edited by hand. It takes the log
   path with it, for the same reason.
+- A lock file that cannot be read or written refuses the run, exit 13, naming the file. It
+  stops every run on every tree alike, so it is never reported as each leg being locked by a
+  run that does not exist.
+- A lock, or a log path, that cannot be given up once its work is done is a warning naming it,
+  and the work's verdict stands. The entry names a process that has ended, and is reclaimed as
+  a dead holder's is.
 
 ## Syncing a tree
 
@@ -1079,7 +1089,11 @@ sibling directory whose name merely starts the same way is outside, not inside.
   `install-missing-tools` guarantees is installed. It is judged as it will start: its names
   filled in, and a relative path read from the directory its step runs in, both worked out by the
   one function the run starts it with. Read as written, `{dir}/tool` was inside the repository
-  while the step started a program wherever `{dir}` pointed.
+  while the step started a program wherever `{dir}` pointed. A refusal says what a line was
+  read as where the file does not already say it, masked where a secret filled it in.
+- A line that fills in to nothing starts nothing, and is refused naming it; so is a step whose
+  directory fills in to nothing, or whose names hold a character no path can. A runner's own
+  steps are held to the same rule before the first one runs.
 - Values come from `.harness-config/runner/.env` and `.harness-config/runner/.secrets`, each a
   directory of files. A value that came from `.secrets` never reaches a log, an argument list or
   an error message.
@@ -1159,7 +1173,8 @@ with "the harness could not run", because the remedies differ.
 
 `verify-git` keeps its own contract: `0` success, `1` git not installed,
 `2` not a git repository. `legs` exits `1` when a leg named with `--legs` cannot run,
-or when no selected leg can. `install-missing-tools` exits `1` when a tool is missing, out of
+or when no selected leg can, and `70` when whether a leg can run was never established, through
+a defect in this tool. `install-missing-tools` exits `1` when a tool is missing, out of
 date or could not be installed, and `15` when a host could not be reached: a tool that is not
 there and a host that did not answer call for different things. `check-anchor-balance` and
 `check-anchor-citations` exit `1` on a finding, which is what they were asked to look for rather

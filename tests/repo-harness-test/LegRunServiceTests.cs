@@ -72,14 +72,36 @@ public sealed class LegRunServiceTests
         var harness = new HarnessFactory();
         var sync = Substitute.For<ISyncService>();
 
+        // The copy starts ssh through the runner every host command goes through, so what reaches the
+        // run is what that runner makes of ssh not starting - never a refusal written for the test.
+        var processes = Substitute.For<IProcessRunner>();
+        processes.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ProgramStartException("ssh", "'ssh' could not be started: No such file or directory"));
+        var hosts = new HostCommandRunner(processes);
+        var pi = new HostConnection
+        {
+            Host = HostId.Ssh(HostName),
+            Address = "192.0.2.10",
+            User = "harness",
+            Port = 22,
+            KeyFile = temp.Combine(".harness-config", "sshItems", HostName, ".key"),
+            KnownHostsFile = temp.Combine(".harness-config", "sshItems", HostName, "known_hosts"),
+            ConnectTimeoutSeconds = 10,
+            KeepAliveSeconds = 15,
+            LocalDirectory = temp.Path,
+        };
+
+        var unreached = await Assert.ThrowsAnyAsync<Exception>(
+            () => hosts.RunAsync(pi, new HostCommand { Program = "true" }, TestContext.Current.CancellationToken));
+
         sync.SyncAsync(default!, default!, default!, default!, TestContext.Current.CancellationToken)
-            .ThrowsAsyncForAnyArgs(new HarnessException(HarnessExit.HostUnavailable, "ssh pi could not be reached: 'ssh' could not be started: No such file or directory"));
+            .ThrowsAsyncForAnyArgs(unreached);
 
         var verdicts = await RunAsync(temp, harness, TwoLegs(harness), SshAndLocal(harness), new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.Copy }, sync: sync);
 
         Assert.Equal("passed", verdicts["native"].Verdict);
         Assert.Equal("skipped-unavailable", verdicts["arm"].Verdict);
-        Assert.Equal("ssh pi could not be reached: 'ssh' could not be started: No such file or directory", verdicts["arm"].Detail);
+        Assert.Equal($"ssh {HostName} could not be reached: 'ssh' could not be started: No such file or directory", verdicts["arm"].Detail);
     }
 
     /// <summary>

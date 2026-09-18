@@ -236,7 +236,7 @@ public sealed class RunnerRunService(
             await RefuseUnignoredScratchAsync(request, action, cancellationToken).ConfigureAwait(false);
         }
 
-        Refuse(request, steps.Phases, values);
+        Refuse(request, steps, values, scratch);
 
         var record = await _runSegments
             .BeginAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
@@ -968,15 +968,27 @@ public sealed class RunnerRunService(
     /// secret leaks by being convenient, and the leak that costs a credential is a failed command
     /// echoing what it was asked to run.
     /// </exception>
-    private static void Refuse(RunnerRunRequest request, IReadOnlyList<RunnerPhase> phases, ActionValues values)
+    private static void Refuse(RunnerRunRequest request, RunnerSteps steps, ActionValues values, ActionScratch? scratch)
     {
-        foreach (var phase in phases)
+        var supplied = Supplied(values, steps.Inputs);
+
+        foreach (var phase in steps.Phases)
         {
             if (phase.Command.Count == 0)
             {
                 throw new HarnessException(
                     HarnessExit.ConfigInvalid,
                     $"Step '{phase.Name}' of runner '{request.RunnerName}' names no program.");
+            }
+
+            // Worked out as the start works it out: a program filled in to nothing - an empty value
+            // in the runner's .env - starts nothing, and is refused before the first step rather
+            // than reaching the start as a program with no name, which read as a defect in this tool.
+            if (string.IsNullOrWhiteSpace(Started(request, phase.Command[0], phase.WorkingDirectory, PathsFor(request, scratch, phase.StepName), supplied, phase.Name).Program))
+            {
+                throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"Step '{phase.Name}' of runner '{request.RunnerName}' starts nothing once its names are filled in.");
             }
 
             if (Carries(values, phase.Command))
@@ -1389,15 +1401,34 @@ public sealed class RunnerRunService(
         IReadOnlyDictionary<string, string> supplied,
         string name)
     {
-        var working = Path.GetFullPath(
-            workingDirectory is { Length: > 0 } declared
-                ? LegPathNames.Expand(declared, paths, $"'{name}' workingDirectory", PlaceholderPolicy.LeaveAsWritten, supplied)
-                : ".",
-            request.WorkingDirectory ?? request.TreeRoot);
+        var directory = workingDirectory is { Length: > 0 } declared
+            ? LegPathNames.Expand(declared, paths, $"'{name}' workingDirectory", PlaceholderPolicy.LeaveAsWritten, supplied)
+            : ".";
 
         var filled = LegPathNames.Expand(program, paths, $"'{name}' run line", PlaceholderPolicy.LeaveAsWritten, supplied);
 
-        // A line filled in to nothing starts nothing, and is the policy's to refuse, naming it.
+        // Refused naming the step, before anything runs, rather than reaching a path function that
+        // cannot read them, which read as a defect in this tool: a directory filled in to nothing -
+        // an empty value in the runner's .env - names none, and a NUL is a character no path or
+        // program name can hold.
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Step '{name}' of runner '{request.RunnerName}' runs in no directory once its names are filled in.");
+        }
+
+        if (directory.Contains('\0', StringComparison.Ordinal) || filled.Contains('\0', StringComparison.Ordinal))
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Step '{name}' of runner '{request.RunnerName}' names a program or a directory holding a NUL character, which no path can hold.");
+        }
+
+        var working = Path.GetFullPath(directory, request.WorkingDirectory ?? request.TreeRoot);
+
+        // A line filled in to nothing starts nothing, and is refused before anything runs: by the
+        // policy for an action's lines, naming the line, and by Refuse for a runner's own phases.
         return (string.IsNullOrWhiteSpace(filled) ? filled : ProcessRunner.Anchored(filled, working), working);
     }
 

@@ -180,7 +180,7 @@ internal static class HelpCommand
         builder.AppendLine("A leg turned away for a missing program is 'skipped-tool-missing', and the run is");
         builder.AppendLine($"incomplete, exit {HarnessExit.Incomplete} - or exit {LegsExit.Unavailable} when no selected leg can run at all. A leg");
         builder.AppendLine("that is already running when a program will not start has 'failed', naming the");
-        builder.AppendLine("program and the reason the system gave: no survey could have looked for it - a file");
+        builder.AppendLine("program and the reason the system gave: no survey could have required it - a file");
         builder.AppendLine("the build was to make, a binary for another processor. Neither is 'poisoned', which");
         builder.AppendLine("is kept for a defect in this tool.");
 
@@ -287,7 +287,8 @@ internal static class HelpCommand
         builder.AppendLine("The first token must be a program declared under tools, or a path in the");
         builder.AppendLine("repository; anything else is refused before a single step runs. It is judged as");
         builder.AppendLine("it will start, its names filled in and read from the directory its step runs in:");
-        builder.AppendLine("'{dir}/tool' is inside the repository only where {dir} keeps it there.");
+        builder.AppendLine("'{dir}/tool' is inside the repository only where {dir} keeps it there. A line, or");
+        builder.AppendLine("a step's directory, that fills in to nothing is refused the same way, naming it.");
         builder.AppendLine();
         builder.AppendLine("A step runs at the leg's tree root unless it says otherwise, which is what a step");
         builder.AppendLine("with neither key below has always done. The new layout reads as though a step ran");
@@ -614,7 +615,9 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("A leg no host can run is a warning that names it and says why; the other legs");
         builder.AppendLine("still go ahead. The check fails when a leg named with --legs cannot run, or when");
-        builder.AppendLine("no selected leg can. --legs given without a name is refused, not taken for every leg.");
+        builder.AppendLine("no selected leg can - and, with exit 70, when whether a leg can run was never");
+        builder.AppendLine("established, through a defect in this tool, named or not. --legs given without a");
+        builder.AppendLine("name is refused, not taken for every leg.");
         builder.AppendLine();
         builder.AppendLine("A WSL distribution is available when this machine runs Windows, wsl.exe exists,");
         builder.AppendLine("and a program starts in the distribution; --wsl with no name is WSL's default.");

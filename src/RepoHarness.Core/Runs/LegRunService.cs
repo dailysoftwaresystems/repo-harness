@@ -7,7 +7,6 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
-using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Sync;
@@ -107,11 +106,6 @@ public sealed class LegRunService(
         ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(work);
-
-        // Asked for the ledger as data, the ledger is the whole of standard output. Progress still
-        // appears, on standard error, where a reader parsing the document never sees it — and the
-        // reader here is often this tool on another machine, collecting a dispatched leg's verdict.
-        using var document = request.Json ? _output.DataOnly() : null;
 
         var context = await _contextLoader.LoadAsync(request.Directory, cancellationToken).ConfigureAwait(false);
 
@@ -230,7 +224,7 @@ public sealed class LegRunService(
         ConcurrentDictionary<string, string> lockedTrees,
         CancellationToken cancellationToken)
     {
-        var leg = placed.First(candidate => candidate.TreeKey == treeKey);
+        var leg = placed.First(candidate => LegPlan.TreeKeyComparer.Equals(candidate.TreeKey, treeKey));
 
         if (leg.Host.Host.Kind == HostKind.Local)
         {
@@ -272,7 +266,7 @@ public sealed class LegRunService(
             // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
             // worktree measures that worktree; sending the main checkout instead would report the
             // worktree's name over the main checkout's sources. A transport that will not start is
-            // the host's to report, and does - as that host being unavailable.
+            // reported by the runner that starts it, as that host being unavailable.
             await _syncService
                 .SyncAsync(leg.TreeRoot, _transportFactory.For(leg.Host), leg.HostTreeRoot, new SyncOptions(), cancellationToken)
                 .ConfigureAwait(false);

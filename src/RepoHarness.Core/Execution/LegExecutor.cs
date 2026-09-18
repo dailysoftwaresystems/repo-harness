@@ -353,8 +353,8 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
         catch (HarnessException ex)
         {
             // A refusal that is genuinely about this leg keeps its own verdict: a host that is
-            // switched off is skipped-unavailable, and a lock another run holds is refused-locked,
-            // neither of them a defect in the tool. The other legs still report.
+            // switched off, or a tree git cannot answer in, is skipped-unavailable, neither of them
+            // a defect in the tool. The other legs still report.
             entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(ex.ExitCode), ex.Message));
         }
         catch (Exception ex) when (KnownCauses.Names(ex))
@@ -363,9 +363,10 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // a defect in this tool: recorded as poisoned, a program that would not start read as
             // exit 70 and sent the reader looking for a bug that was not there. Nor is it a skip. The
             // survey turned away, before anything started, every leg whose host lacks a program it
-            // knew the leg would start; a program that still will not start once the leg is running is
-            // one it could not know - a file the build was to make, a script in the tree, a binary
-            // for another processor - and a leg that cannot start its own program has failed. Read
+            // requires there; a program that still will not start once the leg is running is one it
+            // could not require - a file the build was to make, a script in the tree, one a phase's
+            // own PATH finds, a binary for another processor - and a leg that cannot start its own
+            // program has failed. Read
             // as a skip, a build that never produced what its next step runs would pass a gate
             // that accepts an incomplete run.
             entry = Entry(leg, ReachedVerdict.Of(LegVerdict.Failed, ex.Message));

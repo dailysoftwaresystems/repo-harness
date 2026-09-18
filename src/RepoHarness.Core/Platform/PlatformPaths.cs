@@ -34,6 +34,19 @@ public static class PlatformPaths
         => IsAbsoluteOn(path, PlatformNames.Linux) || IsAbsoluteOn(path, PlatformNames.Windows);
 
     /// <summary>
+    /// Whether <paramref name="path"/> is rooted on some platform: a leading separator of either kind,
+    /// or a drive - <c>C:tools</c> among them, which Windows reads against that drive. What a setting
+    /// that names a place inside the tree may never be, on whichever machine reads it.
+    /// </summary>
+    /// <param name="path">The path as a configuration spells it.</param>
+    public static bool IsRootedOnAnyPlatform(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        return path.StartsWith('/') || path.StartsWith('\\') || NamesADrive(path);
+    }
+
+    /// <summary>
     /// Whether <paramref name="path"/> starts from the home directory of whoever reads it: <c>~/</c>,
     /// which each machine expands against its own.
     /// </summary>

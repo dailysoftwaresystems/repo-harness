@@ -235,7 +235,7 @@ public sealed class HostAgentService(
             return _platform.HomeDirectory;
         }
 
-        return directory.StartsWith("~/", StringComparison.Ordinal)
+        return Platform.PlatformPaths.IsHomeRelative(directory)
             ? Path.GetFullPath(Path.Combine(_platform.HomeDirectory, directory[2..]))
             : directory;
     }

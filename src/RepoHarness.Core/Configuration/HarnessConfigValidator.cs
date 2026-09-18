@@ -840,7 +840,7 @@ public static class HarnessConfigValidator
                 // Under 'all', an entry only one kind of machine can name is searched where it can
                 // be; under a platform, it has to name a directory on that platform.
                 var names = every
-                    ? PlatformNames.OperatingSystems.Any(system => ToolSearchDirectories.Names(directory, system))
+                    ? ToolSearchDirectories.NamesOnAnyPlatform(directory)
                     : ToolSearchDirectories.Names(directory, platform);
 
                 if (!names)
@@ -1463,8 +1463,7 @@ public static class HarnessConfigValidator
         foreach (var path in paths)
         {
             var escapes = string.IsNullOrWhiteSpace(path)
-                || path[0] is '/' or '\\'
-                || (path.Length >= 2 && path[1] == ':')
+                || PlatformPaths.IsRootedOnAnyPlatform(path)
                 || path.Split('/', '\\').Any(segment => segment == "..");
 
             if (escapes)

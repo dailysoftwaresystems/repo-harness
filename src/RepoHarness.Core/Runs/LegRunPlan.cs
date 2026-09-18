@@ -310,7 +310,7 @@ public static class LegRunPlan
 
         var contested = placed
             .Where(leg => leg.Host.Host.Kind != HostKind.Local)
-            .GroupBy(leg => leg.TreeKey, StringComparer.Ordinal)
+            .GroupBy(leg => leg.TreeKey, LegPlan.TreeKeyComparer)
             .Where(group => group.Select(leg => leg.TreeRoot).Distinct(comparer).Count() > 1)
             .Select(group =>
                 $"{string.Join(" and ", group.Select(leg => $"'{leg.Name}'"))} would each put a different tree in "

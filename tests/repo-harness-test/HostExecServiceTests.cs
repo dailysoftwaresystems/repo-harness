@@ -166,17 +166,26 @@ public sealed class HostExecServiceTests
         Assert.Equal("~/src/repo", request?.Directory);
     }
 
+    /// <summary>
+    /// wsl.exe that is not installed is raised by the runner that starts it as WSL not being
+    /// reachable, and the command ends as that - never as a program of this machine's own that is
+    /// missing - with nothing measured.
+    /// </summary>
     [Fact]
     public async Task TheDefaultDistribution_WithoutWslInstalled_IsUnavailable()
     {
+        const string Unreachable = "WSL could not be reached: Executable 'wsl.exe' was not found on PATH.";
         var fixture = Create(platform: HostDoubles.Platform(PlatformId.Windows));
-        fixture.Commands.DefaultWslDistribution = () => throw new ExecutableNotFoundException(HostCommandRunner.WslProgram);
+        fixture.Commands.DefaultWslDistribution = () => throw new HarnessException(
+            HarnessExit.HostUnavailable,
+            Unreachable,
+            new ExecutableNotFoundException(HostCommandRunner.WslProgram));
 
         var exception = await Assert.ThrowsAsync<HarnessException>(
             () => fixture.Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
-        Assert.Contains("wsl.exe was not found", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(Unreachable, exception.Message);
         Assert.Empty(fixture.Inspector.Inspected);
     }
 

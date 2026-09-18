@@ -246,6 +246,38 @@ public sealed class RemoteLegRunnerTests
         Assert.EndsWith("saying: the directory '/home/dev/repo' does not exist", failure.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Why a host did not run a leg is that host's reason, named by the host this machine knows: the
+    /// host places the leg on itself, and has no name for itself but "this machine".
+    /// </summary>
+    [Fact]
+    public async Task WhyAHostDidNotRunALeg_IsNamedByTheHostThisMachineKnows()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, Ledger("skipped-tool-missing", "'cmake' is not installed there", 0, 0, tests: null));
+
+            return HostResults.Finished(command, HarnessExit.Incomplete);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.SkippedToolMissing, entry.Verdict);
+        Assert.Equal("wsl Example-Linux: 'cmake' is not installed there", entry.Detail);
+
+        // A host that gave no reason is not given an empty one after its name.
+        var silent = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, Ledger("skipped-unavailable", string.Empty, 0, 0, tests: null));
+
+            return HostResults.Finished(command, HarnessExit.Incomplete);
+        });
+
+        var unexplained = await Runner(silent).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(string.Empty, unexplained.Detail);
+    }
+
     [Fact]
     public async Task ProgressPrecedingTheLedger_IsNotReadAsPartOfIt()
     {

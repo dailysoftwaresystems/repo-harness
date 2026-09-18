@@ -38,15 +38,17 @@ public static partial class HostProbes
 
     /// <summary>
     /// Whether the host ran a command at all. A program that ran and failed exits non-zero; a
-    /// connection that never opened is ssh's own <see cref="SshFailed"/>, and one that hung has no
-    /// exit code to read. Only an answer says anything about the host.
+    /// connection that never opened is ssh's own <see cref="SshFailed"/>; wsl.exe that failed itself
+    /// exits with a code no program in a distribution can, a negative one, as Windows reports
+    /// 0xFFFFFFFF, where a program's own status is 0 to 255; and one that hung has no exit code to
+    /// read. Only an answer says anything about the host.
     /// </summary>
     /// <param name="result">What running the command produced.</param>
     public static bool Answered(Processes.ProcessResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
 
-        return !result.TimedOut && result.ExitCode != SshFailed;
+        return !result.TimedOut && result.ExitCode != SshFailed && result.ExitCode >= 0;
     }
 
     /// <summary>Reads <c>uname -sm</c> into an operating system and a processor, in configuration's words.</summary>

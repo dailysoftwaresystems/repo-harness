@@ -147,7 +147,7 @@ optionally the emulator it runs through, which rules out running it natively. Ho
 measured before anything starts: this machine first, then WSL distributions and ssh hosts
 only for the legs this machine cannot take, and a WSL distribution only for a Linux leg.
 Each leg runs on the first host that can take it - its operating system, its processor and
-its emulator - and is turned away there when that host lacks a program its command starts.
+its emulator - and is turned away there when that host lacks a program its command requires.
 
 ```json
 {

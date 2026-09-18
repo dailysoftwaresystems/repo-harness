@@ -138,10 +138,12 @@ public sealed record HostCommand
 public interface IHostCommandRunner
 {
     /// <summary>Runs <paramref name="command"/> on the host <paramref name="connection"/> reaches.</summary>
-    /// <exception cref="ExecutableNotFoundException">wsl.exe or ssh, or a local program, is not installed.</exception>
+    /// <exception cref="HarnessException">wsl.exe or ssh would not start, so the host could not be reached.</exception>
+    /// <exception cref="ProgramStartException">A program run on this machine is not installed or would not start.</exception>
     Task<ProcessResult> RunAsync(HostConnection connection, HostCommand command, CancellationToken cancellationToken = default);
 
     /// <summary>Runs <see cref="RemoteCommandLine.ShellProbe"/> on an ssh host, to learn which kind of shell it has.</summary>
+    /// <exception cref="HarnessException">ssh would not start, so the host could not be reached.</exception>
     Task<ProcessResult> ProbeShellAsync(HostConnection connection, TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -178,18 +180,33 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(command);
 
+        var request = BuildRequest(connection, command);
+
+        return connection.Host.Kind == HostKind.Local
+            ? await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false)
+            : await ThroughTransportAsync(connection.Host.ToString(), request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts <paramref name="request"/>, whose program is the transport that reaches
+    /// <paramref name="reached"/> - ssh, or wsl.exe.
+    /// </summary>
+    /// <remarks>
+    /// What would not start is the transport itself - ssh, or wsl.exe in the middle of an update - so
+    /// the host was never reached, whatever was asked of it: it is unavailable, which is no verdict
+    /// about anything that runs there. Said here, where the program is known to be the transport,
+    /// and not by a caller that cannot tell it from a program of its own; the cause travels with it,
+    /// for a caller that names the host itself.
+    /// </remarks>
+    private async Task<ProcessResult> ThroughTransportAsync(string reached, ProcessRequest request, CancellationToken cancellationToken)
+    {
         try
         {
-            return await _processRunner.RunAsync(BuildRequest(connection, command), cancellationToken).ConfigureAwait(false);
+            return await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false);
         }
-        catch (ProgramStartException ex) when (connection.Host.Kind != HostKind.Local)
+        catch (ProgramStartException ex)
         {
-            // What would not start is the transport itself - ssh, or wsl.exe in the middle of an
-            // update - so the host was never reached, whatever was asked of it: it is unavailable,
-            // which is no verdict about anything that runs there. Said here, where the program is
-            // known to be the transport, and not by a caller that cannot tell it from a program of
-            // its own.
-            throw new HarnessException(HarnessExit.HostUnavailable, $"{connection.Host} could not be reached: {ex.Message}", ex);
+            throw new HarnessException(HarnessExit.HostUnavailable, $"{reached} could not be reached: {ex.Message}", ex);
         }
     }
 
@@ -205,13 +222,14 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
             throw new ArgumentException("Only an ssh host hands commands to a shell.", nameof(connection));
         }
 
-        return _processRunner.RunAsync(
+        return ThroughTransportAsync(
+            connection.Host.ToString(),
             SshRequest(connection, RemoteCommandLine.ShellProbe) with { Timeout = timeout, StandardInput = string.Empty },
             cancellationToken);
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
-        => _processRunner.RunAsync(DefaultWslDistributionRequest(timeout), cancellationToken);
+        => ThroughTransportAsync("WSL", DefaultWslDistributionRequest(timeout), cancellationToken);
 
     /// <summary>
     /// The process that asks WSL for its default distribution. The name is read from inside that

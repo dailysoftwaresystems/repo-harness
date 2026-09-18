@@ -334,7 +334,7 @@ public sealed class HostProgramResolverTests
     /// home directory could not be read".
     /// </summary>
     [Fact]
-    public async Task AHomeTheHostNeverAnsweredFor_LeavesTheProgramUnanswered_NotUnreadable()
+    public async Task AHomeTheHostNeverAnsweredFor_IsTheHostNotAnswering_NotAHomeThatCouldNotBeRead()
     {
         var commands = new ScriptedHostCommands((_, command) => command.Program switch
         {
@@ -348,6 +348,26 @@ public sealed class HostProgramResolverTests
         Assert.Equal(ProgramFound.Unreadable, located?.Found);
         Assert.Null(located?.Reason);
         Assert.Equal("the host did not answer when asked where 'dotnet' is", located?.WhyUnestablished());
+    }
+
+    /// <summary>
+    /// wsl.exe that fails itself exits with a code no program in a distribution can: the host did not
+    /// answer, and a program asked about there is not known either way - never "not installed".
+    /// </summary>
+    [Fact]
+    public async Task AWslThatFailedItself_IsNoAnswer_AndCallsNothingMissing()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program == "sh"
+            ? HostResults.Failed(-1, "Wsl/Service/E_UNEXPECTED")
+            : throw HostResults.Unexpected(command));
+
+        var located = (await Resolve(
+            commands,
+            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            ["cmake"],
+            [])).Located("cmake");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
     }
 
     [Fact]

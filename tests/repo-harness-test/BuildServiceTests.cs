@@ -1,8 +1,11 @@
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
@@ -469,19 +472,65 @@ public sealed class BuildServiceTests
         var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
 
+        // Whole on the machine that ran the build, written the way CMake writes it.
+        var recorded = temp.Combine("toolchain", "bin", "ninja").Replace('\\', '/');
+
         Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
         await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
-            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path}\nCMAKE_MAKE_PROGRAM:FILEPATH=/opt/arm/bin/ninja\n",
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path}\nCMAKE_MAKE_PROGRAM:FILEPATH={recorded}\n",
             cancellationToken);
 
         var dependencies = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
 
         _ = await Service(factory, exitCode: 0, dependencies).BuildAsync(Config(), request, cancellationToken);
 
-        Assert.Equal("/opt/arm/bin/ninja", Assert.Single(dependencies.Started).FileName);
+        Assert.Equal(recorded, Assert.Single(dependencies.Started).FileName);
+    }
+
+    /// <summary>
+    /// A relative program the build recorded is read from the build directory, where the check starts,
+    /// never from wherever this process began.
+    /// </summary>
+    [Fact]
+    public async Task ARelativeRecordedNinja_IsReadFromTheBuildDirectory()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = temp.Combine("build", "x86_64-gcc-debug");
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, TestContext.Current.CancellationToken);
+
+        var runner = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
+            .CheckAsync(buildDirectory, [], "tools/ninja", TestContext.Current.CancellationToken);
+
+        Assert.Equal(Path.Combine(buildDirectory, "tools", "ninja"), Assert.Single(runner.Started).FileName);
+    }
+
+    /// <summary>
+    /// A check that could not start says so as a check that did not run - never as the build failing,
+    /// and never as a pass.
+    /// </summary>
+    [Fact]
+    public async Task ADependencyCheckThatCouldNotStart_IsACheckThatDidNotRun()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = temp.Combine("build", "x86_64-gcc-debug");
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, TestContext.Current.CancellationToken);
+
+        var runner = Substitute.For<IProcessRunner>();
+        runner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ProgramStartException("/opt/arm/bin/ninja", "'/opt/arm/bin/ninja' could not be started: Text file busy"));
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
+            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.CommandFailed, failure.ExitCode);
+        Assert.Contains("could not be started", failure.Message, StringComparison.Ordinal);
     }
 
     /// <summary>Answers every program with <paramref name="output"/>, recording what it was asked to start.</summary>

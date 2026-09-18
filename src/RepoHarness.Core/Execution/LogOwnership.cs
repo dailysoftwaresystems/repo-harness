@@ -199,15 +199,25 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
 
         var file = OwnerFile(logDirectory);
 
-        MachineWideFile.Update<object?>(file, UpdateWindow, () =>
+        // Given up once the run is over, so a failure here is said and never stands in for what the
+        // run found: the record names this process, and is reclaimed as a dead owner's is once it
+        // has ended.
+        try
         {
-            if (Read(file) is { } existing && Mine(existing, runId))
+            MachineWideFile.Update<object?>(file, UpdateWindow, () =>
             {
-                _fileSystem.DeleteFile(file);
-            }
+                if (Read(file) is { } existing && Mine(existing, runId))
+                {
+                    _fileSystem.DeleteFile(file);
+                }
 
-            return null;
-        });
+                return null;
+            });
+        }
+        catch (Exception ex) when (ex is HarnessException or IOException or UnauthorizedAccessException)
+        {
+            _output.Warn(CommandName, $"'{logDirectory}' could not be given up: {ex.Message} It is reclaimed once this run has ended.");
+        }
 
         return Task.CompletedTask;
     }
@@ -241,7 +251,7 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
             // that lets two runs write one set of logs.
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"The log owner file '{file}' could not be read: {ex.Message}. Remove it once no run is using that path.",
+                $"The log owner file '{file}' could not be read: {ex.Message.TrimEnd('.')}. Remove it once no run is using that path.",
                 ex);
         }
     }

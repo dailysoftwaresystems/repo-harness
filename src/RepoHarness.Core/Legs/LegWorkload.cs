@@ -14,7 +14,9 @@ namespace RepoHarness.Core.Legs;
 /// </param>
 /// <param name="Test">Whether the leg's tests are run: its test runner.</param>
 /// <param name="Programs">
-/// What else the command starts on every leg, such as the steps of the runner <c>run</c> was given.
+/// What else the command starts on every leg that its host must have, such as the steps of the
+/// runner <c>run</c> was given; one started under an environment that sets PATH goes to
+/// <see cref="UnderOwnPath"/> instead.
 /// </param>
 /// <remarks>
 /// Said by each command rather than assumed for all of them. Asked what a leg needs in general, a

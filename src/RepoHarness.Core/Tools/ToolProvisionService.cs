@@ -7,6 +7,7 @@ using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Secrets;
 
 namespace RepoHarness.Core.Tools;
@@ -117,10 +118,37 @@ public sealed class ToolProvisionService(
 
         if (opened.Connection is not { } connection)
         {
-            _output.Warn(CommandName, $"{host} could not be reached: {opened.Problem}");
-            return new LegProvision { Leg = string.Empty, Host = host, Unreachable = opened.Problem };
+            return Unreachable(host, opened.Problem!);
         }
 
+        try
+        {
+            return await ProvisionConnectedAsync(host, connection, opened, config, context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
+        {
+            // Its transport stopped starting part way through: this host is named, and the others
+            // are still provisioned.
+            return Unreachable(host, reason);
+        }
+    }
+
+    /// <summary>A host that could not be reached, named, and what provisioning it reports.</summary>
+    private LegProvision Unreachable(HostId host, string reason)
+    {
+        _output.Warn(CommandName, $"{host} could not be reached: {reason}");
+        return new LegProvision { Leg = string.Empty, Host = host, Unreachable = reason };
+    }
+
+    /// <summary>Provisions a host that was reached.</summary>
+    private async Task<LegProvision> ProvisionConnectedAsync(
+        HostId host,
+        HostConnection connection,
+        HostConnectionResult opened,
+        HarnessConfig config,
+        HarnessContext context,
+        CancellationToken cancellationToken)
+    {
         var outcomes = new List<ToolOutcome>();
         var superuser = new Superuser(host, opened.Superuser, ItemEnvFile(context.Layout, host));
 
@@ -583,8 +611,8 @@ public sealed class ToolProvisionService(
         }
         catch (Exception ex) when (ex is ArgumentException or ExecutableNotFoundException)
         {
-            // A token no shell reads literally, or a transport that is not installed here: reported as
-            // what the command did, because either way the program on the host never ran.
+            // A token no shell reads literally, or a program of this machine's own that is not
+            // installed: reported as what the command did, because either way the program never ran.
             return new ProcessResult(-1, string.Empty, ex.Message, TimeSpan.Zero, TimedOut: false);
         }
     }

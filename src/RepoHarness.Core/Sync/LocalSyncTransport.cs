@@ -340,7 +340,7 @@ public sealed class LocalSyncTransport(
     /// </remarks>
     internal static string Home(string root)
     {
-        if (root != "~" && !root.StartsWith("~/", StringComparison.Ordinal) && !root.StartsWith(@"~\", StringComparison.Ordinal))
+        if (root != "~" && !PlatformPaths.IsHomeRelative(root))
         {
             return root;
         }

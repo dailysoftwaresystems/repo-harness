@@ -6,10 +6,10 @@ using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Core.Legs;
 
-/// <summary>Where a leg runs, or why no host can run it.</summary>
+/// <summary>Where a leg runs, or why it does not: no host can take it, or the one it went to lacks what it needs.</summary>
 /// <param name="Leg">The leg.</param>
-/// <param name="Host">The host that runs it, or <see langword="null"/> when none can.</param>
-/// <param name="Reason">Why no host can run it, when none can.</param>
+/// <param name="Host">The host that runs it, or <see langword="null"/> when it does not run.</param>
+/// <param name="Reason">Why it does not run, when it does not.</param>
 public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Reason)
 {
     /// <summary>Whether a host can run the leg.</summary>
@@ -84,6 +84,16 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// ran on the day before, because somebody had installed a tool there. Every command places a leg
     /// where a copy of its tree goes, and a program that host lacks is said to be missing there. To
     /// run a leg on another host, the leg names that host.
+    /// <para>
+    /// The machine is asked about before its programs, because a host that is the wrong machine
+    /// should say so. Told instead that cmake is missing on a Windows host being considered for a
+    /// Linux leg, a reader would go and install cmake on a machine the leg will never run on.
+    /// </para>
+    /// <para>
+    /// A host running a leg for the machine that dispatched it - <paramref name="here"/> - names
+    /// no candidate in its reasons: it is the only one, and the name it has for itself is not the
+    /// name the machine that reads the reason knows it by.
+    /// </para>
     /// </remarks>
     public static LegPlacement Place(
         HarnessConfig config,
@@ -106,34 +116,21 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 continue;
             }
 
+            var at = here ? string.Empty : $"{candidate}: ";
+
             if (PlatformObstacle(selected.Leg, report) is { } passedOver)
             {
-                reasons.Add($"{candidate}: {passedOver}");
+                reasons.Add(at + passedOver);
                 continue;
             }
 
-            return Refusal(selected.Leg, LegPrograms.For(config, selected.Leg, workload), report) is { } refused
-                ? new LegPlacement(selected, null, $"{candidate}: {refused.Reason}") { Verdict = refused.Verdict }
+            return MissingPrograms(LegPrograms.For(config, selected.Leg, workload), report) is { } refused
+                ? new LegPlacement(selected, null, at + refused.Reason) { Verdict = refused.Verdict }
                 : new LegPlacement(selected, report, null);
         }
 
         return new LegPlacement(selected, null, reasons.Count == 0 ? "no host was measured for it" : string.Join("; ", reasons));
     }
-
-    /// <summary>
-    /// Why <paramref name="host"/> turns <paramref name="leg"/> away, and what a run records for
-    /// that, or <see langword="null"/> when it takes the leg. The one decision placing a leg and
-    /// asking about one host both read, so the two cannot come to disagree about a host.
-    /// </summary>
-    /// <remarks>
-    /// The machine is asked about before its programs, because a host that is the wrong machine
-    /// should say so. Told instead that cmake is missing on a Windows host being considered for a
-    /// Linux leg, a reader would go and install cmake on a machine the leg will never run on.
-    /// </remarks>
-    private static (string Reason, LegVerdict Verdict)? Refusal(LegConfig leg, IReadOnlyList<string> programs, HostReport host)
-        => PlatformObstacle(leg, host) is { } platform
-            ? (platform, LegVerdict.SkippedUnavailable)
-            : MissingPrograms(programs, host);
 
     /// <summary>
     /// What stops <paramref name="host"/> from taking <paramref name="leg"/> at all, before its

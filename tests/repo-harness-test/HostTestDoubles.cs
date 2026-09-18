@@ -20,6 +20,9 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
+    /// <summary>What the ssh shell probe raises instead of answering, when set: ssh that would not start.</summary>
+    public Exception? ShellProbeRaises { get; set; }
+
     /// <summary>What asking WSL for its default distribution answers; by default, WSL is not expected to be asked.</summary>
     public Func<ProcessResult> DefaultWslDistribution { get; set; }
         = () => throw new InvalidOperationException("WSL was not expected to be asked for its default distribution.");
@@ -69,7 +72,7 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             _shellProbes.Add(connection);
         }
 
-        return Task.FromResult(ShellProbe);
+        return ShellProbeRaises is { } raised ? Task.FromException<ProcessResult>(raised) : Task.FromResult(ShellProbe);
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -188,6 +191,22 @@ internal static class HostResults
 
     public static InvalidOperationException Unexpected(HostCommand command)
         => new($"The host was not expected to run '{command.Program} {string.Join(' ', command.Arguments)}'.");
+
+    /// <summary>What the runner that starts a host's transport raises when wsl.exe or ssh would not start.</summary>
+    public static Core.Results.HarnessException TransportWouldNotStart(HostId host)
+    {
+        var start = TransportStart(host);
+
+        return new(Core.Results.HarnessExit.HostUnavailable, $"{host} could not be reached: {start.Message}", start);
+    }
+
+    /// <summary>Why the transport that reaches <paramref name="host"/> would not start, in the words the system gives.</summary>
+    public static ProgramStartException TransportStart(HostId host)
+    {
+        var transport = host.Kind == HostKind.Wsl ? "wsl" : "ssh";
+
+        return new(transport, $"'{transport}' could not be started: The file cannot be accessed by the system.");
+    }
 
     /// <summary>
     /// What the DssHarness on a host does with a run request: passes on what the command wrote to standard

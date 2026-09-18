@@ -277,11 +277,14 @@ public sealed class ProcessRunnerTests
         using var temp = new TempDirectory();
         var missing = temp.Combine("gone");
 
-        var exception = await Assert.ThrowsAsync<DirectoryNotFoundException>(() => CreateRunner().RunAsync(
+        // The program could not start, which every reader names: a leg already running fails, and
+        // a command ends as one whose program never ran - and never as a missing executable.
+        var exception = await Assert.ThrowsAsync<ProgramStartException>(() => CreateRunner().RunAsync(
             TestHost.ChildRequest("exit", "0") with { WorkingDirectory = missing },
             TestContext.Current.CancellationToken));
 
         Assert.Contains(missing, exception.Message, StringComparison.Ordinal);
+        Assert.Contains("working directory", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
