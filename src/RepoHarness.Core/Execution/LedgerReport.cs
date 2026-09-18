@@ -100,6 +100,50 @@ public sealed class LedgerReport
             : HarnessExit.Incomplete;
     }
 
+    /// <summary>
+    /// The one line that says how this run ended: interrupted, a failing verdict, legs that did no
+    /// work, or a plain pass.
+    /// </summary>
+    /// <param name="cancelled">Whether the run was interrupted before it finished.</param>
+    /// <param name="unfinished">The legs still running when it stopped.</param>
+    /// <remarks>
+    /// Derived the way <see cref="ExitCodeGiven"/> is and beside it, so the line and the code can
+    /// never describe two different runs. Composed here rather than by each caller because a
+    /// caller that composed it on one branch only is exactly how a failing run came to print
+    /// <c>FAIL - </c> with nothing after it: the table said why and the JSON branch said nothing,
+    /// and a host is always asked for JSON, so every failure on another machine read that way.
+    /// </remarks>
+    public string Summarize(bool cancelled, IReadOnlyList<string> unfinished)
+    {
+        ArgumentNullException.ThrowIfNull(unfinished);
+
+        if (cancelled)
+        {
+            // Not a red verdict. A caller reading a failure code for an interrupted run would
+            // report the code as broken when nothing reached a verdict at all.
+            return $"interrupted after {Lines.Count} leg(s)";
+        }
+
+        if (!Passed)
+        {
+            return $"{Verdicts.Display(Verdict)}: {Lines.Count} leg(s) reported";
+        }
+
+        if (ExitCodeGiven(cancelled, unfinished) == HarnessExit.Success)
+        {
+            return $"{Lines.Count} leg(s) passed";
+        }
+
+        // A leg that did no work is not a leg that passed. Nothing failed, so this is not a red
+        // run; but an unqualified success would put "OK - 8 leg(s) passed" in front of a reader
+        // when none of those eight ran, which is the one thing a gate reads. The legs are named,
+        // because which of them went unreported is the first thing to ask.
+        var withoutWork = WithoutVerdict.Select(line => line.Leg).Concat(unfinished).ToList();
+
+        return $"{Reported} of {Lines.Count} leg(s) passed; "
+            + $"{withoutWork.Count} did no work: {string.Join(", ", withoutWork)}";
+    }
+
     /// <summary>Whether every leg reached a verdict that is not a failure.</summary>
     public bool Passed => !Lines.Any(line => Verdicts.IsFailure(line.Verdict));
 

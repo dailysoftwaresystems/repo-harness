@@ -436,6 +436,45 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A run that did not succeed says why on its FAIL line whether or not --json was asked for.
+    /// The JSON branch composed no message at all, so it printed "FAIL - " and nothing after the
+    /// dash - and a host is always asked for JSON, so every failure on another machine read that
+    /// way on the machine that sent it.
+    /// </summary>
+    [Fact]
+    public async Task ARunThatDidNotSucceed_SaysWhyOnItsFailLine_WithOrWithoutJson()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+        var token = TestContext.Current.CancellationToken;
+
+        var table = await CliRunner.RunAsync(["run", "probe", "--legs", "native,elsewhere", "-C", temp.Path], token);
+        var json = await CliRunner.RunAsync(["run", "probe", "--legs", "native,elsewhere", "--json", "-C", temp.Path], token);
+
+        const string Expected = "run: FAIL - 1 of 2 leg(s) passed; 1 did no work: elsewhere";
+
+        Assert.Equal(HarnessExit.Incomplete, table.ExitCode);
+        Assert.Equal(HarnessExit.Incomplete, json.ExitCode);
+        Assert.Contains(Expected, table.StandardError, StringComparison.Ordinal);
+        Assert.Contains(Expected, json.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The description names where worktrees go by default and that configuration may move them,
+    /// rather than stating the default as the only place: a repository that sets worktrees.root
+    /// was told, by the command it runs, somewhere its worktrees are not.
+    /// </summary>
+    [Fact]
+    public async Task CreateWorktree_DescribesTheRootAsTheDefault_NotAsTheOnlyPlace()
+    {
+        var result = await CliRunner.RunAsync(["create-worktree", "--help"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains(WorktreeSettings.DefaultRoot, result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("worktrees.root", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// B2's whole point is that a green nobody earned must not be reported, and the JSON ledger is
     /// the machine-readable half of that — the half a gate actually parses.
     /// </summary>

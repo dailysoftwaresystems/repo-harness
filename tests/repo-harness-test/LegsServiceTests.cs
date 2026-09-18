@@ -159,8 +159,38 @@ public sealed class LegsServiceTests
         var outcome = LegsReports.Render(report, json: false);
 
         Assert.Equal(HarnessExit.Incomplete, outcome.ExitCode);
-        Assert.Contains("did not answer", outcome.Message, StringComparison.Ordinal);
-        Assert.Contains("ssh vps", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh vps (the connection was refused)", outcome.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that answered and turned out unable to run legs is named with what it answered, and
+    /// never said to have been silent. One verb for every host with a reason is how a host busy
+    /// with a run read as unreachable in the one line a log reader sees, while the reason that
+    /// said otherwise sat on a line of its own further up.
+    /// </summary>
+    [Fact]
+    public void AHostThatAnsweredButCannotRunLegs_IsNamedWithItsOwnReason_NotAsSilent()
+    {
+        var report = new LegsReport(
+            [new LegPlacement(new SelectedLeg("a", HostDoubles.Leg("linux", "x86_64")), Reachable, Reason: null)],
+            [
+                new HostReport { Host = HostId.Local, Os = "linux", Processor = "x86_64" },
+                new HostReport
+                {
+                    Host = HostId.Wsl("Ubuntu"),
+                    Reason = "DssHarness needs the .NET 10 SDK there, and it has 8.0.100",
+                },
+            ],
+            Named: false);
+
+        var outcome = LegsReports.Render(report, json: false);
+
+        Assert.Equal(HarnessExit.Incomplete, outcome.ExitCode);
+        Assert.Contains(
+            "wsl Ubuntu (DssHarness needs the .NET 10 SDK there, and it has 8.0.100)",
+            outcome.Message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("did not answer", outcome.Message, StringComparison.Ordinal);
     }
 
     /// <summary>Every host answering is an unqualified OK, which is the whole point of the other one.</summary>

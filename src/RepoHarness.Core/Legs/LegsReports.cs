@@ -114,10 +114,16 @@ public static class LegsReports
 
         if (report.Passed)
         {
+            // Each host is named with its own reason rather than under one verb for all of them.
+            // "Did not answer" was said of every host with a reason, including one that answered
+            // and turned out to need a newer SDK, and one that was never asked because its
+            // connection data is missing - so a host busy with a run read as unreachable, and
+            // nothing on this line could say which. Only the reason knows the cause, so the line
+            // carries it rather than a class this file would have to guess from the wording.
             return silent.Count == 0
                 ? counted
-                : $"{counted}; {silent.Count} host(s) did not answer, so this survey is incomplete: "
-                    + string.Join(", ", silent.Select(host => host.Host.ToString()));
+                : $"{counted}; {silent.Count} host(s) cannot take legs, so this survey is incomplete: "
+                    + string.Join("; ", silent.Select(host => $"{host.Host} ({host.Reason})"));
         }
 
         return runnable == 0

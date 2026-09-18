@@ -262,6 +262,45 @@ public sealed class LedgerReportTests
         Assert.All(lines, line => Assert.StartsWith("test: win-msvc-release: ", line, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The line says how the run ended in every case where the code does not, so a FAIL line can
+    /// never be the three characters after it and nothing else. Asserted over every shape a run
+    /// can end in rather than over one, because a message composed per branch is exactly how one
+    /// branch came to compose none.
+    /// </summary>
+    [Theory]
+    [InlineData(LegVerdict.Failed, false, "", "failed: 2 leg(s) reported")]
+    [InlineData(LegVerdict.InputsMoved, false, "", "inputs-moved: 2 leg(s) reported")]
+    [InlineData(LegVerdict.Poisoned, false, "", "poisoned: 2 leg(s) reported")]
+    [InlineData(LegVerdict.SkippedToolMissing, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
+    [InlineData(LegVerdict.SkippedUnavailable, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
+    [InlineData(LegVerdict.Passed, false, "c", "2 of 2 leg(s) passed; 1 did no work: c")]
+    [InlineData(LegVerdict.Passed, true, "", "interrupted after 2 leg(s)")]
+    [InlineData(LegVerdict.Passed, false, "", "2 leg(s) passed")]
+    public void Summarize_SaysHowTheRunEnded_WhateverItsShape(
+        LegVerdict second,
+        bool cancelled,
+        string unfinished,
+        string expected)
+    {
+        var report = LedgerReport.From(
+            [
+                Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("b", second, TimeSpan.FromSeconds(1), string.Empty),
+            ],
+            durationWarningFactor: 0);
+
+        IReadOnlyList<string> left = unfinished.Length == 0 ? [] : [unfinished];
+
+        Assert.Equal(expected, report.Summarize(cancelled, left));
+
+        // And a run that did not succeed always has something to say for itself.
+        if (report.ExitCodeGiven(cancelled, left) != HarnessExit.Success)
+        {
+            Assert.NotEqual(string.Empty, report.Summarize(cancelled, left));
+        }
+    }
+
     private static LegEntry Entry(string leg, LegVerdict verdict, TimeSpan duration, string detail, params PhaseRecord[] phases) => new()
     {
         Leg = leg,

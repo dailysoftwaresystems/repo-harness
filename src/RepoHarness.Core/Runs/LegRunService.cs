@@ -338,13 +338,18 @@ public sealed class LegRunService(
     {
         var report = ledger.Build(context.Config.Defaults.DurationWarningFactor);
 
+        // One code and one line, whichever form the ledger is shown in. Deciding them per branch
+        // is how the JSON branch came to report a failing run with an empty line: a host is always
+        // asked for JSON, so every failure on another machine read as `FAIL - ` and nothing else.
+        var exitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
+        var message = report.Summarize(execution.Cancelled, execution.Unfinished);
+
         if (json)
         {
-            return CommandOutcome.Ok(string.Empty, null) with
+            return new CommandOutcome(exitCode, message)
             {
                 Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
                 Quiet = true,
-                ExitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished),
             };
         }
 
@@ -355,44 +360,6 @@ public sealed class LegRunService(
             details.Add($"left unfinished: {string.Join(", ", execution.Unfinished)}");
         }
 
-        if (execution.Cancelled)
-        {
-            // Not a red verdict. A caller reading a failure code for an interrupted run would
-            // report the code as broken when nothing reached a verdict at all.
-            return CommandOutcome.Failed(
-                HarnessExit.Cancelled,
-                $"interrupted after {report.Lines.Count} leg(s)",
-                details);
-        }
-
-        if (!report.Passed)
-        {
-            return CommandOutcome.Failed(
-                report.ExitCode,
-                $"{Verdicts.Display(report.Verdict)}: {report.Lines.Count} leg(s) reported",
-                details);
-        }
-
-        // A leg that did no work is not a leg that passed. Nothing failed here, so this is not a
-        // red run; but reporting it as an unqualified success would put "OK - 8 leg(s) passed" in
-        // front of a reader when none of those eight ran, which is the one thing a gate reads. The
-        // legs are named, because which of them went unreported is the first thing to ask.
-        // Asked about legs that did no work, or left running when the run stopped: neither is a
-        // failure, and neither is a pass. Decided by the same derivation the JSON uses, so a reader
-        // and a script are never told different things about one run.
-        var code = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
-
-        if (code != HarnessExit.Success)
-        {
-            var withoutWork = report.WithoutVerdict.Select(line => line.Leg).Concat(execution.Unfinished).ToList();
-
-            return CommandOutcome.Failed(
-                code,
-                $"{report.Reported} of {report.Lines.Count} leg(s) passed; "
-                + $"{withoutWork.Count} did no work: {string.Join(", ", withoutWork)}",
-                details);
-        }
-
-        return CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details);
+        return new CommandOutcome(exitCode, message, details);
     }
 }
