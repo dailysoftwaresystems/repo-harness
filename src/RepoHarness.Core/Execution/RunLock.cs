@@ -373,24 +373,9 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
         });
     }
 
-    /// <summary>
-    /// Does <paramref name="write"/>, and refuses when the lock file could not be written: a lock
-    /// file nobody can update stops every run on every tree alike, and is no defect in this tool.
-    /// </summary>
+    /// <summary>Does <paramref name="write"/>, and refuses, naming the lock file, when it could not be done.</summary>
     private static void Written(string path, Action write)
-    {
-        try
-        {
-            write();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            throw new HarnessException(
-                HarnessExit.Refused,
-                $"The run lock '{path}' could not be written: {ex.Message.TrimEnd('.')}. Until it can be, one run cannot be told from another.",
-                ex);
-        }
-    }
+        => MachineWideFile.Written($"The run lock '{path}'", "Until it can be, one run cannot be told from another.", write);
 
     private IReadOnlyList<LockEntry> ReadFile(string path)
     {

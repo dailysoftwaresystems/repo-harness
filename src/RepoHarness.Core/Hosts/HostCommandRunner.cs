@@ -150,7 +150,7 @@ public interface IHostCommandRunner
     /// Asks WSL which distribution is its default, by running <c>printenv WSL_DISTRO_NAME</c> in it: the
     /// distribution answers with its own name.
     /// </summary>
-    /// <exception cref="ExecutableNotFoundException">wsl.exe is not installed.</exception>
+    /// <exception cref="HarnessException">wsl.exe would not start, so WSL could not be reached.</exception>
     Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
 }
 

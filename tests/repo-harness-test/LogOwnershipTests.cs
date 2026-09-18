@@ -162,6 +162,42 @@ public sealed class LogOwnershipTests
         Assert.Contains("could not be given up", factory.StandardError.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A log path that cannot be claimed - its directory cannot be made, or its owner file cannot be
+    /// written - is a refusal naming the file, never an error that reads as a defect in this tool.
+    /// The claim is the first thing a run writes, so this is where a runs directory an earlier run
+    /// under sudo left to root is met.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ALogPathThatCannotBeClaimed_IsARefusal_NamingTheOwnerFile(bool directoryIsAFile)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "blocked");
+
+        if (directoryIsAFile)
+        {
+            temp.WriteFile("runs", "not a directory");
+        }
+        else
+        {
+            // The owner file replaced by a directory: nothing can be written where it goes.
+            Directory.CreateDirectory(LogOwnership.OwnerFile(directory));
+        }
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
+            directory,
+            RunId.New(),
+            cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("The log owner file", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("could not be written", refusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARunReclaimsItsOwnLogPath()
     {

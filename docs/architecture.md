@@ -908,9 +908,10 @@ while their sources are being replaced. A lock is released only by the run that 
   host it is the only way out of an id that has come back around to something live,
   which would otherwise hold a tree until the file was edited by hand. It takes the log
   path with it, for the same reason.
-- A lock file that cannot be read or written refuses the run, exit 13, naming the file. It
-  stops every run on every tree alike, so it is never reported as each leg being locked by a
-  run that does not exist.
+- A lock file, or the file that records who owns a run's logs, that cannot be read or written
+  refuses the run, exit 13, naming the file - a runs directory an earlier run under sudo left to
+  root is the usual cause. It stops every run on every tree alike, so it is never reported as
+  each leg being locked by a run that does not exist, nor as a defect in this tool.
 - A lock, or a log path, that cannot be given up once its work is done is a warning naming it,
   and the work's verdict stands. The entry names a process that has ended, and is reclaimed as
   a dead holder's is.

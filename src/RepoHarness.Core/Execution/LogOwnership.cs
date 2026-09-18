@@ -144,7 +144,11 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
         cancellationToken.ThrowIfCancellationRequested();
 
         var file = OwnerFile(logDirectory);
-        _fileSystem.CreateDirectory(Path.GetDirectoryName(file)!);
+
+        // Claimed before anything else a run writes, so a directory this user cannot write - one an
+        // earlier run under sudo left to root - is refused here, naming it, rather than escaping as
+        // an error that reads as a defect in this tool.
+        Written(file, () => _fileSystem.CreateDirectory(Path.GetDirectoryName(file)!));
 
         var claim = MachineWideFile.Update(file, UpdateWindow, () =>
         {
@@ -177,7 +181,7 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
                 runId.Value,
                 DateTimeOffset.UtcNow);
 
-            _fileSystem.WriteAllTextAtomic(file, JsonSerializer.Serialize(owner, JsonOptions) + "\n");
+            Written(file, () => _fileSystem.WriteAllTextAtomic(file, JsonSerializer.Serialize(owner, JsonOptions) + "\n"));
             return new LogClaim(true, owner, file);
         });
 
@@ -221,6 +225,10 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
 
         return Task.CompletedTask;
     }
+
+    /// <summary>Does <paramref name="write"/>, and refuses, naming the owner file, when it could not be done.</summary>
+    private static void Written(string file, Action write)
+        => MachineWideFile.Written($"The log owner file '{file}'", "Until it can be, two runs could write one set of logs.", write);
 
     /// <summary>
     /// The run that owns <paramref name="logDirectory"/>, or <see langword="null"/> when none does.

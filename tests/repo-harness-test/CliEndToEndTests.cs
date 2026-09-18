@@ -748,6 +748,38 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A runs directory nobody can write - an earlier run under sudo left it to root - refuses the
+    /// run, exit 13, naming the file it could not write, and still answers --json with the ledger.
+    /// Escaping as an error, it read as exit 70, a defect in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ARunsDirectoryNobodyCanWrite_RefusesTheRun_NamingIt()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        await PrepareRunnerAsync(temp);
+
+        var runs = temp.Combine(".harness-config", "runs");
+
+        if (Directory.Exists(runs))
+        {
+            Directory.Delete(runs, recursive: true);
+        }
+
+        await File.WriteAllTextAsync(runs, "not a directory", token);
+
+        var result = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Refused, result.ExitCode);
+        Assert.Contains("could not be written", result.StandardError, StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+
+        Assert.Equal(HarnessExit.Refused, document.RootElement.GetProperty("exitCode").GetInt32());
+    }
+
+    /// <summary>
     /// A repository with one leg this machine can run and one no host can, and a runner that does
     /// something trivial on whichever of them runs.
     /// </summary>
