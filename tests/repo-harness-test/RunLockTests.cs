@@ -39,6 +39,93 @@ public sealed class RunLockTests
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), $"the refusal took {watch.Elapsed}");
     }
 
+    /// <summary>
+    /// A lock another run holds is an answer, returned as one and written nowhere, which a caller can
+    /// turn into a verdict for the legs on that tree; a lock file nobody can use is not, and is still
+    /// raised, since it stops every run on every tree alike.
+    /// </summary>
+    [Fact]
+    public async Task AHeldLock_IsAnAnswer_AndALockFileNobodyCanUse_IsNot()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        await using (var held = await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken))
+        {
+            var before = File.ReadAllText(layout.LockFile);
+
+            var attempt = await runLock.TryAcquireAsync(layout, Request(LockScope.TreeExclusive, "build"), TestContext.Current.CancellationToken);
+
+            Assert.Null(attempt.Handle);
+            Assert.Contains(held.Entry.Holder.RunId, attempt.HeldBy, StringComparison.Ordinal);
+            Assert.Equal(before, File.ReadAllText(layout.LockFile));
+        }
+
+        File.WriteAllText(layout.LockFile, "not a lock file");
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.TryAcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "build"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+
+        // The parser's reason is joined into the sentence, not closed twice.
+        Assert.DoesNotContain("..", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A lock file that cannot be written stops every run on every tree alike: raised as the refusal
+    /// it is, naming the file, rather than escaping as an error the leg executor records as a defect
+    /// in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ALockFileThatCannotBeWritten_IsARefusal_NamingIt()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+
+        // Where the directory holding the lock file belongs, a file: nothing can be written there.
+        temp.WriteFile(".harness-config", "not a directory");
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.TryAcquireAsync(
+            Layout(temp),
+            Request(LockScope.TreeExclusive, "build"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("could not be written", refusal.Message, StringComparison.Ordinal);
+
+        // The system's reason is joined into the sentence, not closed twice.
+        Assert.DoesNotContain("..", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A lock that could not be given up is said, and never stands in for the verdict of the work it
+    /// guarded: the entry names this process, and is reclaimed once this run has ended.
+    /// </summary>
+    [Fact]
+    public async Task ALockThatCouldNotBeReleased_IsSaid_AndNotRaised()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        var handle = (await runLock.TryAcquireAsync(layout, Request(LockScope.TreeExclusive, "build"), TestContext.Current.CancellationToken)).Handle!;
+
+        // The lock file replaced by a directory: nothing can be written where it was.
+        File.Delete(layout.LockFile);
+        Directory.CreateDirectory(layout.LockFile);
+
+        await handle.DisposeAsync();
+
+        Assert.Contains("could not be released", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARecycledProcessId_IsNotMistakenForALiveHolder()
     {
@@ -436,5 +523,23 @@ public sealed class RunLockTests
             + "\"holder\": { \"machine\": \"" + machine + "\", \"processId\": " + id + ", "
             + stampField + "\"runId\": \"20250101-120000-deadbeef\", "
             + "\"takenUtc\": \"" + taken + "\", \"command\": \"test\" } }";
+    }
+}
+
+/// <summary>
+/// Takes a lock, or refuses naming its holder: how these tests ask for one, where a held lock is the
+/// refusal a test is about.
+/// </summary>
+internal static class RunLockTaking
+{
+    public static async Task<RunLockHandle> AcquireAsync(
+        this RunLock runLock,
+        HarnessLayout layout,
+        LockRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var attempt = await runLock.TryAcquireAsync(layout, request, cancellationToken);
+
+        return attempt.Handle ?? throw new HarnessException(HarnessExit.Refused, attempt.HeldBy!);
     }
 }

@@ -129,6 +129,112 @@ public sealed class HostInspectorTests
         Assert.Contains("could not be established", report.Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A host that answered, and could not look everywhere it was told to, gives the search's own
+    /// reason - which running again does not change, so nothing tells the reader to.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatCouldNotLookEverywhereForDotnet_SaysWhy_AndSendsNobodyToRunAgain()
+    {
+        var host = HostThat(dotnet: Where.OffPath);
+
+        using var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Program == "pwd"
+                ? HostResults.Failed(1, "pwd: cannot read")
+                : host(connection, command));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains("could not be established: 'dotnet' is not on the PATH there, and '~/.dotnet'", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("because its home directory could not be read", report.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("run again", report.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that did not answer while its SDK was looked for leaves no reason of the search's own,
+    /// and running again may well change that: the reader is told so.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatStoppedAnsweringWhileDotnetWasLookedFor_SaysToRunAgain()
+    {
+        var host = HostThat(dotnet: Where.OffPath);
+
+        using var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Program == "pwd"
+                ? new ProcessResult(-1, string.Empty, string.Empty, TimeSpan.FromMinutes(2), TimedOut: true)
+                : host(connection, command));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains("the host did not answer when asked where 'dotnet' is; run again once it does", report.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host whose transport would not start is one host that cannot take legs, in the transport's
+    /// own words - whether it failed on the first command or part way through - never an end to the
+    /// whole survey, which took every leg on every other host with it.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseTransportWouldNotStart_IsUnavailable_AndTheSurveyGoesOn()
+    {
+        using var atConnect = new Fixture(PlatformId.Windows, respond: (_, _) => throw HostResults.TransportWouldNotStart(HostId.Wsl(Distro)));
+
+        var refused = await atConnect.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.False(refused.Available);
+        Assert.Equal("'wsl' could not be started: The file cannot be accessed by the system.", refused.Reason);
+
+        var host = HostThat();
+
+        using var partWay = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Arguments.Contains("--list-sdks")
+                ? throw HostResults.TransportWouldNotStart(HostId.Wsl(Distro))
+                : host(connection, command));
+
+        var stopped = await partWay.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.False(stopped.Available);
+        Assert.Equal("'wsl' could not be started: The file cannot be accessed by the system.", stopped.Reason);
+
+        // And ssh, whose first command is the probe that learns its shell.
+        using var ssh = new Fixture(PlatformId.Windows);
+        ssh.Commands.ShellProbeRaises = HostResults.TransportWouldNotStart(HostId.Ssh(SshName));
+
+        var unreached = await ssh.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(unreached.Available);
+        Assert.Equal("'ssh' could not be started: The file cannot be accessed by the system.", unreached.Reason);
+    }
+
+    /// <summary>
+    /// Two programs whose names differ only in case are two files on Linux, and the host's answer
+    /// about both is kept whole: read into a map that ignored case, it was refused, and every leg on
+    /// the host read as unavailable.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerAboutProgramsDifferingOnlyInCase_KeepsBoth()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: _ => HostResults.Ok(JsonSerializer.Serialize(
+            new HostAgentInfo
+            {
+                Version = Root.Version,
+                AssemblySha256 = "roothash",
+                Os = "linux",
+                Processor = "x86_64",
+                Programs = [new("cmake", ProgramFound.OnPath, "/usr/bin/cmake"), new("CMake", ProgramFound.Nowhere)],
+            },
+            HostAgentProtocol.JsonOptions))));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(ProgramFound.OnPath, report.Programs["cmake"].Found);
+        Assert.Equal(ProgramFound.Nowhere, report.Programs["CMake"].Found);
+    }
+
     [Fact]
     public async Task AnSdkOlderThanTheToolNeeds_IsNamed()
     {
@@ -492,6 +598,22 @@ public sealed class HostInspectorTests
         Assert.Equal("windows", report.Os);
     }
 
+    /// <summary>
+    /// cmd is Windows's own shell, whose installers put the SDK on the machine PATH, and no POSIX
+    /// directory is one a Windows host has. So nothing was left unlooked: an SDK on no PATH there is
+    /// missing, with the fix named, rather than unknown for directories that were never its.
+    /// </summary>
+    [Fact]
+    public async Task Ssh_ToACmdShellWithoutDotnetOnItsPath_SaysTheSdkIsNotInstalled()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat(dotnet: Where.Nowhere, answeredOs: "windows"));
+        fixture.Commands.ShellProbe = HostResults.Ok("C:\\WINDOWS\\system32\\cmd.exe\r\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.StartsWith("the .NET 10 SDK is not installed there", report.Reason, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Ssh_ToAWindowsHostWhoseShellIsNotCmd_IsStillTreatedAsWindows()
     {
@@ -642,10 +764,15 @@ public sealed class HostInspectorTests
             _context = new HarnessContext(new HarnessLayout(Repository.Path, Repository.Path), config);
 
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
-            var agent = new HostAgentService(platform, identity, new EmulatorProbe(platform, processRunner, fileSystem), fileSystem);
+            var agent = new HostAgentService(
+                platform,
+                identity,
+                new EmulatorProbe(platform, processRunner, fileSystem),
+                fileSystem,
+                new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
             var addresses = new HostAddressResolver(new FixedLookup(resolves), TimeProvider.System, TimeSpan.Zero);
-            var programs = new HostProgramResolver(processRunner, Commands);
+            var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
             var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
 
             _inspector = new HostInspector(Commands, connector, identity, agent);
@@ -657,11 +784,15 @@ public sealed class HostInspectorTests
 
         public IFilePermissions Permissions { get; }
 
-        public Task<HostReport> InspectAsync(HostId host, IReadOnlyDictionary<string, EmulatorConfig>? emulators = null)
+        public Task<HostReport> InspectAsync(
+            HostId host,
+            IReadOnlyDictionary<string, EmulatorConfig>? emulators = null,
+            IReadOnlyList<string>? programs = null)
             => _inspector.InspectAsync(
                 _context,
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
+                programs ?? [],
                 TestContext.Current.CancellationToken);
 
         public void Dispose() => Repository.Dispose();

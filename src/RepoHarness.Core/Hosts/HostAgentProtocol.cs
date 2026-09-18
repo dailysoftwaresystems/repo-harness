@@ -25,7 +25,13 @@ public static class HostAgentProtocol
     /// The protocol version. Both ends are the same build by the time a run request is sent, so a
     /// difference is a defect rather than something to negotiate.
     /// </summary>
-    public const int Version = 1;
+    /// <remarks>
+    /// Raised whenever a request or an answer changes shape. A host reads the version before anything
+    /// else, so one on another build refuses a request as coming from another protocol, naming both
+    /// and its own version. With the number left as it was, the same host refuses the request over
+    /// whichever field it happens not to know, which says nothing about why.
+    /// </remarks>
+    public const int Version = 2;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -104,6 +110,21 @@ public sealed class HostAgentRequest
     /// <summary>The emulators to check, by name. Info only.</summary>
     public Dictionary<string, EmulatorConfig> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The programs to find there, the way a leg on that host will start them. Info only.
+    /// </summary>
+    public List<string> Programs { get; init; } = [];
+
+    /// <summary>
+    /// The repository's <c>toolSearchDirectories</c>, of which the host takes its own platform's.
+    /// Info only.
+    /// </summary>
+    /// <remarks>
+    /// Sent whole rather than chosen here, because only the host knows which platform it is until it
+    /// has answered, and asking twice would be a second round trip for one question.
+    /// </remarks>
+    public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The host's copy of the repository, absolute or from the home directory. Run only.</summary>
     public string? Directory { get; init; }
 
@@ -134,6 +155,20 @@ public sealed class HostAgentInfo
 
     /// <summary>What checking each requested emulator found.</summary>
     public Dictionary<string, EmulatorCheck> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Where each requested program is there, each carrying the name it was asked for.</summary>
+    /// <remarks>
+    /// A list rather than a map keyed by name. A name compares exactly - cmake and CMake are two files
+    /// on Linux, and a repository can ask about both - while a map in this protocol is read back
+    /// ignoring case, as configuration's names are, and refuses an answer holding both.
+    /// </remarks>
+    public List<ProgramLocation> Programs { get; init; } = [];
+
+    /// <summary>
+    /// The directories a program asked for by name was found in there, on the PATH or off it, in the
+    /// order the search looked: what a leg there appends to the PATH of every process it starts.
+    /// </summary>
+    public List<string> ProgramDirectories { get; init; } = [];
 }
 
 /// <summary>Whether an emulator works on a host.</summary>

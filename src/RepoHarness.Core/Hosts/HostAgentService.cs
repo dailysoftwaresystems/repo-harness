@@ -1,6 +1,7 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -15,12 +16,14 @@ public sealed class HostAgentService(
     IHostPlatform platform,
     IToolIdentityProvider identity,
     EmulatorProbe emulatorProbe,
-    IFileSystem fileSystem)
+    IFileSystem fileSystem,
+    LocalProgramResolver programs)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
     private readonly EmulatorProbe _emulatorProbe = emulatorProbe;
     private readonly IFileSystem _fileSystem = fileSystem;
+    private readonly LocalProgramResolver _programs = programs;
 
     /// <summary>Reads one request from <paramref name="input"/> and serves it.</summary>
     /// <param name="input">
@@ -94,7 +97,8 @@ public sealed class HostAgentService(
 
         if (request.Kind == HostAgentRequestKind.Info)
         {
-            var info = await DescribeAsync(request.Emulators, abandoned.Token).ConfigureAwait(false);
+            var info = await DescribeAsync(request.Emulators, request.Programs, request.ToolSearchDirectories, abandoned.Token)
+                .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
             return HarnessExit.Success;
@@ -104,17 +108,34 @@ public sealed class HostAgentService(
     }
 
     /// <summary>Which build this is, what this machine is, and which of <paramref name="emulators"/> work here.</summary>
+    /// <param name="emulators">The emulators to check, by name.</param>
+    /// <param name="programs">The programs to find, the way a leg here will start them.</param>
+    /// <param name="searchDirectories">The repository's <c>toolSearchDirectories</c>, of which this machine takes its own platform's.</param>
+    /// <param name="cancellationToken">Stops the checks.</param>
     public async Task<HostAgentInfo> DescribeAsync(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
+        IReadOnlyDictionary<string, List<string>> searchDirectories,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(emulators);
+        ArgumentNullException.ThrowIfNull(programs);
+        ArgumentNullException.ThrowIfNull(searchDirectories);
+
+        // By the function the leg's own run uses, on the machine that will run it. Answered from
+        // anywhere else this would be a second opinion about this machine's PATH, and a second
+        // opinion is how a survey came to call a leg runnable whose build tool could not be found.
+        // The emulators' own programs are found by the same search, in the same pass, so a launcher
+        // installed off the PATH is found - and handed on - exactly as a build tool would be.
+        var found = _programs.Resolve(
+            programs.Concat(emulators.Values.SelectMany(EmulatorProbe.ProgramsOf)),
+            ToolSearchDirectories.For(searchDirectories, _platform.PlatformKey));
 
         var checks = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (name, emulator) in emulators)
         {
-            checks[name] = await _emulatorProbe.CheckAsync(emulator, cancellationToken).ConfigureAwait(false);
+            checks[name] = await _emulatorProbe.CheckAsync(emulator, found, cancellationToken).ConfigureAwait(false);
         }
 
         var current = _identity.Current;
@@ -126,6 +147,8 @@ public sealed class HostAgentService(
             Os = _platform.PlatformKey,
             Processor = _platform.Processor,
             Emulators = checks,
+            Programs = [.. found.Found.Values],
+            ProgramDirectories = [.. found.Directories],
         };
     }
 
@@ -212,7 +235,7 @@ public sealed class HostAgentService(
             return _platform.HomeDirectory;
         }
 
-        return directory.StartsWith("~/", StringComparison.Ordinal)
+        return Platform.PlatformPaths.IsHomeRelative(directory)
             ? Path.GetFullPath(Path.Combine(_platform.HomeDirectory, directory[2..]))
             : directory;
     }
@@ -278,7 +301,7 @@ public sealed class HostAgentService(
 
     private static async Task<int> RefuseAsync(TextWriter error, int exitCode, string message)
     {
-        await error.WriteLineAsync($"{HostAgentProtocol.CommandName}: FAIL - {message}").ConfigureAwait(false);
+        await error.WriteLineAsync(FailureLine.For(HostAgentProtocol.CommandName, message)).ConfigureAwait(false);
         return exitCode;
     }
 }

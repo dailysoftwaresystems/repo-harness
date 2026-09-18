@@ -144,7 +144,11 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
         cancellationToken.ThrowIfCancellationRequested();
 
         var file = OwnerFile(logDirectory);
-        _fileSystem.CreateDirectory(Path.GetDirectoryName(file)!);
+
+        // Claimed before anything else a run writes, so a directory this user cannot write - one an
+        // earlier run under sudo left to root - is refused here, naming it, rather than escaping as
+        // an error that reads as a defect in this tool.
+        Written(file, () => _fileSystem.CreateDirectory(Path.GetDirectoryName(file)!));
 
         var claim = MachineWideFile.Update(file, UpdateWindow, () =>
         {
@@ -177,7 +181,7 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
                 runId.Value,
                 DateTimeOffset.UtcNow);
 
-            _fileSystem.WriteAllTextAtomic(file, JsonSerializer.Serialize(owner, JsonOptions) + "\n");
+            Written(file, () => _fileSystem.WriteAllTextAtomic(file, JsonSerializer.Serialize(owner, JsonOptions) + "\n"));
             return new LogClaim(true, owner, file);
         });
 
@@ -199,18 +203,32 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
 
         var file = OwnerFile(logDirectory);
 
-        MachineWideFile.Update<object?>(file, UpdateWindow, () =>
+        // Given up once the run is over, so a failure here is said and never stands in for what the
+        // run found: the record names this process, and is reclaimed as a dead owner's is once it
+        // has ended.
+        try
         {
-            if (Read(file) is { } existing && Mine(existing, runId))
+            MachineWideFile.Update<object?>(file, UpdateWindow, () =>
             {
-                _fileSystem.DeleteFile(file);
-            }
+                if (Read(file) is { } existing && Mine(existing, runId))
+                {
+                    _fileSystem.DeleteFile(file);
+                }
 
-            return null;
-        });
+                return null;
+            });
+        }
+        catch (Exception ex) when (ex is HarnessException or IOException or UnauthorizedAccessException)
+        {
+            _output.Warn(CommandName, $"'{logDirectory}' could not be given up: {ex.Message} It is reclaimed once this run has ended.");
+        }
 
         return Task.CompletedTask;
     }
+
+    /// <summary>Does <paramref name="write"/>, and refuses, naming the owner file, when it could not be done.</summary>
+    private static void Written(string file, Action write)
+        => MachineWideFile.Written($"The log owner file '{file}'", "Until it can be, two runs could write one set of logs.", write);
 
     /// <summary>
     /// The run that owns <paramref name="logDirectory"/>, or <see langword="null"/> when none does.
@@ -241,7 +259,7 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
             // that lets two runs write one set of logs.
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"The log owner file '{file}' could not be read: {ex.Message}. Remove it once no run is using that path.",
+                $"The log owner file '{file}' could not be read: {ex.Message.TrimEnd('.')}. Remove it once no run is using that path.",
                 ex);
         }
     }

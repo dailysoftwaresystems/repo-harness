@@ -23,6 +23,12 @@ public sealed record LegPlan
     /// </summary>
     public string TreeKey { get; init; } = string.Empty;
 
+    /// <summary>
+    /// How two tree keys compare, wherever legs are grouped by one: ignoring case, as the run lock
+    /// compares the host and the tree it names.
+    /// </summary>
+    public static StringComparer TreeKeyComparer => StringComparer.OrdinalIgnoreCase;
+
     /// <summary>Whether the leg runs under emulation, which decides what its timings are compared with.</summary>
     public bool Emulated { get; init; }
 
@@ -140,7 +146,7 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
 
         Announce(request, ledger, machines.Count);
 
-        var syncs = new Dictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
+        var syncs = new Dictionary<string, Task>(LegPlan.TreeKeyComparer);
         var syncGate = new Lock();
 
         // Started together and awaited together. A leg that finishes early reports at once through
@@ -331,25 +337,39 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // not read one. What was left is named in the report.
             return null;
         }
-        catch (HarnessException ex)
-            when (ex.ExitCode is HarnessExit.ConfigInvalid or HarnessExit.UsageError or HarnessExit.Refused)
+        catch (HarnessException ex) when (HarnessExit.RefusesTheRun(ex.ExitCode))
         {
             // Left to propagate, and it ends the run. A configuration or a policy a leg cannot
             // satisfy — an action file naming an undeclared program, a leg whose project declares no
             // toolchain — is the same fact for every leg. Turned into a verdict it would be reported
             // once per leg, under a name that said the wrong cause, when what the reader has to do
             // is edit one file.
-            // The one refusal that IS about this leg alone, a lock another run holds, never reaches
-            // here: the caller turns it into a verdict itself, precisely so that the other legs
-            // still report. The slot is released by the finally below, as on every other path out.
+            // The one refusal that IS about this leg alone, a lock another run holds - on its variant,
+            // or on its host's tree while that is synced - never reaches here: the caller turns it
+            // into a verdict itself, precisely so that the other legs still report. The slot is
+            // released by the finally below, as on every other path out.
             throw;
         }
         catch (HarnessException ex)
         {
             // A refusal that is genuinely about this leg keeps its own verdict: a host that is
-            // switched off is skipped-unavailable, and a lock another run holds is refused-locked,
-            // neither of them a defect in the tool. The other legs still report.
+            // switched off, or a tree git cannot answer in, is skipped-unavailable, neither of them
+            // a defect in the tool. The other legs still report.
             entry = Entry(leg, ReachedVerdict.Of(Verdicts.ForRefusal(ex.ExitCode), ex.Message));
+        }
+        catch (Exception ex) when (KnownCauses.Names(ex))
+        {
+            // A cause this build can name, read from the table the command runner reads too, is not
+            // a defect in this tool: recorded as poisoned, a program that would not start read as
+            // exit 70 and sent the reader looking for a bug that was not there. Nor is it a skip. The
+            // survey turned away, before anything started, every leg whose host lacks a program it
+            // requires there; a program that still will not start once the leg is running is one it
+            // could not require - a file the build was to make, a script in the tree, one a phase's
+            // own PATH finds, a binary for another processor - and a leg that cannot start its own
+            // program has failed. Read
+            // as a skip, a build that never produced what its next step runs would pass a gate
+            // that accepts an incomplete run.
+            entry = Entry(leg, ReachedVerdict.Of(LegVerdict.Failed, ex.Message));
         }
         catch (Exception ex)
         {

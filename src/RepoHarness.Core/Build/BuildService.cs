@@ -23,7 +23,11 @@ public sealed record BuildRequest(
     string PlatformKey,
     int Cores,
     string RunDirectory,
-    bool Time = false);
+    bool Time = false)
+{
+    /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+}
 
 /// <summary>What one leg's build did.</summary>
 /// <param name="Verdict">The verdict, and the sentence the ledger shows for it.</param>
@@ -85,7 +89,7 @@ public sealed class BuildService(
 
         var adapter = BuildAdapters.For(request.Project.Type);
         var buildDirectory = request.Variant.DirectoryUnder(request.TreeRoot);
-        var overlay = Overlay(config, request);
+        var overlay = request.Variant.Overlay(config, request.Project);
 
         // Before configuring, not after: a directory configured from another worktree watches that
         // tree's sources, which produced both a false refusal and a silent wrong answer. Compared
@@ -128,14 +132,12 @@ public sealed class BuildService(
                 {
                     TreeRoot = request.TreeRoot,
                     Inputs = unmeasurable is null ? LegInputs.Watch(watched) : LegInputs.Unmeasured(unmeasurable),
-                    Contention = new ContentionRequest
-                    {
-                        Leg = request.Leg,
-                        BuildDirectory = buildDirectory,
-                        BuildTools = config.Contention.BuildTools,
-                        SharedResourceTools = config.Contention.SharedResourceTools,
-                        SampleSeconds = config.Defaults.ProcessSampleSeconds,
-                    },
+                    Contention = ContentionRequests.For(
+                        config,
+                        request.Leg,
+                        buildDirectory,
+                        request.TreeRoot,
+                        request.PlatformKey),
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -260,7 +262,8 @@ public sealed class BuildService(
             var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
             var verdict = seen.Decide(request.Leg, [reached]);
 
-            Report(request, seen.Contention!);
+            ContentionWarnings.Write(_output, CommandName, request.Leg, seen.Contention!, config.Contention);
+            WarnWhenDeeperThanTheReserve(request, buildDirectory, config.Worktrees.PathBudgetReserve);
 
             // Recorded for a build that reached a verdict on its own terms, and marked as
             // untrustworthy when anything doubted it. The record is what the next build's staleness
@@ -285,74 +288,60 @@ public sealed class BuildService(
     }
 
     /// <summary>
-    /// Says what sampling found besides a contender, and what it could not see. A clean report read
-    /// without its limits is read as more than it is.
+    /// Warns when this build produced a path deeper below its build directory than
+    /// worktrees.pathBudgetReserve declares, naming both numbers.
     /// </summary>
-    private void Report(BuildRequest request, ContentionReport contention)
+    /// <param name="request">The leg's build.</param>
+    /// <param name="buildDirectory">Where it built.</param>
+    /// <param name="reserve">What worktrees.pathBudgetReserve declares.</param>
+    /// <remarks>
+    /// What keeps the reserve honest. It is a number somebody measured once, against whatever the
+    /// build produced then; headers grow deeper and generators rename what they write, and nothing
+    /// else would notice until a worktree's build failed with compile errors in files it never
+    /// touched. Measured after every build, from the files the build itself left, and said when it
+    /// could not be measured rather than taken as fine.
+    /// </remarks>
+    private void WarnWhenDeeperThanTheReserve(BuildRequest request, string buildDirectory, int reserve)
     {
-        foreach (var shared in contention.SharedResourceUsers)
+        if (!_fileSystem.DirectoryExists(buildDirectory))
+        {
+            return;
+        }
+
+        var longest = 0;
+        var deepest = string.Empty;
+
+        try
+        {
+            foreach (var file in _fileSystem.EnumerateFiles(buildDirectory, recursive: true))
+            {
+                var below = Path.GetRelativePath(buildDirectory, file);
+
+                if (below.Length > longest)
+                {
+                    longest = below.Length;
+                    deepest = below;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _output.Warn(
                 CommandName,
-                $"{request.Leg}: {shared.Tool} (pid {shared.Process.Id}) ran outside this run, seen "
-                + $"{ContentionReport.Describe(shared.Seen)}; it shares state rather than this build directory.");
+                $"{request.Leg}: the deepest path this build produced could not be measured, so "
+                + $"worktrees.pathBudgetReserve was not checked against it: {ex.Message}");
+
+            return;
         }
 
-        foreach (var unreadable in contention.Unreadable)
+        if (longest > reserve)
         {
-            // Reported as unknown, never as nothing found: "no contender was running" and "nobody
-            // looked" are different facts and only one of them is evidence.
-            _output.Warn(CommandName, $"{request.Leg}: the process table was not read for one sample ({unreadable}).");
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: this build produced a path {longest} characters long below its build "
+                + $"directory ('{deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
+                + $"to at least {longest}, or a worktree created against it may not leave its build room.");
         }
-
-        foreach (var limit in contention.Limits)
-        {
-            _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
-        }
-    }
-
-    /// <summary>
-    /// The environment and cache variables this leg builds with: the toolchain, then the build
-    /// configuration, then the sanitizer, then the project, each layered over the last.
-    /// </summary>
-    private static VariantOverlay Overlay(HarnessConfig config, BuildRequest request)
-    {
-        var merged = new VariantOverlay();
-
-        foreach (var layer in Layers(config, request))
-        {
-            foreach (var (name, value) in layer.Env)
-            {
-                merged.Env[name] = value;
-            }
-
-            foreach (var (name, value) in layer.CacheVars)
-            {
-                merged.CacheVars[name] = value;
-            }
-        }
-
-        return merged;
-    }
-
-    private static IEnumerable<VariantOverlay> Layers(HarnessConfig config, BuildRequest request)
-    {
-        if (config.Toolchains.TryGetValue(request.Variant.Toolchain, out var toolchain))
-        {
-            yield return toolchain;
-        }
-
-        if (config.BuildConfigs.TryGetValue(request.Variant.Config, out var buildConfig))
-        {
-            yield return buildConfig;
-        }
-
-        if (request.Variant.Sanitizer is { } sanitizer && config.Sanitizers.TryGetValue(sanitizer, out var overlay))
-        {
-            yield return overlay;
-        }
-
-        yield return request.Project;
     }
 
     /// <summary>
@@ -728,7 +717,10 @@ public sealed class BuildService(
 
         try
         {
-            return (await _dependencyCheck.CheckAsync(buildDirectory, cancellationToken).ConfigureAwait(false), null);
+            // The ninja the build itself ran, which only its own environment may have found.
+            var recorded = _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram;
+
+            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {

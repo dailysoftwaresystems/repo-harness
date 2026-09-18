@@ -3,6 +3,7 @@ using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
@@ -85,6 +86,7 @@ internal static class RunCommand
                 .ConfigureAwait(false);
 
             var runner = Resolve(harness.Config, runnerName);
+            ActionFile? file = null;
 
             // Before a leg is placed or a host is measured, so that a mistyped action costs nothing
             // and says so in the same terms 'legs' would have.
@@ -101,7 +103,7 @@ internal static class RunCommand
                 // begun and its run directory exists: on an eight-leg gate that is eight started
                 // runs and eight directories for one typo. The file is the same for every leg, so
                 // the question is asked once, where nothing has been created yet.
-                await context.Get<IActionFileParser>()
+                file = await context.Get<IActionFileParser>()
                     .LoadAsync(harness.Layout.RunnerActionsDirectory, action, cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -123,11 +125,17 @@ internal static class RunCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
-                        RemoteArguments(arguments)),
+                        RemoteArguments(arguments))
+                    {
+                        // Built only where the runner requires it, and never tested: a host needs
+                        // cmake for a runner that measures a build product, and not for one that
+                        // only runs a script.
+                        Workload = LegWorkload.ForRunner(runner, file),
+                    },
                     (work, token) => RunLegAsync(runners, builds, runnerName, work, token),
                     cancellationToken)
                 .ConfigureAwait(false);
-        }));
+        }, JsonOption));
 
         return command;
     }
@@ -191,7 +199,10 @@ internal static class RunCommand
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
                         CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory),
+                        work.RunDirectory)
+                    {
+                        ProgramDirectories = leg.Host.ProgramDirectories,
+                    },
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -220,6 +231,7 @@ internal static class RunCommand
                 config,
                 new RunnerRunRequest
                 {
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     RunnerName = runnerName,
                     Runner = runner,
                     Leg = leg.Name,
@@ -275,6 +287,7 @@ internal static class RunCommand
                 config,
                 new RunnerRunRequest
                 {
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     RunnerName = runnerName,
                     Runner = Resolve(config, runnerName),
                     Leg = leg.Name,

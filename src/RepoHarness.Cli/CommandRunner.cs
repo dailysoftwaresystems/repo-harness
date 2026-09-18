@@ -1,6 +1,7 @@
 using System.CommandLine;
 using Microsoft.Extensions.DependencyInjection;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
@@ -33,9 +34,18 @@ internal sealed record CommandContext(IServiceProvider Services, ParseResult Par
 internal static class CommandRunner
 {
     /// <summary>Wraps a command body into an action the parser can invoke.</summary>
+    /// <param name="commandName">The command, which prefixes every line it writes.</param>
+    /// <param name="body">What the command does.</param>
+    /// <param name="ledger">
+    /// For a command that runs legs, its <c>--json</c>. Asked for its ledger as data, it answers with
+    /// a ledger on every exit - one with no legs, when it stopped before any leg had a line: a leg
+    /// nobody declared, a configuration that does not load, a runner nobody declared. A script
+    /// reading standard output has one document to read whatever happened.
+    /// </param>
     internal static Func<ParseResult, CancellationToken, Task<int>> Wrap(
         string commandName,
-        Func<CommandContext, CancellationToken, Task<CommandOutcome>> body)
+        Func<CommandContext, CancellationToken, Task<CommandOutcome>> body,
+        Option<bool>? ledger = null)
     {
         return async (parseResult, cancellationToken) =>
         {
@@ -43,13 +53,17 @@ internal static class CommandRunner
             var prompting = !parseResult.GetValue(GlobalOptions.NoPrompt);
             await using var services = HarnessServices.Build(verbose, prompting);
             var output = services.GetRequiredService<IHarnessOutput>();
+            var answersWithLedger = ledger is not null && parseResult.GetValue(ledger);
+
+            // The document is the whole of standard output from the first line, not from the moment
+            // the legs are surveyed: a line written before then would sit in front of it.
+            using var document = answersWithLedger ? output.DataOnly() : null;
 
             try
             {
                 if (!TryResolveDirectory(parseResult, services, out var directory, out var problem))
                 {
-                    output.Fail(commandName, problem);
-                    return HarnessExit.UsageError;
+                    return Stop(output, commandName, HarnessExit.UsageError, problem, answersWithLedger);
                 }
 
                 var context = new CommandContext(services, parseResult, directory);
@@ -60,7 +74,7 @@ internal static class CommandRunner
             }
             catch (Exception ex)
             {
-                return Fail(output, commandName, ex);
+                return Fail(output, commandName, ex, answersWithLedger);
             }
         };
     }
@@ -70,45 +84,68 @@ internal static class CommandRunner
     /// The one place a failure becomes an exit code, so a command a host serves for another machine
     /// fails exactly as a command typed here does.
     /// </summary>
-    internal static int Fail(IHarnessOutput output, string commandName, Exception exception)
+    /// <param name="output">Where the command writes.</param>
+    /// <param name="commandName">The command, which prefixes its failure line.</param>
+    /// <param name="exception">What ended it.</param>
+    /// <param name="ledger">Whether the command was asked for its ledger as data, which it then answers with.</param>
+    internal static int Fail(IHarnessOutput output, string commandName, Exception exception, bool ledger = false)
     {
-        switch (exception)
+        var (exitCode, message, defect) = Meaning(exception);
+
+        Stop(output, commandName, exitCode, message, ledger);
+
+        // A defect's stack trace is there under --verbose, where someone is actually diagnosing it.
+        if (defect && output.IsVerbose)
         {
-            case HarnessException harness:
-                // The service already decided what this failure means.
-                output.Fail(commandName, harness.Message);
-                return harness.ExitCode;
-
-            case ConfigException:
-                output.Fail(commandName, exception.Message);
-                return HarnessExit.ConfigInvalid;
-
-            case ProgramStartException:
-                // Missing, or there and unable to start: either way the instrument never ran.
-                output.Fail(commandName, exception.Message);
-                return HarnessExit.ToolMissing;
-
-            case OperationCanceledException:
-                // Not CommandFailed: nothing ran to completion, and a caller reading
-                // a failure code would report a red verdict for an interrupted run.
-                output.Fail(commandName, "Interrupted before completion.");
-                return HarnessExit.Cancelled;
-
-            default:
-                // A defect in the harness, not a failure of the thing being asked
-                // about. Reported as a message with a defined exit code rather than
-                // an unhandled exception, whose exit code would collide with a
-                // command's own contract. The stack trace is available under
-                // --verbose, where someone is actually diagnosing it.
-                output.Fail(commandName, $"Unexpected {exception.GetType().Name}: {exception.Message}");
-
-                if (output.IsVerbose)
-                {
-                    output.RawError(exception.ToString());
-                }
-
-                return HarnessExit.InternalError;
+            output.RawError(exception.ToString());
         }
+
+        return exitCode;
+    }
+
+    /// <summary>
+    /// What <paramref name="exception"/> means: the code the command exits with, the line it ends on,
+    /// and whether it is a defect in this tool.
+    /// </summary>
+    private static (int ExitCode, string Message, bool Defect) Meaning(Exception exception)
+    {
+        // A cause both this and the leg executor know, read from the one table they share, so the
+        // same missing program means the same thing whether it stopped a command or a leg.
+        if (KnownCauses.ExitCodeFor(exception) is { } known)
+        {
+            return (known, exception.Message, false);
+        }
+
+        return exception switch
+        {
+            // The service already decided what this failure means.
+            HarnessException harness => (harness.ExitCode, harness.Message, false),
+            ConfigException => (HarnessExit.ConfigInvalid, exception.Message, false),
+
+            // Not CommandFailed: nothing ran to completion, and a caller reading a failure code
+            // would report a red verdict for an interrupted run.
+            OperationCanceledException => (HarnessExit.Cancelled, "Interrupted before completion.", false),
+
+            // A defect in the harness, not a failure of the thing being asked about. Reported as a
+            // message with a defined exit code rather than an unhandled exception, whose exit code
+            // would collide with a command's own contract.
+            _ => (HarnessExit.InternalError, $"Unexpected {exception.GetType().Name}: {exception.Message}", true),
+        };
+    }
+
+    /// <summary>
+    /// Ends a command that did not succeed: with its ledger first, as the whole of standard output,
+    /// when it was asked for one, and then the line that says why.
+    /// </summary>
+    private static int Stop(IHarnessOutput output, string commandName, int exitCode, string message, bool ledger)
+    {
+        if (ledger)
+        {
+            output.Data(LedgerReport.Stopped(exitCode, message));
+        }
+
+        output.Fail(commandName, message);
+        return exitCode;
     }
 
     /// <summary>

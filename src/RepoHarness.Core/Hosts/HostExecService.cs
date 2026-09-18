@@ -89,7 +89,7 @@ public sealed class HostExecService(
         var host = target.Host;
 
         var report = await _inspector
-            .InspectAsync(context, host, new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase), cancellationToken)
+            .InspectAsync(context, host, new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase), [], cancellationToken)
             .ConfigureAwait(false);
 
         foreach (var action in report.Actions)
@@ -190,18 +190,11 @@ public sealed class HostExecService(
             throw new HarnessException(HarnessExit.HostUnavailable, $"WSL exists only on Windows, and this machine runs {_platform.PlatformKey}");
         }
 
-        ProcessResult result;
-
-        try
-        {
-            result = await _hostCommands
-                .ProbeDefaultWslDistributionAsync(DefaultDistributionBudget, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (ExecutableNotFoundException)
-        {
-            throw new HarnessException(HarnessExit.HostUnavailable, "wsl.exe was not found, so WSL is not installed on this machine");
-        }
+        // wsl.exe that would not start - not installed, or mid-update - is raised by the runner that
+        // starts it, as WSL not being reachable, in the words the system gave.
+        var result = await _hostCommands
+            .ProbeDefaultWslDistributionAsync(DefaultDistributionBudget, cancellationToken)
+            .ConfigureAwait(false);
 
         if (result.TimedOut)
         {

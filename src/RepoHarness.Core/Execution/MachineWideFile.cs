@@ -17,6 +17,32 @@ namespace RepoHarness.Core.Execution;
 internal static class MachineWideFile
 {
     /// <summary>
+    /// Does <paramref name="write"/>, and refuses when it could not be done: a file every run
+    /// decides by that nobody can write stops every run alike - a directory an earlier run under
+    /// sudo left to root, a disk that is full - and is no defect in this tool.
+    /// </summary>
+    /// <param name="file">The file, as the refusal names it: <c>The run lock '...'</c>.</param>
+    /// <param name="consequence">Why nothing may run until it can be written.</param>
+    /// <param name="write">The write.</param>
+    /// <exception cref="HarnessException">The write failed, refused with the reason the system gave.</exception>
+    public static void Written(string file, string consequence, Action write)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+
+        try
+        {
+            write();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"{file} could not be written: {ex.Message.TrimEnd('.')}. {consequence}",
+                ex);
+        }
+    }
+
+    /// <summary>
     /// Runs <paramref name="work"/> with no other process inside the same file's update.
     /// </summary>
     /// <remarks>

@@ -180,9 +180,15 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
             }
             else if (Tool(entry.Process, request.SharedResourceTools) is { } sharedTool)
             {
-                // No build directory is asked of these: they share a cache rather than a build
-                // directory, which is why they are a warning and not a verdict.
-                shared.Add(new ContendingProcess(entry.Process, seen, sharedTool));
+                // No build directory makes these a verdict: they share state rather than a build
+                // directory, which is why they are a warning. Whose they are is still worth saying,
+                // and a command line naming another leg's build directory says it.
+                var owner = request.OtherLegs
+                    .OrderBy(other => other.Key, StringComparer.Ordinal)
+                    .FirstOrDefault(other => NamesBuildDirectory(entry.Process.CommandLine, other.Value, pathComparison))
+                    .Key;
+
+                shared.Add(new ContendingProcess(entry.Process, seen, sharedTool, owner));
             }
         }
 
@@ -286,9 +292,36 @@ public sealed class ProcessSamplingSession : IAsyncDisposable
 
         var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(buildDirectory));
 
-        return commandLine.Contains(directory, pathComparison)
-            || commandLine.Contains(directory.Replace('\\', '/'), pathComparison)
-            || commandLine.Contains(directory.Replace('/', '\\'), pathComparison);
+        return new[] { directory, directory.Replace('\\', '/'), directory.Replace('/', '\\') }
+            .Distinct(StringComparer.Ordinal)
+            .Any(spelled => NamesAt(commandLine, spelled, pathComparison));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="directory"/> appears in <paramref name="commandLine"/> as a whole
+    /// directory, and not as the start of a longer name.
+    /// </summary>
+    /// <remarks>
+    /// A plain substring match took <c>build/x86_64-gcc-debug-asan/a.o</c> to name
+    /// <c>build/x86_64-gcc-debug</c>, so a sanitizer leg's work contended with its plain sibling and
+    /// forced that leg's verdict to contended. The directory has to end where a path could: at the end
+    /// of the line, a separator, a quote, a space, or a list's delimiter.
+    /// </remarks>
+    private static bool NamesAt(string commandLine, string directory, StringComparison pathComparison)
+    {
+        for (var start = commandLine.IndexOf(directory, pathComparison);
+            start >= 0;
+            start = commandLine.IndexOf(directory, start + 1, pathComparison))
+        {
+            var end = start + directory.Length;
+
+            if (end == commandLine.Length || commandLine[end] is '/' or '\\' or '"' or '\'' or ' ' or '\t' or ';' or ',')
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

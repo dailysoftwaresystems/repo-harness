@@ -1,6 +1,8 @@
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
@@ -180,6 +182,70 @@ public sealed class HostCommandRunnerTests
         Assert.Equal("cmake", connection.Spell("cmake"));
         Assert.Null(connection.Located("ninja"));
         Assert.Equal(ProgramFound.Unknown, connection.Forget("dotnet").Located("dotnet")?.Found ?? ProgramFound.Unknown);
+    }
+
+    /// <summary>
+    /// ssh or wsl.exe that will not start never reached the host, whatever was asked of it: the host
+    /// is unavailable, said here where the program is known to be the transport. A program run on
+    /// this machine that will not start is that program's own failure, and stays one.
+    /// </summary>
+    [Fact]
+    public async Task ATransportThatWillNotStart_LeavesTheHostUnavailable_AndALocalProgramItsOwnFailure()
+    {
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ProgramStartException("ssh", "'ssh' could not be started: Permission denied"));
+        var hosts = new HostCommandRunner(processRunner);
+        var command = new HostCommand { Program = "uname", Arguments = ["-s"] };
+
+        var unavailable = await Assert.ThrowsAsync<HarnessException>(
+            () => hosts.RunAsync(Ssh(), command, TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, unavailable.ExitCode);
+        Assert.Equal("ssh build-box could not be reached: 'ssh' could not be started: Permission denied", unavailable.Message);
+
+        await Assert.ThrowsAsync<ProgramStartException>(
+            () => hosts.RunAsync(new HostConnection { Host = HostId.Local }, command, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// The probes start the transport too, and one that will not start is said the same way: WSL
+    /// that is not installed is WSL that cannot be reached, in the words the system gave - never a
+    /// program of this machine's own that is missing, which ended the command as one.
+    /// </summary>
+    [Fact]
+    public async Task AProbeWhoseTransportWillNotStart_LeavesTheHostUnavailable()
+    {
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ExecutableNotFoundException("wsl.exe"));
+        var hosts = new HostCommandRunner(processRunner);
+
+        var wsl = await Assert.ThrowsAsync<HarnessException>(
+            () => hosts.ProbeDefaultWslDistributionAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        var ssh = await Assert.ThrowsAsync<HarnessException>(
+            () => hosts.ProbeShellAsync(Ssh(), TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, wsl.ExitCode);
+        Assert.Equal("WSL could not be reached: Executable 'wsl.exe' was not found on PATH.", wsl.Message);
+        Assert.Equal(HarnessExit.HostUnavailable, ssh.ExitCode);
+        Assert.StartsWith("ssh build-box could not be reached: ", ssh.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Only a transport that would not start is a host that was never reached. A program of the
+    /// host's own that would not start, raised as the check it served failing, and a host that was
+    /// reached and could not answer, are not: read as unreachable, either would be said as a host
+    /// that is switched off.
+    /// </summary>
+    [Fact]
+    public void OnlyATransportThatWouldNotStart_IsAHostThatWasNeverReached()
+    {
+        var start = new ProgramStartException("ssh", "'ssh' could not be started: Permission denied");
+
+        Assert.Equal(start.Message, HostConnector.Unreached(new HarnessException(HarnessExit.HostUnavailable, "ssh build-box could not be reached", start)));
+        Assert.Null(HostConnector.Unreached(new HarnessException(HarnessExit.CommandFailed, "'ninja -t deps' could not be started", start)));
+        Assert.Null(HostConnector.Unreached(new HarnessException(HarnessExit.HostUnavailable, "WSL did not name a default distribution (exit 0)")));
     }
 
     [Fact]

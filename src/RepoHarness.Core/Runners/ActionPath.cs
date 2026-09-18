@@ -1,4 +1,5 @@
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -52,10 +53,10 @@ public static class ActionPath
             return $"is empty; it names an action file, as '{Expected("<name>")}'";
         }
 
-        // Rooted first, and by both tests: Path.IsPathRooted answers for this platform only, so a
-        // Windows drive letter written on Linux would otherwise read as an ordinary directory name
-        // and a configuration would mean two different things on two machines.
-        if (Path.IsPathRooted(action) || action[0] is '/' or '\\' || (action.Length >= 2 && action[1] == ':'))
+        // Rooted first, by every platform's rules: a Windows drive letter written on Linux would
+        // otherwise read as an ordinary directory name, and a configuration would mean two
+        // different things on two machines.
+        if (PlatformPaths.IsRootedOnAnyPlatform(action))
         {
             return $"'{action}' is an absolute path; it names a file inside the actions "
                 + $"directory, as '{Expected("<name>")}'";

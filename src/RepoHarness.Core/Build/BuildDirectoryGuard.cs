@@ -9,11 +9,13 @@ namespace RepoHarness.Core.Build;
 /// <param name="CCompiler">The C compiler recorded in it, or null.</param>
 /// <param name="CxxCompiler">The C++ compiler recorded in it, or null.</param>
 /// <param name="BuildType">The build type recorded in it, or null.</param>
+/// <param name="MakeProgram">The program that builds it, such as the ninja the build ran, or null.</param>
 public sealed record BuildDirectoryRecord(
     string? HomeDirectory,
     string? CCompiler,
     string? CxxCompiler,
-    string? BuildType);
+    string? BuildType,
+    string? MakeProgram = null);
 
 /// <summary>
 /// Refuses a build directory that was configured for something other than this leg.
@@ -49,6 +51,7 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
         string? cCompiler = null;
         string? cxxCompiler = null;
         string? buildType = null;
+        string? makeProgram = null;
 
         foreach (var line in _fileSystem.ReadAllText(cache).Split('\n'))
         {
@@ -58,9 +61,10 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
             cCompiler ??= ValueOf(text, "CMAKE_C_COMPILER");
             cxxCompiler ??= ValueOf(text, "CMAKE_CXX_COMPILER");
             buildType ??= ValueOf(text, "CMAKE_BUILD_TYPE");
+            makeProgram ??= ValueOf(text, "CMAKE_MAKE_PROGRAM");
         }
 
-        return new BuildDirectoryRecord(home, cCompiler, cxxCompiler, buildType);
+        return new BuildDirectoryRecord(home, cCompiler, cxxCompiler, buildType, makeProgram);
     }
 
     /// <summary>

@@ -38,6 +38,12 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     public const string ManifestFileName = "build.ninja";
 
     /// <summary>
+    /// What a Ninja generator starts to build, and the name the check looks ninja up by when the build
+    /// recorded no program of its own.
+    /// </summary>
+    public const string Program = "ninja";
+
+    /// <summary>
     /// How long <c>ninja -t deps</c> may take. A probe, not a phase: it reads a log and prints, so a
     /// budget here bounds a hang rather than guessing at a workload.
     /// </summary>
@@ -64,6 +70,13 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
 
     /// <summary>Checks one build directory.</summary>
     /// <param name="buildDirectory">The directory to read.</param>
+    /// <param name="appendToPath">The directories the build appended to its PATH, which ninja is looked up on too.</param>
+    /// <param name="program">
+    /// The ninja the build ran, as its configuration recorded it, or <see langword="null"/> to look one
+    /// up. Read by the program that wrote them, the records are read the way they were written, and a
+    /// ninja only the build's own environment could find is found all the same. A relative one is read
+    /// from the build directory, where the check starts.
+    /// </param>
     /// <param name="cancellationToken">Stops the check.</param>
     /// <exception cref="HarnessException">
     /// The check could not run: the directory is missing, ninja could not be started, or it answered
@@ -73,8 +86,12 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// </exception>
     public async Task<NinjaDependencyReport> CheckAsync(
         string buildDirectory,
+        IReadOnlyList<string> appendToPath,
+        string? program = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(appendToPath);
+
         if (!_fileSystem.DirectoryExists(buildDirectory))
         {
             throw new HarnessException(
@@ -91,17 +108,35 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
             return new NinjaDependencyReport(0, [], EmptyExcuses, $"'{buildDirectory}' is not a ninja build directory");
         }
 
-        var result = await _processRunner
-            .RunAsync(
-                new ProcessRequest
-                {
-                    FileName = "ninja",
-                    Arguments = ["-C", buildDirectory, "-t", "deps"],
-                    WorkingDirectory = buildDirectory,
-                    Timeout = Budget,
-                },
-                cancellationToken)
-            .ConfigureAwait(false);
+        ProcessResult result;
+
+        try
+        {
+            result = await _processRunner
+                .RunAsync(
+                    new ProcessRequest
+                    {
+                        FileName = string.IsNullOrWhiteSpace(program) ? Program : ProcessRunner.Anchored(program, buildDirectory),
+                        Arguments = ["-C", buildDirectory, "-t", "deps"],
+
+                        // The directories the build was given, for a ninja looked up by name: the one
+                        // the survey found for the build, not "not installed".
+                        AppendToPath = appendToPath,
+                        WorkingDirectory = buildDirectory,
+                        Timeout = Budget,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ProgramStartException ex)
+        {
+            // The check could not run, which says nothing about the build it was to read: reported
+            // as the check that did not run, never as the build failing, and never as a pass.
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'ninja -t deps' could not be started for '{buildDirectory}': {ex.Message}",
+                ex);
+        }
 
         if (result.TimedOut)
         {

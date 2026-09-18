@@ -152,16 +152,21 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
     private readonly IHarnessOutput _output = output;
 
     /// <summary>
-    /// Takes what <paramref name="request"/> asks for, or refuses naming the holder.
+    /// Takes what <paramref name="request"/> asks for, or says which run holds it.
     /// </summary>
     /// <param name="layout">The repository, whose main checkout holds the lock file.</param>
     /// <param name="request">What to take.</param>
     /// <param name="cancellationToken">Stops the attempt.</param>
+    /// <remarks>
+    /// A lock another run holds is an answer, about one tree at one moment, and is returned as one: a
+    /// caller that turns it into a verdict for the legs on that tree must not also turn into one a
+    /// lock file nobody can use, which stops every run on every tree alike.
+    /// </remarks>
     /// <exception cref="HarnessException">
-    /// Another run holds it, or the lock file could not be read or updated. Never a wait: a run
-    /// blocked for hours on a lock cannot be told from one that hung.
+    /// The lock file could not be read or updated, or the request names no variant for a shared
+    /// hold. Never a wait: a run blocked for hours on a lock cannot be told from one that hung.
     /// </exception>
-    public Task<RunLockHandle> AcquireAsync(
+    public Task<LockAttempt> TryAcquireAsync(
         HarnessLayout layout,
         LockRequest request,
         CancellationToken cancellationToken = default)
@@ -190,24 +195,38 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
                 DateTimeOffset.UtcNow,
                 request.Command));
 
-        Update(
-            layout,
-            entries =>
-            {
-                var kept = Live(entries, entry, request.Force);
+        string? heldBy = null;
 
-                if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
+        try
+        {
+            Update(
+                layout,
+                entries =>
                 {
-                    throw new HarnessException(
-                        HarnessExit.Refused,
-                        $"{Describe(entry)} is held by {holder.Describe()}.");
-                }
+                    var kept = Live(entries, entry, request.Force);
 
-                return [.. kept, entry];
-            });
+                    if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
+                    {
+                        heldBy = $"{Describe(entry)} is held by {holder.Describe()}.";
 
-        return Task.FromResult(new RunLockHandle(this, layout, entry));
+                        // Thrown through the update so that nothing is written: a request that was
+                        // refused leaves the file as it found it.
+                        throw new LockHeldException();
+                    }
+
+                    return [.. kept, entry];
+                });
+        }
+        catch (LockHeldException)
+        {
+            return Task.FromResult(new LockAttempt(null, heldBy));
+        }
+
+        return Task.FromResult(new LockAttempt(new RunLockHandle(this, layout, entry), null));
     }
+
+    /// <summary>What leaves an update when another run holds what was asked for, writing nothing.</summary>
+    private sealed class LockHeldException : Exception;
 
     /// <summary>Every entry currently recorded, live or not.</summary>
     /// <param name="layout">The repository whose main checkout holds the lock file.</param>
@@ -225,10 +244,24 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
     /// <param name="layout">The repository whose main checkout holds the lock file.</param>
     /// <param name="entry">The entry this run took.</param>
     /// <param name="cancellationToken">Stops the attempt.</param>
+    /// <remarks>
+    /// A lock that could not be given up is said, and never stands in for the verdict of the work it
+    /// guarded, which is done: the entry names this process, and is reclaimed as a dead holder's is
+    /// once this run has ended.
+    /// </remarks>
     internal Task ReleaseAsync(HarnessLayout layout, LockEntry entry, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Update(layout, entries => [.. entries.Where(existing => !Ours(existing, entry))]);
+
+        try
+        {
+            Update(layout, entries => [.. entries.Where(existing => !Ours(existing, entry))]);
+        }
+        catch (HarnessException ex)
+        {
+            _output.Warn(CommandName, $"{Describe(entry)} could not be released: {ex.Message} It is reclaimed once this run has ended.");
+        }
+
         return Task.CompletedTask;
     }
 
@@ -325,7 +358,8 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
     private void Update(HarnessLayout layout, Func<IReadOnlyList<LockEntry>, IReadOnlyList<LockEntry>> change)
     {
         var path = Path.GetFullPath(layout.LockFile);
-        _fileSystem.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        Written(path, () => _fileSystem.CreateDirectory(Path.GetDirectoryName(path)!));
 
         MachineWideFile.Update<object?>(path, UpdateWindow, () =>
         {
@@ -334,10 +368,14 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
             // Written through the atomic write, which renames a complete file over the old one and
             // retries a sharing violation: a reader never sees a half-written lock file, and a
             // crash never truncates one into a file that appears to hold nothing.
-            _fileSystem.WriteAllTextAtomic(path, JsonSerializer.Serialize(entries, JsonOptions) + "\n");
+            Written(path, () => _fileSystem.WriteAllTextAtomic(path, JsonSerializer.Serialize(entries, JsonOptions) + "\n"));
             return null;
         });
     }
+
+    /// <summary>Does <paramref name="write"/>, and refuses, naming the lock file, when it could not be done.</summary>
+    private static void Written(string path, Action write)
+        => MachineWideFile.Written($"The run lock '{path}'", "Until it can be, one run cannot be told from another.", write);
 
     private IReadOnlyList<LockEntry> ReadFile(string path)
     {
@@ -356,7 +394,7 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"The run lock '{path}' could not be read: {ex.Message}. Until it can be, one run cannot be told from another.",
+                $"The run lock '{path}' could not be read: {ex.Message.TrimEnd('.')}. Until it can be, one run cannot be told from another.",
                 ex);
         }
 
@@ -370,11 +408,16 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
             // case where two runs would otherwise both proceed.
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"The run lock '{path}' is not readable as JSON: {ex.Message}. Remove it once no run is using it.",
+                $"The run lock '{path}' is not readable as JSON: {ex.Message.TrimEnd('.')}. Remove it once no run is using it.",
                 ex);
         }
     }
 }
+
+/// <summary>What asking for a lock came to: the lock, or the run that holds it. Exactly one is set.</summary>
+/// <param name="Handle">The lock, when it was taken.</param>
+/// <param name="HeldBy">Which run holds it, said as a refusal says it, when it was not.</param>
+public sealed record LockAttempt(RunLockHandle? Handle, string? HeldBy);
 
 /// <summary>
 /// What a run holds, and the only thing that can give it up. Released by the run that took it, and

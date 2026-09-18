@@ -1,8 +1,11 @@
+using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
@@ -30,6 +33,50 @@ public sealed class BuildServiceTests
         Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
         Assert.Equal(LegExit.Unwitnessed, Verdicts.ExitCodeFor(result.Verdict.Verdict));
         Assert.Contains("declares no buildOutputs", result.Verdict.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// worktrees.pathBudgetReserve is a number measured once, against whatever the build produced
+    /// then. Every build measures what it actually left below its build directory and says so, with
+    /// both numbers, when that went deeper - and says nothing when it did not, at the boundary too.
+    /// </summary>
+    [Theory]
+    [InlineData(-1, true)]
+    [InlineData(0, false)]
+    public async Task ABuildDeeperThanTheReserve_SaysSo_WithBothNumbers(int reserveAgainstDeepest, bool warned)
+    {
+        using var temp = new TempDirectory();
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        var directory = request.Variant.DirectoryUnder(temp.Path);
+        var deepest = Path.Combine("obj", "nested", "deeper", "still", "file.obj");
+
+        foreach (var file in new[] { Path.Combine("bin", "app.dll"), deepest })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(directory, file))!);
+            await File.WriteAllTextAsync(Path.Combine(directory, file), "built", TestContext.Current.CancellationToken);
+        }
+
+        var (service, factory) = await TrackedWithFactoryAsync(temp, TestContext.Current.CancellationToken);
+        var reserve = deepest.Length + reserveAgainstDeepest;
+
+        await service.BuildAsync(
+            new HarnessConfig
+            {
+                Defaults = new HarnessDefaults { StallSeconds = 0 },
+                Worktrees = new WorktreeSettings { PathBudgetReserve = reserve },
+            },
+            request,
+            TestContext.Current.CancellationToken);
+
+        var said = factory.StandardError.ToString();
+
+        Assert.Equal(warned, said.Contains("worktrees.pathBudgetReserve declares", StringComparison.Ordinal));
+
+        if (warned)
+        {
+            Assert.Contains($"{deepest.Length} characters long", said, StringComparison.Ordinal);
+            Assert.Contains($"declares {reserve}", said, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -251,6 +298,13 @@ public sealed class BuildServiceTests
     /// reason and not because these tests are about git.
     /// </summary>
     private static async Task<BuildService> TrackedAsync(TempDirectory temp, CancellationToken cancellationToken, int exitCode = 0)
+        => (await TrackedWithFactoryAsync(temp, cancellationToken, exitCode)).Service;
+
+    /// <summary>The same, with the factory, for a test that reads what the build said.</summary>
+    private static async Task<(BuildService Service, HarnessFactory Factory)> TrackedWithFactoryAsync(
+        TempDirectory temp,
+        CancellationToken cancellationToken,
+        int exitCode = 0)
     {
         var factory = new HarnessFactory();
 
@@ -260,14 +314,14 @@ public sealed class BuildServiceTests
         await File.WriteAllTextAsync(temp.Combine("src.cs"), "class App;" + Environment.NewLine, cancellationToken);
         await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
 
-        return Service(factory, exitCode);
+        return (Service(factory, exitCode), factory);
     }
 
-    private static BuildService Service(HarnessFactory factory, int exitCode)
+    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null)
         => new(
             new PhaseRunner(new QuietRunner(exitCode), factory.FileSystem, factory.Output),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
-            new NinjaDependencyCheck(new QuietRunner(exitCode), factory.FileSystem),
+            new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
             factory.GitClient,
@@ -405,6 +459,94 @@ public sealed class BuildServiceTests
         => BuildOutput.Keyed(paths.Select(entry => new KeyValuePair<string, string>(entry.Platform, entry.Path)));
 
     /// <summary>A runner that starts nothing, prints nothing, and exits as it was told to.</summary>
+    /// <summary>
+    /// The dependency records are read by the ninja the build ran, as its configuration recorded it:
+    /// one only the build's own environment could find is found all the same, and reads the records
+    /// the way it wrote them. Looked up by name instead, it was not there, and a green build failed.
+    /// </summary>
+    [Fact]
+    public async Task TheDependencyRecords_AreReadByTheNinjaTheBuildRan()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        // Whole on the machine that ran the build, written the way CMake writes it.
+        var recorded = temp.Combine("toolchain", "bin", "ninja").Replace('\\', '/');
+
+        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path}\nCMAKE_MAKE_PROGRAM:FILEPATH={recorded}\n",
+            cancellationToken);
+
+        var dependencies = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await Service(factory, exitCode: 0, dependencies).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.Equal(recorded, Assert.Single(dependencies.Started).FileName);
+    }
+
+    /// <summary>
+    /// A relative program the build recorded is read from the build directory, where the check starts,
+    /// never from wherever this process began.
+    /// </summary>
+    [Fact]
+    public async Task ARelativeRecordedNinja_IsReadFromTheBuildDirectory()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = temp.Combine("build", "x86_64-gcc-debug");
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, TestContext.Current.CancellationToken);
+
+        var runner = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
+            .CheckAsync(buildDirectory, [], "tools/ninja", TestContext.Current.CancellationToken);
+
+        Assert.Equal(Path.Combine(buildDirectory, "tools", "ninja"), Assert.Single(runner.Started).FileName);
+    }
+
+    /// <summary>
+    /// A check that could not start says so as a check that did not run - never as the build failing,
+    /// and never as a pass.
+    /// </summary>
+    [Fact]
+    public async Task ADependencyCheckThatCouldNotStart_IsACheckThatDidNotRun()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = temp.Combine("build", "x86_64-gcc-debug");
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, TestContext.Current.CancellationToken);
+
+        var runner = Substitute.For<IProcessRunner>();
+        runner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ProgramStartException("/opt/arm/bin/ninja", "'/opt/arm/bin/ninja' could not be started: Text file busy"));
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
+            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.CommandFailed, failure.ExitCode);
+        Assert.Contains("could not be started", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Answers every program with <paramref name="output"/>, recording what it was asked to start.</summary>
+    private sealed class RecordingRunner(string output) : IProcessRunner
+    {
+        public List<ProcessRequest> Started { get; } = [];
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            Started.Add(request);
+            return Task.FromResult(new ProcessResult(0, output, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
     private sealed class QuietRunner(int exitCode) : IProcessRunner
     {
         public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)

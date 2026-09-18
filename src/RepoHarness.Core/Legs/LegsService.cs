@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.ExceptionServices;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Repository;
@@ -28,16 +29,29 @@ public sealed record LegsReport(IReadOnlyList<LegPlacement> Placements, IReadOnl
     /// <summary>
     /// Whether the check passed. A leg named with <c>--legs</c> that cannot run fails it, because it
     /// was asked for; one that was merely declared does not, because a switched-off machine is normal.
-    /// Either way at least one leg must be able to run, or nothing would.
+    /// Either way at least one leg must be able to run, or nothing would - and a leg turned away
+    /// through a defect in this tool fails it, named or not.
     /// </summary>
     public bool Passed => Placements.Any(placement => placement.Runnable)
-        && (!Named || Placements.All(placement => placement.Runnable));
+        && (!Named || Placements.All(placement => placement.Runnable))
+        && Defect is null;
+
+    /// <summary>
+    /// A leg this survey turned away through a defect of its own - a host never asked about a program
+    /// the leg starts - or <see langword="null"/> when there is none.
+    /// </summary>
+    /// <remarks>
+    /// Never passed over as a machine that happens to be off: whether the leg could run was never
+    /// established, and a survey that did not ask must not read as one that looked.
+    /// </remarks>
+    public LegPlacement? Defect => Placements.FirstOrDefault(placement => !placement.Runnable && placement.Verdict == LegVerdict.Poisoned);
 }
 
 /// <summary>
 /// Finds where each selected leg can run before anything runs. It measures the hosts that could run
 /// them, bringing DssHarness on each to this machine's build, and places each leg on the first host
-/// that provides its operating system, its processor and its emulator.
+/// that provides its operating system, its processor and its emulator - turning it away there when
+/// that host lacks a program the command requires.
 /// </summary>
 public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspector inspector, IHarnessOutput output)
 {
@@ -52,41 +66,54 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
     /// Checks the legs <paramref name="legNames"/> selects, or every leg when <c>--legs</c> was left out and
     /// <paramref name="legNames"/> is <see langword="null"/>.
     /// </summary>
+    /// <param name="directory">A directory in the repository.</param>
+    /// <param name="legNames">What <c>--legs</c> was given, or <see langword="null"/>.</param>
+    /// <param name="workload">What the command asking will have each leg do, which says what a host must have.</param>
+    /// <param name="here">Whether this machine is the only candidate, whatever a leg names.</param>
+    /// <param name="cancellationToken">Stops the measuring.</param>
     public async Task<LegsReport> CheckAsync(
         string directory,
         IReadOnlyList<string>? legNames,
+        LegWorkload workload,
         bool here = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentNullException.ThrowIfNull(workload);
 
         var context = await _contextLoader.LoadAsync(directory, cancellationToken).ConfigureAwait(false);
         var config = context.Config;
         var selection = LegSelection.Resolve(config, legNames);
         var emulators = EmulatorsUsedBy(config, selection);
+        var programs = LegPrograms.Wanted(config, workload);
         var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
         // This machine costs nothing to reach, so it is measured first. Other hosts are measured only
-        // for the legs it cannot run, and all of those hosts at once.
+        // for the legs it cannot take at all - the wrong machine, or an emulator that does not work
+        // here - and all of those hosts at once. A leg it can take goes nowhere else, whatever
+        // programs it lacks.
         if (candidates.Any(entry => entry.Hosts.Contains(HostId.Local)))
         {
-            reports[HostId.Local] = await _inspector.InspectAsync(context, HostId.Local, emulators, cancellationToken).ConfigureAwait(false);
+            reports[HostId.Local] = await _inspector
+                .InspectAsync(context, HostId.Local, emulators, programs, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var remote = candidates
-            .Where(entry => !entry.Hosts.Contains(HostId.Local) || LegPlacement.Obstacle(entry.leg.Leg, reports[HostId.Local]) is not null)
+            .Where(entry => !entry.Hosts.Contains(HostId.Local)
+                || LegPlacement.PlatformObstacle(entry.leg.Leg, reports[HostId.Local]) is not null)
             .SelectMany(entry => entry.Hosts)
             .Where(host => host.Kind != HostKind.Local)
             .Distinct()
             .ToList();
 
-        foreach (var report in await InspectAllAsync(context, remote, emulators, cancellationToken).ConfigureAwait(false))
+        foreach (var report in await InspectAllAsync(context, remote, emulators, programs, cancellationToken).ConfigureAwait(false))
         {
             reports[report.Host] = report;
         }
 
-        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, reports, here)).ToList();
+        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, workload, reports, here)).ToList();
 
         // Each leg that cannot run is its own warning, naming it and saying why, while the others go on.
         foreach (var placement in placements.Where(placement => !placement.Runnable))
@@ -106,9 +133,10 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         HarnessContext context,
         List<HostId> hosts,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken)
     {
-        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, cancellationToken)).ToList();
+        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, programs, cancellationToken)).ToList();
 
         try
         {
@@ -126,8 +154,9 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken)
-        => await _inspector.InspectAsync(context, host, emulators, cancellationToken).ConfigureAwait(false);
+        => await _inspector.InspectAsync(context, host, emulators, programs, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Reports what the measurements that finished changed, warns about every failure but one, and raises that

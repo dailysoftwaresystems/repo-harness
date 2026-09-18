@@ -104,6 +104,37 @@ public sealed record ActionStep
 
 
     /// <summary>
+    /// The directory this step runs in, relative to the directory the leg's run works in - its tree
+    /// root: its root and its own path joined, or <see langword="null"/> where it declared neither and
+    /// runs at the tree root.
+    /// </summary>
+    /// <param name="actionName">
+    /// The action's directory name, which <see cref="Runners.WorkingDirectoryRoot.Action"/> resolves
+    /// against.
+    /// </param>
+    /// <remarks>
+    /// Where a program the step names by a relative path is read from, by the run and by the policy
+    /// that allows it alike: <c>./probe.py</c> in a step that runs in its action's directory is the
+    /// script beside the action file. Joined once, here, so the two cannot come to read it from two
+    /// different places.
+    /// </remarks>
+    public string? WorkingPath(string actionName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionName);
+
+        var root = WorkingDirectoryRoots.RelativePath(WorkingDirectoryRoot, actionName);
+
+        // Null where the step declared neither, so a phase that named no directory still names none
+        // and the runner's own "tree root" default keeps applying unchanged.
+        return (root, WorkingDirectory) switch
+        {
+            (null, var path) => path,
+            (var start, null) => start,
+            var (start, path) => Path.Combine(start, path),
+        };
+    }
+
+    /// <summary>
     /// This step as the phases the harness runs: one per line of its <c>run</c> block, each
     /// carrying the step's working directory, environment, witness, stall bound and failure policy.
     /// A predefined action yields none, because it is not a child process.
@@ -131,16 +162,7 @@ public sealed record ActionStep
         ArgumentException.ThrowIfNullOrWhiteSpace(actionName);
 
         var total = Commands.Count;
-        var root = WorkingDirectoryRoots.RelativePath(WorkingDirectoryRoot, actionName);
-
-        // Null where the step declared neither, so a phase that named no directory still names none
-        // and the runner's own "tree root" default keeps applying unchanged.
-        var working = (root, WorkingDirectory) switch
-        {
-            (null, var path) => path,
-            (var start, null) => start,
-            var (start, path) => Path.Combine(start, path),
-        };
+        var working = WorkingPath(actionName);
 
         return
         [

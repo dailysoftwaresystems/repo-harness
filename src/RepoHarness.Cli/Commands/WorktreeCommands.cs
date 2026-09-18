@@ -23,7 +23,9 @@ internal static class CreateWorktreeCommand
 
     internal static Command Create()
     {
-        var command = new Command(Name, "Create a worktree under .harness-config/worktrees.");
+        var command = new Command(
+            Name,
+            $"Create a worktree under {WorktreeSettings.DefaultRoot}, unless worktrees.root says otherwise.");
         command.Arguments.Add(NameArgument);
         command.Options.Add(RandomOption);
         GlobalOptions.AddTo(command);

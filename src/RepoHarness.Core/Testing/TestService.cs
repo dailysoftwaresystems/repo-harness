@@ -7,6 +7,7 @@ using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Sync;
 
@@ -20,6 +21,9 @@ namespace RepoHarness.Core.Testing;
 /// </remarks>
 public sealed record TestRequest
 {
+    /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>The leg, as the configuration names it and as the ledger shows it.</summary>
     public required string Leg { get; init; }
 
@@ -234,22 +238,30 @@ public sealed class TestService(
                 cancellationToken)
             .ConfigureAwait(false);
 
+        // Where the invocation said, and the tree root when it said nothing — which is what every
+        // test phase written before this ran in. A project that builds out of source has its tests
+        // in the build directory, which is derived per leg and so cannot be written down: started at
+        // the tree root, ctest reports that it found no tests, in a tree holding thousands. Made
+        // whole against the tree here, on the machine that starts the runner, so a directory rooted
+        // but not whole - '\tests' on Windows - is on the tree's own drive.
+        var working = Path.GetFullPath(command.WorkingDirectory ?? request.TreeRoot, request.TreeRoot);
+
         var phase = await _phaseRunner
             .RunAsync(
                 new PhaseRequest
                 {
                     Leg = request.Leg,
                     Phase = request.PhaseName,
-                    FileName = command.Program,
+
+                    // A runner named by a relative path is read from the directory it starts in, as
+                    // its arguments are: './unit_tests' with a workingDirectory of '{buildDir}' is
+                    // the build's own. Left to the start, it would be read against wherever this
+                    // process began, which for a leg on a worktree is the main checkout.
+                    FileName = ProcessRunner.Anchored(command.Program, working),
                     Arguments = command.Arguments,
                     LogFile = logFile,
-
-                    // Where the invocation said, and the tree root when it said nothing — which is
-                    // what every test phase written before this ran in. A project that builds out
-                    // of source has its tests in the build directory, which is derived per leg and
-                    // so cannot be written down: started at the tree root, ctest reports that it
-                    // found no tests, in a tree holding thousands.
-                    WorkingDirectory = command.WorkingDirectory ?? request.TreeRoot,
+                    AppendToPath = request.ProgramDirectories,
+                    WorkingDirectory = working,
                     Environment = Environment(command),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
@@ -263,7 +275,7 @@ public sealed class TestService(
         var contention = seen.Contention!;
         var comparison = seen.Inputs;
 
-        Report(request, contention);
+        ContentionWarnings.Write(_output, CommandName, request.Leg, contention, config.Contention);
 
         var reached = seen.Decide(request.Leg, [phase.Verdict()]);
         var entry = new LegEntry
@@ -443,33 +455,6 @@ public sealed class TestService(
         catch (HarnessException ex)
         {
             return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Says what sampling found besides a contender, and what it could not see. A clean report read
-    /// without its limits is read as more than it is.
-    /// </summary>
-    private void Report(TestRequest request, ContentionReport contention)
-    {
-        foreach (var shared in contention.SharedResourceUsers)
-        {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: {shared.Tool} (pid {shared.Process.Id}) ran outside this run, seen "
-                + $"{ContentionReport.Describe(shared.Seen)}; it shares state rather than this build directory.");
-        }
-
-        foreach (var unreadable in contention.Unreadable)
-        {
-            // Reported as unknown, never as nothing found: "no contender was running" and "nobody
-            // looked" are different facts and only one of them is evidence.
-            _output.Warn(CommandName, $"{request.Leg}: the process table was not read for one sample ({unreadable}).");
-        }
-
-        foreach (var limit in contention.Limits)
-        {
-            _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
         }
     }
 

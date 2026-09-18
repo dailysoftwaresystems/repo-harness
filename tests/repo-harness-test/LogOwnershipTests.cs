@@ -139,6 +139,65 @@ public sealed class LogOwnershipTests
         Assert.Null(ownership.Owner(directory));
     }
 
+    /// <summary>
+    /// A log path that could not be given up is said, and never stands in for what the run found:
+    /// the run is over by then, and the record is reclaimed once it has ended.
+    /// </summary>
+    [Fact]
+    public async Task ALogPathThatCouldNotBeGivenUp_IsSaid_AndNotRaised()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "unreadable");
+        var runId = RunId.New();
+
+        await ownership.ClaimAsync(directory, runId, cancellationToken: TestContext.Current.CancellationToken);
+
+        // The record no longer readable by the time the run gives it up.
+        await File.WriteAllTextAsync(LogOwnership.OwnerFile(directory), "not an owner", TestContext.Current.CancellationToken);
+
+        await ownership.ReleaseAsync(directory, runId, TestContext.Current.CancellationToken);
+
+        Assert.Contains("could not be given up", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A log path that cannot be claimed - its directory cannot be made, or its owner file cannot be
+    /// written - is a refusal naming the file, never an error that reads as a defect in this tool.
+    /// The claim is the first thing a run writes, so this is where a runs directory an earlier run
+    /// under sudo left to root is met.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ALogPathThatCannotBeClaimed_IsARefusal_NamingTheOwnerFile(bool directoryIsAFile)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var ownership = new LogOwnership(factory.FileSystem, factory.Output, factory.Identity);
+        var directory = temp.Combine("runs", "blocked");
+
+        if (directoryIsAFile)
+        {
+            temp.WriteFile("runs", "not a directory");
+        }
+        else
+        {
+            // The owner file replaced by a directory: nothing can be written where it goes.
+            Directory.CreateDirectory(LogOwnership.OwnerFile(directory));
+        }
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
+            directory,
+            RunId.New(),
+            cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("The log owner file", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("could not be written", refusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARunReclaimsItsOwnLogPath()
     {
@@ -211,10 +270,12 @@ public sealed class LogOwnershipTests
                 StringComparison.Ordinal),
             TestContext.Current.CancellationToken);
 
-        await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => ownership.ClaimAsync(
             directory,
             RunId.New(),
             cancellationToken: TestContext.Current.CancellationToken));
-    }
 
+        // The parser's reason is joined into the sentence, not closed twice.
+        Assert.DoesNotContain("..", refusal.Message, StringComparison.Ordinal);
+    }
 }

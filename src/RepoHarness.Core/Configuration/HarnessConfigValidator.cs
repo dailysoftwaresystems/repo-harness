@@ -1,7 +1,9 @@
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
 using RepoHarness.Core.Worktrees;
@@ -53,6 +55,7 @@ public static class HarnessConfigValidator
         ValidateEmulators(config, problems);
         ValidateLegs(config, problems);
         ValidateTools(config, problems);
+        ValidateToolSearchDirectories(config, problems);
         ValidateRunnersAndExec(config, problems);
         ValidateCommit(config.Commit, problems);
         ValidateSync(config.Sync, problems);
@@ -649,9 +652,7 @@ public static class HarnessConfigValidator
     /// </summary>
     private static void CheckProgram(string program, string setting, List<string> problems)
     {
-        var isPath = program.Contains('/', StringComparison.Ordinal) || program.Contains('\\', StringComparison.Ordinal);
-
-        if (isPath && !IsAbsolute(program))
+        if (ProcessRunner.IsPath(program) && !IsAbsolute(program))
         {
             problems.Add($"{setting} '{program}' must be a program name, looked up on the PATH, or an absolute path");
         }
@@ -666,7 +667,7 @@ public static class HarnessConfigValidator
         }
     }
 
-    private static bool IsAbsolute(string program) => program.StartsWith('/') || IsWindowsAbsolute(program);
+    private static bool IsAbsolute(string program) => PlatformPaths.IsAbsoluteOnAnyPlatform(program);
 
     /// <summary>Whether a command names no program: it is empty, or its first word is blank.</summary>
     private static bool IsBlankCommand(IReadOnlyList<string> command) => command.Count == 0 || string.IsNullOrWhiteSpace(command[0]);
@@ -802,6 +803,55 @@ public static class HarnessConfigValidator
         if (!SameName(emulator.HostOs, leg.Os))
         {
             problems.Add($"{owner} runs on {leg.Os}, but emulator '{emulatorName}' runs on {emulator.HostOs} hosts");
+        }
+    }
+
+    /// <summary>
+    /// Refuses a <c>toolSearchDirectories</c> entry naming a platform that does not exist, and a
+    /// directory that is blank or relative.
+    /// </summary>
+    /// <remarks>
+    /// A relative directory would be looked in relative to wherever the command happened to start,
+    /// so one leg would find a tool and the next, started elsewhere, would not. <c>~/</c> is allowed
+    /// and means the home directory of whoever searches, on each host its own.
+    /// </remarks>
+    private static void ValidateToolSearchDirectories(HarnessConfig config, List<string> problems)
+    {
+        foreach (var (platform, directories) in config.ToolSearchDirectories)
+        {
+            if (!PlatformKeys.Contains(platform, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"toolSearchDirectories names platform '{platform}'; "
+                    + $"expected one of {string.Join(", ", PlatformKeys)}");
+                continue;
+            }
+
+            var every = string.Equals(platform, PlatformScope.Every, StringComparison.OrdinalIgnoreCase);
+
+            foreach (var directory in directories ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    problems.Add($"toolSearchDirectories.{platform} has a blank entry");
+                    continue;
+                }
+
+                // Under 'all', an entry only one kind of machine can name is searched where it can
+                // be; under a platform, it has to name a directory on that platform.
+                var names = every
+                    ? ToolSearchDirectories.NamesOnAnyPlatform(directory)
+                    : ToolSearchDirectories.Names(directory, platform);
+
+                if (!names)
+                {
+                    problems.Add(
+                        $"toolSearchDirectories.{platform} lists '{directory}', which names no directory "
+                        + $"{(every ? "on any platform" : "there")} wherever a search starts; name it "
+                        + "absolutely - a drive or a share on Windows, a leading '/' elsewhere - or from "
+                        + "the home directory as '~/...'");
+                }
+            }
         }
     }
 
@@ -1309,6 +1359,23 @@ public static class HarnessConfigValidator
         {
             problems.Add("contention.sharedResourceTools contains a blank name");
         }
+
+        // A description of a tool nothing watches for reads as protection that does not exist, and
+        // it is what a renamed or misspelt entry in sharedResourceTools leaves behind.
+        foreach (var (tool, state) in contention.SharedState)
+        {
+            if (!contention.SharedResourceTools.Contains(tool, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"contention.sharedState describes '{tool}', which contention.sharedResourceTools does not "
+                    + "list, so nothing is ever found for it to describe");
+            }
+
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                problems.Add($"contention.sharedState.{tool} is blank; say what the tool shares, or leave it out");
+            }
+        }
     }
 
     /// <summary>
@@ -1359,11 +1426,13 @@ public static class HarnessConfigValidator
     {
         var trimmed = path.TrimEnd('/', '\\');
         var isHome = trimmed == "~";
-        var isRoot = trimmed.Length == 0 || (trimmed.Length == 2 && trimmed[1] == ':');
+        var isRoot = trimmed.Length == 0 || (trimmed.Length == 2 && PlatformPaths.NamesADrive(trimmed));
 
-        var isAbsolute = path.StartsWith('/')
-            || path.StartsWith("~/", StringComparison.Ordinal)
-            || (allowWindowsPaths && IsWindowsAbsolute(path));
+        // A POSIX path, or one from the home directory - or, where the host may run Windows, a drive
+        // or a share.
+        var isAbsolute = PlatformPaths.IsHomeRelative(path)
+            || PlatformPaths.IsAbsoluteOn(path, PlatformNames.Linux)
+            || (allowWindowsPaths && PlatformPaths.IsWindowsAbsolute(path));
 
         if (string.IsNullOrWhiteSpace(path) || (!isAbsolute && !isHome))
         {
@@ -1383,10 +1452,6 @@ public static class HarnessConfigValidator
         }
     }
 
-    private static bool IsWindowsAbsolute(string path)
-        => (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/')
-            || path.StartsWith(@"\\", StringComparison.Ordinal);
-
     /// <summary>
     /// Rejects a path that is absolute or climbs out with "..". These paths are resolved
     /// against a leg's own tree or build directory, and one that escapes it would read, or
@@ -1398,8 +1463,7 @@ public static class HarnessConfigValidator
         foreach (var path in paths)
         {
             var escapes = string.IsNullOrWhiteSpace(path)
-                || path[0] is '/' or '\\'
-                || (path.Length >= 2 && path[1] == ':')
+                || PlatformPaths.IsRootedOnAnyPlatform(path)
                 || path.Split('/', '\\').Any(segment => segment == "..");
 
             if (escapes)

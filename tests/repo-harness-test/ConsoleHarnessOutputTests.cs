@@ -36,6 +36,29 @@ public sealed class ConsoleHarnessOutputTests
         Assert.False(output.IsDataOnly);
     }
 
+    /// <summary>
+    /// A scope opened inside another - a leg run inside a command that already answers with data -
+    /// leaves the outer one standing when it closes: closed by the inner scope, the rest of the
+    /// command's progress went to standard output, in front of the document.
+    /// </summary>
+    [Fact]
+    public void AScopeInsideAnother_LeavesTheOuterOneStanding()
+    {
+        var (output, _, _) = Create(verbose: false);
+
+        using (output.DataOnly())
+        {
+            using (output.DataOnly())
+            {
+                Assert.True(output.IsDataOnly);
+            }
+
+            Assert.True(output.IsDataOnly);
+        }
+
+        Assert.False(output.IsDataOnly);
+    }
+
     [Fact]
     public void FailuresAndWarnings_GoToStandardError_SoOutputStaysPipeable()
     {
@@ -46,6 +69,23 @@ public sealed class ConsoleHarnessOutputTests
 
         Assert.Equal(["push: WARN - nothing to push", "push: FAIL - rejected"], Lines(standardError));
         Assert.Empty(Lines(standardOutput));
+    }
+
+    /// <summary>
+    /// A failure line reads back as what it said, through the one spelling that wrote it: a host's
+    /// refusal reaches the machine that dispatched its leg as exactly this line, and nothing but the
+    /// failure line of the command asked about is taken for it.
+    /// </summary>
+    [Fact]
+    public void AFailureLine_ReadsBackAsWhatItSaid_AndNothingElseDoes()
+    {
+        var line = FailureLine.For("run", "git does not ignore this action's 'artifacts/'");
+
+        Assert.Equal("run: FAIL - git does not ignore this action's 'artifacts/'", line);
+        Assert.True(FailureLine.TryRead(line, "run", out var said));
+        Assert.Equal("git does not ignore this action's 'artifacts/'", said);
+        Assert.False(FailureLine.TryRead(line, "test", out _));
+        Assert.False(FailureLine.TryRead("run: WARN - git does not ignore it", "run", out _));
     }
 
     [Fact]

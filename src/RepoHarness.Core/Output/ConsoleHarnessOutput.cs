@@ -30,7 +30,7 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
 
     public void Ok(string command, string message) => Write(Progress, $"{command}: OK - {message}");
 
-    public void Fail(string command, string message) => Write(_error, $"{command}: FAIL - {message}");
+    public void Fail(string command, string message) => Write(_error, FailureLine.For(command, message));
 
     public void Warn(string command, string message) => Write(_error, $"{command}: WARN - {message}");
 
@@ -54,10 +54,10 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
     {
         lock (_gate)
         {
+            var before = _dataOnly;
             _dataOnly = true;
+            return new DataOnlyScope(this, before);
         }
-
-        return new DataOnlyScope(this);
     }
 
     /// <summary>
@@ -83,7 +83,11 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
         }
     }
 
-    private sealed class DataOnlyScope(ConsoleHarnessOutput output) : IDisposable
+    /// <summary>
+    /// Puts back what it found, so a scope opened inside another - a leg run inside a command that
+    /// already answers with data - leaves the outer one standing when it closes.
+    /// </summary>
+    private sealed class DataOnlyScope(ConsoleHarnessOutput output, bool before) : IDisposable
     {
         private readonly ConsoleHarnessOutput _output = output;
 
@@ -91,7 +95,7 @@ public sealed class ConsoleHarnessOutput(TextWriter standardOutput, TextWriter s
         {
             lock (_output._gate)
             {
-                _output._dataOnly = false;
+                _output._dataOnly = before;
             }
         }
     }

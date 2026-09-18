@@ -196,7 +196,7 @@ public sealed class LegPlacementTests
     }
 
     private static LegPlacement Place(LegConfig leg, params HostReport[] measured)
-        => LegPlacement.Place(Config, new SelectedLeg("leg", leg), measured.ToDictionary(report => report.Host));
+        => LegPlacement.Place(Config, new SelectedLeg("leg", leg), LegWorkload.BuildAndTest, measured.ToDictionary(report => report.Host));
 
     private static HostReport Measured(HostId host, string os, string processor) => new() { Host = host, Os = os, Processor = processor };
 

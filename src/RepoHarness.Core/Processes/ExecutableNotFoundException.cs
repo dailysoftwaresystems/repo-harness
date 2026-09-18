@@ -10,7 +10,7 @@ public sealed class ExecutableNotFoundException(string fileName, Exception? inne
 {
     /// <summary>A name is looked up on PATH; a path is not, so for a path the file itself is what is missing.</summary>
     private static string Describe(string fileName)
-        => fileName.Contains('/', StringComparison.Ordinal) || fileName.Contains('\\', StringComparison.Ordinal)
+        => ProcessRunner.IsPath(fileName)
             ? $"Executable '{fileName}' does not exist."
             : $"Executable '{fileName}' was not found on PATH.";
 }

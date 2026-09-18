@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -436,6 +437,45 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A run that did not succeed says why on its FAIL line whether or not --json was asked for.
+    /// The JSON branch composed no message at all, so it printed "FAIL - " and nothing after the
+    /// dash - and a host is always asked for JSON, so every failure on another machine read that
+    /// way on the machine that sent it.
+    /// </summary>
+    [Fact]
+    public async Task ARunThatDidNotSucceed_SaysWhyOnItsFailLine_WithOrWithoutJson()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+        var token = TestContext.Current.CancellationToken;
+
+        var table = await CliRunner.RunAsync(["run", "probe", "--legs", "native,elsewhere", "-C", temp.Path], token);
+        var json = await CliRunner.RunAsync(["run", "probe", "--legs", "native,elsewhere", "--json", "-C", temp.Path], token);
+
+        const string Expected = "run: FAIL - 1 of 2 leg(s) passed; 1 did no work: elsewhere";
+
+        Assert.Equal(HarnessExit.Incomplete, table.ExitCode);
+        Assert.Equal(HarnessExit.Incomplete, json.ExitCode);
+        Assert.Contains(Expected, table.StandardError, StringComparison.Ordinal);
+        Assert.Contains(Expected, json.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The description names where worktrees go by default and that configuration may move them,
+    /// rather than stating the default as the only place: a repository that sets worktrees.root
+    /// was told, by the command it runs, somewhere its worktrees are not.
+    /// </summary>
+    [Fact]
+    public async Task CreateWorktree_DescribesTheRootAsTheDefault_NotAsTheOnlyPlace()
+    {
+        var result = await CliRunner.RunAsync(["create-worktree", "--help"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains(WorktreeSettings.DefaultRoot, result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("worktrees.root", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// B2's whole point is that a green nobody earned must not be reported, and the JSON ledger is
     /// the machine-readable half of that — the half a gate actually parses.
     /// </summary>
@@ -463,6 +503,280 @@ public sealed partial class CliEndToEndTests
         var legs = root.GetProperty("legs").EnumerateArray().Select(leg => leg.GetProperty("leg").GetString()).ToList();
         Assert.Contains("native", legs);
         Assert.Contains("elsewhere", legs);
+    }
+
+    /// <summary>
+    /// Asked for data, a run is answered with data whatever ended it. A selection no host can take
+    /// answered with text, which the machine that dispatched the leg read as a host whose answer
+    /// could not be read - where the host had said exactly why each leg could not run.
+    /// </summary>
+    [Fact]
+    public async Task ARunNoHostCanTake_AnswersWithTheLedger_NamingEachLegsVerdict()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "elsewhere", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegsExit.Unavailable, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(LegsExit.Unavailable, root.GetProperty("exitCode").GetInt32());
+        Assert.Equal("no selected leg can run", root.GetProperty("summary").GetString());
+        Assert.False(root.GetProperty("passed").GetBoolean());
+        Assert.False(root.GetProperty("complete").GetBoolean());
+
+        var leg = Assert.Single(root.GetProperty("legs").EnumerateArray());
+        Assert.Equal("elsewhere", leg.GetProperty("leg").GetString());
+        Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString());
+    }
+
+    /// <summary>
+    /// And a refusal of the whole run answers with the ledger too, carrying the refusal's own code
+    /// and words - as its FAIL line does, on standard error, where a reader of the terminal sees it.
+    /// </summary>
+    [Fact]
+    public async Task ARefusedRun_AnswersWithTheLedger_WithTheRefusalsCodeAndWords()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        // A program this machine has and the repository never declared: the leg is placed, then
+        // refused before anything starts.
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: git --version\n");
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.Refused, root.GetProperty("exitCode").GetInt32());
+        Assert.Contains("'git' is not declared under 'tools'", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.False(root.GetProperty("passed").GetBoolean());
+        Assert.False(root.GetProperty("complete").GetBoolean());
+        Assert.False(root.TryGetProperty("verdict", out _), "a stopped run reached no verdict of its own");
+        Assert.Empty(root.GetProperty("legs").EnumerateArray());
+        Assert.Contains("'git' is not declared under 'tools'", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The document is the whole of standard output from the command's first line: 'run' reads its
+    /// action before any leg is surveyed, and under --verbose says so, which went to standard output
+    /// in front of the document a script was about to parse.
+    /// </summary>
+    [Fact]
+    public async Task UnderVerbose_TheLedgerIsStillTheWholeOfStandardOutput()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--json", "--verbose", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+
+        Assert.Equal("native", Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("leg").GetString());
+        Assert.Contains("reading action file", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And before any leg is placed, too: a leg nobody declared is a usage error, answered with a
+    /// ledger holding no legs - so a script reading standard output has one document to read on
+    /// every exit, where it had nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task ARunStoppedBeforeAnyLegWasPlaced_StillAnswersWithTheLedger()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["test", "--no-build", "--legs", "no-such-leg", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.UsageError, root.GetProperty("exitCode").GetInt32());
+        Assert.Contains("no-such-leg", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.Empty(root.GetProperty("legs").EnumerateArray());
+        Assert.Contains("no-such-leg", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The chain the consumer's gate broke on, end to end: a leg whose test runner no directory on
+    /// this machine holds is turned away by the survey, naming the program, and a test run that
+    /// selects it reports it as skipped for a missing tool - incomplete, exit 21 - rather than starting
+    /// it and poisoning the run, exit 70. Its sibling still runs. And only a command that starts the
+    /// runner turns the leg away for it: a runner whose steps run something else runs there.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseTestRunnerIsNowhere_IsTurnedAwayForItsTests_AndOnlyForThem()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var missing = "rh-missing-" + Guid.NewGuid().ToString("N")[..8];
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs =
+            {
+                ["native"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                },
+                ["broken"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig { All = new TestInvocation { Runner = missing, SuccessPattern = "passed" } },
+                },
+            },
+            PredefinedRunners = { ["probe"] = new RunnerConfig { Action = "probe/probe.yml" } },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
+
+        var legs = await CliRunner.RunAsync(["legs", "-C", temp.Path], token);
+
+        Assert.Contains($"'{missing}' is not installed there", legs.StandardError, StringComparison.Ordinal);
+
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native,broken", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Incomplete, test.ExitCode);
+
+        using (var document = JsonDocument.Parse(test.StandardOutput))
+        {
+            var verdicts = document.RootElement.GetProperty("legs").EnumerateArray()
+                .ToDictionary(leg => leg.GetProperty("leg").GetString()!, leg => leg.GetProperty("verdict").GetString());
+
+            Assert.Equal("passed", verdicts["native"]);
+            Assert.Equal("skipped-tool-missing", verdicts["broken"]);
+        }
+
+        // A runner whose steps never start the test runner is not turned away for it.
+        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "broken", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, run.ExitCode);
+    }
+
+    /// <summary>
+    /// Each command asks a host only for what it will start there. A leg whose compiler no machine
+    /// has is turned away by the survey and by a build, and still tested when the build is skipped;
+    /// a runner whose step starts a program nothing has is turned away before it starts, with the
+    /// program named, rather than failing halfway through.
+    /// </summary>
+    [Fact]
+    public async Task EachCommand_TurnsALegAwayOnlyForWhatItWillStart()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var compiler = "rh-missing-cc-" + Guid.NewGuid().ToString("N")[..8];
+        var tool = "rh-missing-tool-" + Guid.NewGuid().ToString("N")[..8];
+
+        var toolchain = new ToolchainConfig { Platforms = [platform.PlatformKey] };
+        toolchain.Env["CC"] = compiler;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = toolchain },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                },
+            },
+            Tools = { new ToolConfig { Name = tool } },
+            Legs = { ["compiled"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+            PredefinedRunners = { ["absent"] = new RunnerConfig { Action = "absent/absent.yml" } },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "absent", "absent.yml"),
+            $"name: absent\nsteps:\n  - name: use\n    run: {tool} --version\n");
+
+        var legs = await CliRunner.RunAsync(["legs", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, legs.ExitCode);
+        Assert.Contains($"'{compiler}'", legs.StandardError, StringComparison.Ordinal);
+
+        var build = await CliRunner.RunAsync(["build", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, build.ExitCode);
+        Assert.Contains($"'{compiler}'", build.StandardError, StringComparison.Ordinal);
+
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, test.ExitCode);
+
+        var run = await CliRunner.RunAsync(["run", "absent", "--legs", "compiled", "-C", temp.Path], token);
+
+        Assert.Equal(LegsExit.Unavailable, run.ExitCode);
+        Assert.Contains($"'{tool}' is not installed there", run.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A runs directory nobody can write - an earlier run under sudo left it to root - refuses the
+    /// run, exit 13, naming the file it could not write, and still answers --json with the ledger.
+    /// Escaping as an error, it read as exit 70, a defect in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ARunsDirectoryNobodyCanWrite_RefusesTheRun_NamingIt()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        await PrepareRunnerAsync(temp);
+
+        var runs = temp.Combine(".harness-config", "runs");
+
+        if (Directory.Exists(runs))
+        {
+            Directory.Delete(runs, recursive: true);
+        }
+
+        await File.WriteAllTextAsync(runs, "not a directory", token);
+
+        var result = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Refused, result.ExitCode);
+        Assert.Contains("could not be written", result.StandardError, StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+
+        Assert.Equal(HarnessExit.Refused, document.RootElement.GetProperty("exitCode").GetInt32());
     }
 
     /// <summary>

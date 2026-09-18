@@ -5,6 +5,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -13,6 +14,9 @@ namespace RepoHarness.Core.Runners;
 /// <summary>One predefined runner on one leg, with everything the caller has already decided.</summary>
 public sealed record RunnerRunRequest
 {
+    /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>The runner, as <c>predefinedRunners</c> keys it and a run check names it.</summary>
     public required string RunnerName { get; init; }
 
@@ -225,15 +229,14 @@ public sealed class RunnerRunService(
 
         var steps = await StepsAsync(config, request, values, cancellationToken).ConfigureAwait(false);
 
-        // Keyed by the run, under the action's own directory. Two runs of one action on one machine
-        // — two legs, or a retry — would otherwise write over each other's intermediate files.
-        var scratch = steps.ActionDirectory is { Length: > 0 } owned
-            ? new ActionScratch(
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId, request.Leg)),
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
-            : null;
+        var scratch = ScratchFor(request, steps.ActionDirectory);
 
-        Refuse(request, steps.Phases, values);
+        if (steps.ActionDirectory is { Length: > 0 } action)
+        {
+            await RefuseUnignoredScratchAsync(request, action, cancellationToken).ConfigureAwait(false);
+        }
+
+        Refuse(request, steps, values, scratch);
 
         var record = await _runSegments
             .BeginAsync(request.Layout, request.RunId, request.Leg, request.SegmentId, DateTimeOffset.UtcNow, cancellationToken)
@@ -285,14 +288,12 @@ public sealed class RunnerRunService(
                         ? LegInputs.Unmeasured(unmeasurable)
                         : LegInputs.Watch(guarded ?? []),
                     Contention = watching
-                        ? new ContentionRequest
-                        {
-                            Leg = request.Leg,
-                            BuildDirectory = request.BuildDirectory!,
-                            BuildTools = config.Contention.BuildTools,
-                            SharedResourceTools = config.Contention.SharedResourceTools,
-                            SampleSeconds = config.Defaults.ProcessSampleSeconds,
-                        }
+                        ? Build.ContentionRequests.For(
+                            config,
+                            request.Leg,
+                            request.BuildDirectory!,
+                            request.TreeRoot,
+                            _platform.PlatformKey)
                         : null,
                 },
                 cancellationToken)
@@ -374,6 +375,13 @@ public sealed class RunnerRunService(
             .ConfigureAwait(false);
 
         var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
+
+        // Said as build and test say it. A runner's steps are sampled with the same rules, and what
+        // that found beside them was dropped without a word.
+        if (seen.Contention is { } contention)
+        {
+            ContentionWarnings.Write(_output, CommandName, request.Leg, contention, config.Contention);
+        }
         var decided = await DecideAsync(request, state, values, cancellationToken).ConfigureAwait(false);
 
         // What the guards saw is folded in the same way every other verb folds it, so a step whose
@@ -494,16 +502,33 @@ public sealed class RunnerRunService(
                 .LoadAsync(request.Layout.RunnerActionsDirectory, action, cancellationToken)
                 .ConfigureAwait(false);
 
-            // Before anything starts, and over the whole file rather than step by step: a file whose
-            // last step names an undeclared program is refused with its first step not yet run.
-            _toolPolicy.Enforce(file, config, request.TreeRoot);
-
             inputs = ResolveInputs(file, values);
+
+            var supplied = Supplied(values, inputs);
+            var scratch = ScratchFor(request, file.DirectoryName);
+
+            // Before anything starts, and over the whole file rather than step by step: a file whose
+            // last step names an undeclared program is refused with its first step not yet run. Each
+            // line is judged by what it will start and where from, worked out exactly as the run
+            // works them out: read as written, a directory an input names could put a program
+            // outside the repository while the text still read as inside it.
+            _toolPolicy.Enforce(
+                file,
+                config,
+                request.TreeRoot,
+                (step, command) => Started(
+                    request,
+                    command.Program,
+                    step.WorkingPath(file.DirectoryName),
+                    PathsFor(request, scratch, step.Name),
+                    supplied,
+                    step.Name),
+                values.Redact);
 
             // The names the expansion will actually have, not a subset of them. Handed the declared
             // inputs alone this refused a run line naming a runner value directory's own value — the
             // same check-against-a-different-set defect as before, inverted.
-            RefuseUnknownNames(file, Namable(values.Supplied, inputs).Keys);
+            RefuseUnknownNames(file, supplied.Keys);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -633,37 +658,17 @@ public sealed class RunnerRunService(
         ActionScratch? scratch,
         CancellationToken cancellationToken)
     {
+        var paths = PathsFor(request, scratch, phase.StepName);
+
         // Created before the step runs, not lazily by whatever the step happens to do. A program
         // told to write into a directory that is not there fails in its own words, which is a worse
         // message than the one this would have given.
-        var stepBuild = scratch is not null && phase.StepName is { Length: > 0 }
-            ? Path.Combine(scratch.Build, LogNameFor(phase.StepName))
-            : null;
-
-        if (stepBuild is not null)
+        if (paths.StepBuild is { } stepBuild)
         {
             _fileSystem.CreateDirectory(stepBuild);
         }
 
-        // The leg's directories and the action's own values, through the one expander a project's
-        // test invocation uses. A step that builds out of source has no other way to name where its
-        // build went: the directory is derived per leg and no tracked file can spell it.
-        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory)
-        {
-            Identity = request.Identity,
-            Product = request.Product,
-            ProductProblem = request.ProductProblem,
-            ActionBuild = scratch?.Build,
-            ActionArtifacts = scratch?.Artifacts,
-            RunArtifacts = scratch is null ? null : Path.GetDirectoryName(scratch.Artifacts),
-            StepBuild = stepBuild,
-        };
-        // The runner's own values, and the action's declared inputs over them. One map, because the
-        // check that refuses an unfillable name is given this same set: fed from two places they
-        // disagree, and a name the check accepted reached the program as literal text.
-        var supplied = inputs.Count == 0
-            ? values.Supplied
-            : Namable(values.Supplied, inputs);
+        var supplied = Supplied(values, inputs);
 
         var arguments = phase.Command
             .Skip(1)
@@ -675,16 +680,7 @@ public sealed class RunnerRunService(
                 supplied))
             .ToList();
 
-        var working = Path.GetFullPath(Path.Combine(
-            request.WorkingDirectory ?? request.TreeRoot,
-            phase.WorkingDirectory is { Length: > 0 } declared
-                ? LegPathNames.Expand(
-                    declared,
-                    paths,
-                    $"'{phase.Name}' workingDirectory",
-                    PlaceholderPolicy.LeaveAsWritten,
-                    supplied)
-                : "."));
+        var (program, working) = Started(request, phase.Command[0], phase.WorkingDirectory, paths, supplied, phase.Name);
 
         var result = await _phaseRunner
             .RunAsync(
@@ -692,12 +688,7 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    FileName = LegPathNames.Expand(
-                        phase.Command[0],
-                        paths,
-                        $"'{phase.Name}' run line",
-                        PlaceholderPolicy.LeaveAsWritten,
-                        supplied),
+                    FileName = program,
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),
@@ -705,6 +696,7 @@ public sealed class RunnerRunService(
                         LogNameFor(phase.Name) + ".log"),
                     WorkingDirectory = working,
                     Environment = EnvironmentFor(request, phase, values),
+                    AppendToPath = request.ProgramDirectories,
                     SuccessPattern = phase.SuccessPattern,
 
                     // The step's own bound, else the runner's, else the repository's. A stall bound
@@ -976,15 +968,27 @@ public sealed class RunnerRunService(
     /// secret leaks by being convenient, and the leak that costs a credential is a failed command
     /// echoing what it was asked to run.
     /// </exception>
-    private static void Refuse(RunnerRunRequest request, IReadOnlyList<RunnerPhase> phases, ActionValues values)
+    private static void Refuse(RunnerRunRequest request, RunnerSteps steps, ActionValues values, ActionScratch? scratch)
     {
-        foreach (var phase in phases)
+        var supplied = Supplied(values, steps.Inputs);
+
+        foreach (var phase in steps.Phases)
         {
             if (phase.Command.Count == 0)
             {
                 throw new HarnessException(
                     HarnessExit.ConfigInvalid,
                     $"Step '{phase.Name}' of runner '{request.RunnerName}' names no program.");
+            }
+
+            // Worked out as the start works it out: a program filled in to nothing - an empty value
+            // in the runner's .env - starts nothing, and is refused before the first step rather
+            // than reaching the start as a program with no name, which read as a defect in this tool.
+            if (string.IsNullOrWhiteSpace(Started(request, phase.Command[0], phase.WorkingDirectory, PathsFor(request, scratch, phase.StepName), supplied, phase.Name).Program))
+            {
+                throw new HarnessException(
+                    HarnessExit.ConfigInvalid,
+                    $"Step '{phase.Name}' of runner '{request.RunnerName}' starts nothing once its names are filled in.");
             }
 
             if (Carries(values, phase.Command))
@@ -1102,6 +1106,80 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>
+    /// Refuses a run whose action's working space or kept output git would not ignore in this tree.
+    /// </summary>
+    /// <param name="request">The run.</param>
+    /// <param name="action">The action's own directory, relative to the actions directory.</param>
+    /// <param name="cancellationToken">Stops the questions.</param>
+    /// <exception cref="HarnessException">
+    /// Either directory would not be ignored, a refusal naming the rule; or git could not say whether
+    /// it would, which leaves this leg unable to run in this tree. Nothing has run.
+    /// </exception>
+    /// <remarks>
+    /// Asked before anything is written, of the paths this very run would write: a file under each,
+    /// because git answers a directory rule for a directory that does not exist yet only when asked
+    /// about something inside it. The rules were written by init and nothing checked they were still
+    /// in effect, so a repository whose .gitignore predates them wrote a run's kept output where git
+    /// status shows it and the next 'git add -A' commits it - output committed beside the thing that
+    /// produced it is a measurement nobody can reproduce.
+    /// <para>
+    /// A sync does not carry these either way: each action's build and artifacts are withheld by name,
+    /// whatever .gitignore says. What the rule protects is the repository's own history.
+    /// </para>
+    /// </remarks>
+    private async Task RefuseUnignoredScratchAsync(RunnerRunRequest request, string action, CancellationToken cancellationToken)
+    {
+        var uncovered = new List<string>();
+
+        foreach (var (kind, relative) in new[]
+        {
+            (HarnessLayout.ActionBuildDirectoryName, HarnessLayout.ActionBuildRelative(action, request.RunId, request.Leg)),
+            (HarnessLayout.ActionArtifactsDirectoryName, HarnessLayout.ActionArtifactsRelative(action, request.RunId, request.Leg)),
+        })
+        {
+            var probe = Path.Combine(relative, "probe").Replace('\\', '/');
+            bool ignored;
+
+            try
+            {
+                ignored = await _gitClient.IsIgnoredAsync(request.TreeRoot, probe, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HarnessException ex) when (ex.ExitCode == HarnessExit.CommandFailed)
+            {
+                // A question that could not be asked is no verdict on the code, and not an answer
+                // either way. It is about this leg's tree - a worktree whose link to its repository
+                // is broken, a copy git can no longer read - so this leg cannot run here, in git's own
+                // words, and the legs on other trees still report: raised as a refusal of the run, it
+                // ended every leg over one tree's repository.
+                throw new HarnessException(
+                    HarnessExit.HostUnavailable,
+                    $"git could not say whether this action's '{kind}/' is ignored in '{request.TreeRoot}', "
+                    + $"so whether this run would write where git commits is unknown. Nothing has run. {ex.Message}");
+            }
+
+            if (!ignored)
+            {
+                uncovered.Add(kind);
+            }
+        }
+
+        if (uncovered.Count == 0)
+        {
+            return;
+        }
+
+        var directories = string.Join(" and ", uncovered.Select(kind => $"'{kind}/'"));
+        var rules = string.Join(", ", uncovered.Select(kind => $"'{HarnessLayout.ActionScratchIgnoreRule(kind)}'"));
+
+        throw new HarnessException(
+            HarnessExit.Refused,
+            $"git does not ignore this action's {directories} in '{request.TreeRoot}', so what this run "
+            + "writes there would show in git status and be committed by the next 'git add -A'. "
+            + $"'{Hosts.ToolPackage.Command} init' writes the rule{(uncovered.Count == 1 ? string.Empty : "s")} "
+            + $"into the managed block of .gitignore, or add {rules} by hand. Nothing has run.");
+    }
+
+    /// <summary>
     /// Copies what a step asked to keep into the action's artifacts, as soon as it has passed.
     /// </summary>
     /// <param name="phase">The step that finished, carrying what it declared and whether it persists.</param>
@@ -1135,7 +1213,19 @@ public sealed class RunnerRunService(
                         // samples emits a directory of them. Skipped here — which is what this did —
                         // it passed the witness, was never copied, and went with the build directory,
                         // leaving a passed run and no measurements.
-                        KeepDirectory(source, destination);
+                        var unfollowed = KeepDirectory(source, destination);
+
+                        if (unfollowed.Count > 0)
+                        {
+                            // A kept copy missing what its links led to is an incomplete copy, and one
+                            // a later sync carries to every host as though it were the whole output.
+                            _output.Warn(
+                                CommandName,
+                                $"'{phase.StepName}' asked to keep '{output}', which holds {unfollowed.Count} "
+                                + "directory link(s) that were not followed, so what they lead to is not in "
+                                + $"the kept copy: {string.Join(", ", unfollowed.Select(link => $"'{link}'"))}");
+                        }
+
                         continue;
                     }
 
@@ -1202,7 +1292,12 @@ public sealed class RunnerRunService(
     /// <summary>Copies a directory output, with everything under it.</summary>
     /// <param name="source">The directory the step produced.</param>
     /// <param name="destination">Where it is kept.</param>
-    private void KeepDirectory(string source, string destination)
+    /// <returns>
+    /// The directory links under it, relative to it, which were not followed: a link can lead out of
+    /// the output, or back into it and round again, so what it leads to is not copied - and is named
+    /// rather than left out without a word.
+    /// </returns>
+    private IReadOnlyList<string> KeepDirectory(string source, string destination)
     {
         _fileSystem.CreateDirectory(destination);
 
@@ -1214,6 +1309,8 @@ public sealed class RunnerRunService(
             _fileSystem.CreateDirectory(Path.GetDirectoryName(into) ?? destination);
             _fileSystem.CopyFile(file, into, overwrite: true);
         }
+
+        return [.. _fileSystem.EnumerateDirectoryLinks(source).Select(link => Path.GetRelativePath(source, link).Replace('\\', '/'))];
     }
 
     /// <summary>
@@ -1234,6 +1331,106 @@ public sealed class RunnerRunService(
         IReadOnlyList<string> PerformedActions,
         IReadOnlyDictionary<string, string> Inputs,
         string? ActionDirectory);
+
+    /// <summary>
+    /// The action's working space for this run, or <see langword="null"/> for a runner that declares
+    /// phases of its own. Keyed by the run, under the action's own directory: two runs of one action
+    /// on one machine - two legs, or a retry - would otherwise write over each other's files.
+    /// </summary>
+    private static ActionScratch? ScratchFor(RunnerRunRequest request, string? actionDirectory)
+        => actionDirectory is { Length: > 0 } owned
+            ? new ActionScratch(
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId, request.Leg)),
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
+            : null;
+
+    /// <summary>
+    /// The directories a step's placeholders name: the leg's own, and the action's working space with
+    /// the step's own directory in it, through the one expander a project's test invocation uses. A
+    /// step that builds out of source has no other way to name where its build went: the directory is
+    /// derived per leg and no tracked file can spell it.
+    /// </summary>
+    /// <param name="request">The leg's run.</param>
+    /// <param name="scratch">The action's working space, when the runner uses an action.</param>
+    /// <param name="stepName">The step's own name, which names its directory in that space.</param>
+    private static LegPaths PathsFor(RunnerRunRequest request, ActionScratch? scratch, string? stepName) => new(request.TreeRoot, request.BuildDirectory)
+    {
+        Identity = request.Identity,
+        Product = request.Product,
+        ProductProblem = request.ProductProblem,
+        ActionBuild = scratch?.Build,
+        ActionArtifacts = scratch?.Artifacts,
+        RunArtifacts = scratch is null ? null : Path.GetDirectoryName(scratch.Artifacts),
+        StepBuild = scratch is not null && stepName is { Length: > 0 } ? Path.Combine(scratch.Build, LogNameFor(stepName)) : null,
+    };
+
+    /// <summary>
+    /// The values a step's placeholders are filled from: the runner's own, and the action's declared
+    /// inputs over them. One map, because the check that refuses an unfillable name is given this
+    /// same set: fed from two places they disagree, and a name the check accepted reached the program
+    /// as literal text.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> Supplied(ActionValues values, IReadOnlyDictionary<string, string> inputs)
+        => inputs.Count == 0 ? values.Supplied : Namable(values.Supplied, inputs);
+
+    /// <summary>
+    /// What a line starts, and the directory it starts in, with their placeholders filled in: the
+    /// one reading both the start and the policy that allowed it use, so the program a policy judged
+    /// is the program that starts, from where it starts.
+    /// </summary>
+    /// <remarks>
+    /// A program named by a relative path is made whole against the directory its step starts in -
+    /// './probe.py' in a step that runs in its action's directory is the script beside the action
+    /// file. Left to the start, it would be read against wherever this process began, which for a
+    /// leg on a worktree is the main checkout.
+    /// </remarks>
+    /// <param name="request">The leg's run.</param>
+    /// <param name="program">The line's program, as written.</param>
+    /// <param name="workingDirectory">
+    /// The directory its step runs in, as written, relative to the directory the leg's run works in -
+    /// its tree root; that directory itself when absent.
+    /// </param>
+    /// <param name="paths">The directories the placeholders name.</param>
+    /// <param name="supplied">The values the placeholders are filled from.</param>
+    /// <param name="name">The step, as refusals name it.</param>
+    private static (string Program, string WorkingDirectory) Started(
+        RunnerRunRequest request,
+        string program,
+        string? workingDirectory,
+        LegPaths paths,
+        IReadOnlyDictionary<string, string> supplied,
+        string name)
+    {
+        var directory = workingDirectory is { Length: > 0 } declared
+            ? LegPathNames.Expand(declared, paths, $"'{name}' workingDirectory", PlaceholderPolicy.LeaveAsWritten, supplied)
+            : ".";
+
+        var filled = LegPathNames.Expand(program, paths, $"'{name}' run line", PlaceholderPolicy.LeaveAsWritten, supplied);
+
+        // Refused naming the step, before anything runs, rather than reaching a path function that
+        // cannot read them, which read as a defect in this tool: a directory filled in to nothing -
+        // an empty value in the runner's .env - names none, and a NUL is a character no path or
+        // program name can hold.
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Step '{name}' of runner '{request.RunnerName}' runs in no directory once its names are filled in.");
+        }
+
+        if (directory.Contains('\0', StringComparison.Ordinal) || filled.Contains('\0', StringComparison.Ordinal))
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Step '{name}' of runner '{request.RunnerName}' names a program or a directory holding a NUL character, which no path can hold.");
+        }
+
+        var working = Path.GetFullPath(directory, request.WorkingDirectory ?? request.TreeRoot);
+
+        // A line filled in to nothing starts nothing, and is refused before anything runs: by the
+        // policy for an action's lines, naming the line, and by Refuse for a runner's own phases.
+        return (string.IsNullOrWhiteSpace(filled) ? filled : ProcessRunner.Anchored(filled, working), working);
+    }
 
     /// <summary>What a run line may name: the runner's values, with the action's inputs over them.</summary>
     /// <param name="values">What the runner value directories supply.</param>

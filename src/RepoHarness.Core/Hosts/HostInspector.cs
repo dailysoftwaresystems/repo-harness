@@ -50,6 +50,19 @@ public sealed record HostReport
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Where each program the survey asked about is there, found by the host itself the way a leg
+    /// there will start it.
+    /// </summary>
+    public IReadOnlyDictionary<string, ProgramLocation> Programs { get; init; }
+        = new Dictionary<string, ProgramLocation>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The directories a program asked for by name was found in there, on the PATH or off it, in the
+    /// order the search looked. A leg run there appends them to the PATH of every process it starts.
+    /// </summary>
+    public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
     /// <summary>What inspection changed on the host, such as installing DssHarness.</summary>
     public IReadOnlyList<string> Actions { get; init; } = [];
 
@@ -69,12 +82,27 @@ public interface IHostInspector
     /// The host has a newer DssHarness than this machine. Versions only move up, so nothing runs until
     /// this machine is updated.
     /// </exception>
+    /// <param name="context">The repository and its configuration.</param>
+    /// <param name="host">The host to measure.</param>
+    /// <param name="emulators">The emulators to check there, by name.</param>
+    /// <param name="programs">The programs to find there, the way a leg there will start them.</param>
+    /// <param name="cancellationToken">Stops the measuring.</param>
     Task<HostReport> InspectAsync(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>What a host is asked when it is measured.</summary>
+/// <param name="Emulators">The emulators to check, by name.</param>
+/// <param name="Programs">The programs to find.</param>
+/// <param name="SearchDirectories">The repository's <c>toolSearchDirectories</c>.</param>
+internal sealed record HostQuestions(
+    IReadOnlyDictionary<string, EmulatorConfig> Emulators,
+    IReadOnlyList<string> Programs,
+    IReadOnlyDictionary<string, List<string>> SearchDirectories);
 
 /// <inheritdoc cref="IHostInspector"/>
 public sealed class HostInspector(
@@ -101,23 +129,28 @@ public sealed class HostInspector(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(emulators);
+        ArgumentNullException.ThrowIfNull(programs);
+
+        var questions = new HostQuestions(emulators, programs, context.Config.ToolSearchDirectories);
 
         return host.Kind == HostKind.Local
-            ? InspectLocalAsync(emulators, cancellationToken)
-            : InspectRemoteAsync(context, host, emulators, cancellationToken);
+            ? InspectLocalAsync(questions, cancellationToken)
+            : InspectRemoteAsync(context, host, questions, cancellationToken);
     }
 
     /// <summary>This machine is measured in-process: the build doing the measuring is the one that would run its legs.</summary>
-    private async Task<HostReport> InspectLocalAsync(
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
-        CancellationToken cancellationToken)
+    private async Task<HostReport> InspectLocalAsync(HostQuestions questions, CancellationToken cancellationToken)
     {
-        var info = await _agent.DescribeAsync(emulators, cancellationToken).ConfigureAwait(false);
+        var info = await _agent
+            .DescribeAsync(questions.Emulators, questions.Programs, questions.SearchDirectories, cancellationToken)
+            .ConfigureAwait(false);
+
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
     }
 
@@ -128,22 +161,34 @@ public sealed class HostInspector(
     private async Task<HostReport> InspectRemoteAsync(
         HarnessContext context,
         HostId host,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         CancellationToken cancellationToken)
     {
         var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
         var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
 
-        return opened.Connection is { } connection
-            ? await PrepareAsync(found, connection, emulators, cancellationToken).ConfigureAwait(false)
-            : found with { Reason = opened.Problem };
+        if (opened.Connection is not { } connection)
+        {
+            return found with { Reason = opened.Problem };
+        }
+
+        try
+        {
+            return await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
+        {
+            // Its transport stopped starting part way through: this host cannot take legs, and the
+            // others are still measured.
+            return found with { Reason = reason };
+        }
     }
 
     /// <summary>Brings DssHarness on a reachable host to this machine's build, then asks it what the host is.</summary>
     private async Task<HostReport> PrepareAsync(
         HostReport found,
         HostConnection connection,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         CancellationToken cancellationToken)
     {
         var root = _identity.Current;
@@ -186,7 +231,7 @@ public sealed class HostInspector(
             return found with { Reason = reason };
         }
 
-        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, emulators, root, cancellationToken)
+        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, questions, root, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -272,10 +317,12 @@ public sealed class HostInspector(
         HostReport found,
         HostConnection connection,
         bool windowsHost,
-        IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        HostQuestions questions,
         ToolIdentity root,
         CancellationToken cancellationToken)
     {
+        var emulators = questions.Emulators;
+
         // Global tools are installed under the home directory, which is where programs start on every
         // kind of host. They are usually not on the PATH of a command run over ssh or with wsl.exe
         // --exec, which reads no login profile, so the path is spelt out.
@@ -287,6 +334,10 @@ public sealed class HostInspector(
             {
                 Kind = HostAgentRequestKind.Info,
                 Emulators = new Dictionary<string, EmulatorConfig>(emulators, StringComparer.OrdinalIgnoreCase),
+                Programs = [.. questions.Programs],
+                ToolSearchDirectories = new Dictionary<string, List<string>>(
+                    questions.SearchDirectories,
+                    StringComparer.OrdinalIgnoreCase),
             },
             HostAgentProtocol.JsonOptions);
 
@@ -384,8 +435,13 @@ public sealed class HostInspector(
 
         if (dotnet is null or { Found: ProgramFound.Unreadable })
         {
-            return $"whether {sdk} is installed there could not be established: the host did not answer when asked "
-                + $"where 'dotnet' is; run again once it does, and see '{ToolPackage.Id} legs' for what answered";
+            // The search's own reason where it has one: the host answered, and the search could not
+            // look where it was told to, which running again does not change. A host that did not
+            // answer leaves no reason, and running again may well change that.
+            var located = dotnet ?? new ProgramLocation(DotnetProgram, ProgramFound.Unreadable);
+
+            return $"whether {sdk} is installed there could not be established: {located.WhyUnestablished()}"
+                + (located.Reason is null ? $"; run again once it does, and see '{ToolPackage.Id} legs' for what answered" : string.Empty);
         }
 
         if (dotnet.Found == ProgramFound.Nowhere)
@@ -432,6 +488,13 @@ public sealed class HostInspector(
         ToolVersion = info.Version,
         ToolPath = session?.ToolPath,
         Emulators = info.Emulators,
+
+        // By each program's own name, compared exactly: cmake and CMake are two files on Linux. A
+        // program answered twice is the same answer twice, and the later one stands.
+        Programs = info.Programs
+            .GroupBy(location => location.Program, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal),
+        ProgramDirectories = info.ProgramDirectories,
         Session = session,
     };
 

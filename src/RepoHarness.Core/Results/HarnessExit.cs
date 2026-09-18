@@ -75,6 +75,14 @@ public static class HarnessExit
     /// </summary>
     public static IReadOnlyList<ExitCodeDescription> All { get; } = BuildDescriptions();
 
+    /// <summary>
+    /// Whether <paramref name="exitCode"/> refuses a whole run rather than describing one leg: a
+    /// configuration, a command line or a policy, each the same fact for every leg, so the reader has
+    /// one thing to change rather than one verdict per leg to read.
+    /// </summary>
+    /// <param name="exitCode">The code a refusal carries.</param>
+    public static bool RefusesTheRun(int exitCode) => exitCode is ConfigInvalid or UsageError or Refused;
+
     /// <summary>Describes one shared exit code, or <see langword="null"/> if it is command specific.</summary>
     public static ExitCodeDescription? Describe(int exitCode)
         => All.FirstOrDefault(description => description.Code == exitCode);

@@ -47,15 +47,7 @@ public static class TestInvocationResolver
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        var platform = platformKey switch
-        {
-            PlatformNames.Windows => settings.Windows,
-            PlatformNames.Linux => settings.Linux,
-            PlatformNames.MacOs => settings.Macos,
-            _ => null,
-        };
-
-        var merged = Merge(settings.All, platform);
+        var merged = Merge(settings.All, SectionFor(settings, platformKey));
 
         if (string.IsNullOrWhiteSpace(merged.Runner))
         {
@@ -170,8 +162,9 @@ public static class TestInvocationResolver
     }
 
     /// <summary>
-    /// <paramref name="path"/> as an absolute path, resolving a relative one against
-    /// <paramref name="treeRoot"/>.
+    /// <paramref name="path"/> read against <paramref name="treeRoot"/> when it is relative, and as
+    /// written when it is already rooted - which on Windows may still lack a drive, for the machine
+    /// that starts the runner to make whole.
     /// </summary>
     /// <remarks>
     /// So a working directory can be written either way: <c>{buildDir}</c> expands to an absolute
@@ -180,6 +173,33 @@ public static class TestInvocationResolver
     /// </remarks>
     private static string Rooted(string path, string treeRoot)
         => Path.IsPathRooted(path) ? path : Path.Combine(treeRoot, path);
+
+    /// <summary>
+    /// The invocation a leg's tests use on <paramref name="platformKey"/>: its runner - empty when the
+    /// settings name none there - and the environment that runner starts in.
+    /// </summary>
+    /// <param name="settings">The test settings.</param>
+    /// <param name="platformKey">The operating system the leg runs on.</param>
+    /// <remarks>
+    /// Read by the same merge <see cref="Resolve"/> uses, and without its refusals: a survey asks
+    /// which program a host must have, and settings that name none are the test command's to refuse,
+    /// in its own words, when somebody runs it.
+    /// </remarks>
+    public static ResolvedTestInvocation InvocationFor(TestConfig settings, string platformKey)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        return Merge(settings.All, SectionFor(settings, platformKey));
+    }
+
+    /// <summary>The section of <paramref name="settings"/> for one operating system, if it has one.</summary>
+    private static TestInvocation? SectionFor(TestConfig settings, string platformKey) => platformKey switch
+    {
+        PlatformNames.Windows => settings.Windows,
+        PlatformNames.Linux => settings.Linux,
+        PlatformNames.MacOs => settings.Macos,
+        _ => null,
+    };
 
     private static ResolvedTestInvocation Merge(TestInvocation? all, TestInvocation? platform)
         => new(

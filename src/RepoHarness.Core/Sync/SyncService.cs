@@ -285,13 +285,16 @@ public sealed class SyncService(
             return CommandOutcome.Failed(
                 HarnessExit.UsageError,
                 $"no run '{named}' has kept anything: nothing under "
-                + $"'{HarnessLayout.DirectoryName}/{HarnessLayout.RunnerDirectoryName}/"
-                + $"{HarnessLayout.RunnerActionsDirectoryName}' holds artifacts for it. A step keeps "
+                + $"'{HarnessLayout.RunnerActionsDirectoryRelative}' holds artifacts for it. A step keeps "
                 + "what it declares under 'outputs' and asks for with 'persist', and only when it "
                 + "passes.");
         }
 
-        var report = await _legsService.CheckAsync(directory, legNames, here: false, cancellationToken).ConfigureAwait(false);
+        // A copy starts no program on a host, so a host is given one whatever it has installed: a host
+        // without cmake is still where a runner that builds nothing runs, and where its artifacts go.
+        var report = await _legsService
+            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: false, cancellationToken)
+            .ConfigureAwait(false);
 
         var hosts = report.Placements
             .Where(placement => placement is { Runnable: true, Host: not null })
@@ -595,6 +598,7 @@ public sealed class SyncService(
             }
 
             _output.Warn(CommandName, $"{transport.Host}:   replace  {HarnessLayout.DirectoryName}/config.json, with this tree's");
+            _output.Warn(CommandName, $"{transport.Host}:   mirror   {HarnessLayout.RunnerActionsDirectoryRelative}, to this tree's actions");
 
             // Marked as begun before anything is deleted, and marked as finished only once the copy
             // is one. A takeover that stops part way is neither the checkout somebody had nor a copy
@@ -614,7 +618,7 @@ public sealed class SyncService(
         // after the transfer, so a copy that failed part way is not left looking complete.
         await transport.InitialiseRepositoryAsync(destinationRoot, cancellationToken).ConfigureAwait(false);
 
-        await PlaceConfigurationAsync(context.Layout, transport, destinationRoot, cancellationToken)
+        await PlaceConfigurationAsync(context, transport, destinationRoot, cancellationToken)
             .ConfigureAwait(false);
 
         // Throws when the copy does not match, so reaching the next line is what verified means.
@@ -675,29 +679,32 @@ public sealed class SyncService(
     }
 
     /// <summary>
-    /// Puts this repository's <c>config.json</c> in the copy, and nothing else from
-    /// <c>.harness-config</c>.
+    /// Puts the <c>config.json</c> this command read into the copy.
     /// </summary>
     /// <remarks>
     /// A leg placed on a host runs DssHarness there, and DssHarness in a directory holding no
     /// <c>.harness-config/config.json</c> refuses as not initialised — so without this the copy is a
     /// tree no leg can run in, and the failure arrives as "the host could not be reached" about a
-    /// host that answered. Only this one file crosses: the rest of that directory is connection
-    /// data, credentials, locks and logs, each of which is local to a machine by design, and the
-    /// tracked configuration names hosts only by name.
+    /// host that answered. The file is the one this command was configured from: the synced tree's
+    /// own, which for a worktree is that worktree's. Read from the main checkout instead, as it was,
+    /// a worktree's remote legs ran with a configuration the worktree did not have.
     /// Written after the transfer and the git initialisation, so a copy that failed part way is
-    /// never left looking like one a leg could run in.
+    /// never left looking like one a leg could run in. The rest of the harness's directory crosses
+    /// only as far as <see cref="HarnessDirectorySync"/> lets it.
     /// </remarks>
     private async Task PlaceConfigurationAsync(
-        Repository.HarnessLayout layout,
+        Repository.HarnessContext context,
         ISyncTransport transport,
         string destinationRoot,
         CancellationToken cancellationToken)
     {
         var relativePath = $"{Repository.HarnessLayout.DirectoryName}/{Repository.HarnessLayout.ConfigFileName}";
 
+        // The tree's file and the main checkout's fallback are both '<root>/.harness-config/config.json'.
+        var configRoot = Path.GetDirectoryName(Path.GetDirectoryName(context.ConfigFile))!;
+
         var contents = await _localTransport
-            .ReadFileAsync(layout.MainCheckoutRoot, relativePath, cancellationToken)
+            .ReadFileAsync(configRoot, relativePath, cancellationToken)
             .ConfigureAwait(false);
 
         await transport.WriteFileAsync(destinationRoot, relativePath, contents, cancellationToken).ConfigureAwait(false);
@@ -1041,9 +1048,10 @@ public sealed class SyncService(
     /// <remarks>
     /// A sync deletes whatever the source does not have, so a checkout somebody made by hand may hold
     /// work nothing here knows about. What survives is named exactly, and it is narrower than it
-    /// looks: <c>.git</c> and so every commit there, the rest of this tool's own directory — though
-    /// the <c>config.json</c> in it is replaced with this tree's — the worktrees root,
-    /// and whatever <c>sync.neverTransfer</c> names. What git ignores is read from <em>this</em>
+    /// looks: <c>.git</c> and so every commit there, this tool's own state in its directory — though
+    /// the <c>config.json</c> there is replaced with this tree's and its actions are made to match
+    /// this tree's, keeping each action's own build and artifacts — the worktrees root, and
+    /// whatever <c>sync.neverTransfer</c> names. What git ignores is read from <em>this</em>
     /// tree, by listing the ignored files that exist here — so a build directory that exists only on
     /// the host is ignored by nothing this side can see, and is counted among the deletions like any
     /// other file. It appears in the list below, which is why the list is the thing to read.
@@ -1068,10 +1076,11 @@ public sealed class SyncService(
         var take = $"'--adopt \"{transport.Host}\"'";
 
         var configuration = $"Taking it over also replaces {HarnessLayout.DirectoryName}/config.json "
-            + "there with this tree's.";
+            + $"there with this tree's, and makes {HarnessLayout.RunnerActionsDirectoryRelative} there match this tree's, action by action.";
 
-        var survives = $"Its .git and every commit in it, the rest of {HarnessLayout.DirectoryName}, "
-            + "the worktrees root and whatever sync.neverTransfer names are left alone. Nothing else "
+        var survives = $"Its .git and every commit in it, the harness's own state in {HarnessLayout.DirectoryName} "
+            + "- connection data, secrets, runner values, locks, runs, and each action's own build and "
+            + "artifacts - the worktrees root and whatever sync.neverTransfer names are left alone. Nothing else "
             + "is: a directory that only that host has, a build tree among them, is ignored by nothing "
             + "this tree can see and is deleted like any other file. A link there is never followed "
             + "and never deleted, so nothing behind one is in this list — but a file this tree has "

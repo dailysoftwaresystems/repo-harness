@@ -1,6 +1,7 @@
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Secrets;
 
 namespace RepoHarness.Core.Hosts;
@@ -67,9 +68,6 @@ public sealed class HostConnector(
     /// <summary>Longest one probe of a connected host may take.</summary>
     public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
-    private const int SshFailed = 255;
-
     private readonly IHostPlatform _platform = platform;
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
@@ -90,15 +88,50 @@ public sealed class HostConnector(
         return host.Kind switch
         {
             HostKind.Local => LocalAsync(programs, cancellationToken),
-            HostKind.Wsl => WslAsync(context, host, programs, cancellationToken),
-            _ => SshAsync(context, host, programs, cancellationToken),
+            HostKind.Wsl => ReachedAsync(WslAsync(context, host, programs, cancellationToken)),
+            _ => ReachedAsync(SshAsync(context, host, programs, cancellationToken)),
         };
+    }
+
+    /// <summary>
+    /// A host whose transport would not start was never reached, and is refused as that - one host
+    /// that cannot be used - rather than ending whatever asked for it, in the transport's own words.
+    /// </summary>
+    private static async Task<HostConnectionResult> ReachedAsync(Task<HostConnectionResult> connecting)
+    {
+        try
+        {
+            return await connecting.ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (Unreached(ex) is { } reason)
+        {
+            return HostConnectionResult.Refused(reason);
+        }
+    }
+
+    /// <summary>
+    /// Why the transport that reaches a host would not start, when that is what
+    /// <paramref name="exception"/> says, or <see langword="null"/>.
+    /// </summary>
+    /// <param name="exception">What reaching the host raised.</param>
+    public static string? Unreached(HarnessException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        return exception.ExitCode == HarnessExit.HostUnavailable && exception.InnerException is ProgramStartException start
+            ? start.Message
+            : null;
     }
 
     private async Task<HostConnectionResult> LocalAsync(IReadOnlyList<string> wanted, CancellationToken cancellationToken)
     {
         var connection = await _programs
-            .ResolveAsync(new HostConnection { Host = HostId.Local }, wanted, ProbeBudget, cancellationToken)
+            .ResolveAsync(
+                new HostConnection { Host = HostId.Local },
+                wanted,
+                ToolSearchDirectories.BuiltIn(_platform.PlatformKey),
+                ProbeBudget,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return new HostConnectionResult
@@ -149,7 +182,9 @@ public sealed class HostConnector(
 
         return new HostConnectionResult
         {
-            Connection = await _programs.ResolveAsync(connection, wanted, ProbeBudget, cancellationToken).ConfigureAwait(false),
+            Connection = await _programs
+                .ResolveAsync(connection, wanted, ToolSearchDirectories.Posix, ProbeBudget, cancellationToken)
+                .ConfigureAwait(false),
             Superuser = item.Superuser,
             Os = os,
             Processor = processor,
@@ -214,7 +249,7 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused(probe switch
             {
                 { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
-                { ExitCode: SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
+                { ExitCode: HostProbes.SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
                 _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
             });
         }
@@ -223,7 +258,18 @@ public sealed class HostConnector(
 
         return new HostConnectionResult
         {
-            Connection = await _programs.ResolveAsync(connection, wanted, budget, cancellationToken).ConfigureAwait(false),
+            // Before the host's platform is known, so the built-in list: what is looked for here is
+            // the harness's own SDK, which a repository's toolSearchDirectories must never hide. cmd
+            // is Windows's own shell, and Windows's built-in list is empty: a POSIX directory is none a
+            // Windows host has, and the SDK there is on the machine PATH.
+            Connection = await _programs
+                .ResolveAsync(
+                    connection,
+                    wanted,
+                    connection.Shell == RemoteShell.Cmd ? ToolSearchDirectories.BuiltIn(PlatformNames.Windows) : ToolSearchDirectories.Posix,
+                    budget,
+                    cancellationToken)
+                .ConfigureAwait(false),
             Superuser = item.Superuser,
         };
     }

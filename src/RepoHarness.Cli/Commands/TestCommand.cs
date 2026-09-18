@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Legs;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Testing;
 
@@ -102,11 +103,15 @@ internal static class TestCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(HereOption),
-                        RemoteArguments(arguments)),
+                        RemoteArguments(arguments))
+                    {
+                        // Built first unless told not to, and tested either way.
+                        Workload = new LegWorkload(Build: !skipBuild, Test: true, []),
+                    },
                     (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);
-        }));
+        }, JsonOption));
 
         return command;
     }
@@ -180,7 +185,10 @@ internal static class TestCommand
                         leg.Variant,
                         leg.Host.Os ?? string.Empty,
                         CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory),
+                        work.RunDirectory)
+                    {
+                        ProgramDirectories = leg.Host.ProgramDirectories,
+                    },
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -206,6 +214,7 @@ internal static class TestCommand
                 new TestRequest
                 {
                     Leg = leg.Name,
+                    ProgramDirectories = leg.Host.ProgramDirectories,
                     TreeRoot = leg.TreeRoot,
                     BuildDirectory = leg.BuildDirectory,
                     RunDirectory = work.RunDirectory,

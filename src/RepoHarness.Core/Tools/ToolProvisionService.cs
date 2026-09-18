@@ -7,6 +7,7 @@ using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Results;
 using RepoHarness.Core.Secrets;
 
 namespace RepoHarness.Core.Tools;
@@ -105,23 +106,49 @@ public sealed class ToolProvisionService(
     private async Task<LegProvision> ProvisionHostAsync(HarnessContext context, HostId host, CancellationToken cancellationToken)
     {
         var config = context.Config;
-        var wanted = new List<string>();
 
-        if (host.Kind != HostKind.Local)
-        {
-            wanted.Add(HostInspector.DotnetProgram);
-        }
-
-        wanted.AddRange(config.Tools.Select(tool => tool.Name));
+        // Only the harness's own SDK is looked for while connecting. The declared tools are looked
+        // for once the host's platform is known, in the directories this repository declares for that
+        // platform: the same list the survey and a leg's own run use there. Where the host's shell
+        // cannot look in one of them, the tool is unknown rather than missing, so this command never
+        // installs a second copy of a tool a leg there can already start.
+        IReadOnlyList<string> wanted = host.Kind == HostKind.Local ? [] : [HostInspector.DotnetProgram];
 
         var opened = await _connector.ConnectAsync(context, host, wanted, cancellationToken).ConfigureAwait(false);
 
         if (opened.Connection is not { } connection)
         {
-            _output.Warn(CommandName, $"{host} could not be reached: {opened.Problem}");
-            return new LegProvision { Leg = string.Empty, Host = host, Unreachable = opened.Problem };
+            return Unreachable(host, opened.Problem!);
         }
 
+        try
+        {
+            return await ProvisionConnectedAsync(host, connection, opened, config, context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
+        {
+            // Its transport stopped starting part way through: this host is named, and the others
+            // are still provisioned.
+            return Unreachable(host, reason);
+        }
+    }
+
+    /// <summary>A host that could not be reached, named, and what provisioning it reports.</summary>
+    private LegProvision Unreachable(HostId host, string reason)
+    {
+        _output.Warn(CommandName, $"{host} could not be reached: {reason}");
+        return new LegProvision { Leg = string.Empty, Host = host, Unreachable = reason };
+    }
+
+    /// <summary>Provisions a host that was reached.</summary>
+    private async Task<LegProvision> ProvisionConnectedAsync(
+        HostId host,
+        HostConnection connection,
+        HostConnectionResult opened,
+        HarnessConfig config,
+        HarnessContext context,
+        CancellationToken cancellationToken)
+    {
         var outcomes = new List<ToolOutcome>();
         var superuser = new Superuser(host, opened.Superuser, ItemEnvFile(context.Layout, host));
 
@@ -135,13 +162,18 @@ public sealed class ToolProvisionService(
         }
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
+        var searched = ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey);
+
+        connection = await _programs
+            .ResolveAsync(connection, [.. config.Tools.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
+            .ConfigureAwait(false);
 
         // A tool this platform does not need is not probed here, rather than probed and excused.
         // Probing costs a round trip to the host for an answer nothing would read, and an outcome
         // recorded for it would have to be excused again by everything that counts outcomes.
         foreach (var tool in config.Tools.Where(tool => PlatformScope.Applies(tool.Platforms, platformKey)))
         {
-            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, superuser, cancellationToken)
+            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, searched, superuser, cancellationToken)
                 .ConfigureAwait(false);
 
             connection = updated;
@@ -174,11 +206,9 @@ public sealed class ToolProvisionService(
         const string Name = HostInspector.DotnetProgram;
         var needed = $".NET {ToolPackage.MinimumSdkMajor}";
 
-        if (connection.Located(Name) is { Found: ProgramFound.Unreadable })
+        if (connection.Located(Name) is { Found: ProgramFound.Unreadable } unreadable)
         {
-            return (
-                new ToolOutcome(Name, ToolState.Unknown, null, $"the host did not answer when asked where '{Name}' is"),
-                connection);
+            return (new ToolOutcome(Name, ToolState.Unknown, null, unreadable.WhyUnestablished()), connection);
         }
 
         if (await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false) is { } current)
@@ -219,7 +249,7 @@ public sealed class ToolProvisionService(
         // Measured again rather than assumed: the installer's own directory is what the next command
         // has to spell, and the run that put it there is the only one that can find out where it went.
         connection = await _programs
-            .ResolveAsync(connection.Forget(Name), [Name], ProbeBudget, cancellationToken)
+            .ResolveAsync(connection.Forget(Name), [Name], ToolSearchDirectories.Posix, ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
         var installed = await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false);
@@ -263,16 +293,15 @@ public sealed class ToolProvisionService(
         HostConnection connection,
         ToolConfig tool,
         string? platformKey,
+        IReadOnlyList<string> searched,
         Superuser superuser,
         CancellationToken cancellationToken)
     {
-        var located = connection.Located(tool.Name);
+        var located = connection.Located(tool.Name) ?? new ProgramLocation(tool.Name, ProgramFound.Unreadable);
 
-        if (located is null or { Found: ProgramFound.Unreadable })
+        if (located.Found == ProgramFound.Unreadable)
         {
-            return (
-                new ToolOutcome(tool.Name, ToolState.Unknown, null, $"the host did not answer when asked where '{tool.Name}' is"),
-                connection);
+            return (new ToolOutcome(tool.Name, ToolState.Unknown, null, located.WhyUnestablished()), connection);
         }
 
         var install = InstallFor(tool, platformKey);
@@ -286,7 +315,7 @@ public sealed class ToolProvisionService(
                 return (new ToolOutcome(tool.Name, ToolState.Missing, null, Needed(tool, platformKey)), connection);
             }
 
-            return await RunInstallAsync(host, connection, tool, install, superuser, update: false, cancellationToken)
+            return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: false, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -324,7 +353,7 @@ public sealed class ToolProvisionService(
                 connection);
         }
 
-        return await RunInstallAsync(host, connection, tool, install, superuser, update: true, cancellationToken)
+        return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: true, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -334,6 +363,7 @@ public sealed class ToolProvisionService(
         HostConnection connection,
         ToolConfig tool,
         ToolInstall install,
+        IReadOnlyList<string> searched,
         Superuser superuser,
         bool update,
         CancellationToken cancellationToken)
@@ -373,7 +403,7 @@ public sealed class ToolProvisionService(
         }
 
         connection = await _programs
-            .ResolveAsync(connection.Forget(tool.Name), [tool.Name], ProbeBudget, cancellationToken)
+            .ResolveAsync(connection.Forget(tool.Name), [tool.Name], searched, ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
         if (connection.Located(tool.Name) is not { Present: true })
@@ -495,9 +525,17 @@ public sealed class ToolProvisionService(
 
         var uname = await RunAsync(connection, "uname", ["-s"], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
-        // uname is on every POSIX system, so a host without it is a Windows one running PowerShell,
-        // which is the only other shell an ssh server here hands a command to. A host that has it
-        // and names a system this build does not know is not that, and is not guessed at.
+        // A host that did not answer at all - it timed out, or ssh itself failed - said nothing about
+        // what it is. Read as Windows, it would be searched in no POSIX directory and asked about no
+        // tool scoped to Linux, and then reported as having everything it needs.
+        if (!HostProbes.Answered(uname))
+        {
+            return null;
+        }
+
+        // uname is on every POSIX system, so a host that answered without it is a Windows one running
+        // PowerShell, which is the only other shell an ssh server here hands a command to. A host that
+        // has it and names a system this build does not know is not that, and is not guessed at.
         return uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : PlatformNames.Windows;
     }
 
@@ -573,8 +611,8 @@ public sealed class ToolProvisionService(
         }
         catch (Exception ex) when (ex is ArgumentException or ExecutableNotFoundException)
         {
-            // A token no shell reads literally, or a transport that is not installed here: reported as
-            // what the command did, because either way the program on the host never ran.
+            // A token no shell reads literally, or a program of this machine's own that is not
+            // installed: reported as what the command did, because either way the program never ran.
             return new ProcessResult(-1, string.Empty, ex.Message, TimeSpan.Zero, TimedOut: false);
         }
     }

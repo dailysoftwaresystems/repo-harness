@@ -99,6 +99,9 @@ public sealed class WorktreeService(
     /// <summary>The command a creation reports under.</summary>
     internal const string CreateCommand = "create-worktree";
 
+    /// <summary>The command a listing reports under.</summary>
+    internal const string ListCommand = "list-worktree";
+
     /// <summary>
     /// Where the commit a worktree was made from is recorded. Under <c>refs/harness/</c> rather than
     /// under heads, tags or remotes, so the record can never be mistaken for somewhere work is kept.
@@ -193,7 +196,7 @@ public sealed class WorktreeService(
 
         var budget = _pathBudget.Check(
             path,
-            settings.PathBudgetReserve,
+            BuildDirectoryLength(context.Config) + settings.PathBudgetReserve,
             settings.PathBudgetMargin,
             settings.PathLimit);
 
@@ -330,7 +333,7 @@ public sealed class WorktreeService(
             _output.Warn(
                 DeleteCommand,
                 $"'{worktreeName}' was deleted, and the commit it was made from is still recorded at "
-                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage}. Remove it with "
+                + $"'{BaseCommitRef(worktreeName)}': {removed.FailureMessage.TrimEnd('.')}. Remove it with "
                 + $"'git update-ref -d {BaseCommitRef(worktreeName)}', or the next worktree of this name "
                 + "inherits it.");
         }
@@ -493,15 +496,56 @@ public sealed class WorktreeService(
             return [];
         }
 
-        var names = _fileSystem
-            .EnumerateDirectories(worktreesDirectory)
-            .Select(directory => Path.GetFileName(Path.TrimEndingDirectorySeparator(directory)))
-            .Where(directoryName => !string.IsNullOrEmpty(directoryName))
-            .OrderBy(directoryName => directoryName, StringComparer.Ordinal);
+        // Only what git records as a worktree is one. Every directory under the root was counted, so
+        // a data directory a lane script keeps there read as a sixth worktree beside git's five, and
+        // a listing that disagrees with git's own record is one nobody can act on. Read from git's
+        // record rather than guessed from a directory's contents, and matched by resolved path, the
+        // way git lists them: if the record cannot be read, the command fails rather than listing
+        // directories nobody checked.
+        var registered = (await _gitClient.ListWorktreesAsync(context.Layout.MainCheckoutRoot, cancellationToken).ConfigureAwait(false))
+            .Where(worktree => !worktree.IsMain)
+            .ToList();
+
+        var names = new List<string>();
+
+        foreach (var directory in _fileSystem.EnumerateDirectories(worktreesDirectory))
+        {
+            var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
+
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+
+            var resolved = _fileSystem.ResolveLinks(directory);
+
+            if (registered.Any(worktree => PathsEqual(worktree.Path, resolved)))
+            {
+                names.Add(name);
+            }
+            else if (_fileSystem.FileExists(Path.Combine(directory, ".git")) || _fileSystem.DirectoryExists(Path.Combine(directory, ".git")))
+            {
+                // Said without being asked. A directory holding a .git entry that git no longer
+                // records is what a removal leaves when git's record went and a file in use did not,
+                // and its name stays taken: dropped from the listing silently, it looks free.
+                _output.Warn(
+                    ListCommand,
+                    $"'{name}' holds a .git entry, and git records no worktree there: what a removal leaves "
+                    + "when git's record goes and something in the directory could not. It is not listed, "
+                    + "and a new worktree cannot take its name until it is gone; look inside for anything "
+                    + $"wanted, then delete '{directory}'.");
+            }
+            else
+            {
+                _output.Detail(
+                    ListCommand,
+                    $"'{name}' is under the worktrees root and is not a worktree git records, so it is not listed");
+            }
+        }
 
         var listings = new List<WorktreeListing>();
 
-        foreach (var name in names)
+        foreach (var name in names.Order(StringComparer.Ordinal))
         {
             listings.Add(new WorktreeListing(
                 name,
@@ -509,6 +553,32 @@ public sealed class WorktreeService(
         }
 
         return listings;
+    }
+
+    /// <summary>
+    /// How many characters <c>/build/&lt;variant&gt;/</c> adds below a worktree, for the longest
+    /// variant among the legs this machine builds; zero when it builds none.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <remarks>
+    /// Counted here rather than folded into worktrees.pathBudgetReserve, because the harness knows
+    /// every variant's name and the reserve could only guess at one: when build directories came to
+    /// be keyed by variant, a reserve measured below the build directory stopped covering the
+    /// directory itself, and the check believed it had twenty characters to spare where it had four.
+    /// A leg builds in this machine's worktree when it names no host of its own and its operating
+    /// system is this machine's; one that names a host builds there, whatever its os says.
+    /// </remarks>
+    private int BuildDirectoryLength(Configuration.HarnessConfig config)
+    {
+        var longest = config.Legs.Values
+            .Where(leg => leg.Wsl is null && leg.Ssh is null)
+            .Where(leg => string.Equals(leg.Os, _platform.PlatformKey, StringComparison.OrdinalIgnoreCase))
+            .Select(leg => Build.VariantKey.For(config, leg, _platform.PlatformKey).DirectoryName.Length)
+            .DefaultIfEmpty(-1)
+            .Max();
+
+        // A separator before 'build', one between it and the variant, and one after the variant.
+        return longest < 0 ? 0 : Build.VariantKey.BuildRootName.Length + longest + 3;
     }
 
     private static WorktreeOutcome Usage(string message)

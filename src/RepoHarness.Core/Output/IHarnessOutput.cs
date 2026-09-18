@@ -51,11 +51,15 @@ public interface IHarnessOutput
     /// document.
     /// </summary>
     /// <remarks>
+    /// Disposing the scope puts back what was in force when it opened, so a scope opened inside
+    /// another leaves the outer one standing.
+    /// <para>
     /// A command asked for JSON has one reader, and that reader parses standard output whole.
     /// Progress written there would be read as part of the document, and the run's own progress is
     /// the most likely thing to appear before it. Measured: a leg dispatched to a host returned its
     /// ledger behind two lines of progress, and the machine that asked reported the host as
     /// unreachable — a green leg turned into a connection failure by a line of prose.
+    /// </para>
     /// </remarks>
     IDisposable DataOnly();
 }

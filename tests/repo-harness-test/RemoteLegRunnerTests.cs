@@ -1,6 +1,8 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 
@@ -108,6 +110,172 @@ public sealed class RemoteLegRunnerTests
             "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
 
         Assert.Contains("exited 11", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that refused the whole run - a configuration, a command line or a policy its copy cannot
+    /// satisfy - refused this run: the same refusal on this machine stops the run, and read as a host
+    /// that could not be reached it became a skipped leg, with its reason and fix left on the host.
+    /// </summary>
+    [Theory]
+    [InlineData(HarnessExit.Refused)]
+    [InlineData(HarnessExit.ConfigInvalid)]
+    [InlineData(HarnessExit.UsageError)]
+    public async Task AHostsRefusalOfTheRun_IsThisRunsRefusal_InTheHostsOwnWords(int code)
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "git does not ignore this action's 'artifacts/'. Nothing has run."));
+
+            return HostResults.Finished(command, code);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(code, refusal.ExitCode);
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': git does not ignore this action's 'artifacts/'. Nothing has run.",
+            refusal.Message);
+    }
+
+    [Fact]
+    public async Task AHostsRefusalThatSaidNothing_StillRefuses_NamingTheCode()
+    {
+        var hosts = new ScriptedHostCommands((_, command) => HostResults.Finished(command, HarnessExit.Refused));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.EndsWith($"it exited {HarnessExit.Refused} and said nothing more", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Any other end without a ledger is still no verdict about the code, and now says what the host
+    /// said about it rather than only the code it exited with.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerWithNoLedger_QuotesWhatTheHostSaid()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("build", "no selected leg can run"));
+
+            return HostResults.Finished(command, 1);
+        });
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, failure.ExitCode);
+        Assert.EndsWith("exited 1 without a ledger entry for it, saying: no selected leg can run", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A refusal runs over several lines - one for each program an action may not start - and the
+    /// whole of it travels, from the failure line to the end, rather than the first line alone.
+    /// </summary>
+    [Fact]
+    public async Task AHostsRefusalOverSeveralLines_TravelsWhole()
+    {
+        const string First = "  - line 4: 'gcc' is not declared under 'tools' and is not a path inside the repository (declared: 'dotnet').";
+        const string Second = "  - line 5: 'ninja' is not declared under 'tools' and is not a path inside the repository (declared: 'dotnet').";
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke("run: corpus: resolving the action");
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "'actions/corpus/corpus.yml' names 2 program(s) that may not run:"));
+            command.OnErrorLine?.Invoke(First);
+            command.OnErrorLine?.Invoke(Second);
+
+            return HostResults.Finished(command, HarnessExit.Refused);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': 'actions/corpus/corpus.yml' names 2 program(s) that may not run:"
+            + Environment.NewLine + First
+            + Environment.NewLine + Second,
+            refusal.Message);
+    }
+
+    /// <summary>
+    /// A failure line the command's own output carried - a run of this tool inside a test suite
+    /// prints one - is not the command's failure: the last one is, with what follows it.
+    /// </summary>
+    [Fact]
+    public async Task TheLastFailureLine_IsTheCommandsOwn()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "an inner run's own failure, printed by a step"));
+            command.OnErrorLine?.Invoke("the step's output goes on");
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "git does not ignore this action's 'artifacts/'. Nothing has run."));
+
+            return HostResults.Finished(command, HarnessExit.Refused);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': git does not ignore this action's 'artifacts/'. Nothing has run.",
+            refusal.Message);
+    }
+
+    /// <summary>
+    /// The host's agent fails under its own name when it could not start the command at all, and
+    /// what it said travels as the command's own failure would.
+    /// </summary>
+    [Fact]
+    public async Task AFailureTheHostsAgentReported_IsQuoted()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For(HostAgentProtocol.CommandName, "the directory '/home/dev/repo' does not exist"));
+
+            return HostResults.Finished(command, HarnessExit.InternalError);
+        });
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.EndsWith("saying: the directory '/home/dev/repo' does not exist", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Why a host did not run a leg is that host's reason, named by the host this machine knows: the
+    /// host places the leg on itself, and has no name for itself but "this machine".
+    /// </summary>
+    [Fact]
+    public async Task WhyAHostDidNotRunALeg_IsNamedByTheHostThisMachineKnows()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, Ledger("skipped-tool-missing", "'cmake' is not installed there", 0, 0, tests: null));
+
+            return HostResults.Finished(command, HarnessExit.Incomplete);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.SkippedToolMissing, entry.Verdict);
+        Assert.Equal("wsl Example-Linux: 'cmake' is not installed there", entry.Detail);
+
+        // A host that gave no reason is not given an empty one after its name.
+        var silent = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, Ledger("skipped-unavailable", string.Empty, 0, 0, tests: null));
+
+            return HostResults.Finished(command, HarnessExit.Incomplete);
+        });
+
+        var unexplained = await Runner(silent).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(string.Empty, unexplained.Detail);
     }
 
     [Fact]

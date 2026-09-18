@@ -11,6 +11,22 @@ namespace RepoHarness.Tests;
 /// </summary>
 public sealed class LedgerReportTests
 {
+    /// <summary>
+    /// A command stopped before any leg had a line answers with a ledger holding none - and one it
+    /// was interrupted in says so, from the code it ends with, so a script never reads it as red.
+    /// </summary>
+    [Fact]
+    public void AStoppedLedger_SaysWhetherItWasInterrupted()
+    {
+        using var interrupted = System.Text.Json.JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Cancelled, "Interrupted before completion."));
+        using var refused = System.Text.Json.JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Refused, "refused"));
+
+        Assert.True(interrupted.RootElement.GetProperty("cancelled").GetBoolean());
+        Assert.False(interrupted.RootElement.GetProperty("passed").GetBoolean());
+        Assert.False(refused.RootElement.GetProperty("cancelled").GetBoolean());
+        Assert.Empty(refused.RootElement.GetProperty("legs").EnumerateArray());
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {
@@ -260,6 +276,69 @@ public sealed class LedgerReportTests
 
         Assert.Equal(2, lines.Length);
         Assert.All(lines, line => Assert.StartsWith("test: win-msvc-release: ", line, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The line says how the run ended in every case where the code does not, so a FAIL line can
+    /// never be the three characters after it and nothing else. Asserted over every shape a run
+    /// can end in rather than over one, because a message composed per branch is exactly how one
+    /// branch came to compose none.
+    /// </summary>
+    [Theory]
+    [InlineData(LegVerdict.Failed, false, "", "failed: 1 of 2 leg(s); 1 passed")]
+    [InlineData(LegVerdict.InputsMoved, false, "", "inputs-moved: 1 of 2 leg(s); 1 passed")]
+    [InlineData(LegVerdict.Poisoned, false, "", "poisoned: 1 of 2 leg(s); 1 passed")]
+    [InlineData(LegVerdict.SkippedToolMissing, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
+    [InlineData(LegVerdict.SkippedUnavailable, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
+    [InlineData(LegVerdict.Passed, false, "c", "2 of 2 leg(s) passed; 1 did no work: c")]
+    [InlineData(LegVerdict.Passed, true, "", "interrupted after 2 leg(s)")]
+    [InlineData(LegVerdict.Passed, false, "", "2 leg(s) passed")]
+    public void Summarize_SaysHowTheRunEnded_WhateverItsShape(
+        LegVerdict second,
+        bool cancelled,
+        string unfinished,
+        string expected)
+    {
+        var report = LedgerReport.From(
+            [
+                Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("b", second, TimeSpan.FromSeconds(1), string.Empty),
+            ],
+            durationWarningFactor: 0);
+
+        IReadOnlyList<string> left = unfinished.Length == 0 ? [] : [unfinished];
+
+        Assert.Equal(expected, report.Summarize(cancelled, left));
+
+        // And a run that did not succeed always has something to say for itself.
+        if (report.ExitCodeGiven(cancelled, left) != HarnessExit.Success)
+        {
+            Assert.NotEqual(string.Empty, report.Summarize(cancelled, left));
+        }
+    }
+
+    /// <summary>
+    /// The line a consumer's eight-leg gate ended on said "poisoned: 8 leg(s) reported" - read as eight
+    /// poisoned legs, when two were, three had failed and three had passed. The run's verdict comes
+    /// with the count that reached it, and the rest follow, worst first.
+    /// </summary>
+    [Fact]
+    public void Summarize_CountsTheWorstVerdictsOwnLegs_AndNamesTheRest()
+    {
+        var report = LedgerReport.From(
+            [
+                Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("b", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("c", LegVerdict.Poisoned, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("d", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("e", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("f", LegVerdict.Poisoned, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("g", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("h", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            ],
+            durationWarningFactor: 0);
+
+        Assert.Equal("poisoned: 2 of 8 leg(s); 3 failed, 3 passed", report.Summarize(cancelled: false, []));
     }
 
     private static LegEntry Entry(string leg, LegVerdict verdict, TimeSpan duration, string detail, params PhaseRecord[] phases) => new()

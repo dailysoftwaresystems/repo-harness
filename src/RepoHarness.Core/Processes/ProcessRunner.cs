@@ -27,6 +27,12 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     private readonly IHostPlatform _platform = platform;
     private readonly IFilePermissions _filePermissions = filePermissions;
 
+    /// <summary>
+    /// The variable a program is looked up on. Spelled once: on Windows the environment a child is
+    /// given compares names without case, so this also finds the 'Path' Windows itself writes.
+    /// </summary>
+    private const string PathVariable = "PATH";
+
     public async Task<ProcessResult> RunAsync(
         ProcessRequest request,
         CancellationToken cancellationToken = default)
@@ -36,15 +42,17 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
         // Checked before starting. On Linux and macOS a missing working directory fails with
         // the same error number as a missing executable, so it would otherwise be reported
         // as "git is not installed" when git is installed and it is the directory that is gone.
+        // Raised as the program not starting, which it did not, so every reader names the cause:
+        // a leg already running has failed, and a command ends as one whose program never ran.
         if (!string.IsNullOrEmpty(request.WorkingDirectory) && !Directory.Exists(request.WorkingDirectory))
         {
-            throw new DirectoryNotFoundException(
-                $"Cannot run '{request.FileName}': the working directory '{request.WorkingDirectory}' does not exist.");
+            throw new ProgramStartException(
+                request.FileName,
+                $"'{request.FileName}' could not be started: the working directory '{request.WorkingDirectory}' does not exist.");
         }
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = ResolveProgram(request.FileName),
             WorkingDirectory = request.WorkingDirectory ?? string.Empty,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -77,6 +85,22 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
                 startInfo.Environment[key] = value;
             }
         }
+
+        if (request.AppendToPath.Count > 0)
+        {
+            var current = startInfo.Environment.TryGetValue(PathVariable, out var inherited) ? inherited : null;
+
+            startInfo.Environment[PathVariable] = string.Join(
+                Path.PathSeparator,
+                new[] { current }.Concat(request.AppendToPath).Where(part => !string.IsNullOrEmpty(part)));
+        }
+
+        // Looked up on the PATH the child is given, not on this process's own. The two used to differ
+        // whenever a request changed PATH, and then the program started was one the child's own
+        // lookups could not see: cmake resolved from one PATH and the ninja it starts from another.
+        startInfo.FileName = ResolveProgram(
+            request.FileName,
+            startInfo.Environment.TryGetValue(PathVariable, out var effective) ? effective : null);
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stopwatch = Stopwatch.StartNew();
@@ -164,9 +188,71 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             return OnPath(command);
         }
 
-        // A path is used as given rather than searched for, with the one extension Windows adds to it.
-        var path = Path.GetFullPath(_platform.Current == PlatformId.Windows ? WithWindowsExtension(command) : command);
+        var path = ProgramAtPath(command, _platform.Current == PlatformId.Windows);
         return _filePermissions.IsExecutable(path) ? path : null;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="program"/> names a file by its path rather than a program to look up by
+    /// name.
+    /// </summary>
+    /// <remarks>
+    /// The one rule, read by everything that has to tell the two apart: the run that starts a program,
+    /// the survey that looks for one first, the validator, and the policy that decides whether an
+    /// action may name it. Read from the text alone, so a configuration means the same thing on every
+    /// machine that reads it: either separator counts on every platform, and so does a drive, such as
+    /// <c>C:tool</c>, which is no name a program is installed under.
+    /// </remarks>
+    /// <param name="program">The program as a configuration or a request names it.</param>
+    internal static bool IsPath(string program)
+        => program.Contains('/', StringComparison.Ordinal)
+            || program.Contains('\\', StringComparison.Ordinal)
+            || PlatformPaths.NamesADrive(program);
+
+    /// <summary>
+    /// Whether <paramref name="environment"/> sets the PATH a program is looked for on.
+    /// </summary>
+    /// <remarks>
+    /// Compared without case, as a configuration's environment names are: a PATH set in any spelling
+    /// is one the harness does not choose.
+    /// </remarks>
+    /// <param name="environment">An environment a configuration declares.</param>
+    internal static bool SetsPath(IEnumerable<string> environment)
+        => environment.Any(name => string.Equals(name, PathVariable, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The file a program named by its path is: made absolute, with the one extension Windows adds.
+    /// </summary>
+    /// <remarks>
+    /// One spelling for the run that starts it and for every question asked about it beforehand, so a
+    /// path a survey found is the file the run starts rather than a sibling without its extension.
+    /// </remarks>
+    /// <param name="program">A program named by its path.</param>
+    /// <param name="windows">Whether the file is started on Windows.</param>
+    /// <exception cref="ArgumentException">The path is not one this machine can express.</exception>
+    internal static string ProgramAtPath(string program, bool windows)
+        => Path.GetFullPath(windows ? WithWindowsExtension(program) : program);
+
+    /// <summary>
+    /// <paramref name="program"/> with a relative path read against <paramref name="directory"/>; a
+    /// name, or a path that is already full, as given.
+    /// </summary>
+    /// <remarks>
+    /// Left to the start, a relative path is read against whatever directory this process happens to
+    /// be in, never the one the child is started in: the main checkout for a leg that works in a
+    /// worktree, a subdirectory when the command was typed in one. Either way the file started is some
+    /// other directory's, under the same name.
+    /// </remarks>
+    /// <param name="program">The program as a configuration names it.</param>
+    /// <param name="directory">The directory the program starts in, which a relative path is written from.</param>
+    internal static string Anchored(string program, string directory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(program);
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+
+        return IsPath(program) && !Path.IsPathFullyQualified(program)
+            ? Path.GetFullPath(program, directory)
+            : program;
     }
 
     /// <summary>
@@ -184,26 +270,11 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             return null;
         }
 
-        var fileName = windows ? WithWindowsExtension(name) : name;
-
         foreach (var directory in pathVariable.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            string candidate;
-            try
+            if (ProgramInDirectory(name, directory.Trim('"'), windows, isExecutable) is { } found)
             {
-                // A relative PATH entry is relative to the working directory, exactly as a shell treats
-                // it; an entry that is not a path at all is skipped. Joined rather than combined, so a name
-                // Windows reads as rooted, such as C:tool, cannot step out of the directory.
-                candidate = Path.Join(Path.GetFullPath(directory.Trim('"')), fileName);
-            }
-            catch (ArgumentException)
-            {
-                continue;
-            }
-
-            if (isExecutable(candidate))
-            {
-                return candidate;
+                return found;
             }
         }
 
@@ -211,8 +282,38 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     }
 
     /// <summary>
-    /// The file to start for <paramref name="fileName"/>: a path is used as given, and a name is looked up
-    /// in the PATH directories and nowhere else.
+    /// The file that would start as <paramref name="name"/> in <paramref name="directory"/>, or
+    /// <see langword="null"/> when there is none.
+    /// </summary>
+    /// <remarks>
+    /// The one rule for turning a name into a candidate file, used for every PATH entry and for every
+    /// directory searched beyond the PATH, so a program found in one place is found the same way in
+    /// the other. A relative directory is relative to the working directory, exactly as a shell treats
+    /// a PATH entry; one that is not a path at all holds nothing. Joined rather than combined, so a
+    /// name Windows reads as rooted, such as C:tool, cannot step out of the directory.
+    /// </remarks>
+    internal static string? ProgramInDirectory(string name, string directory, bool windows, Func<string, bool> isExecutable)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(isExecutable);
+
+        string candidate;
+
+        try
+        {
+            candidate = Path.Join(Path.GetFullPath(directory), windows ? WithWindowsExtension(name) : name);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+
+        return isExecutable(candidate) ? candidate : null;
+    }
+
+    /// <summary>
+    /// The file to start for <paramref name="fileName"/>: a path is the file it names, and a name is looked
+    /// up in the PATH directories and nowhere else.
     /// </summary>
     /// <remarks>
     /// Left to the runtime, a name is looked for beside the running executable and in the current directory
@@ -221,14 +322,17 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// root would run in place of the real tool. A relative path is made absolute for the same reason: .NET
     /// would otherwise look for it beside its own executable first.
     /// </remarks>
+    /// <param name="fileName">The program as the request names it.</param>
+    /// <param name="pathVariable">The PATH the child is given.</param>
     /// <exception cref="ExecutableNotFoundException">A name is in none of the PATH directories.</exception>
-    private string ResolveProgram(string fileName)
+    private string ResolveProgram(string fileName, string? pathVariable)
         => IsPath(fileName)
-            ? Path.GetFullPath(fileName)
-            : OnPath(fileName) ?? throw new ExecutableNotFoundException(fileName);
+            ? ProgramAtPath(fileName, _platform.Current == PlatformId.Windows)
+            : ProgramOnPath(fileName, pathVariable, _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable)
+                ?? throw new ExecutableNotFoundException(fileName);
 
     private string? OnPath(string name)
-        => ProgramOnPath(name, Environment.GetEnvironmentVariable("PATH"), _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable);
+        => ProgramOnPath(name, Environment.GetEnvironmentVariable(PathVariable), _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable);
 
     /// <summary>
     /// What a failure to start <paramref name="resolved"/> means. It is reported as not found only when the
@@ -255,17 +359,13 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             : new ExecutableNotFoundException(requested, exception);
     }
 
-    /// <summary>Whether <paramref name="program"/> names a file by its path rather than by a name to look up.</summary>
-    private static bool IsPath(string program)
-        => program.Contains(Path.DirectorySeparatorChar) || program.Contains(Path.AltDirectorySeparatorChar);
-
     /// <summary>
     /// The file Windows starts for <paramref name="name"/>: the name itself when it has an extension, and
     /// otherwise the name with <c>.exe</c>, the one extension CreateProcess adds. A batch file is never
     /// found for a bare name: cmd.exe would parse its arguments a second time, so they would not arrive as
     /// they were passed.
     /// </summary>
-    private static string WithWindowsExtension(string name) => Path.HasExtension(name) ? name : name + ".exe";
+    internal static string WithWindowsExtension(string name) => Path.HasExtension(name) ? name : name + ".exe";
 
     /// <summary>
     /// Reads one stream to its end, keeping the text exactly as the child wrote it, and hands

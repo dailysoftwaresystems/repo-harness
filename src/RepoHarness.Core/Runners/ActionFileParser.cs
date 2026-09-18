@@ -589,8 +589,7 @@ public sealed class ActionFileParser(
 
             var normalised = path.Replace('\\', '/').Trim();
 
-            if (Path.IsPathRooted(normalised)
-                || normalised.StartsWith('/')
+            if (PlatformPaths.IsRootedOnAnyPlatform(normalised)
                 || normalised.Split('/').Any(segment => segment is ".." or "." or ""))
             {
                 problems.Add(At(
@@ -752,10 +751,9 @@ public sealed class ActionFileParser(
             return null;
         }
 
-        // Rooted by this platform's rules and by the other's: a drive letter written on Linux is not
-        // rooted there, and a step must not mean two different directories on two machines.
-        if (Path.IsPathRooted(path) || path.Length == 0 || path[0] is '/' or '\\'
-            || (path.Length >= 2 && path[1] == ':'))
+        // Rooted by every platform's rules: a drive letter written on Linux is not rooted there, and
+        // a step must not mean two different directories on two machines.
+        if (path.Length == 0 || PlatformPaths.IsRootedOnAnyPlatform(path))
         {
             problems.Add(At(node, $"a step's 'workingDirectory' is '{path}', which is an absolute "
                 + "path; it names a directory under the step's own root, so that a step runs where "

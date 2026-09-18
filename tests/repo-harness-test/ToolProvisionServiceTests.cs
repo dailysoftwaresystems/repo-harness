@@ -25,6 +25,9 @@ public sealed class ToolProvisionServiceTests
     /// <summary>A second distribution, so two hosts that each need a password can be told apart.</summary>
     private const string OtherDistro = "lane-b";
 
+    /// <summary>The ssh host a fixture declares when asked to reach its leg over ssh.</summary>
+    private const string SshName = "build-box";
+
     private const string Home = "/home/harness";
 
     private const string Credential = "not-a-real-password";
@@ -108,6 +111,51 @@ public sealed class ToolProvisionServiceTests
         // A host that could not be reached is a different answer from a tool that is missing.
         var outcome = ToolProvisionReports.Render(report, json: false);
         Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+    }
+
+    /// <summary>
+    /// A directory another platform's machine names - a Windows one under 'all', here for a Linux
+    /// distribution - is not one this host is asked to look in. Handed over anyway, it could not be
+    /// listed there, and a tool that is simply missing would read as unknown and never be installed.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryForAnotherPlatform_IsNeverLookedForOnAHost_SoAMissingToolIsStillInstalled()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            searchDirectories: new() { ["all"] = [@"C:\tools", "/opt/tools"] });
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Installed, ninja.State);
+
+        var listed = fixture.Host.Calls.Where(call => call.Program == "ls").SelectMany(call => call.Arguments).ToList();
+        Assert.Contains("/opt/tools/ninja", listed);
+        Assert.DoesNotContain(listed, path => path.StartsWith(@"C:\", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A tool the host could not look for everywhere it was told to is not known either way. It is
+    /// reported with the search's own reason, and nothing is installed: a second copy of a tool a
+    /// leg there can already start is the one outcome this must never produce.
+    /// </summary>
+    [Fact]
+    public async Task AToolTheHostCouldNotLookFor_IsUnknown_WithTheSearchsOwnReason_AndNothingIsInstalled()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            searchDirectories: new() { ["linux"] = ["~/tools"] },
+            homeUnreadable: true);
+
+        var report = await fixture.ProvisionAsync();
+
+        var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.Unknown, ninja.State);
+        Assert.Equal(
+            "'ninja' is not on the PATH there, and '~/tools' could not be looked in, because its home directory could not be read",
+            ninja.Detail);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "sudo");
     }
 
     [Fact]
@@ -666,6 +714,46 @@ public sealed class ToolProvisionServiceTests
         Assert.Contains(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
     }
 
+    /// <summary>
+    /// An ssh host that did not answer <c>uname</c> at all said nothing about what it is. Read as
+    /// Windows, it would have been asked about no tool scoped to Linux and reported as having
+    /// everything it needs.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatDidNotAnswerWhatItIs_StillHasEveryToolChecked()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", platforms: ["linux"])],
+            present: new() { ["ninja"] = "1.12.0" },
+            kernel: null,
+            ssh: true);
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Equal(ToolState.AlreadyCurrent, Assert.Single(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja").State);
+    }
+
+    /// <summary>
+    /// A host whose transport stops starting part way through is named as unreachable, and the other
+    /// hosts are still provisioned: ended there, the command lost what it had done everywhere else.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseTransportStopsStarting_IsNamed_AndTheOtherHostsAreStillProvisioned()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja")],
+            present: new() { ["ninja"] = "1.12.0" },
+            secondDistro: true,
+            transportStops: (host, command) => host.Equals(HostId.Wsl(Distro)) && command.Program == "sh" && command.Arguments.Count == 0);
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Equal(
+            "'wsl' could not be started: The file cannot be accessed by the system.",
+            Assert.Single(report.Legs, leg => leg.Leg == "on-distro").Unreachable);
+        Assert.Null(Assert.Single(report.Legs, leg => leg.Leg == "on-other").Unreachable);
+    }
+
     [Fact]
     public void RepositoryPath_IsRequiredOfEveryRemoteHost()
     {
@@ -732,9 +820,11 @@ public sealed class ToolProvisionServiceTests
         Dictionary<string, string> installs,
         bool passwordlessSudo,
         string? installFails,
-        string kernel,
+        string? kernel,
         Func<HostId, string> rootPassword,
-        bool checkNeverFinishes)
+        bool checkNeverFinishes,
+        bool homeUnreadable,
+        Func<HostId, HostCommand, bool>? transportStops)
     {
         private readonly Dictionary<string, Dictionary<string, string>> _present = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dotnet = new(StringComparer.Ordinal);
@@ -748,6 +838,11 @@ public sealed class ToolProvisionServiceTests
         {
             var host = connection.Host;
             Calls.Add(new HostCall(host, command.Program, command.Arguments, command.StandardInput));
+
+            if (transportStops?.Invoke(host, command) == true)
+            {
+                throw HostResults.TransportWouldNotStart(host);
+            }
 
             if (!exists && host.Kind != HostKind.Local)
             {
@@ -764,8 +859,10 @@ public sealed class ToolProvisionServiceTests
 
             return (command.Program, command.Arguments.FirstOrDefault()) switch
             {
-                ("uname", _) => HostResults.Ok($"{kernel} x86_64\n"),
-                ("pwd", _) => HostResults.Ok(Home + "\n"),
+                ("uname", _) => kernel is null
+                    ? HostResults.Failed(HostProbes.SshFailed, "Connection closed by remote host")
+                    : HostResults.Ok($"{kernel} x86_64\n"),
+                ("pwd", _) => homeUnreadable ? HostResults.Failed(1, "pwd: cannot read the current directory") : HostResults.Ok(Home + "\n"),
                 ("ls", _) => HostResults.Ok(dotnet
                     ? string.Join('\n', command.Arguments.Where(path => path == dotnetPath)) + "\n"
                     : "\n"),
@@ -802,11 +899,17 @@ public sealed class ToolProvisionServiceTests
             return found;
         }
 
-        /// <summary>The program a PATH lookup asked about; a distribution is asked through a shell.</summary>
-        private static string? Lookup(HostCommand command)
-            => command.Program == "sh" && command.Arguments.FirstOrDefault() == "-c"
-                ? command.Arguments[1].Split(' ')[^1]
-                : null;
+        /// <summary>
+        /// The program a PATH lookup asked about: a distribution is asked through a shell, and an ssh
+        /// host with its shell's own builtin.
+        /// </summary>
+        private static string? Lookup(HostCommand command) => (command.Program, command.Arguments.FirstOrDefault()) switch
+        {
+            ("sh", "-c") => command.Arguments[1].Split(' ')[^1],
+            ("command", "-v") => command.Arguments[1],
+            ("where", not null) => command.Arguments[0],
+            _ => null,
+        };
 
         private ProcessResult Install(HostId host, bool dotnet, HostCommand? command = null)
         {
@@ -843,13 +946,17 @@ public sealed class ToolProvisionServiceTests
             string? credential = Credential,
             bool passwordlessSudo = false,
             string? installFails = null,
-            string kernel = "Linux",
+            string? kernel = "Linux",
             PromptAvailability prompting = PromptAvailability.Unavailable,
             Func<HostId, string>? typed = null,
             PlatformId localPlatform = PlatformId.Windows,
             bool secondDistro = false,
             Func<HostId, string>? rootPassword = null,
-            bool checkNeverFinishes = false)
+            bool checkNeverFinishes = false,
+            Dictionary<string, List<string>>? searchDirectories = null,
+            bool homeUnreadable = false,
+            bool ssh = false,
+            Func<HostId, HostCommand, bool>? transportStops = null)
         {
             var declared = tools ?? [];
 
@@ -863,11 +970,20 @@ public sealed class ToolProvisionServiceTests
                 installFails,
                 kernel,
                 rootPassword ?? (_ => Credential),
-                checkNeverFinishes);
+                checkNeverFinishes,
+                homeUnreadable,
+                transportStops);
 
             _repository.WriteFile(
                 Path.Combine(".harness-config", "wslDistros", Distro, ".env"),
                 $"DISTRO=Example-Linux\n{(credential is null ? string.Empty : $"SUDO_PASSWORD={credential}\n")}");
+
+            if (ssh)
+            {
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".env"), "ADDRESS=192.0.2.10\nUSER=harness\n");
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".key"), "not a real key");
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, "known_hosts"), "192.0.2.10 ssh-ed25519 AAAA\n");
+            }
 
             if (secondDistro)
             {
@@ -881,6 +997,7 @@ public sealed class ToolProvisionServiceTests
             {
                 WslDistros = { Distro },
                 Tools = [.. declared],
+                ToolSearchDirectories = new(searchDirectories ?? [], StringComparer.OrdinalIgnoreCase),
                 Hosts = new HostsConfig { Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } } },
                 Legs =
                 {
@@ -891,6 +1008,15 @@ public sealed class ToolProvisionServiceTests
             if (twoLegs)
             {
                 config.Legs["only-local"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" };
+            }
+
+            if (ssh)
+            {
+                // In place of the distribution's leg, so the one host provisioned is reached over ssh.
+                config.SshItems.Add(SshName);
+                config.Hosts.Ssh[SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 };
+                config.Legs.Remove("on-distro");
+                config.Legs["on-ssh"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug", Ssh = SshName };
             }
 
             if (secondDistro)
@@ -922,11 +1048,17 @@ public sealed class ToolProvisionServiceTests
             var permissions = Substitute.For<IFilePermissions>();
             permissions.IsPrivate(Arg.Any<string>()).Returns(true);
 
+            // The same answer, given where this machine's resolver asks it: a file on the one PATH
+            // entry below starts exactly when the program it is named for is one this host has.
+            permissions.IsExecutable(Arg.Any<string>()).Returns(call =>
+                localPlatform == PlatformId.Windows
+                || Host.Has(HostId.Local, Path.GetFileNameWithoutExtension(call.Arg<string>())));
+
             var commands = new ScriptedHostCommands(Host.Respond);
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
             var secrets = new HostSecretsStore(fileSystem, permissions, platform);
             var addresses = new HostAddressResolver(new NoLookup(), TimeProvider.System, TimeSpan.Zero);
-            var programs = new HostProgramResolver(processRunner, commands);
+            var programs = new HostProgramResolver(new LocalProgramResolver(platform, permissions, () => "/usr/bin"), commands);
             var connector = new HostConnector(platform, processRunner, commands, secrets, addresses, programs);
 
             _service = new ToolProvisionService(

@@ -13,6 +13,14 @@ public interface IBuildAdapter
     /// <summary>The project type this adapter serves.</summary>
     string Type { get; }
 
+    /// <summary>The program every phase this adapter runs starts, by the name it is started with.</summary>
+    /// <remarks>
+    /// Named once, here, and read both by the phases and by the survey that decides whether a host
+    /// can run a leg: a survey spelling it again for itself would be a second list, and a second list
+    /// is how a leg came to be called runnable on a host where its build tool could not be found.
+    /// </remarks>
+    string Program { get; }
+
     /// <summary>
     /// The kinds of file whose content can change what this project type builds: extensions and
     /// whole file names, in one list.
@@ -158,13 +166,17 @@ public static class BuildAdapters
 {
     private static readonly IBuildAdapter[] Known = [new CMakeAdapter(), new DotnetAdapter(), new DartAdapter()];
 
+    /// <summary>The adapter for a project type, or <see langword="null"/> when no adapter serves it.</summary>
+    /// <param name="type">The project's declared type.</param>
+    public static IBuildAdapter? Find(string? type)
+        => Known.FirstOrDefault(candidate => string.Equals(candidate.Type, type, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The adapter for a project type.</summary>
     /// <param name="type">The project's declared type.</param>
     /// <exception cref="HarnessException">No adapter serves that type.</exception>
     public static IBuildAdapter For(string type)
     {
-        var adapter = Known.FirstOrDefault(
-            candidate => string.Equals(candidate.Type, type, StringComparison.OrdinalIgnoreCase));
+        var adapter = Find(type);
 
         return adapter ?? throw new HarnessException(
             HarnessExit.ConfigInvalid,
@@ -207,6 +219,9 @@ public sealed class CMakeAdapter : IBuildAdapter
 {
     /// <inheritdoc/>
     public string Type => "cmake";
+
+    /// <inheritdoc/>
+    public string Program => "cmake";
 
     /// <inheritdoc/>
     /// <remarks>
@@ -272,11 +287,12 @@ public sealed class CMakeAdapter : IBuildAdapter
         {
             Leg = request.Leg,
             Phase = "configure",
-            FileName = "cmake",
+            FileName = Program,
             Arguments = configure,
             WorkingDirectory = request.TreeRoot,
             Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "configure"),
+            AppendToPath = request.ProgramDirectories,
         };
 
         var build = new List<string>
@@ -295,11 +311,12 @@ public sealed class CMakeAdapter : IBuildAdapter
         {
             Leg = request.Leg,
             Phase = "build",
-            FileName = "cmake",
+            FileName = Program,
             Arguments = build,
             WorkingDirectory = request.TreeRoot,
             Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "build"),
+            AppendToPath = request.ProgramDirectories,
         };
     }
 }
@@ -309,6 +326,9 @@ public sealed class DotnetAdapter : IBuildAdapter
 {
     /// <inheritdoc/>
     public string Type => "dotnet";
+
+    /// <inheritdoc/>
+    public string Program => "dotnet";
 
     /// <inheritdoc/>
     /// <remarks>
@@ -368,11 +388,12 @@ public sealed class DotnetAdapter : IBuildAdapter
         {
             Leg = request.Leg,
             Phase = "build",
-            FileName = "dotnet",
+            FileName = Program,
             Arguments = arguments,
             WorkingDirectory = request.TreeRoot,
             Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
             LogFile = BuildAdapters.LogFor(request, "build"),
+            AppendToPath = request.ProgramDirectories,
         };
     }
 }
@@ -382,6 +403,9 @@ public sealed class DartAdapter : IBuildAdapter
 {
     /// <inheritdoc/>
     public string Type => "dart";
+
+    /// <inheritdoc/>
+    public string Program => "dart";
 
     /// <inheritdoc/>
     /// <remarks>
@@ -416,11 +440,12 @@ public sealed class DartAdapter : IBuildAdapter
         {
             Leg = request.Leg,
             Phase = "pub-get",
-            FileName = "dart",
+            FileName = Program,
             Arguments = ["pub", "get"],
             WorkingDirectory = project,
             Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
             LogFile = BuildAdapters.LogFor(request, "pub-get"),
+            AppendToPath = request.ProgramDirectories,
         };
 
         var arguments = new List<string> { "compile", "exe" };
@@ -442,11 +467,12 @@ public sealed class DartAdapter : IBuildAdapter
         {
             Leg = request.Leg,
             Phase = "build",
-            FileName = "dart",
+            FileName = Program,
             Arguments = arguments,
             WorkingDirectory = project,
             Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
             LogFile = BuildAdapters.LogFor(request, "build"),
+            AppendToPath = request.ProgramDirectories,
         };
     }
 }

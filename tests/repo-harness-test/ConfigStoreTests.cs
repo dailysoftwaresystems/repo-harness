@@ -434,6 +434,7 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "requires": [" "], "witness": { "command": ["w"], "pattern": "x" } }""", "requires contains a blank entry")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["./qemu-aarch64"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher './qemu-aarch64' must be a program name, looked up on the PATH, or an absolute path")]
     [InlineData("""{ "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64", "launcher": ["tools\\prism.exe"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher 'tools\\prism.exe' must be a program name")]
+    [InlineData("""{ "hostOs": "windows", "hostProcessor": "arm64", "processor": "x86_64", "launcher": ["C:prism.exe"], "witness": { "command": ["w"], "pattern": "x" } }""", "launcher 'C:prism.exe' must be a program name")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "witness": { "command": ["bin/uname"], "pattern": "x" } }""", "witness 'bin/uname' must be a program name")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "requires": ["~/sysroot"], "witness": { "command": ["w"], "pattern": "x" } }""", "requires '~/sysroot' must be a program name")]
     [InlineData("""{ "hostOs": "linux", "hostProcessor": "x86_64", "processor": "arm64", "launcher": ["qemu-aarch64"], "witness": { "command": ["uname", "-m"], "pattern": "x" } }""", "witness 'uname' must be an absolute path: behind a launcher it is found by the launcher")]
@@ -576,7 +577,16 @@ public sealed class ConfigStoreTests
         Assert.Equal(SyncConfig.NeverTransferFloor, emptied.Sync.EffectiveNeverTransfer);
         Assert.Equal([.. SyncConfig.NeverTransferFloor, "out"], replaced.Sync.EffectiveNeverTransfer);
         Assert.Contains(".git", SyncConfig.NeverTransferFloor);
-        Assert.Contains(".harness-config", SyncConfig.NeverTransferFloor);
+
+        // The harness's own state is withheld by code rather than by that list, so emptying the list
+        // reaches it no more than it reaches .git: a host's credentials are neither sent nor deleted.
+        var exclusions = new RepoHarness.Core.Sync.SyncExclusions(emptied.Sync, emptied.Worktrees.Root);
+
+        foreach (var local in new[] { ".git/config", ".harness-config/sshItems/vps/.env", ".harness-config/runner/.secrets/ci.env" })
+        {
+            Assert.True(exclusions.IsWithheldFromTransfer(local), $"'{local}' should never be sent");
+            Assert.True(exclusions.IsProtectedFromDeletion(local), $"'{local}' should never be deleted");
+        }
     }
 
     [Fact]

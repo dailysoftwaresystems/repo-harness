@@ -54,6 +54,16 @@ public sealed class ContentionConfig
     /// legs legitimately run them at the same time.
     /// </summary>
     public List<string> SharedResourceTools { get; init; } = [];
+
+    /// <summary>
+    /// What each of <see cref="SharedResourceTools"/> shares, by tool name, said in the warning when
+    /// one is found beside a leg - "the per-user compiler cache under ~/.cache/dsscp".
+    /// </summary>
+    /// <remarks>
+    /// The harness cannot know what a tool shares; the file's author does. Without it the warning can
+    /// only say that the tool shares something, and a reader cannot judge whether that matters.
+    /// </remarks>
+    public Dictionary<string, string> SharedState { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>What the tree mirror carries, what it must never carry, and how far a deletion may go.</summary>
@@ -63,15 +73,22 @@ public sealed class SyncConfig
     public const double DefaultMaxDeleteFraction = 0.25;
 
     /// <summary>
-    /// Paths sync must never transfer, whatever the configuration says: repository
-    /// metadata, and the harness's own state including every host's connection data.
+    /// Paths sync must never transfer, whatever the configuration says: the repository's own
+    /// metadata.
     /// </summary>
     /// <remarks>
     /// A constant rather than a default value. A default is replaced by whatever list a
     /// configuration supplies, so a floor held that way can be removed by the very
     /// configuration it exists to constrain.
+    /// <para>
+    /// The harness's own directory is no longer listed here, and is no less protected for it. Its
+    /// state - connection data, credentials, runner values, locks, runs - is withheld by
+    /// <see cref="Sync.HarnessDirectorySync"/>, in code that no configuration and no ignore rule
+    /// reaches. What left this list is the one part of that directory that belongs to the tree:
+    /// its actions, which a leg on another host has to be able to run.
+    /// </para>
     /// </remarks>
-    public static IReadOnlyList<string> NeverTransferFloor { get; } = [".git", ".harness-config"];
+    public static IReadOnlyList<string> NeverTransferFloor { get; } = [".git"];
 
     /// <summary>Paths to exclude in addition to those git already ignores.</summary>
     public List<string> Exclude { get; init; } = [];

@@ -69,7 +69,7 @@ public sealed class InitService(
     {
         var root = HarnessLayout.DirectoryName;
         var keep = HarnessLayout.GitKeepFileName;
-        var runner = $"{root}/{HarnessLayout.RunnerDirectoryName}";
+        var runner = HarnessLayout.RunnerDirectoryRelative;
         var worktreesRoot = worktrees.Root.Replace('\\', '/').Trim('/');
 
         return
@@ -100,8 +100,8 @@ public sealed class InitService(
             // matched at any depth rather than rooted. Neither is ever tracked: one is this run's
             // working space and the other is output, and output committed beside the thing that
             // produced it is how a repository comes to hold a measurement nobody can reproduce.
-            $"/{runner}/{HarnessLayout.RunnerActionsDirectoryName}/**/{HarnessLayout.ActionBuildDirectoryName}/",
-            $"/{runner}/{HarnessLayout.RunnerActionsDirectoryName}/**/{HarnessLayout.ActionArtifactsDirectoryName}/",
+            HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName),
+            HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName),
         ];
     }
 

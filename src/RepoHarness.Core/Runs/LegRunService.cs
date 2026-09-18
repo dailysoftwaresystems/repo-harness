@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
@@ -36,7 +37,14 @@ public sealed record LegRunRequest(
     bool UseStaged = false,
     bool Time = false,
     bool Here = false,
-    IReadOnlyList<string>? RemoteArguments = null);
+    IReadOnlyList<string>? RemoteArguments = null)
+{
+    /// <summary>
+    /// What the command has each leg do, which decides the programs a host must have to be given
+    /// one. Said by every command, because what one needs is not what another does.
+    /// </summary>
+    public required LegWorkload Workload { get; init; }
+}
 
 /// <summary>What one leg is asked to do once its tree is ready.</summary>
 /// <param name="Leg">The placed leg.</param>
@@ -99,27 +107,24 @@ public sealed class LegRunService(
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(work);
 
-        // Asked for the ledger as data, the ledger is the whole of standard output. Progress still
-        // appears, on standard error, where a reader parsing the document never sees it — and the
-        // reader here is often this tool on another machine, collecting a dispatched leg's verdict.
-        using var document = request.Json ? _output.DataOnly() : null;
-
         var context = await _contextLoader.LoadAsync(request.Directory, cancellationToken).ConfigureAwait(false);
 
         // Hosts are measured before anything runs, and DssHarness on each is brought to this
-        // machine's build there, so a leg never starts on a host that turns out not to answer.
+        // machine's build there, so a leg never starts on a host that turns out not to answer. A leg
+        // goes where a sync puts its tree whatever this command starts, so a run on what is already
+        // staged finds it there.
         var report = await _legsService
-            .CheckAsync(request.Directory, request.LegNames, request.Here, cancellationToken)
+            .CheckAsync(request.Directory, request.LegNames, request.Workload, request.Here, cancellationToken)
             .ConfigureAwait(false);
 
         var placed = LegRunPlan.From(context, report, _platform, out var skipped);
+        var factor = context.Config.Defaults.DurationWarningFactor;
 
         if (placed.Count == 0)
         {
-            return CommandOutcome.Failed(
-                LegsExit.Unavailable,
-                "no selected leg can run",
-                [.. skipped.Select(entry => $"{entry.Leg}: {entry.Detail}")]);
+            var nothing = LegRunPlan.NothingRuns(skipped);
+
+            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? []);
         }
 
         var runId = RunId.New();
@@ -136,11 +141,22 @@ public sealed class LegRunService(
         if (!claim.Taken)
         {
             // Two runs writing one set of logs would each read the other's output as its own, which
-            // is why this is its own verdict and its own exit code rather than a lock refusal.
-            return CommandOutcome.Failed(
+            // is why this is its own verdict and its own exit code rather than a lock refusal - and
+            // the verdict of every leg this run would have started.
+            var held = $"another run owns '{runDirectory}': {claim.Holder?.Describe()}";
+
+            return Stopped(
+                request,
                 LegExit.LogHeld,
-                $"another run owns '{runDirectory}': {claim.Holder?.Describe()}");
+                held,
+                [.. skipped, .. placed.Select(leg => new LegEntry { Leg = leg.Name, Verdict = LegVerdict.LogHeld, Detail = held, Emulated = leg.Emulated })],
+                factor,
+                []);
         }
+
+        // Trees another run holds, by tree: a verdict for the legs that need one, as a variant
+        // another run holds is, and no end to the legs that do not.
+        var lockedTrees = new ConcurrentDictionary<string, string>(LegPlan.TreeKeyComparer);
 
         try
         {
@@ -164,9 +180,9 @@ public sealed class LegRunService(
                             // transfer it did not make.
                             SyncTree = request.UseStaged || !placed.Any(leg => leg.Host.Host.Kind != HostKind.Local)
                                 ? null
-                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, runId, request.ForceLock, token),
+                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, runId, request.ForceLock, lockedTrees, token),
                             RunLeg = (plan, token) => RunLegAsync(
-                                context, placed, plan, runId, runDirectory, request, work, commandName, ledger, token),
+                                context, placed, plan, runId, runDirectory, request, work, commandName, ledger, lockedTrees, token),
                         },
                         ledger,
                         cancellationToken)
@@ -178,12 +194,9 @@ public sealed class LegRunService(
                 // leg's configuration turned out to be unsatisfiable still reached a verdict, and
                 // throwing it away would make the reader run everything again to learn what they
                 // already knew. The exit code is still the refusal's own.
-                var reached = ledger.Build(context.Config.Defaults.DurationWarningFactor);
+                var reached = ledger.Build(factor);
 
-                return CommandOutcome.Failed(
-                    ex.ExitCode,
-                    ex.Message,
-                    [.. reached.Render(), $"logs: {runDirectory}"]);
+                return Stopped(request, ex.ExitCode, ex.Message, ledger.Entries, factor, [.. reached.Render(), $"logs: {runDirectory}"]);
             }
 
             return Report(commandName, context, ledger, execution, runDirectory, request.Json);
@@ -208,17 +221,18 @@ public sealed class LegRunService(
         string treeKey,
         RunId runId,
         bool force,
+        ConcurrentDictionary<string, string> lockedTrees,
         CancellationToken cancellationToken)
     {
-        var leg = placed.First(candidate => candidate.TreeKey == treeKey);
+        var leg = placed.First(candidate => LegPlan.TreeKeyComparer.Equals(candidate.TreeKey, treeKey));
 
         if (leg.Host.Host.Kind == HostKind.Local)
         {
             return;
         }
 
-        await using var handle = await _runLock
-            .AcquireAsync(
+        var attempt = await _runLock
+            .TryAcquireAsync(
                 context.Layout,
                 new LockRequest
                 {
@@ -237,15 +251,54 @@ public sealed class LegRunService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var transport = _transportFactory.For(leg.Host);
+        if (attempt.Handle is not { } handle)
+        {
+            // About this tree and this moment, as a variant another run holds is: each leg that needs
+            // the tree records it as refused-locked, and the legs on other trees still report. Raised
+            // from here it ended the whole run, as though it were a configuration every leg shares.
+            // A lock file nobody can use is not this, and is raised as the refusal of the run it is.
+            lockedTrees[treeKey] = attempt.HeldBy!;
+            return;
+        }
 
-        // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
-        // worktree measures that worktree; sending the main checkout instead would report the
-        // worktree's name over the main checkout's sources.
-        await _syncService
-            .SyncAsync(leg.TreeRoot, transport, leg.HostTreeRoot, new SyncOptions(), cancellationToken)
-            .ConfigureAwait(false);
+        await using (handle)
+        {
+            // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
+            // worktree measures that worktree; sending the main checkout instead would report the
+            // worktree's name over the main checkout's sources. A transport that will not start is
+            // reported by the runner that starts it, as that host being unavailable.
+            await _syncService
+                .SyncAsync(leg.TreeRoot, _transportFactory.For(leg.Host), leg.HostTreeRoot, new SyncOptions(), cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
+
+    /// <summary>
+    /// What a run ends with when something other than its legs ended it, with the legs that had a
+    /// line by then.
+    /// </summary>
+    /// <param name="request">What the command was asked to do.</param>
+    /// <param name="exitCode">What the process exits with.</param>
+    /// <param name="message">The line it ends on.</param>
+    /// <param name="entries">The legs' lines so far.</param>
+    /// <param name="factor">The duration warning factor the ledger is built with.</param>
+    /// <param name="details">What the table form says beneath the line.</param>
+    /// <remarks>
+    /// Asked for data, the ledger is the whole of standard output whatever ended the run: the document,
+    /// with the code and the line the process ends on. Written as text instead - a table, a list of
+    /// reasons - it reached the machine that dispatched the leg as a host whose answer could not be
+    /// read, where the host had said exactly what happened.
+    /// </remarks>
+    private static CommandOutcome Stopped(
+        LegRunRequest request,
+        int exitCode,
+        string message,
+        IReadOnlyList<LegEntry> entries,
+        double factor,
+        IReadOnlyList<string> details)
+        => request.Json
+            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message)] }
+            : CommandOutcome.Failed(exitCode, message, details);
 
     private async Task<LegEntry?> RunLegAsync(
         HarnessContext context,
@@ -257,42 +310,52 @@ public sealed class LegRunService(
         Func<LegWork, CancellationToken, Task<LegEntry>> work,
         string commandName,
         LegLedger ledger,
+        ConcurrentDictionary<string, string> lockedTrees,
         CancellationToken cancellationToken)
     {
         var leg = placed.First(candidate => candidate.Name == plan.Name);
         var started = Stopwatch.GetTimestamp();
 
-        RunLockHandle handle;
-
-        try
+        if (lockedTrees.TryGetValue(leg.TreeKey, out var treeHeld))
         {
-            // The tree shared and this variant exclusive: variants build side by side, but never
-            // while their sources are being replaced.
-            handle = await _runLock
-                .AcquireAsync(
-                    context.Layout,
-                    new LockRequest
-                    {
-                        Host = leg.Host.Host.ToString(),
-                        Tree = leg.HostTreeRoot,
-                        Variant = leg.Variant.DirectoryName,
-                        Scope = LockScope.TreeShared,
-                        RunId = runId,
-                        Command = ledger.CommandName,
-                        Force = request.ForceLock,
-                    },
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (HarnessException ex) when (ex.ExitCode == HarnessExit.Refused)
-        {
-            // The one refusal that is a verdict rather than an end to the run: it is about this leg
-            // and this moment, so the other legs still report, and one locked leg never hides them.
             return new LegEntry
             {
                 Leg = leg.Name,
                 Verdict = LegVerdict.RefusedLocked,
-                Detail = ex.Message,
+                Detail = treeHeld,
+                Duration = Stopwatch.GetElapsedTime(started),
+                Emulated = leg.Emulated,
+            };
+        }
+
+        // The tree shared and this variant exclusive: variants build side by side, but never while
+        // their sources are being replaced.
+        var attempt = await _runLock
+            .TryAcquireAsync(
+                context.Layout,
+                new LockRequest
+                {
+                    Host = leg.Host.Host.ToString(),
+                    Tree = leg.HostTreeRoot,
+                    Variant = leg.Variant.DirectoryName,
+                    Scope = LockScope.TreeShared,
+                    RunId = runId,
+                    Command = ledger.CommandName,
+                    Force = request.ForceLock,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (attempt.Handle is not { } handle)
+        {
+            // The one refusal that is a verdict rather than an end to the run: it is about this leg
+            // and this moment, so the other legs still report, and one locked leg never hides them.
+            // A lock file nobody can use is raised instead, as the refusal of the run it is.
+            return new LegEntry
+            {
+                Leg = leg.Name,
+                Verdict = LegVerdict.RefusedLocked,
+                Detail = attempt.HeldBy!,
                 Duration = Stopwatch.GetElapsedTime(started),
                 Emulated = leg.Emulated,
             };
@@ -338,13 +401,18 @@ public sealed class LegRunService(
     {
         var report = ledger.Build(context.Config.Defaults.DurationWarningFactor);
 
+        // One code and one line, whichever form the ledger is shown in. Deciding them per branch
+        // is how the JSON branch came to report a failing run with an empty line: a host is always
+        // asked for JSON, so every failure on another machine read as `FAIL - ` and nothing else.
+        var exitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
+        var message = report.Summarize(execution.Cancelled, execution.Unfinished);
+
         if (json)
         {
-            return CommandOutcome.Ok(string.Empty, null) with
+            return new CommandOutcome(exitCode, message)
             {
                 Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
                 Quiet = true,
-                ExitCode = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished),
             };
         }
 
@@ -355,44 +423,6 @@ public sealed class LegRunService(
             details.Add($"left unfinished: {string.Join(", ", execution.Unfinished)}");
         }
 
-        if (execution.Cancelled)
-        {
-            // Not a red verdict. A caller reading a failure code for an interrupted run would
-            // report the code as broken when nothing reached a verdict at all.
-            return CommandOutcome.Failed(
-                HarnessExit.Cancelled,
-                $"interrupted after {report.Lines.Count} leg(s)",
-                details);
-        }
-
-        if (!report.Passed)
-        {
-            return CommandOutcome.Failed(
-                report.ExitCode,
-                $"{Verdicts.Display(report.Verdict)}: {report.Lines.Count} leg(s) reported",
-                details);
-        }
-
-        // A leg that did no work is not a leg that passed. Nothing failed here, so this is not a
-        // red run; but reporting it as an unqualified success would put "OK - 8 leg(s) passed" in
-        // front of a reader when none of those eight ran, which is the one thing a gate reads. The
-        // legs are named, because which of them went unreported is the first thing to ask.
-        // Asked about legs that did no work, or left running when the run stopped: neither is a
-        // failure, and neither is a pass. Decided by the same derivation the JSON uses, so a reader
-        // and a script are never told different things about one run.
-        var code = report.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
-
-        if (code != HarnessExit.Success)
-        {
-            var withoutWork = report.WithoutVerdict.Select(line => line.Leg).Concat(execution.Unfinished).ToList();
-
-            return CommandOutcome.Failed(
-                code,
-                $"{report.Reported} of {report.Lines.Count} leg(s) passed; "
-                + $"{withoutWork.Count} did no work: {string.Join(", ", withoutWork)}",
-                details);
-        }
-
-        return CommandOutcome.Ok($"{report.Lines.Count} leg(s) passed", details);
+        return new CommandOutcome(exitCode, message, details);
     }
 }
