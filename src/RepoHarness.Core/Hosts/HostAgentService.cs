@@ -147,7 +147,7 @@ public sealed class HostAgentService(
             Os = _platform.PlatformKey,
             Processor = _platform.Processor,
             Emulators = checks,
-            Programs = new Dictionary<string, ProgramLocation>(found.Found, StringComparer.Ordinal),
+            Programs = [.. found.Found.Values],
             ProgramDirectories = [.. found.Directories],
         };
     }

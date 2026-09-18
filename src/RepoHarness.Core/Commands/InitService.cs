@@ -69,7 +69,7 @@ public sealed class InitService(
     {
         var root = HarnessLayout.DirectoryName;
         var keep = HarnessLayout.GitKeepFileName;
-        var runner = $"{root}/{HarnessLayout.RunnerDirectoryName}";
+        var runner = HarnessLayout.RunnerDirectoryRelative;
         var worktreesRoot = worktrees.Root.Replace('\\', '/').Trim('/');
 
         return

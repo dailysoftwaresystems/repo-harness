@@ -136,11 +136,12 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
     /// The directories to look in, made full, and the ones that should have been and cannot be.
     /// </summary>
     /// <remarks>
-    /// An entry this machine cannot name as a whole path - <c>/opt/tools</c> declared under
-    /// <c>all</c>, read on Windows - is passed over, as the validator allowed for: it names another
-    /// platform's directory, and read here it would be one relative to wherever the search happened to
-    /// start. A <c>~/</c> entry with no home to expand it against is different: it names a directory
-    /// this machine has, which could not be looked in.
+    /// The entries arrive as the ones this platform names (see <see cref="ToolSearchDirectories.For"/>),
+    /// and this machine is asked about each all the same, by its own rule for a whole path: an entry
+    /// it cannot name as one would be read against wherever the search happened to start, where a
+    /// program somebody left there would be found in place of the real one. A <c>~/</c> entry with no
+    /// home to expand it against is different: it names a directory this machine has, which could
+    /// not be looked in.
     /// </remarks>
     private SearchPlan Plan(IReadOnlyList<string> directories)
     {
@@ -150,7 +151,7 @@ public sealed class LocalProgramResolver(IHostPlatform platform, IFilePermission
 
         foreach (var directory in directories)
         {
-            if (!directory.StartsWith("~/", StringComparison.Ordinal))
+            if (!PlatformPaths.IsHomeRelative(directory))
             {
                 if (Path.IsPathFullyQualified(directory))
                 {

@@ -717,7 +717,10 @@ public sealed class BuildService(
 
         try
         {
-            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, cancellationToken).ConfigureAwait(false), null);
+            // The ninja the build itself ran, which only its own environment may have found.
+            var recorded = _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram;
+
+            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {

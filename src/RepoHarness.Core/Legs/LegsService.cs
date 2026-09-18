@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.ExceptionServices;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Repository;
@@ -28,10 +29,22 @@ public sealed record LegsReport(IReadOnlyList<LegPlacement> Placements, IReadOnl
     /// <summary>
     /// Whether the check passed. A leg named with <c>--legs</c> that cannot run fails it, because it
     /// was asked for; one that was merely declared does not, because a switched-off machine is normal.
-    /// Either way at least one leg must be able to run, or nothing would.
+    /// Either way at least one leg must be able to run, or nothing would - and a leg turned away
+    /// through a defect in this tool fails it, named or not.
     /// </summary>
     public bool Passed => Placements.Any(placement => placement.Runnable)
-        && (!Named || Placements.All(placement => placement.Runnable));
+        && (!Named || Placements.All(placement => placement.Runnable))
+        && Defect is null;
+
+    /// <summary>
+    /// A leg this survey turned away through a defect of its own - a host never asked about a program
+    /// the leg starts - or <see langword="null"/> when there is none.
+    /// </summary>
+    /// <remarks>
+    /// Never passed over as a machine that happens to be off: whether the leg could run was never
+    /// established, and a survey that did not ask must not read as one that looked.
+    /// </remarks>
+    public LegPlacement? Defect => Placements.FirstOrDefault(placement => !placement.Runnable && placement.Verdict == LegVerdict.Poisoned);
 }
 
 /// <summary>
@@ -76,7 +89,9 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         var reports = new Dictionary<HostId, HostReport>();
 
         // This machine costs nothing to reach, so it is measured first. Other hosts are measured only
-        // for the legs it cannot run, and all of those hosts at once.
+        // for the legs it cannot take at all - the wrong machine, or an emulator that does not work
+        // here - and all of those hosts at once. A leg it can take goes nowhere else, whatever
+        // programs it lacks.
         if (candidates.Any(entry => entry.Hosts.Contains(HostId.Local)))
         {
             reports[HostId.Local] = await _inspector
@@ -86,7 +101,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
 
         var remote = candidates
             .Where(entry => !entry.Hosts.Contains(HostId.Local)
-                || LegPlacement.Obstacle(config, entry.leg.Leg, workload, reports[HostId.Local]) is not null)
+                || LegPlacement.PlatformObstacle(entry.leg.Leg, reports[HostId.Local]) is not null)
             .SelectMany(entry => entry.Hosts)
             .Where(host => host.Kind != HostKind.Local)
             .Distinct()

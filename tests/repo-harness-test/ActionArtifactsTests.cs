@@ -149,6 +149,8 @@ public sealed class ActionArtifactsTests
     [InlineData("a/../../escape.txt")]
     [InlineData("/etc/passwd")]
     [InlineData("./payload.txt")]
+    [InlineData("C:/payload.txt")]
+    [InlineData("C:payload.txt")]
     public void AnOutputThatLeavesTheStepsOwnDirectory_IsRefusedWhenTheFileIsRead(string output)
     {
         var factory = new HarnessFactory();

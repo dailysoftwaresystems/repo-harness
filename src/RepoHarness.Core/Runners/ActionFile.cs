@@ -106,7 +106,10 @@ public sealed record ActionCommand(string Line, int LineNumber, IReadOnlyList<st
         ? Arguments
         : throw new ArgumentException("A command line holds a program and its arguments, so it is never empty.", nameof(Arguments));
 
-    /// <summary>The program this line starts. The token the tool policy vets.</summary>
+    /// <summary>
+    /// The program this line starts, as the file writes it. The tool policy vets it once its names
+    /// are filled in, and a problem quotes it as written.
+    /// </summary>
     public string Program => Arguments[0];
 }
 
@@ -132,14 +135,6 @@ public sealed record ActionFile(
     IReadOnlyList<ActionInput> Inputs,
     IReadOnlyList<ActionStep> Steps)
 {
-    /// <summary>Every program invocation in the file, in the order the steps run them.</summary>
-    /// <remarks>
-    /// The tool policy reads this: every program a file can start is vetted before the first one
-    /// runs, so a file whose last step names an undeclared tool is refused before its first step
-    /// has changed anything.
-    /// </remarks>
-    public IEnumerable<ActionCommand> Commands => Steps.SelectMany(step => step.Commands);
-
     /// <summary>
     /// The action's own directory, relative to the actions directory, as the runner's <c>action</c>
     /// key spelled it. Null where the file was parsed without one, and then the leaf is used.

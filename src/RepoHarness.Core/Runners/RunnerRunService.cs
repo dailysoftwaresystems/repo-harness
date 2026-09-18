@@ -229,13 +229,7 @@ public sealed class RunnerRunService(
 
         var steps = await StepsAsync(config, request, values, cancellationToken).ConfigureAwait(false);
 
-        // Keyed by the run, under the action's own directory. Two runs of one action on one machine
-        // — two legs, or a retry — would otherwise write over each other's intermediate files.
-        var scratch = steps.ActionDirectory is { Length: > 0 } owned
-            ? new ActionScratch(
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId, request.Leg)),
-                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
-            : null;
+        var scratch = ScratchFor(request, steps.ActionDirectory);
 
         if (steps.ActionDirectory is { Length: > 0 } action)
         {
@@ -508,16 +502,33 @@ public sealed class RunnerRunService(
                 .LoadAsync(request.Layout.RunnerActionsDirectory, action, cancellationToken)
                 .ConfigureAwait(false);
 
-            // Before anything starts, and over the whole file rather than step by step: a file whose
-            // last step names an undeclared program is refused with its first step not yet run.
-            _toolPolicy.Enforce(file, config, request.TreeRoot);
-
             inputs = ResolveInputs(file, values);
+
+            var supplied = Supplied(values, inputs);
+            var scratch = ScratchFor(request, file.DirectoryName);
+
+            // Before anything starts, and over the whole file rather than step by step: a file whose
+            // last step names an undeclared program is refused with its first step not yet run. Each
+            // line is judged by what it will start and where from, worked out exactly as the run
+            // works them out: read as written, a directory an input names could put a program
+            // outside the repository while the text still read as inside it.
+            _toolPolicy.Enforce(
+                file,
+                config,
+                request.TreeRoot,
+                (step, command) => Started(
+                    request,
+                    command.Program,
+                    step.WorkingPath(file.DirectoryName),
+                    PathsFor(request, scratch, step.Name),
+                    supplied,
+                    step.Name),
+                values.Redact);
 
             // The names the expansion will actually have, not a subset of them. Handed the declared
             // inputs alone this refused a run line naming a runner value directory's own value — the
             // same check-against-a-different-set defect as before, inverted.
-            RefuseUnknownNames(file, Namable(values.Supplied, inputs).Keys);
+            RefuseUnknownNames(file, supplied.Keys);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -647,37 +658,17 @@ public sealed class RunnerRunService(
         ActionScratch? scratch,
         CancellationToken cancellationToken)
     {
+        var paths = PathsFor(request, scratch, phase.StepName);
+
         // Created before the step runs, not lazily by whatever the step happens to do. A program
         // told to write into a directory that is not there fails in its own words, which is a worse
         // message than the one this would have given.
-        var stepBuild = scratch is not null && phase.StepName is { Length: > 0 }
-            ? Path.Combine(scratch.Build, LogNameFor(phase.StepName))
-            : null;
-
-        if (stepBuild is not null)
+        if (paths.StepBuild is { } stepBuild)
         {
             _fileSystem.CreateDirectory(stepBuild);
         }
 
-        // The leg's directories and the action's own values, through the one expander a project's
-        // test invocation uses. A step that builds out of source has no other way to name where its
-        // build went: the directory is derived per leg and no tracked file can spell it.
-        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory)
-        {
-            Identity = request.Identity,
-            Product = request.Product,
-            ProductProblem = request.ProductProblem,
-            ActionBuild = scratch?.Build,
-            ActionArtifacts = scratch?.Artifacts,
-            RunArtifacts = scratch is null ? null : Path.GetDirectoryName(scratch.Artifacts),
-            StepBuild = stepBuild,
-        };
-        // The runner's own values, and the action's declared inputs over them. One map, because the
-        // check that refuses an unfillable name is given this same set: fed from two places they
-        // disagree, and a name the check accepted reached the program as literal text.
-        var supplied = inputs.Count == 0
-            ? values.Supplied
-            : Namable(values.Supplied, inputs);
+        var supplied = Supplied(values, inputs);
 
         var arguments = phase.Command
             .Skip(1)
@@ -689,16 +680,7 @@ public sealed class RunnerRunService(
                 supplied))
             .ToList();
 
-        var working = Path.GetFullPath(Path.Combine(
-            request.WorkingDirectory ?? request.TreeRoot,
-            phase.WorkingDirectory is { Length: > 0 } declared
-                ? LegPathNames.Expand(
-                    declared,
-                    paths,
-                    $"'{phase.Name}' workingDirectory",
-                    PlaceholderPolicy.LeaveAsWritten,
-                    supplied)
-                : "."));
+        var (program, working) = Started(request, phase.Command[0], phase.WorkingDirectory, paths, supplied, phase.Name);
 
         var result = await _phaseRunner
             .RunAsync(
@@ -706,17 +688,7 @@ public sealed class RunnerRunService(
                 {
                     Leg = request.Leg,
                     Phase = phase.Name,
-                    // A relative path is the tree's own file, as the policy that allowed it read it:
-                    // left to the start, it would be read against wherever this process began,
-                    // which for a leg on a worktree is the main checkout's copy of the script.
-                    FileName = ProcessRunner.Anchored(
-                        LegPathNames.Expand(
-                            phase.Command[0],
-                            paths,
-                            $"'{phase.Name}' run line",
-                            PlaceholderPolicy.LeaveAsWritten,
-                            supplied),
-                        request.TreeRoot),
+                    FileName = program,
                     Arguments = arguments,
                     LogFile = Path.Combine(
                         request.Layout.RunDirectory(request.RunId),
@@ -1128,7 +1100,8 @@ public sealed class RunnerRunService(
     /// <param name="action">The action's own directory, relative to the actions directory.</param>
     /// <param name="cancellationToken">Stops the questions.</param>
     /// <exception cref="HarnessException">
-    /// Either directory would not be ignored, or git could not say whether it would. Nothing has run.
+    /// Either directory would not be ignored, a refusal naming the rule; or git could not say whether
+    /// it would, which leaves this leg unable to run in this tree. Nothing has run.
     /// </exception>
     /// <remarks>
     /// Asked before anything is written, of the paths this very run would write: a file under each,
@@ -1162,10 +1135,12 @@ public sealed class RunnerRunService(
             catch (HarnessException ex) when (ex.ExitCode == HarnessExit.CommandFailed)
             {
                 // A question that could not be asked is no verdict on the code, and not an answer
-                // either way: refused, in git's own words, which on a host's copy is usually a
-                // safe.directory git will not trust - and git names the fix for that itself.
+                // either way. It is about this leg's tree - a worktree whose link to its repository
+                // is broken, a copy git can no longer read - so this leg cannot run here, in git's own
+                // words, and the legs on other trees still report: raised as a refusal of the run, it
+                // ended every leg over one tree's repository.
                 throw new HarnessException(
-                    HarnessExit.Refused,
+                    HarnessExit.HostUnavailable,
                     $"git could not say whether this action's '{kind}/' is ignored in '{request.TreeRoot}', "
                     + $"so whether this run would write where git commits is unknown. Nothing has run. {ex.Message}");
             }
@@ -1344,6 +1319,87 @@ public sealed class RunnerRunService(
         IReadOnlyList<string> PerformedActions,
         IReadOnlyDictionary<string, string> Inputs,
         string? ActionDirectory);
+
+    /// <summary>
+    /// The action's working space for this run, or <see langword="null"/> for a runner that declares
+    /// phases of its own. Keyed by the run, under the action's own directory: two runs of one action
+    /// on one machine - two legs, or a retry - would otherwise write over each other's files.
+    /// </summary>
+    private static ActionScratch? ScratchFor(RunnerRunRequest request, string? actionDirectory)
+        => actionDirectory is { Length: > 0 } owned
+            ? new ActionScratch(
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionBuildRelative(owned, request.RunId, request.Leg)),
+                Path.Combine(request.TreeRoot, HarnessLayout.ActionArtifactsRelative(owned, request.RunId, request.Leg)))
+            : null;
+
+    /// <summary>
+    /// The directories a step's placeholders name: the leg's own, and the action's working space with
+    /// the step's own directory in it, through the one expander a project's test invocation uses. A
+    /// step that builds out of source has no other way to name where its build went: the directory is
+    /// derived per leg and no tracked file can spell it.
+    /// </summary>
+    /// <param name="request">The leg's run.</param>
+    /// <param name="scratch">The action's working space, when the runner uses an action.</param>
+    /// <param name="stepName">The step's own name, which names its directory in that space.</param>
+    private static LegPaths PathsFor(RunnerRunRequest request, ActionScratch? scratch, string? stepName) => new(request.TreeRoot, request.BuildDirectory)
+    {
+        Identity = request.Identity,
+        Product = request.Product,
+        ProductProblem = request.ProductProblem,
+        ActionBuild = scratch?.Build,
+        ActionArtifacts = scratch?.Artifacts,
+        RunArtifacts = scratch is null ? null : Path.GetDirectoryName(scratch.Artifacts),
+        StepBuild = scratch is not null && stepName is { Length: > 0 } ? Path.Combine(scratch.Build, LogNameFor(stepName)) : null,
+    };
+
+    /// <summary>
+    /// The values a step's placeholders are filled from: the runner's own, and the action's declared
+    /// inputs over them. One map, because the check that refuses an unfillable name is given this
+    /// same set: fed from two places they disagree, and a name the check accepted reached the program
+    /// as literal text.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> Supplied(ActionValues values, IReadOnlyDictionary<string, string> inputs)
+        => inputs.Count == 0 ? values.Supplied : Namable(values.Supplied, inputs);
+
+    /// <summary>
+    /// What a line starts, and the directory it starts in, with their placeholders filled in: the
+    /// one reading both the start and the policy that allowed it use, so the program a policy judged
+    /// is the program that starts, from where it starts.
+    /// </summary>
+    /// <remarks>
+    /// A program named by a relative path is made whole against the directory its step starts in -
+    /// './probe.py' in a step that runs in its action's directory is the script beside the action
+    /// file. Left to the start, it would be read against wherever this process began, which for a
+    /// leg on a worktree is the main checkout.
+    /// </remarks>
+    /// <param name="request">The leg's run.</param>
+    /// <param name="program">The line's program, as written.</param>
+    /// <param name="workingDirectory">
+    /// The directory its step runs in, as written, relative to the directory the leg's run works in -
+    /// its tree root; that directory itself when absent.
+    /// </param>
+    /// <param name="paths">The directories the placeholders name.</param>
+    /// <param name="supplied">The values the placeholders are filled from.</param>
+    /// <param name="name">The step, as refusals name it.</param>
+    private static (string Program, string WorkingDirectory) Started(
+        RunnerRunRequest request,
+        string program,
+        string? workingDirectory,
+        LegPaths paths,
+        IReadOnlyDictionary<string, string> supplied,
+        string name)
+    {
+        var working = Path.GetFullPath(
+            workingDirectory is { Length: > 0 } declared
+                ? LegPathNames.Expand(declared, paths, $"'{name}' workingDirectory", PlaceholderPolicy.LeaveAsWritten, supplied)
+                : ".",
+            request.WorkingDirectory ?? request.TreeRoot);
+
+        var filled = LegPathNames.Expand(program, paths, $"'{name}' run line", PlaceholderPolicy.LeaveAsWritten, supplied);
+
+        // A line filled in to nothing starts nothing, and is the policy's to refuse, naming it.
+        return (string.IsNullOrWhiteSpace(filled) ? filled : ProcessRunner.Anchored(filled, working), working);
+    }
 
     /// <summary>What a run line may name: the runner's values, with the action's inputs over them.</summary>
     /// <param name="values">What the runner value directories supply.</param>

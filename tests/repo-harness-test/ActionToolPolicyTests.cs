@@ -73,7 +73,7 @@ public sealed class ActionToolPolicyTests
             """);
 
         var exception = Assert.Throws<HarnessException>(
-            () => new ActionToolPolicy(new HostPlatform()).Enforce(action, Config, Root));
+            () => new ActionToolPolicy(new HostPlatform()).Enforce(action, Config, Root, AsWritten(action)));
 
         // A policy refusal, not a malformed file: the file is well formed and says something it
         // may not do.
@@ -95,9 +95,9 @@ public sealed class ActionToolPolicyTests
                   build/bin/corpus --self-check
             """);
 
-        new ActionToolPolicy(new HostPlatform()).Enforce(action, Config, Root);
+        new ActionToolPolicy(new HostPlatform()).Enforce(action, Config, Root, AsWritten(action));
 
-        Assert.Empty(new ActionToolPolicy(new HostPlatform()).Problems(action, Config, Root));
+        Assert.Empty(new ActionToolPolicy(new HostPlatform()).Problems(action, Config, Root, AsWritten(action)));
     }
 
     [Fact]
@@ -111,12 +111,62 @@ public sealed class ActionToolPolicyTests
                   ninja -C build
             """);
 
-        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(action, Config, Root));
+        var problem = Assert.Single(new ActionToolPolicy(new HostPlatform()).Problems(action, Config, Root, AsWritten(action)));
 
         Assert.StartsWith("line 5:", problem, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A relative program is read from the directory its step runs in, as the run reads it: from
+    /// 'engine', '../bin/tool' is the repository's own, and from the tree root it leaves the repository.
+    /// </summary>
+    [Fact]
+    public void Problems_ReadARelativeProgram_FromTheDirectoryItsStepRunsIn()
+    {
+        var policy = new ActionToolPolicy(new HostPlatform());
+
+        var fromEngine = Parse("""
+            steps:
+              - name: probe
+                workingDirectory: engine
+                run: |
+                  ../bin/tool
+            """);
+
+        var fromRoot = Parse("""
+            steps:
+              - name: probe
+                run: |
+                  ../bin/tool
+            """);
+
+        Assert.Empty(policy.Problems(fromEngine, Config, Root, AsWritten(fromEngine)));
+        Assert.Single(policy.Problems(fromRoot, Config, Root, AsWritten(fromRoot)));
+        Assert.Equal(ProgramAllowance.Undeclared, policy.Classify("../../tool", Config.Tools, Root, "engine"));
+    }
+
+    /// <summary>
+    /// A program relative to a drive - 'C:tool' on Windows - is read as the run starts it: from the
+    /// directory its step runs in, on that drive, never from wherever this process happens to be on it.
+    /// </summary>
+    [Fact]
+    public void Classify_ReadsADriveRelativeProgram_AsTheRunStartsIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows reads a path relative to a drive.");
+
+        var policy = new ActionToolPolicy(new HostPlatform());
+
+        Assert.Equal(ProgramAllowance.RepositoryPath, policy.Classify($"{Root[..2]}tool", Config.Tools, Root, "engine"));
+    }
+
     private static string Root => Path.Combine(Path.GetTempPath(), "harness-policy-root");
+
+    /// <summary>
+    /// Each line as written, from its step's directory under <see cref="Root"/>: how the run reads a
+    /// line that names no placeholder.
+    /// </summary>
+    private static Func<ActionStep, ActionCommand, (string Program, string WorkingDirectory)> AsWritten(ActionFile action)
+        => (step, command) => (command.Program, Path.Combine(Root, step.WorkingPath(action.DirectoryName) ?? string.Empty));
 
     private static ActionFile Parse(string text)
         => new ActionFileParser(

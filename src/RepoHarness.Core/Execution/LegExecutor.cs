@@ -23,6 +23,12 @@ public sealed record LegPlan
     /// </summary>
     public string TreeKey { get; init; } = string.Empty;
 
+    /// <summary>
+    /// How two tree keys compare, wherever legs are grouped by one: ignoring case, as the run lock
+    /// compares the host and the tree it names.
+    /// </summary>
+    public static StringComparer TreeKeyComparer => StringComparer.OrdinalIgnoreCase;
+
     /// <summary>Whether the leg runs under emulation, which decides what its timings are compared with.</summary>
     public bool Emulated { get; init; }
 
@@ -140,7 +146,7 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
 
         Announce(request, ledger, machines.Count);
 
-        var syncs = new Dictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
+        var syncs = new Dictionary<string, Task>(LegPlan.TreeKeyComparer);
         var syncGate = new Lock();
 
         // Started together and awaited together. A leg that finishes early reports at once through
@@ -338,9 +344,10 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // toolchain — is the same fact for every leg. Turned into a verdict it would be reported
             // once per leg, under a name that said the wrong cause, when what the reader has to do
             // is edit one file.
-            // The one refusal that IS about this leg alone, a lock another run holds, never reaches
-            // here: the caller turns it into a verdict itself, precisely so that the other legs
-            // still report. The slot is released by the finally below, as on every other path out.
+            // The one refusal that IS about this leg alone, a lock another run holds - on its variant,
+            // or on its host's tree while that is synced - never reaches here: the caller turns it
+            // into a verdict itself, precisely so that the other legs still report. The slot is
+            // released by the finally below, as on every other path out.
             throw;
         }
         catch (HarnessException ex)

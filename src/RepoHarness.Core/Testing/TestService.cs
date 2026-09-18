@@ -238,6 +238,14 @@ public sealed class TestService(
                 cancellationToken)
             .ConfigureAwait(false);
 
+        // Where the invocation said, and the tree root when it said nothing — which is what every
+        // test phase written before this ran in. A project that builds out of source has its tests
+        // in the build directory, which is derived per leg and so cannot be written down: started at
+        // the tree root, ctest reports that it found no tests, in a tree holding thousands. Made
+        // whole against the tree here, on the machine that starts the runner, so a directory rooted
+        // but not whole - '\tests' on Windows - is on the tree's own drive.
+        var working = Path.GetFullPath(command.WorkingDirectory ?? request.TreeRoot, request.TreeRoot);
+
         var phase = await _phaseRunner
             .RunAsync(
                 new PhaseRequest
@@ -245,21 +253,15 @@ public sealed class TestService(
                     Leg = request.Leg,
                     Phase = request.PhaseName,
 
-                    // A runner named by a relative path is the tree's own, read from the tree root
-                    // as every other relative path in the test settings is: left to the start, it
-                    // is read against wherever this process began, which for a leg on a worktree is
-                    // the main checkout.
-                    FileName = ProcessRunner.Anchored(command.Program, request.TreeRoot),
+                    // A runner named by a relative path is read from the directory it starts in, as
+                    // its arguments are: './unit_tests' with a workingDirectory of '{buildDir}' is
+                    // the build's own. Left to the start, it would be read against wherever this
+                    // process began, which for a leg on a worktree is the main checkout.
+                    FileName = ProcessRunner.Anchored(command.Program, working),
                     Arguments = command.Arguments,
                     LogFile = logFile,
                     AppendToPath = request.ProgramDirectories,
-
-                    // Where the invocation said, and the tree root when it said nothing — which is
-                    // what every test phase written before this ran in. A project that builds out
-                    // of source has its tests in the build directory, which is derived per leg and
-                    // so cannot be written down: started at the tree root, ctest reports that it
-                    // found no tests, in a tree holding thousands.
-                    WorkingDirectory = command.WorkingDirectory ?? request.TreeRoot,
+                    WorkingDirectory = working,
                     Environment = Environment(command),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,

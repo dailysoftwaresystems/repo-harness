@@ -3,6 +3,7 @@ using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
 using RepoHarness.Core.Worktrees;
@@ -651,9 +652,7 @@ public static class HarnessConfigValidator
     /// </summary>
     private static void CheckProgram(string program, string setting, List<string> problems)
     {
-        var isPath = program.Contains('/', StringComparison.Ordinal) || program.Contains('\\', StringComparison.Ordinal);
-
-        if (isPath && !IsAbsolute(program))
+        if (ProcessRunner.IsPath(program) && !IsAbsolute(program))
         {
             problems.Add($"{setting} '{program}' must be a program name, looked up on the PATH, or an absolute path");
         }
@@ -668,7 +667,7 @@ public static class HarnessConfigValidator
         }
     }
 
-    private static bool IsAbsolute(string program) => program.StartsWith('/') || IsWindowsAbsolute(program);
+    private static bool IsAbsolute(string program) => PlatformPaths.IsAbsoluteOnAnyPlatform(program);
 
     /// <summary>Whether a command names no program: it is empty, or its first word is blank.</summary>
     private static bool IsBlankCommand(IReadOnlyList<string> command) => command.Count == 0 || string.IsNullOrWhiteSpace(command[0]);
@@ -1427,11 +1426,13 @@ public static class HarnessConfigValidator
     {
         var trimmed = path.TrimEnd('/', '\\');
         var isHome = trimmed == "~";
-        var isRoot = trimmed.Length == 0 || (trimmed.Length == 2 && trimmed[1] == ':');
+        var isRoot = trimmed.Length == 0 || (trimmed.Length == 2 && PlatformPaths.NamesADrive(trimmed));
 
-        var isAbsolute = path.StartsWith('/')
-            || path.StartsWith("~/", StringComparison.Ordinal)
-            || (allowWindowsPaths && IsWindowsAbsolute(path));
+        // A POSIX path, or one from the home directory - or, where the host may run Windows, a drive
+        // or a share.
+        var isAbsolute = PlatformPaths.IsHomeRelative(path)
+            || PlatformPaths.IsAbsoluteOn(path, PlatformNames.Linux)
+            || (allowWindowsPaths && PlatformPaths.IsWindowsAbsolute(path));
 
         if (string.IsNullOrWhiteSpace(path) || (!isAbsolute && !isHome))
         {
@@ -1450,10 +1451,6 @@ public static class HarnessConfigValidator
             problems.Add($"{owner} repositoryPath '{path}' is a home or root directory; name a directory of its own for the copy");
         }
     }
-
-    private static bool IsWindowsAbsolute(string path)
-        => (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/')
-            || path.StartsWith(@"\\", StringComparison.Ordinal);
 
     /// <summary>
     /// Rejects a path that is absolute or climbs out with "..". These paths are resolved

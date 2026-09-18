@@ -285,13 +285,13 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
-    /// Only a program named by name is looked for beforehand. A relative path is the tree's own, which
-    /// a host's copy may not hold until the run's sync; a placeholder is filled in only once the leg
-    /// runs; and a compiler variable naming a path is read whole by CMake, never cut at its first
-    /// space into a "C:\Program" nobody has.
+    /// A relative path and a placeholder are left to the run. A relative path is read from the
+    /// directory its phase starts in, which a host's copy may not hold until the run's sync; a
+    /// placeholder is filled in only once the leg runs; and a compiler variable naming a path with a
+    /// space in it is read whole by CMake, never cut at its first space into a "C:\Program" nobody has.
     /// </summary>
     [Fact]
-    public void OnlyAProgramNamedByName_IsLookedForBeforehand()
+    public void ARelativePathOrAPlaceholder_IsLeftToTheRun()
     {
         var relativeRunner = Configured(generator: "Ninja", cc: @"C:\Program Files\LLVM\bin\clang-cl.exe", cxx: "ccache g++", runner: "scripts/test.sh");
 
@@ -304,6 +304,192 @@ public sealed class ToolResolutionTests
         Assert.Equal(
             ["python3"],
             LegPrograms.For(builtRunner, builtRunner.Legs["lin"], new LegWorkload(Build: false, Test: false, ["python3", "./bench.sh", "{tool}", " "])));
+    }
+
+    /// <summary>
+    /// A program named by a path absolute on the leg's platform is an installed file - a compiler kept
+    /// out of every PATH, as Homebrew keeps its llvm - and is looked for as surely as a name is. A
+    /// path absolute only on another platform names nothing there.
+    /// </summary>
+    [Fact]
+    public void AnAbsolutePath_IsLookedForBeforehand_OnItsOwnPlatform()
+    {
+        var absolute = Configured(generator: null, cc: "/usr/bin/gcc-13", runner: "/opt/tools/ctest");
+
+        Assert.Equal(["cmake", "/usr/bin/gcc-13", "/opt/tools/ctest"], LegPrograms.For(absolute, absolute.Legs["lin"], LegWorkload.BuildAndTest));
+
+        var windowsPath = Configured(generator: null, runner: @"C:\tools\ctest.exe");
+
+        Assert.Equal(["cmake"], LegPrograms.For(windowsPath, windowsPath.Legs["lin"], LegWorkload.BuildAndTest));
+    }
+
+    /// <summary>
+    /// A compiler variable is read as CMake reads it where the value alone can say: the whole of it
+    /// when it holds no space, and its first word when that is a name. A value with a space whose
+    /// first word is a path is left to CMake, which alone can ask whether the whole of it is a file.
+    /// </summary>
+    [Theory]
+    [InlineData("gcc -m32", "gcc")]
+    [InlineData("ccache gcc", "ccache")]
+    [InlineData("/usr/bin/gcc-13", "/usr/bin/gcc-13")]
+    [InlineData(@"C:\Program Files\LLVM\bin\clang-cl.exe", null)]
+    [InlineData("/opt/llvm/bin/clang --target=x86_64-linux-gnu", null)]
+    public void ACompilerVariable_IsReadAsCMakeReadsIt(string value, string? program)
+    {
+        var config = Configured(generator: null, cc: value);
+
+        var programs = LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildOnly);
+
+        Assert.Equal(program is null ? ["cmake"] : ["cmake", program], programs);
+    }
+
+    /// <summary>
+    /// A program started under an environment the configuration declares that sets PATH is found on
+    /// that PATH, which no survey can see. Demanded anyway, a compiler only that PATH holds would turn
+    /// away a leg that builds - so it is never required of a host. It is still asked about: the
+    /// directory the survey finds it in is appended to that PATH as any other's is.
+    /// </summary>
+    [Fact]
+    public void AProgramStartedUnderAnEnvironmentThatSetsPath_IsAskedAbout_ButNeverRequired()
+    {
+        var build = Configured(generator: "Ninja", cc: "arm-none-eabi-gcc");
+        build.Toolchains["gcc"].Env["Path"] = "/opt/arm/bin:/usr/bin:/bin";
+
+        Assert.Empty(LegPrograms.For(build, build.Legs["lin"], LegWorkload.BuildOnly));
+        Assert.Contains("arm-none-eabi-gcc", LegPrograms.Wanted(build, LegWorkload.BuildOnly));
+        Assert.Contains("ninja", LegPrograms.Wanted(build, LegWorkload.BuildOnly));
+
+        var test = Configured(generator: null);
+        test.Projects[0] = new ProjectConfig
+        {
+            Name = "app",
+            Type = "cmake",
+            Path = ".",
+            Test = new TestConfig
+            {
+                All = new TestInvocation
+                {
+                    Runner = "ctest",
+                    SuccessPattern = "tests passed",
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/cmake/bin" },
+                },
+            },
+        };
+
+        Assert.Empty(LegPrograms.For(test, test.Legs["lin"], new LegWorkload(Build: false, Test: true, [])));
+        Assert.Contains("ctest", LegPrograms.Wanted(test, LegWorkload.BuildAndTest));
+
+        var phases = new RunnerConfig
+        {
+            Phases =
+            [
+                new RunnerPhase { Name = "plain", Command = ["python3", "bench.py"] },
+                new RunnerPhase
+                {
+                    Name = "cross",
+                    Command = ["arm-none-eabi-size", "out.elf"],
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/arm/bin" },
+                },
+            ],
+        };
+
+        Assert.Equal(["python3"], LegWorkload.ForRunner(phases, action: null).Programs);
+        Assert.Equal(["arm-none-eabi-size"], LegWorkload.ForRunner(phases, action: null).UnderOwnPath);
+
+        var whole = new RunnerConfig
+        {
+            Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/arm/bin" },
+            Phases = phases.Phases,
+        };
+
+        Assert.Empty(LegWorkload.ForRunner(whole, action: null).Programs);
+        Assert.Equal(["python3", "arm-none-eabi-size"], LegWorkload.ForRunner(whole, action: null).UnderOwnPath);
+
+        var action = new RepoHarness.Core.Runners.ActionFile(
+            "actions/probe/probe.yml",
+            "probe",
+            null,
+            [],
+            [
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "plain",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("tclsh probe.tcl", 4, ["tclsh", "probe.tcl"])],
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                },
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "cross",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("arm-none-eabi-size out.elf", 8, ["arm-none-eabi-size", "out.elf"])],
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/arm/bin" },
+                },
+            ]);
+
+        var steps = LegWorkload.ForRunner(new RunnerConfig { Action = "probe/probe.yml" }, action);
+
+        Assert.Equal(["tclsh"], steps.Programs);
+        Assert.Equal(["arm-none-eabi-size"], steps.UnderOwnPath);
+        Assert.Contains("arm-none-eabi-size", LegPrograms.Wanted(build, steps));
+        Assert.DoesNotContain("arm-none-eabi-size", LegPrograms.For(build, build.Legs["lin"], steps));
+    }
+
+    /// <summary>
+    /// A program named by its path is looked for at that path and nowhere else, so the reason it is
+    /// missing says that, and sends nobody to toolSearchDirectories, which has nothing to do with it.
+    /// </summary>
+    [Fact]
+    public void AProgramNamedByAnAbsolutePath_IsMissingFromThatPath_NotFromTheSearchedDirectories()
+    {
+        var config = Configured(generator: null, cc: "/usr/bin/gcc-13");
+        var host = Host(HostId.Local, config, ("/usr/bin/gcc-13", ProgramFound.Nowhere));
+
+        var placement = Place(config, LegWorkload.BuildOnly, host);
+
+        Assert.Equal(LegVerdict.SkippedToolMissing, placement.Verdict);
+        Assert.Equal("local: nothing is at '/usr/bin/gcc-13' there; install it at that path, or name the program where it is", placement.Reason);
+    }
+
+    /// <summary>
+    /// A list under 'all' naming only another platform's directories names nothing on this one, so
+    /// it replaces nothing: read as a replacement, it would have searched no directory at all, and
+    /// every program off the PATH - cmake in /opt/homebrew/bin - would read as missing.
+    /// </summary>
+    [Fact]
+    public void AnAllListNamingOnlyAnotherPlatformsDirectories_KeepsTheBuiltInOne()
+    {
+        var onlyWindows = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { ["all"] = ["C:/Tools"] };
+        var both = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { ["all"] = ["C:/Tools", "/opt/tools"] };
+
+        Assert.Equal(ToolSearchDirectories.Posix, ToolSearchDirectories.For(onlyWindows, "macos"));
+        Assert.Equal(["C:/Tools"], ToolSearchDirectories.For(onlyWindows, "windows"));
+        Assert.Equal(["/opt/tools"], ToolSearchDirectories.For(both, "linux"));
+    }
+
+    /// <summary>
+    /// A leg the survey turned away through a defect of its own fails 'legs', with the defect's
+    /// code, even when another leg can run and none was named: whether it could run was never
+    /// established, which is no switched-off machine.
+    /// </summary>
+    [Fact]
+    public void ALegTurnedAwayThroughADefect_FailsTheSurvey_WithTheDefectsCode()
+    {
+        var config = Configured(generator: "Ninja");
+        var fine = Host(HostId.Local, config);
+        var never = new HostReport { Host = HostId.Local, Os = "linux", Processor = "x86_64" };
+
+        var report = new LegsReport(
+            [
+                Place(config, LegWorkload.BuildAndTest, fine),
+                Place(config, LegWorkload.BuildAndTest, never),
+            ],
+            [fine],
+            Named: false);
+
+        var outcome = LegsReports.Render(report, json: false);
+
+        Assert.False(report.Passed);
+        Assert.Equal(HarnessExit.InternalError, outcome.ExitCode);
+        Assert.Contains("was never established, through a defect in this tool", outcome.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -395,7 +581,7 @@ public sealed class ToolResolutionTests
         var config = Configured(generator: "Ninja");
         var host = new HostReport { Host = HostId.Local, Os = "linux", Processor = "x86_64" };
 
-        var reason = LegPlacement.Obstacle(config, config.Legs["lin"], LegWorkload.BuildAndTest, host);
+        var reason = Place(config, LegWorkload.BuildAndTest, host).Reason;
 
         Assert.NotNull(reason);
         Assert.Contains("was never asked, which is a defect in this tool", reason, StringComparison.Ordinal);
@@ -428,25 +614,39 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
-    /// A leg every candidate turned away reports the gravest reason among them: a defect in this tool
-    /// over anything, then a program a right host lacks - which somebody can install - over a host
-    /// that could not take the leg at all, whichever candidate said which.
+    /// A program never chooses the host. A leg goes to the first candidate that can take it - the
+    /// right machine, reached - and a program that host lacks turns it away there. Moved to a host
+    /// that has the program, it measured a machine nobody chose, and each command could send it
+    /// somewhere else: a build to one host, the run on what that build staged to another. Only a
+    /// host that cannot take the leg at all is passed over.
     /// </summary>
     [Fact]
-    public void ALegEveryHostTurnedAway_ReportsTheGravestReason()
+    public void AProgramNeverChoosesTheHost_ALegIsTurnedAwayWhereItIsPlaced()
     {
         var config = Configured(generator: "Ninja");
         config.Hosts.Ssh["mac"] = new SshHostConfig { RepositoryPath = "/srv/repo" };
 
         var wrongMachine = Host(HostId.Local, config) with { Os = "windows" };
+        var lacksCmakeHere = Host(HostId.Local, config, ("cmake", ProgramFound.Nowhere));
+        var hasEverything = Host(HostId.Ssh("mac"), config);
         var lacksCmake = Host(HostId.Ssh("mac"), config, ("cmake", ProgramFound.Nowhere));
         var neverAsked = new HostReport { Host = HostId.Ssh("mac"), Os = "linux", Processor = "x86_64" };
-        var lacksCmakeHere = Host(HostId.Local, config, ("cmake", ProgramFound.Nowhere));
         var unreachable = new HostReport { Host = HostId.Ssh("mac"), Reason = "ssh could not connect" };
 
+        // This machine lacks cmake and the mac has it: turned away here, never moved there.
+        var here = Place(config, LegWorkload.BuildAndTest, lacksCmakeHere, hasEverything);
+
+        Assert.False(here.Runnable);
+        Assert.Equal(LegVerdict.SkippedToolMissing, here.Verdict);
+        Assert.StartsWith("local: 'cmake' is not installed there", here.Reason, StringComparison.Ordinal);
+
+        // A copy starts nothing and goes to the same host, where a run on what it staged looks.
+        Assert.Equal(HostId.Local, Place(config, LegWorkload.Copy, lacksCmakeHere, hasEverything).Host?.Host);
+
+        // Passed over only for a host that cannot take the leg, and judged on the one it reaches.
+        Assert.Equal(HostId.Ssh("mac"), Place(config, LegWorkload.BuildAndTest, wrongMachine, hasEverything).Host?.Host);
         Assert.Equal(LegVerdict.SkippedToolMissing, Place(config, LegWorkload.BuildAndTest, wrongMachine, lacksCmake).Verdict);
-        Assert.Equal(LegVerdict.SkippedToolMissing, Place(config, LegWorkload.BuildAndTest, lacksCmakeHere, unreachable).Verdict);
-        Assert.Equal(LegVerdict.Poisoned, Place(config, LegWorkload.BuildAndTest, lacksCmakeHere, neverAsked).Verdict);
+        Assert.Equal(LegVerdict.Poisoned, Place(config, LegWorkload.BuildAndTest, wrongMachine, neverAsked).Verdict);
         Assert.Equal(LegVerdict.SkippedUnavailable, Place(config, LegWorkload.BuildAndTest, wrongMachine, unreachable).Verdict);
     }
 
@@ -480,7 +680,7 @@ public sealed class ToolResolutionTests
         var config = Configured(generator: "Ninja");
         var host = Host(HostId.Local, config, ("cmake", ProgramFound.OffPath));
 
-        Assert.Null(LegPlacement.Obstacle(config, config.Legs["lin"], LegWorkload.BuildAndTest, host));
+        Assert.Null(Place(config, LegWorkload.BuildAndTest, host).Reason);
     }
 
     /// <summary>
@@ -546,11 +746,15 @@ public sealed class ToolResolutionTests
         var onPath = Directory.CreateDirectory(temp.Combine("path")).FullName;
         var searched = Directory.CreateDirectory(temp.Combine("searched")).FullName;
 
-        Executable(onPath, "cmake");
-        Executable(searched, "ninja");
-        Executable(searched, "qemu-probe");
+        // As this machine is, because the searched directories are read for the host's own platform.
+        var windows = OperatingSystem.IsWindows();
+        var exe = windows ? ".exe" : string.Empty;
 
-        var platform = HostDoubles.Platform(PlatformId.Linux, "arm64", temp.Path);
+        Executable(onPath, "cmake" + exe);
+        Executable(searched, "ninja" + exe);
+        Executable(searched, "qemu-probe" + exe);
+
+        var platform = HostDoubles.Platform(windows ? PlatformId.Windows : PlatformId.Linux, "arm64", temp.Path);
         var fileSystem = new RepoHarness.Core.FileSystem.PhysicalFileSystem(FilePermissionsFactory.Create());
         var identity = Substitute.For<IToolIdentityProvider>();
         identity.Current.Returns(new ToolIdentity("1.2.3", "abc123"));
@@ -578,15 +782,48 @@ public sealed class ToolResolutionTests
         var info = await agent.DescribeAsync(
             emulators,
             ["cmake", "ninja", "absent"],
-            new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { ["linux"] = [searched] },
+            new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { [platform.PlatformKey] = [searched] },
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(ProgramFound.OnPath, info.Programs["cmake"].Found);
-        Assert.Equal(ProgramFound.OffPath, info.Programs["ninja"].Found);
-        Assert.Equal(ProgramFound.Nowhere, info.Programs["absent"].Found);
-        Assert.Equal(ProgramFound.OffPath, info.Programs["qemu-probe"].Found);
+        Assert.Equal(ProgramFound.OnPath, Answer(info, "cmake").Found);
+        Assert.Equal(ProgramFound.OffPath, Answer(info, "ninja").Found);
+        Assert.Equal(ProgramFound.Nowhere, Answer(info, "absent").Found);
+        Assert.Equal(ProgramFound.OffPath, Answer(info, "qemu-probe").Found);
         Assert.Equal([onPath, searched], info.ProgramDirectories);
     }
+
+    /// <summary>
+    /// Two programs whose names differ only in case are two files on Linux, and a host asked about
+    /// both answers about both. Keyed by name in a map read back ignoring case, that answer was
+    /// refused whole, and every leg on the host read as unavailable.
+    /// </summary>
+    [Fact]
+    public void AnAnswerAboutProgramsDifferingOnlyInCase_ReadsBack_WithBoth()
+    {
+        var info = new HostAgentInfo
+        {
+            Version = "1.2.3",
+            AssemblySha256 = "abc123",
+            Os = "linux",
+            Processor = "x86_64",
+            Programs =
+            [
+                new("cmake", ProgramFound.OnPath, "/usr/bin/cmake"),
+                new("CMake", ProgramFound.Nowhere),
+            ],
+        };
+
+        var read = System.Text.Json.JsonSerializer.Deserialize<HostAgentInfo>(
+            System.Text.Json.JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions),
+            HostAgentProtocol.JsonOptions)!;
+
+        Assert.Equal(ProgramFound.OnPath, Answer(read, "cmake").Found);
+        Assert.Equal(ProgramFound.Nowhere, Answer(read, "CMake").Found);
+    }
+
+    /// <summary>What <paramref name="info"/> says of <paramref name="program"/>.</summary>
+    private static ProgramLocation Answer(HostAgentInfo info, string program)
+        => info.Programs.Single(location => string.Equals(location.Program, program, StringComparison.Ordinal));
 
     /// <summary>A configuration with one Linux leg building a cmake project and testing it.</summary>
     private static HarnessConfig Configured(string? generator, string? cc = null, string? cxx = null, string runner = "ctest")

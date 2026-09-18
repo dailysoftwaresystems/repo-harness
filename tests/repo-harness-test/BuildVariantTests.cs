@@ -147,6 +147,19 @@ public sealed class BuildVariantTests
         Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, "gcc", "g++", "Debug");
     }
 
+    /// <summary>
+    /// A build directory records the program that builds it - the ninja the build ran - and the
+    /// record is read back, so the dependency records are read by that same program.
+    /// </summary>
+    [Fact]
+    public void ARecord_NamesTheProgramThatBuildsTheDirectory()
+    {
+        using var temp = new TempDirectory();
+        var directory = WriteCache(temp, "CMAKE_MAKE_PROGRAM:FILEPATH=/opt/arm/bin/ninja\nCMAKE_BUILD_TYPE:STRING=Debug\n");
+
+        Assert.Equal("/opt/arm/bin/ninja", Guard().Read(directory)?.MakeProgram);
+    }
+
     private static BuildDirectoryGuard Guard()
         => new(new HarnessFactory().FileSystem, new HostPlatform());
 

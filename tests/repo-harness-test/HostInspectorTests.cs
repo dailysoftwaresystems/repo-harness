@@ -129,6 +129,74 @@ public sealed class HostInspectorTests
         Assert.Contains("could not be established", report.Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A host that answered, and could not look everywhere it was told to, gives the search's own
+    /// reason - which running again does not change, so nothing tells the reader to.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatCouldNotLookEverywhereForDotnet_SaysWhy_AndSendsNobodyToRunAgain()
+    {
+        var host = HostThat(dotnet: Where.OffPath);
+
+        using var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Program == "pwd"
+                ? HostResults.Failed(1, "pwd: cannot read")
+                : host(connection, command));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains("could not be established: 'dotnet' is not on the PATH there, and '~/.dotnet'", report.Reason, StringComparison.Ordinal);
+        Assert.Contains("because its home directory could not be read", report.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("run again", report.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that did not answer while its SDK was looked for leaves no reason of the search's own,
+    /// and running again may well change that: the reader is told so.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatStoppedAnsweringWhileDotnetWasLookedFor_SaysToRunAgain()
+    {
+        var host = HostThat(dotnet: Where.OffPath);
+
+        using var fixture = new Fixture(
+            PlatformId.Windows,
+            respond: (connection, command) => command.Program == "pwd"
+                ? new ProcessResult(-1, string.Empty, string.Empty, TimeSpan.FromMinutes(2), TimedOut: true)
+                : host(connection, command));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.Contains("the host did not answer when asked where 'dotnet' is; run again once it does", report.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two programs whose names differ only in case are two files on Linux, and the host's answer
+    /// about both is kept whole: read into a map that ignored case, it was refused, and every leg on
+    /// the host read as unavailable.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerAboutProgramsDifferingOnlyInCase_KeepsBoth()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: _ => HostResults.Ok(JsonSerializer.Serialize(
+            new HostAgentInfo
+            {
+                Version = Root.Version,
+                AssemblySha256 = "roothash",
+                Os = "linux",
+                Processor = "x86_64",
+                Programs = [new("cmake", ProgramFound.OnPath, "/usr/bin/cmake"), new("CMake", ProgramFound.Nowhere)],
+            },
+            HostAgentProtocol.JsonOptions))));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(ProgramFound.OnPath, report.Programs["cmake"].Found);
+        Assert.Equal(ProgramFound.Nowhere, report.Programs["CMake"].Found);
+    }
+
     [Fact]
     public async Task AnSdkOlderThanTheToolNeeds_IsNamed()
     {

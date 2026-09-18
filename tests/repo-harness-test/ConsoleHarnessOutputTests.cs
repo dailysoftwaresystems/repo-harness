@@ -36,6 +36,29 @@ public sealed class ConsoleHarnessOutputTests
         Assert.False(output.IsDataOnly);
     }
 
+    /// <summary>
+    /// A scope opened inside another - a leg run inside a command that already answers with data -
+    /// leaves the outer one standing when it closes: closed by the inner scope, the rest of the
+    /// command's progress went to standard output, in front of the document.
+    /// </summary>
+    [Fact]
+    public void AScopeInsideAnother_LeavesTheOuterOneStanding()
+    {
+        var (output, _, _) = Create(verbose: false);
+
+        using (output.DataOnly())
+        {
+            using (output.DataOnly())
+            {
+                Assert.True(output.IsDataOnly);
+            }
+
+            Assert.True(output.IsDataOnly);
+        }
+
+        Assert.False(output.IsDataOnly);
+    }
+
     [Fact]
     public void FailuresAndWarnings_GoToStandardError_SoOutputStaysPipeable()
     {

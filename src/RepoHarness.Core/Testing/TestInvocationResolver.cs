@@ -174,8 +174,8 @@ public static class TestInvocationResolver
         => Path.IsPathRooted(path) ? path : Path.Combine(treeRoot, path);
 
     /// <summary>
-    /// The program a leg's tests start on <paramref name="platformKey"/>, or <see langword="null"/>
-    /// when the settings name none there.
+    /// The invocation a leg's tests use on <paramref name="platformKey"/>: its runner - empty when the
+    /// settings name none there - and the environment that runner starts in.
     /// </summary>
     /// <param name="settings">The test settings.</param>
     /// <param name="platformKey">The operating system the leg runs on.</param>
@@ -184,11 +184,11 @@ public static class TestInvocationResolver
     /// which program a host must have, and settings that name none are the test command's to refuse,
     /// in its own words, when somebody runs it.
     /// </remarks>
-    public static string? RunnerFor(TestConfig settings, string platformKey)
+    public static ResolvedTestInvocation InvocationFor(TestConfig settings, string platformKey)
     {
         ArgumentNullException.ThrowIfNull(settings);
 
-        return Merge(settings.All, SectionFor(settings, platformKey)).Runner is { Length: > 0 } runner ? runner : null;
+        return Merge(settings.All, SectionFor(settings, platformKey));
     }
 
     /// <summary>The section of <paramref name="settings"/> for one operating system, if it has one.</summary>

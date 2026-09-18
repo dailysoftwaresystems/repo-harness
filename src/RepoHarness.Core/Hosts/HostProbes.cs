@@ -20,7 +20,7 @@ public sealed record SdkListing(string Version, string Location)
     /// Whether it is installed at a Windows path, which is how a Windows host is told from any other
     /// before DssHarness runs there.
     /// </summary>
-    public bool OnWindows => (Location.Length >= 2 && Location[1] == ':') || Location.StartsWith(@"\\", StringComparison.Ordinal);
+    public bool OnWindows => Platform.PlatformPaths.NamesADrive(Location) || Location.StartsWith(@"\\", StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -30,8 +30,24 @@ public sealed record SdkListing(string Version, string Location)
 /// </summary>
 public static partial class HostProbes
 {
+    /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
+    public const int SshFailed = 255;
+
     /// <summary>Longest excerpt of a program's output a message quotes.</summary>
     private const int ExcerptLength = 300;
+
+    /// <summary>
+    /// Whether the host ran a command at all. A program that ran and failed exits non-zero; a
+    /// connection that never opened is ssh's own <see cref="SshFailed"/>, and one that hung has no
+    /// exit code to read. Only an answer says anything about the host.
+    /// </summary>
+    /// <param name="result">What running the command produced.</param>
+    public static bool Answered(Processes.ProcessResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return !result.TimedOut && result.ExitCode != SshFailed;
+    }
 
     /// <summary>Reads <c>uname -sm</c> into an operating system and a processor, in configuration's words.</summary>
     public static (string? Os, string? Processor) ReadUname(string output)

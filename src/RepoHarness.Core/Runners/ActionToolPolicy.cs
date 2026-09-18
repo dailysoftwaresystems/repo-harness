@@ -48,13 +48,18 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
     /// A bare name is matched against <see cref="ToolConfig.Name"/> case-insensitively, with and
     /// without an executable extension, because <c>cmake</c> and <c>cmake.exe</c> name one tool.
     /// Anything carrying a separator is treated as a path and must resolve strictly inside the
-    /// repository; existence is deliberately not required, because the program a step runs is
-    /// often one the build in an earlier step produces.
+    /// repository, read from the directory the step runs in - where the run itself reads it; existence
+    /// is deliberately not required, because the program a step runs is often one the build in an
+    /// earlier step produces.
     /// </remarks>
     /// <param name="program">The first token of a <c>run</c> line.</param>
     /// <param name="tools">The repository's declared tools.</param>
     /// <param name="repositoryRoot">Root of the tree the runner acts on.</param>
-    public ProgramAllowance Classify(string program, IReadOnlyList<ToolConfig> tools, string repositoryRoot)
+    /// <param name="workingDirectory">
+    /// The directory the step runs in: absolute, or relative to <paramref name="repositoryRoot"/>, or
+    /// <see langword="null"/> for the root itself.
+    /// </param>
+    public ProgramAllowance Classify(string program, IReadOnlyList<ToolConfig> tools, string repositoryRoot, string? workingDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(program);
         ArgumentNullException.ThrowIfNull(tools);
@@ -62,7 +67,7 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
 
         if (ProcessRunner.IsPath(program))
         {
-            return IsInsideRepository(program, repositoryRoot)
+            return IsInsideRepository(program, repositoryRoot, workingDirectory)
                 ? ProgramAllowance.RepositoryPath
                 : ProgramAllowance.Undeclared;
         }
@@ -83,11 +88,25 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
     /// <param name="action">The parsed action file.</param>
     /// <param name="config">The repository's configuration, for its declared tools.</param>
     /// <param name="repositoryRoot">Root of the tree the runner acts on.</param>
-    public IReadOnlyList<string> Problems(ActionFile action, HarnessConfig config, string repositoryRoot)
+    /// <param name="started">
+    /// What a line of a step will start, and the directory it starts in, as the run works them out -
+    /// its placeholders filled in - so the program judged is the one that starts, from where it starts.
+    /// </param>
+    /// <param name="redact">
+    /// Masks what a line was filled in with, where a problem shows it: a value its placeholders are
+    /// filled from may be a secret. Nothing is masked when absent.
+    /// </param>
+    public IReadOnlyList<string> Problems(
+        ActionFile action,
+        HarnessConfig config,
+        string repositoryRoot,
+        Func<ActionStep, ActionCommand, (string Program, string WorkingDirectory)> started,
+        Func<string, string>? redact = null)
     {
         ArgumentNullException.ThrowIfNull(action);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
+        ArgumentNullException.ThrowIfNull(started);
 
         var declared = config.Tools.Count == 0
             ? "nothing is declared under 'tools'"
@@ -95,13 +114,47 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
 
         return
         [
-            .. action.Commands
-                .Where(command => Classify(command.Program, config.Tools, repositoryRoot)
-                    == ProgramAllowance.Undeclared)
-                .Select(command =>
-                    $"line {command.LineNumber}: '{command.Program}' is not declared under 'tools' "
-                    + $"and is not a path inside the repository ({declared})."),
+            .. action.Steps
+                .SelectMany(step => step.Commands.Select(command => Problem(command, started(step, command), config.Tools, repositoryRoot, declared, redact ?? (text => text))))
+                .OfType<string>(),
         ];
+    }
+
+    /// <summary>What is wrong with one line, or <see langword="null"/> when what it starts may run.</summary>
+    private string? Problem(
+        ActionCommand command,
+        (string Program, string WorkingDirectory) started,
+        IReadOnlyList<ToolConfig> tools,
+        string repositoryRoot,
+        string declared,
+        Func<string, string> redact)
+    {
+        var line = $"line {command.LineNumber}: '{command.Program}'";
+
+        // Filled in to nothing - an empty value in the runner's .env, an input whose default is
+        // empty - a line starts no program at all.
+        if (string.IsNullOrWhiteSpace(started.Program))
+        {
+            return $"{line} starts nothing once its names are filled in.";
+        }
+
+        if (Classify(started.Program, tools, repositoryRoot, started.WorkingDirectory) != ProgramAllowance.Undeclared)
+        {
+            return null;
+        }
+
+        // What it was read as, where that is not what the file says: what its names were filled in
+        // with, or a path read from where its step starts - '../elsewhere/tool' says why a './tool'
+        // is not inside the repository. Masked, as every line that leaves a run is.
+        var read = (ProcessRunner.IsPath(started.Program)
+            ? Path.GetRelativePath(repositoryRoot, Resolved(started.Program, repositoryRoot, started.WorkingDirectory))
+            : started.Program).Replace('\\', '/');
+
+        var shown = string.Equals(read, command.Program.Replace('\\', '/'), StringComparison.Ordinal)
+            ? string.Empty
+            : $" (read as '{redact(read)}')";
+
+        return $"{line}{shown} is not declared under 'tools' and is not a path inside the repository ({declared}).";
     }
 
     /// <summary>
@@ -110,12 +163,20 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
     /// <param name="action">The parsed action file.</param>
     /// <param name="config">The repository's configuration, for its declared tools.</param>
     /// <param name="repositoryRoot">Root of the tree the runner acts on.</param>
+    /// <param name="started">What each line will start, and from where, as the run works them out.</param>
+    /// <param name="redact">Masks what a line was filled in with, where a problem shows it.</param>
     /// <exception cref="HarnessException">
-    /// A program is neither declared nor shipped by the repository. Nothing has run.
+    /// A program is neither declared nor shipped by the repository, or a line starts nothing. Nothing
+    /// has run.
     /// </exception>
-    public void Enforce(ActionFile action, HarnessConfig config, string repositoryRoot)
+    public void Enforce(
+        ActionFile action,
+        HarnessConfig config,
+        string repositoryRoot,
+        Func<ActionStep, ActionCommand, (string Program, string WorkingDirectory)> started,
+        Func<string, string>? redact = null)
     {
-        var problems = Problems(action, config, repositoryRoot);
+        var problems = Problems(action, config, repositoryRoot, started, redact);
 
         if (problems.Count == 0)
         {
@@ -130,16 +191,13 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
             + $"{Environment.NewLine}{detail}");
     }
 
-    private bool IsInsideRepository(string program, string repositoryRoot)
+    private bool IsInsideRepository(string program, string repositoryRoot, string? workingDirectory)
     {
         try
         {
-            // Combine resolves a relative path against the tree and leaves a rooted one alone, and
-            // containment resolves both fully, so neither '..' nor an absolute path from elsewhere
-            // can pass itself off as a program the repository ships.
-            var resolved = Path.Combine(repositoryRoot, program);
-
-            return PathContainment.IsStrictlyInside(repositoryRoot, resolved, _platform.PathComparison);
+            // Resolved as the run starts it, and contained fully, so neither '..' nor an absolute
+            // path from elsewhere can pass itself off as a program the repository ships.
+            return PathContainment.IsStrictlyInside(repositoryRoot, Resolved(program, repositoryRoot, workingDirectory), _platform.PathComparison);
         }
         catch (ArgumentException)
         {
@@ -147,4 +205,11 @@ public sealed class ActionToolPolicy(IHostPlatform platform)
             return false;
         }
     }
+
+    /// <summary>
+    /// The file a program named by a path is, as the run starts it: a relative one made whole against
+    /// the directory its step starts in, itself made whole against the repository.
+    /// </summary>
+    private static string Resolved(string program, string repositoryRoot, string? workingDirectory)
+        => ProcessRunner.Anchored(program, Path.GetFullPath(workingDirectory ?? ".", repositoryRoot));
 }

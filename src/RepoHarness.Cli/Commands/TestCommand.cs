@@ -111,7 +111,7 @@ internal static class TestCommand
                     (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);
-        }));
+        }, JsonOption));
 
         return command;
     }

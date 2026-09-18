@@ -423,8 +423,13 @@ public sealed class HostInspector(
 
         if (dotnet is null or { Found: ProgramFound.Unreadable })
         {
-            return $"whether {sdk} is installed there could not be established: the host did not answer when asked "
-                + $"where 'dotnet' is; run again once it does, and see '{ToolPackage.Id} legs' for what answered";
+            // The search's own reason where it has one: the host answered, and the search could not
+            // look where it was told to, which running again does not change. A host that did not
+            // answer leaves no reason, and running again may well change that.
+            var located = dotnet ?? new ProgramLocation(DotnetProgram, ProgramFound.Unreadable);
+
+            return $"whether {sdk} is installed there could not be established: {located.WhyUnestablished()}"
+                + (located.Reason is null ? $"; run again once it does, and see '{ToolPackage.Id} legs' for what answered" : string.Empty);
         }
 
         if (dotnet.Found == ProgramFound.Nowhere)
@@ -471,7 +476,12 @@ public sealed class HostInspector(
         ToolVersion = info.Version,
         ToolPath = session?.ToolPath,
         Emulators = info.Emulators,
-        Programs = info.Programs,
+
+        // By each program's own name, compared exactly: cmake and CMake are two files on Linux. A
+        // program answered twice is the same answer twice, and the later one stands.
+        Programs = info.Programs
+            .GroupBy(location => location.Program, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal),
         ProgramDirectories = info.ProgramDirectories,
         Session = session,
     };

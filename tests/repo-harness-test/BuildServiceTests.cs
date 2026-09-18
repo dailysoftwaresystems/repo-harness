@@ -314,11 +314,11 @@ public sealed class BuildServiceTests
         return (Service(factory, exitCode), factory);
     }
 
-    private static BuildService Service(HarnessFactory factory, int exitCode)
+    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null)
         => new(
             new PhaseRunner(new QuietRunner(exitCode), factory.FileSystem, factory.Output),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
-            new NinjaDependencyCheck(new QuietRunner(exitCode), factory.FileSystem),
+            new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
             factory.GitClient,
@@ -456,6 +456,48 @@ public sealed class BuildServiceTests
         => BuildOutput.Keyed(paths.Select(entry => new KeyValuePair<string, string>(entry.Platform, entry.Path)));
 
     /// <summary>A runner that starts nothing, prints nothing, and exits as it was told to.</summary>
+    /// <summary>
+    /// The dependency records are read by the ninja the build ran, as its configuration recorded it:
+    /// one only the build's own environment could find is found all the same, and reads the records
+    /// the way it wrote them. Looked up by name instead, it was not there, and a green build failed.
+    /// </summary>
+    [Fact]
+    public async Task TheDependencyRecords_AreReadByTheNinjaTheBuildRan()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path}\nCMAKE_MAKE_PROGRAM:FILEPATH=/opt/arm/bin/ninja\n",
+            cancellationToken);
+
+        var dependencies = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await Service(factory, exitCode: 0, dependencies).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.Equal("/opt/arm/bin/ninja", Assert.Single(dependencies.Started).FileName);
+    }
+
+    /// <summary>Answers every program with <paramref name="output"/>, recording what it was asked to start.</summary>
+    private sealed class RecordingRunner(string output) : IProcessRunner
+    {
+        public List<ProcessRequest> Started { get; } = [];
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            Started.Add(request);
+            return Task.FromResult(new ProcessResult(0, output, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
     private sealed class QuietRunner(int exitCode) : IProcessRunner
     {
         public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)

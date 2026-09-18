@@ -134,7 +134,7 @@ public sealed class ToolProvisionService(
         }
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
-        var searched = ToolSearchDirectories.On(ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey), platformKey);
+        var searched = ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey);
 
         connection = await _programs
             .ResolveAsync(connection, [.. config.Tools.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
@@ -180,7 +180,7 @@ public sealed class ToolProvisionService(
 
         if (connection.Located(Name) is { Found: ProgramFound.Unreadable } unreadable)
         {
-            return (new ToolOutcome(Name, ToolState.Unknown, null, Unestablished(unreadable)), connection);
+            return (new ToolOutcome(Name, ToolState.Unknown, null, unreadable.WhyUnestablished()), connection);
         }
 
         if (await HighestSdkAsync(connection, cancellationToken).ConfigureAwait(false) is { } current)
@@ -273,7 +273,7 @@ public sealed class ToolProvisionService(
 
         if (located.Found == ProgramFound.Unreadable)
         {
-            return (new ToolOutcome(tool.Name, ToolState.Unknown, null, Unestablished(located)), connection);
+            return (new ToolOutcome(tool.Name, ToolState.Unknown, null, located.WhyUnestablished()), connection);
         }
 
         var install = InstallFor(tool, platformKey);
@@ -497,9 +497,17 @@ public sealed class ToolProvisionService(
 
         var uname = await RunAsync(connection, "uname", ["-s"], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
-        // uname is on every POSIX system, so a host without it is a Windows one running PowerShell,
-        // which is the only other shell an ssh server here hands a command to. A host that has it
-        // and names a system this build does not know is not that, and is not guessed at.
+        // A host that did not answer at all - it timed out, or ssh itself failed - said nothing about
+        // what it is. Read as Windows, it would be searched in no POSIX directory and asked about no
+        // tool scoped to Linux, and then reported as having everything it needs.
+        if (!HostProbes.Answered(uname))
+        {
+            return null;
+        }
+
+        // uname is on every POSIX system, so a host that answered without it is a Windows one running
+        // PowerShell, which is the only other shell an ssh server here hands a command to. A host that
+        // has it and names a system this build does not know is not that, and is not guessed at.
         return uname.Succeeded ? PlatformNames.ForKernel(uname.TrimmedOutput) : PlatformNames.Windows;
     }
 
@@ -534,13 +542,6 @@ public sealed class ToolProvisionService(
                 + "captures the version in its first group",
         };
     }
-
-    /// <summary>
-    /// Why whether a program is on a host could not be established: the search's own reason when it
-    /// could not look everywhere, and the host not answering otherwise.
-    /// </summary>
-    private static string Unestablished(ProgramLocation location)
-        => location.Reason ?? $"the host did not answer when asked where '{location.Program}' is";
 
     /// <summary>The install entry for one platform, falling back to the one declared for <c>all</c>.</summary>
     private static ToolInstall? InstallFor(ToolConfig tool, string? platformKey)

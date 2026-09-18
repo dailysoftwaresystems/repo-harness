@@ -56,19 +56,20 @@ public static class ToolSearchDirectories
         => string.Equals(platformKey, PlatformNames.Windows, StringComparison.OrdinalIgnoreCase) ? [] : Posix;
 
     /// <summary>
-    /// The directories to search on <paramref name="platformKey"/>: the list configuration declares
-    /// for it, when that list has something in it, and the built-in list otherwise.
+    /// The directories to search on <paramref name="platformKey"/>: those the configuration declares
+    /// for it that it can name, when there are any, and the built-in list otherwise.
     /// </summary>
     /// <param name="declared"><c>toolSearchDirectories</c>, by platform or <c>all</c>.</param>
     /// <param name="platformKey">The platform being searched.</param>
     /// <remarks>
     /// A declared list replaces the built-in one rather than adding to it, so the file says exactly
-    /// where is searched. Declared but empty is not a replacement: an empty list would mean "search
+    /// where is searched. A list with nothing in it for this platform is not a replacement - declared
+    /// empty, or under <c>all</c> naming only another platform's directories: it would mean "search
     /// nothing", which is never what somebody writing the key meant, and it would turn every program
     /// off the PATH into one that is missing.
     /// </remarks>
     public static IReadOnlyList<string> For(IReadOnlyDictionary<string, List<string>>? declared, string? platformKey)
-        => PlatformScope.Select(declared, platformKey) is { Count: > 0 } chosen ? chosen : BuiltIn(platformKey);
+        => On(PlatformScope.Select(declared, platformKey) ?? [], platformKey) is { Count: > 0 } chosen ? chosen : BuiltIn(platformKey);
 
     /// <summary>
     /// The entries of <paramref name="directories"/> that name a directory on a
@@ -77,11 +78,7 @@ public static class ToolSearchDirectories
     /// </summary>
     /// <param name="directories">The entries chosen for the platform.</param>
     /// <param name="platformKey">The platform searching, as measured on the host.</param>
-    /// <remarks>
-    /// For a search made from another machine, which has only the text to go on. A search on the host
-    /// itself asks that machine, which reads the entries the same way.
-    /// </remarks>
-    public static IReadOnlyList<string> On(IReadOnlyList<string> directories, string? platformKey)
+    private static IReadOnlyList<string> On(IReadOnlyList<string> directories, string? platformKey)
     {
         ArgumentNullException.ThrowIfNull(directories);
 
@@ -98,8 +95,8 @@ public static class ToolSearchDirectories
     /// <param name="platformKey">The platform searching.</param>
     /// <remarks>
     /// Read from the text rather than by asking this machine, so a configuration is judged the same
-    /// wherever it is read - including entries meant for a platform this machine is not. A search
-    /// asks the machine it runs on instead, which reads the same entries the same way:
+    /// wherever it is read - including entries meant for a platform this machine is not. The machine
+    /// a search runs on is asked about each entry as well, and reads the same entries the same way:
     /// <c>/opt/tools</c> under <c>all</c> is searched on macOS and Linux, and on Windows, where it
     /// would be read against whichever drive the search started on, it is passed over.
     /// </remarks>
@@ -107,21 +104,6 @@ public static class ToolSearchDirectories
     {
         ArgumentNullException.ThrowIfNull(directory);
 
-        if (directory.StartsWith("~/", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        if (!string.Equals(platformKey, PlatformNames.Windows, StringComparison.OrdinalIgnoreCase))
-        {
-            return directory.StartsWith('/');
-        }
-
-        var drive = directory.Length >= 3
-            && char.IsAsciiLetter(directory[0])
-            && directory[1] == ':'
-            && directory[2] is '\\' or '/';
-
-        return drive || directory.StartsWith(@"\\", StringComparison.Ordinal) || directory.StartsWith("//", StringComparison.Ordinal);
+        return PlatformPaths.IsHomeRelative(directory) || PlatformPaths.IsAbsoluteOn(directory, platformKey);
     }
 }

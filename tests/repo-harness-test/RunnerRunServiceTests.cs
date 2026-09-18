@@ -347,12 +347,13 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
-    /// A question git cannot answer is no answer either way, and no verdict on the code: the run is
-    /// refused before anything starts, in git's own words - which, on a host's copy git will not
-    /// trust, name the fix themselves.
+    /// A question git cannot answer is no answer either way, and no verdict on the code. It is about
+    /// this leg's tree - a copy git will not trust, a worktree whose link is broken - so the leg cannot
+    /// run there, before anything starts, in git's own words, which name the fix themselves; the legs
+    /// on other trees still report. Raised as a refusal of the run, it ended every leg over one tree.
     /// </summary>
     [Fact]
-    public async Task AnIgnoreQuestionGitCannotAnswer_RefusesTheRun_InGitsOwnWords()
+    public async Task AnIgnoreQuestionGitCannotAnswer_LeavesTheLegUnavailable_InGitsOwnWords()
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
@@ -374,7 +375,8 @@ public sealed class RunnerRunServiceTests
             Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
             TestContext.Current.CancellationToken));
 
-        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Equal(HarnessExit.HostUnavailable, refusal.ExitCode);
+        Assert.Equal(LegVerdict.SkippedUnavailable, Verdicts.ForRefusal(refusal.ExitCode));
         Assert.Contains("git could not say whether this action's 'build/' is ignored", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("Nothing has run", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("not a git repository", refusal.Message, StringComparison.OrdinalIgnoreCase);
@@ -465,6 +467,193 @@ public sealed class RunnerRunServiceTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// And from the directory its step runs in, where the policy that allowed it read it too:
+    /// './own-probe' in a step that runs in 'tools' is 'tools/own-probe'. Read from the tree root, it
+    /// was a file that is not there - or somebody else's.
+    /// </summary>
+    [Fact]
+    public async Task ARelativeProgram_IsReadFromTheDirectoryItsStepRunsIn()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        TestHost.StartableProgram(temp.Combine("tools"), "own-probe");
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: own
+                workingDirectory: tools
+                run: |
+                  ./own-probe
+            """);
+
+        var result = await Service(factory).RunAsync(
+            Config(),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// A step's directory is judged where the run will really start the step, its placeholders
+    /// filled in: './tool' in a step whose workingDirectory '{where}' is '../elsewhere' is outside
+    /// the repository, and refused, saying where it was read. Read as written, it passed, and the
+    /// step then started a program from wherever the input pointed.
+    /// </summary>
+    [Fact]
+    public async Task AProgramInADirectoryAnInputNames_IsJudgedWhereItReallyIs()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            inputs:
+              where:
+                default: ../elsewhere
+            steps:
+              - name: outside
+                workingDirectory: "{where}"
+                run: |
+                  ./tool
+            """);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("'./tool' (read as '../elsewhere/tool') is not declared under 'tools' and is not a path inside the repository", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And the other way: a program the text alone would place outside the repository is allowed
+    /// where the filled-in directory keeps it inside, and starts from there.
+    /// </summary>
+    [Fact]
+    public async Task AProgramReadFromADeeperDirectoryAnInputNames_IsAllowed_AndStarts()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        TestHost.StartableProgram(temp.Combine("tools"), "own-probe");
+        Directory.CreateDirectory(temp.Combine("a", "b"));
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            inputs:
+              where:
+                default: a/b
+            steps:
+              - name: deep
+                workingDirectory: "{where}"
+                run: |
+                  ../../tools/own-probe
+            """);
+
+        var result = await Service(factory).RunAsync(
+            Config(),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// A program an input names is judged as the program that starts. Read as written,
+    /// '{dir}/tool' was a path inside the repository while the step started one outside it.
+    /// </summary>
+    [Fact]
+    public async Task AProgramAnInputNames_IsJudgedAsTheProgramThatStarts()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            inputs:
+              dir:
+                default: ../elsewhere
+            steps:
+              - name: outside
+                run: |
+                  {dir}/tool
+            """);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("'{dir}/tool' (read as '../elsewhere/tool') is not declared under 'tools' and is not a path inside the repository", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And an input naming a declared tool starts that tool: judged as written, '{runner}' was a
+    /// program nothing declared.
+    /// </summary>
+    [Fact]
+    public async Task AProgramAnInputNames_ThatIsADeclaredTool_Runs()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            inputs:
+              runner:
+                default: dotnet
+            steps:
+              - name: version
+                run: |
+                  {runner} --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// A line whose names fill in to nothing - an empty value in the runner's .env - starts no program
+    /// at all: refused before anything runs, naming the line, rather than handed to the start as a
+    /// program with no name, which read as a defect in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ALineThatFillsInToNothing_IsRefused_NamingTheLine()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Path.Combine(".harness-config", "runner", ".env", "ci.env"), "WRAPPER=\n");
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: bench
+                run: |
+                  {WRAPPER} ./bench
+            """);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("'{WRAPPER}' starts nothing once its names are filled in", refusal.Message, StringComparison.Ordinal);
     }
 
     private static string Child => TestHost.DotnetExecutable;

@@ -1,6 +1,8 @@
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
 
@@ -180,6 +182,30 @@ public sealed class HostCommandRunnerTests
         Assert.Equal("cmake", connection.Spell("cmake"));
         Assert.Null(connection.Located("ninja"));
         Assert.Equal(ProgramFound.Unknown, connection.Forget("dotnet").Located("dotnet")?.Found ?? ProgramFound.Unknown);
+    }
+
+    /// <summary>
+    /// ssh or wsl.exe that will not start never reached the host, whatever was asked of it: the host
+    /// is unavailable, said here where the program is known to be the transport. A program run on
+    /// this machine that will not start is that program's own failure, and stays one.
+    /// </summary>
+    [Fact]
+    public async Task ATransportThatWillNotStart_LeavesTheHostUnavailable_AndALocalProgramItsOwnFailure()
+    {
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new ProgramStartException("ssh", "'ssh' could not be started: Permission denied"));
+        var hosts = new HostCommandRunner(processRunner);
+        var command = new HostCommand { Program = "uname", Arguments = ["-s"] };
+
+        var unavailable = await Assert.ThrowsAsync<HarnessException>(
+            () => hosts.RunAsync(Ssh(), command, TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, unavailable.ExitCode);
+        Assert.Equal("ssh build-box could not be reached: 'ssh' could not be started: Permission denied", unavailable.Message);
+
+        await Assert.ThrowsAsync<ProgramStartException>(
+            () => hosts.RunAsync(new HostConnection { Host = HostId.Local }, command, TestContext.Current.CancellationToken));
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Execution;
@@ -178,7 +179,7 @@ public sealed class LedgerReport
     /// fail" are separate questions, and folding them into one boolean made a run where all eight
     /// legs ran and two failed report as incomplete — which reads as a run that did not finish,
     /// when it finished and found bugs. Interruption is not visible from the rows at all, so the
-    /// caller that can see it supplies it to <see cref="ExitCodeGiven"/> and <see cref="ToJson"/>.
+    /// caller that can see it supplies it to <see cref="ExitCodeGiven"/> and <see cref="ToJson(bool, IReadOnlyList{string})"/>.
     /// </remarks>
     public bool Complete => WithoutVerdict.Count == 0;
 
@@ -324,12 +325,50 @@ public sealed class LedgerReport
     /// </remarks>
     /// <param name="cancelled">Whether the run was interrupted before it finished.</param>
     /// <param name="unfinished">The legs that were still running when it stopped.</param>
-    public string ToJson(bool cancelled, IReadOnlyList<string> unfinished) => JsonSerializer.Serialize(
+    public string ToJson(bool cancelled, IReadOnlyList<string> unfinished)
+        => Json(ExitCodeGiven(cancelled, unfinished), Summarize(cancelled, unfinished), cancelled, unfinished, stopped: false);
+
+    /// <summary>
+    /// The ledger as data for a run something other than its legs ended - a refusal of the whole run,
+    /// a selection no host could take, or a log another run holds - with the code the process exits
+    /// with and the line it ends on.
+    /// </summary>
+    /// <param name="exitCode">What the process exits with.</param>
+    /// <param name="stoppedBecause">The line the command ends on.</param>
+    /// <remarks>
+    /// Whatever ended the run, a reader who asked for data is answered with data: the machine that
+    /// dispatched a leg reads a host's standard output as this document, and text there - a table, a
+    /// list of reasons - read as a host whose answer could not be read, where the host had said
+    /// exactly what happened. The legs that had a line by then are in it, and nothing is claimed of
+    /// the run itself: it neither passed nor completed, and reached no verdict of its own.
+    /// </remarks>
+    public string ToJson(int exitCode, string stoppedBecause)
+    {
+        ArgumentNullException.ThrowIfNull(stoppedBecause);
+
+        return Json(exitCode, stoppedBecause, cancelled: false, [], stopped: true);
+    }
+
+    /// <summary>
+    /// The ledger as data for a command that stopped before any leg had a line - a leg nobody
+    /// declared, a configuration that does not load, a runner nobody declared - with none, and the
+    /// code the process exits with and the line it ends on.
+    /// </summary>
+    /// <param name="exitCode">What the process exits with.</param>
+    /// <param name="stoppedBecause">The line the command ends on.</param>
+    public static string Stopped(int exitCode, string stoppedBecause)
+        => From([], new HarnessDefaults().DurationWarningFactor).ToJson(exitCode, stoppedBecause);
+
+    private string Json(int exitCode, string summary, bool cancelled, IReadOnlyList<string> unfinished, bool stopped) => JsonSerializer.Serialize(
         new
         {
-            Verdict = Verdicts.Display(Verdict),
-            ExitCode = ExitCodeGiven(cancelled, unfinished),
-            Passed = !cancelled && Passed,
+            Verdict = stopped ? null : Verdicts.Display(Verdict),
+            ExitCode = exitCode,
+
+            // The line the command ends on, beside the code it exits with, so a script reading the
+            // document has what a reader of the terminal has.
+            Summary = summary,
+            Passed = !stopped && !cancelled && Passed,
             Cancelled = cancelled,
             Unfinished = unfinished,
 
@@ -337,7 +376,7 @@ public sealed class LedgerReport
             // to tell "nothing failed" from "nothing failed and everything reported", and those are
             // the same boolean only when every leg ran. A run that was interrupted, or that left a
             // leg running, reported on fewer legs than it was asked about whatever its rows say.
-            Complete = !cancelled && Complete && unfinished.Count == 0,
+            Complete = !stopped && !cancelled && Complete && unfinished.Count == 0,
             Legs = Lines.Select(line => new
             {
                 line.Leg,

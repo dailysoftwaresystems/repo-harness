@@ -2,6 +2,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 
@@ -169,6 +170,80 @@ public sealed class RemoteLegRunnerTests
 
         Assert.Equal(HarnessExit.HostUnavailable, failure.ExitCode);
         Assert.EndsWith("exited 1 without a ledger entry for it, saying: no selected leg can run", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A refusal runs over several lines - one for each program an action may not start - and the
+    /// whole of it travels, from the failure line to the end, rather than the first line alone.
+    /// </summary>
+    [Fact]
+    public async Task AHostsRefusalOverSeveralLines_TravelsWhole()
+    {
+        const string First = "  - line 4: 'gcc' is not declared under 'tools' and is not a path inside the repository (declared: 'dotnet').";
+        const string Second = "  - line 5: 'ninja' is not declared under 'tools' and is not a path inside the repository (declared: 'dotnet').";
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke("run: corpus: resolving the action");
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "'actions/corpus/corpus.yml' names 2 program(s) that may not run:"));
+            command.OnErrorLine?.Invoke(First);
+            command.OnErrorLine?.Invoke(Second);
+
+            return HostResults.Finished(command, HarnessExit.Refused);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': 'actions/corpus/corpus.yml' names 2 program(s) that may not run:"
+            + Environment.NewLine + First
+            + Environment.NewLine + Second,
+            refusal.Message);
+    }
+
+    /// <summary>
+    /// A failure line the command's own output carried - a run of this tool inside a test suite
+    /// prints one - is not the command's failure: the last one is, with what follows it.
+    /// </summary>
+    [Fact]
+    public async Task TheLastFailureLine_IsTheCommandsOwn()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "an inner run's own failure, printed by a step"));
+            command.OnErrorLine?.Invoke("the step's output goes on");
+            command.OnErrorLine?.Invoke(FailureLine.For("run", "git does not ignore this action's 'artifacts/'. Nothing has run."));
+
+            return HostResults.Finished(command, HarnessExit.Refused);
+        });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "run", Leg(), "/home/dev/repo", ["corpus"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            "wsl Example-Linux refused 'run' for leg 'wsl-debug': git does not ignore this action's 'artifacts/'. Nothing has run.",
+            refusal.Message);
+    }
+
+    /// <summary>
+    /// The host's agent fails under its own name when it could not start the command at all, and
+    /// what it said travels as the command's own failure would.
+    /// </summary>
+    [Fact]
+    public async Task AFailureTheHostsAgentReported_IsQuoted()
+    {
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            command.OnErrorLine?.Invoke(FailureLine.For(HostAgentProtocol.CommandName, "the directory '/home/dev/repo' does not exist"));
+
+            return HostResults.Finished(command, HarnessExit.InternalError);
+        });
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.EndsWith("saying: the directory '/home/dev/repo' does not exist", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -506,6 +506,119 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// Asked for data, a run is answered with data whatever ended it. A selection no host can take
+    /// answered with text, which the machine that dispatched the leg read as a host whose answer
+    /// could not be read - where the host had said exactly why each leg could not run.
+    /// </summary>
+    [Fact]
+    public async Task ARunNoHostCanTake_AnswersWithTheLedger_NamingEachLegsVerdict()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "elsewhere", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegsExit.Unavailable, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(LegsExit.Unavailable, root.GetProperty("exitCode").GetInt32());
+        Assert.Equal("no selected leg can run", root.GetProperty("summary").GetString());
+        Assert.False(root.GetProperty("passed").GetBoolean());
+        Assert.False(root.GetProperty("complete").GetBoolean());
+
+        var leg = Assert.Single(root.GetProperty("legs").EnumerateArray());
+        Assert.Equal("elsewhere", leg.GetProperty("leg").GetString());
+        Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString());
+    }
+
+    /// <summary>
+    /// And a refusal of the whole run answers with the ledger too, carrying the refusal's own code
+    /// and words - as its FAIL line does, on standard error, where a reader of the terminal sees it.
+    /// </summary>
+    [Fact]
+    public async Task ARefusedRun_AnswersWithTheLedger_WithTheRefusalsCodeAndWords()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        // A program this machine has and the repository never declared: the leg is placed, then
+        // refused before anything starts.
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\nsteps:\n  - name: version\n    run: git --version\n");
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.Refused, root.GetProperty("exitCode").GetInt32());
+        Assert.Contains("'git' is not declared under 'tools'", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.False(root.GetProperty("passed").GetBoolean());
+        Assert.False(root.GetProperty("complete").GetBoolean());
+        Assert.False(root.TryGetProperty("verdict", out _), "a stopped run reached no verdict of its own");
+        Assert.Empty(root.GetProperty("legs").EnumerateArray());
+        Assert.Contains("'git' is not declared under 'tools'", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The document is the whole of standard output from the command's first line: 'run' reads its
+    /// action before any leg is surveyed, and under --verbose says so, which went to standard output
+    /// in front of the document a script was about to parse.
+    /// </summary>
+    [Fact]
+    public async Task UnderVerbose_TheLedgerIsStillTheWholeOfStandardOutput()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--json", "--verbose", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+
+        Assert.Equal("native", Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("leg").GetString());
+        Assert.Contains("reading action file", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And before any leg is placed, too: a leg nobody declared is a usage error, answered with a
+    /// ledger holding no legs - so a script reading standard output has one document to read on
+    /// every exit, where it had nothing at all.
+    /// </summary>
+    [Fact]
+    public async Task ARunStoppedBeforeAnyLegWasPlaced_StillAnswersWithTheLedger()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var result = await CliRunner.RunAsync(
+            ["test", "--no-build", "--legs", "no-such-leg", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var root = document.RootElement;
+
+        Assert.Equal(HarnessExit.UsageError, root.GetProperty("exitCode").GetInt32());
+        Assert.Contains("no-such-leg", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.Empty(root.GetProperty("legs").EnumerateArray());
+        Assert.Contains("no-such-leg", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The chain the consumer's gate broke on, end to end: a leg whose test runner no directory on
     /// this machine holds is turned away by the survey, naming the program, and a test run that
     /// selects it reports it as skipped for a missing tool - incomplete, exit 21 - rather than starting

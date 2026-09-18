@@ -1,9 +1,9 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using RepoHarness.Core.Results;
-
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Legs;
 
@@ -34,11 +34,13 @@ public static class LegsReports
         // everything reported.
         var silent = report.Hosts.Where(host => !host.Available).ToList();
 
-        var exitCode = !report.Passed
-            ? LegsExit.Unavailable
-            : silent.Count > 0
-                ? HarnessExit.Incomplete
-                : HarnessExit.Success;
+        var exitCode = report.Defect is not null
+            ? Verdicts.ExitCodeFor(LegVerdict.Poisoned)
+            : !report.Passed
+                ? LegsExit.Unavailable
+                : silent.Count > 0
+                    ? HarnessExit.Incomplete
+                    : HarnessExit.Success;
 
         var message = Summary(report, silent);
 
@@ -111,6 +113,12 @@ public static class LegsReports
 
         var runnable = report.Placements.Count(placement => placement.Runnable);
         var counted = $"{runnable} of {report.Placements.Count} leg(s) can run";
+
+        if (report.Defect is { } defect)
+        {
+            return $"{counted}; whether leg '{defect.Leg.Name}' can run was never established, "
+                + $"through a defect in this tool: {defect.Reason}";
+        }
 
         if (report.Passed)
         {

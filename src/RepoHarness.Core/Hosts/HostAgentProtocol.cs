@@ -156,8 +156,13 @@ public sealed class HostAgentInfo
     /// <summary>What checking each requested emulator found.</summary>
     public Dictionary<string, EmulatorCheck> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Where each requested program is there, by the name it was asked for.</summary>
-    public Dictionary<string, ProgramLocation> Programs { get; init; } = new(StringComparer.Ordinal);
+    /// <summary>Where each requested program is there, each carrying the name it was asked for.</summary>
+    /// <remarks>
+    /// A list rather than a map keyed by name. A name compares exactly - cmake and CMake are two files
+    /// on Linux, and a repository can ask about both - while a map in this protocol is read back
+    /// ignoring case, as configuration's names are, and refuses an answer holding both.
+    /// </remarks>
+    public List<ProgramLocation> Programs { get; init; } = [];
 
     /// <summary>
     /// The directories a program asked for by name was found in there, on the PATH or off it, in the

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
@@ -6,6 +7,7 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Sync;
@@ -114,16 +116,21 @@ public sealed class LegRunService(
         var context = await _contextLoader.LoadAsync(request.Directory, cancellationToken).ConfigureAwait(false);
 
         // Hosts are measured before anything runs, and DssHarness on each is brought to this
-        // machine's build there, so a leg never starts on a host that turns out not to answer.
+        // machine's build there, so a leg never starts on a host that turns out not to answer. A leg
+        // goes where a sync puts its tree whatever this command starts, so a run on what is already
+        // staged finds it there.
         var report = await _legsService
             .CheckAsync(request.Directory, request.LegNames, request.Workload, request.Here, cancellationToken)
             .ConfigureAwait(false);
 
         var placed = LegRunPlan.From(context, report, _platform, out var skipped);
+        var factor = context.Config.Defaults.DurationWarningFactor;
 
         if (placed.Count == 0)
         {
-            return LegRunPlan.NothingRuns(skipped);
+            var nothing = LegRunPlan.NothingRuns(skipped);
+
+            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? []);
         }
 
         var runId = RunId.New();
@@ -140,11 +147,22 @@ public sealed class LegRunService(
         if (!claim.Taken)
         {
             // Two runs writing one set of logs would each read the other's output as its own, which
-            // is why this is its own verdict and its own exit code rather than a lock refusal.
-            return CommandOutcome.Failed(
+            // is why this is its own verdict and its own exit code rather than a lock refusal - and
+            // the verdict of every leg this run would have started.
+            var held = $"another run owns '{runDirectory}': {claim.Holder?.Describe()}";
+
+            return Stopped(
+                request,
                 LegExit.LogHeld,
-                $"another run owns '{runDirectory}': {claim.Holder?.Describe()}");
+                held,
+                [.. skipped, .. placed.Select(leg => new LegEntry { Leg = leg.Name, Verdict = LegVerdict.LogHeld, Detail = held, Emulated = leg.Emulated })],
+                factor,
+                []);
         }
+
+        // Trees another run holds, by tree: a verdict for the legs that need one, as a variant
+        // another run holds is, and no end to the legs that do not.
+        var lockedTrees = new ConcurrentDictionary<string, string>(LegPlan.TreeKeyComparer);
 
         try
         {
@@ -168,9 +186,9 @@ public sealed class LegRunService(
                             // transfer it did not make.
                             SyncTree = request.UseStaged || !placed.Any(leg => leg.Host.Host.Kind != HostKind.Local)
                                 ? null
-                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, runId, request.ForceLock, token),
+                                : (treeKey, token) => SyncTreeAsync(context, placed, treeKey, runId, request.ForceLock, lockedTrees, token),
                             RunLeg = (plan, token) => RunLegAsync(
-                                context, placed, plan, runId, runDirectory, request, work, commandName, ledger, token),
+                                context, placed, plan, runId, runDirectory, request, work, commandName, ledger, lockedTrees, token),
                         },
                         ledger,
                         cancellationToken)
@@ -182,12 +200,9 @@ public sealed class LegRunService(
                 // leg's configuration turned out to be unsatisfiable still reached a verdict, and
                 // throwing it away would make the reader run everything again to learn what they
                 // already knew. The exit code is still the refusal's own.
-                var reached = ledger.Build(context.Config.Defaults.DurationWarningFactor);
+                var reached = ledger.Build(factor);
 
-                return CommandOutcome.Failed(
-                    ex.ExitCode,
-                    ex.Message,
-                    [.. reached.Render(), $"logs: {runDirectory}"]);
+                return Stopped(request, ex.ExitCode, ex.Message, ledger.Entries, factor, [.. reached.Render(), $"logs: {runDirectory}"]);
             }
 
             return Report(commandName, context, ledger, execution, runDirectory, request.Json);
@@ -212,6 +227,7 @@ public sealed class LegRunService(
         string treeKey,
         RunId runId,
         bool force,
+        ConcurrentDictionary<string, string> lockedTrees,
         CancellationToken cancellationToken)
     {
         var leg = placed.First(candidate => candidate.TreeKey == treeKey);
@@ -221,8 +237,8 @@ public sealed class LegRunService(
             return;
         }
 
-        await using var handle = await _runLock
-            .AcquireAsync(
+        var attempt = await _runLock
+            .TryAcquireAsync(
                 context.Layout,
                 new LockRequest
                 {
@@ -241,15 +257,54 @@ public sealed class LegRunService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var transport = _transportFactory.For(leg.Host);
+        if (attempt.Handle is not { } handle)
+        {
+            // About this tree and this moment, as a variant another run holds is: each leg that needs
+            // the tree records it as refused-locked, and the legs on other trees still report. Raised
+            // from here it ended the whole run, as though it were a configuration every leg shares.
+            // A lock file nobody can use is not this, and is raised as the refusal of the run it is.
+            lockedTrees[treeKey] = attempt.HeldBy!;
+            return;
+        }
 
-        // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
-        // worktree measures that worktree; sending the main checkout instead would report the
-        // worktree's name over the main checkout's sources.
-        await _syncService
-            .SyncAsync(leg.TreeRoot, transport, leg.HostTreeRoot, new SyncOptions(), cancellationToken)
-            .ConfigureAwait(false);
+        await using (handle)
+        {
+            // The tree this leg declares, not whatever tree the command was typed in. A leg naming a
+            // worktree measures that worktree; sending the main checkout instead would report the
+            // worktree's name over the main checkout's sources. A transport that will not start is
+            // the host's to report, and does - as that host being unavailable.
+            await _syncService
+                .SyncAsync(leg.TreeRoot, _transportFactory.For(leg.Host), leg.HostTreeRoot, new SyncOptions(), cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
+
+    /// <summary>
+    /// What a run ends with when something other than its legs ended it, with the legs that had a
+    /// line by then.
+    /// </summary>
+    /// <param name="request">What the command was asked to do.</param>
+    /// <param name="exitCode">What the process exits with.</param>
+    /// <param name="message">The line it ends on.</param>
+    /// <param name="entries">The legs' lines so far.</param>
+    /// <param name="factor">The duration warning factor the ledger is built with.</param>
+    /// <param name="details">What the table form says beneath the line.</param>
+    /// <remarks>
+    /// Asked for data, the ledger is the whole of standard output whatever ended the run: the document,
+    /// with the code and the line the process ends on. Written as text instead - a table, a list of
+    /// reasons - it reached the machine that dispatched the leg as a host whose answer could not be
+    /// read, where the host had said exactly what happened.
+    /// </remarks>
+    private static CommandOutcome Stopped(
+        LegRunRequest request,
+        int exitCode,
+        string message,
+        IReadOnlyList<LegEntry> entries,
+        double factor,
+        IReadOnlyList<string> details)
+        => request.Json
+            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message)] }
+            : CommandOutcome.Failed(exitCode, message, details);
 
     private async Task<LegEntry?> RunLegAsync(
         HarnessContext context,
@@ -261,42 +316,52 @@ public sealed class LegRunService(
         Func<LegWork, CancellationToken, Task<LegEntry>> work,
         string commandName,
         LegLedger ledger,
+        ConcurrentDictionary<string, string> lockedTrees,
         CancellationToken cancellationToken)
     {
         var leg = placed.First(candidate => candidate.Name == plan.Name);
         var started = Stopwatch.GetTimestamp();
 
-        RunLockHandle handle;
-
-        try
+        if (lockedTrees.TryGetValue(leg.TreeKey, out var treeHeld))
         {
-            // The tree shared and this variant exclusive: variants build side by side, but never
-            // while their sources are being replaced.
-            handle = await _runLock
-                .AcquireAsync(
-                    context.Layout,
-                    new LockRequest
-                    {
-                        Host = leg.Host.Host.ToString(),
-                        Tree = leg.HostTreeRoot,
-                        Variant = leg.Variant.DirectoryName,
-                        Scope = LockScope.TreeShared,
-                        RunId = runId,
-                        Command = ledger.CommandName,
-                        Force = request.ForceLock,
-                    },
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (HarnessException ex) when (ex.ExitCode == HarnessExit.Refused)
-        {
-            // The one refusal that is a verdict rather than an end to the run: it is about this leg
-            // and this moment, so the other legs still report, and one locked leg never hides them.
             return new LegEntry
             {
                 Leg = leg.Name,
                 Verdict = LegVerdict.RefusedLocked,
-                Detail = ex.Message,
+                Detail = treeHeld,
+                Duration = Stopwatch.GetElapsedTime(started),
+                Emulated = leg.Emulated,
+            };
+        }
+
+        // The tree shared and this variant exclusive: variants build side by side, but never while
+        // their sources are being replaced.
+        var attempt = await _runLock
+            .TryAcquireAsync(
+                context.Layout,
+                new LockRequest
+                {
+                    Host = leg.Host.Host.ToString(),
+                    Tree = leg.HostTreeRoot,
+                    Variant = leg.Variant.DirectoryName,
+                    Scope = LockScope.TreeShared,
+                    RunId = runId,
+                    Command = ledger.CommandName,
+                    Force = request.ForceLock,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (attempt.Handle is not { } handle)
+        {
+            // The one refusal that is a verdict rather than an end to the run: it is about this leg
+            // and this moment, so the other legs still report, and one locked leg never hides them.
+            // A lock file nobody can use is raised instead, as the refusal of the run it is.
+            return new LegEntry
+            {
+                Leg = leg.Name,
+                Verdict = LegVerdict.RefusedLocked,
+                Detail = attempt.HeldBy!,
                 Duration = Stopwatch.GetElapsedTime(started),
                 Emulated = leg.Emulated,
             };

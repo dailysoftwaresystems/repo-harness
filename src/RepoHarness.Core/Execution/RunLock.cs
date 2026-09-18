@@ -161,7 +161,32 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
     /// Another run holds it, or the lock file could not be read or updated. Never a wait: a run
     /// blocked for hours on a lock cannot be told from one that hung.
     /// </exception>
-    public Task<RunLockHandle> AcquireAsync(
+    public async Task<RunLockHandle> AcquireAsync(
+        HarnessLayout layout,
+        LockRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var attempt = await TryAcquireAsync(layout, request, cancellationToken).ConfigureAwait(false);
+
+        return attempt.Handle ?? throw new HarnessException(HarnessExit.Refused, attempt.HeldBy!);
+    }
+
+    /// <summary>
+    /// Takes what <paramref name="request"/> asks for, or says which run holds it.
+    /// </summary>
+    /// <param name="layout">The repository, whose main checkout holds the lock file.</param>
+    /// <param name="request">What to take.</param>
+    /// <param name="cancellationToken">Stops the attempt.</param>
+    /// <remarks>
+    /// A lock another run holds is an answer, about one tree at one moment, and is returned as one: a
+    /// caller that turns it into a verdict for the legs on that tree must not also turn into one a
+    /// lock file nobody can use, which stops every run on every tree alike.
+    /// </remarks>
+    /// <exception cref="HarnessException">
+    /// The lock file could not be read or updated, or the request names no variant for a shared
+    /// hold. Never a wait: a run blocked for hours on a lock cannot be told from one that hung.
+    /// </exception>
+    public Task<LockAttempt> TryAcquireAsync(
         HarnessLayout layout,
         LockRequest request,
         CancellationToken cancellationToken = default)
@@ -190,24 +215,38 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
                 DateTimeOffset.UtcNow,
                 request.Command));
 
-        Update(
-            layout,
-            entries =>
-            {
-                var kept = Live(entries, entry, request.Force);
+        string? heldBy = null;
 
-                if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
+        try
+        {
+            Update(
+                layout,
+                entries =>
                 {
-                    throw new HarnessException(
-                        HarnessExit.Refused,
-                        $"{Describe(entry)} is held by {holder.Describe()}.");
-                }
+                    var kept = Live(entries, entry, request.Force);
 
-                return [.. kept, entry];
-            });
+                    if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
+                    {
+                        heldBy = $"{Describe(entry)} is held by {holder.Describe()}.";
 
-        return Task.FromResult(new RunLockHandle(this, layout, entry));
+                        // Thrown through the update so that nothing is written: a request that was
+                        // refused leaves the file as it found it.
+                        throw new LockHeldException();
+                    }
+
+                    return [.. kept, entry];
+                });
+        }
+        catch (LockHeldException)
+        {
+            return Task.FromResult(new LockAttempt(null, heldBy));
+        }
+
+        return Task.FromResult(new LockAttempt(new RunLockHandle(this, layout, entry), null));
     }
+
+    /// <summary>What leaves an update when another run holds what was asked for, writing nothing.</summary>
+    private sealed class LockHeldException : Exception;
 
     /// <summary>Every entry currently recorded, live or not.</summary>
     /// <param name="layout">The repository whose main checkout holds the lock file.</param>
@@ -381,6 +420,11 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
 /// by nothing else: a release that matched on the tree alone would hand a second run a tree the
 /// first was still building in.
 /// </summary>
+/// <summary>What asking for a lock came to: the lock, or the run that holds it. Exactly one is set.</summary>
+/// <param name="Handle">The lock, when it was taken.</param>
+/// <param name="HeldBy">Which run holds it, said as a refusal says it, when it was not.</param>
+public sealed record LockAttempt(RunLockHandle? Handle, string? HeldBy);
+
 public sealed class RunLockHandle : IAsyncDisposable
 {
     private readonly RunLock _lock;

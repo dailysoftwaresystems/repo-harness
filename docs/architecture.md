@@ -81,9 +81,9 @@ the current directory first, and the current directory is usually the repository
 committed there under a tool's name would run in place of the tool. On Windows a name
 without an extension starts only `<name>.exe`, never a batch file, whose arguments cmd.exe
 would parse a second time, and a path without one starts that path with `.exe` added. A
-program a leg's configuration names by a relative path is read from the leg's own tree, never
-from wherever the harness was started: for a leg on a worktree those are different copies of
-the same file.
+program a leg's configuration names by a relative path is read from the directory its phase
+starts in - a step's working directory, the test runner's - never from wherever the harness was
+started: for a leg on a worktree those are different copies of the same file.
 
 ### Paths come from git
 
@@ -386,10 +386,14 @@ Where it runs is measured before anything starts, never declared:
   `hosts.ssh`, each in the order the configuration declares them and named as it declares
   them. A leg that sets `wsl` or `ssh` has that one host as its only candidate.
 - This machine is measured first, because it costs nothing to reach. Other hosts are
-  measured only for the legs it cannot run, and all at once, so an unreachable host costs
+  measured only for the legs it cannot take, and all at once, so an unreachable host costs
   its connect timeout once.
 - A leg runs on the first candidate whose measured operating system matches and whose
-  processor matches, or, for an emulated leg, where that emulator's check passed.
+  processor matches, or, for an emulated leg, where that emulator's check passed. A program is
+  never part of the choice: a host that lacks one the command starts turns the leg away there,
+  rather than the leg moving to a host that has it and measuring a machine nobody chose. Every
+  command places a leg the same way, so a run with `--use-staged` finds the tree where a sync
+  put it. To run a leg elsewhere, the leg names that host.
 - `--legs` takes leg names and leg set names, separated by commas or spaces. A name that is
   neither is a usage error before any host is measured. No `--legs` selects every leg, and
   `--legs` given without a name is a usage error rather than every leg, so an empty
@@ -457,8 +461,9 @@ is not dependable on such a host.
   DssHarness on the host that runs it, with the function the leg's run uses: on that PATH, then
   in the searched directories (`toolSearchDirectories`, or a built-in list). The directory each
   was found in is appended to the PATH of every process the leg starts, so the run finds what
-  the survey found even where a phase's environment sets a PATH of its own. A directory the
-  search could not look in leaves a program unknown, never missing.
+  the survey found even where a phase's environment sets a PATH of its own - which is why a
+  program started under such an environment is looked for too, though it never turns a leg away.
+  A directory the search could not look in leaves a program unknown, never missing.
 - **No quoting.** An ssh server hands its command line to a shell, and which shell is not
   known in advance: sh, bash, zsh, fish, cmd or PowerShell. The harness quotes for none of
   them. The command line holds only words every one of them reads literally (letters,
@@ -595,9 +600,9 @@ from the report.
 | `unmeasured` | Whether those files held still could not be established | **yes** |
 | `contended` | Another process used the leg's build directory while it ran | **yes** |
 | `skipped-not-selected` | Filtered out by `--legs` | no |
-| `skipped-unavailable` | No host can run the leg | warning |
+| `skipped-unavailable` | No host can take the leg, its host or its tree could not be reached, or git could not answer in its tree | warning |
 | `skipped-tool-missing` | A required tool is not installed | warning |
-| `refused-locked` | Another run holds the lock for this leg | **yes** |
+| `refused-locked` | Another run holds the lock for this leg, or its host's tree | **yes** |
 | `log-held` | Another live run owns this leg's log path | **yes** |
 | `poisoned` | The harness could not produce a verdict | **yes** |
 
@@ -696,10 +701,17 @@ tool replaces, where a green result had quietly stopped meaning anything.
   file, so one leg's result can never be read as another's.
 - The programs a command will start are resolved on the host before a leg starts - each command
   its own: a build its build's, a test its runner too, a run its steps', a sync none - so a
-  missing tool is `skipped-tool-missing` and named, not a failure halfway through. Only a
-  program named by name can be looked for beforehand. One named by a path, or one that still
-  will not start once the leg is running, fails the leg, naming the program and the reason the
-  system gave: never a skip, and never `poisoned`.
+  missing tool is `skipped-tool-missing` and named, not a failure halfway through. A program
+  named by name, or by a path absolute on the leg's platform, is looked for beforehand; one
+  named by a relative path or with a placeholder is the run's to find, and so is one started
+  under an environment the configuration declares that sets PATH - looked for, so its directory
+  reaches that PATH, and never required. One that will not start once the leg is running fails
+  the leg, naming the program and the reason the system gave: never a skip, and never `poisoned`.
+- A leg-running command asked for `--json` answers with its ledger whatever ended it, once its
+  command line was read: a refusal before any leg was placed, a selection no host could take, a
+  log another run holds, a refusal while the legs ran - each is the document too, with the code
+  the process exits with and the line it ends on. A machine that dispatched a leg reads the
+  host's answer this way, so a host's refusal arrives as that refusal, in the host's words.
 - An emulated leg's emulator has passed its witness on that host before the leg starts.
 
 ### Inputs that hold still
@@ -1064,7 +1076,10 @@ sibling directory whose name merely starts the same way is outside, not inside.
   inside a `run` line.
 - The first token must be a program the configuration declares under `tools`, or a path inside
   the repository. An undeclared program is refused before anything runs — the same list
-  `install-missing-tools` guarantees is installed.
+  `install-missing-tools` guarantees is installed. It is judged as it will start: its names
+  filled in, and a relative path read from the directory its step runs in, both worked out by the
+  one function the run starts it with. Read as written, `{dir}/tool` was inside the repository
+  while the step started a program wherever `{dir}` pointed.
 - Values come from `.harness-config/runner/.env` and `.harness-config/runner/.secrets`, each a
   directory of files. A value that came from `.secrets` never reaches a log, an argument list or
   an error message.

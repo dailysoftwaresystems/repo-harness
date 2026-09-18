@@ -195,16 +195,27 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// </summary>
     /// <remarks>
     /// The one rule, read by everything that has to tell the two apart: the run that starts a program,
-    /// the survey that looks for one first, and the policy that decides whether an action may name
-    /// it. Either separator counts on every platform, so a configuration written on one machine means
-    /// the same thing on the next; and so does a name Windows reads as rooted, such as <c>C:tool</c>,
-    /// which is no name a program is installed under.
+    /// the survey that looks for one first, the validator, and the policy that decides whether an
+    /// action may name it. Read from the text alone, so a configuration means the same thing on every
+    /// machine that reads it: either separator counts on every platform, and so does a drive, such as
+    /// <c>C:tool</c>, which is no name a program is installed under.
     /// </remarks>
     /// <param name="program">The program as a configuration or a request names it.</param>
     internal static bool IsPath(string program)
         => program.Contains('/', StringComparison.Ordinal)
             || program.Contains('\\', StringComparison.Ordinal)
-            || Path.IsPathRooted(program);
+            || PlatformPaths.NamesADrive(program);
+
+    /// <summary>
+    /// Whether <paramref name="environment"/> sets the PATH a program is looked for on.
+    /// </summary>
+    /// <remarks>
+    /// Compared without case, as a configuration's environment names are: a PATH set in any spelling
+    /// is one the harness does not choose.
+    /// </remarks>
+    /// <param name="environment">An environment a configuration declares.</param>
+    internal static bool SetsPath(IEnumerable<string> environment)
+        => environment.Any(name => string.Equals(name, PathVariable, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The file a program named by its path is: made absolute, with the one extension Windows adds.
@@ -225,11 +236,12 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
     /// </summary>
     /// <remarks>
     /// Left to the start, a relative path is read against whatever directory this process happens to
-    /// be in: the main checkout for a leg that works in a worktree, and a subdirectory when the command
-    /// was typed in one. Either way the file started is some other tree's, under the same name.
+    /// be in, never the one the child is started in: the main checkout for a leg that works in a
+    /// worktree, a subdirectory when the command was typed in one. Either way the file started is some
+    /// other directory's, under the same name.
     /// </remarks>
     /// <param name="program">The program as a configuration names it.</param>
-    /// <param name="directory">The directory a relative path is written from.</param>
+    /// <param name="directory">The directory the program starts in, which a relative path is written from.</param>
     internal static string Anchored(string program, string directory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(program);
@@ -317,7 +329,7 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
                 ?? throw new ExecutableNotFoundException(fileName);
 
     private string? OnPath(string name)
-        => ProgramOnPath(name, Environment.GetEnvironmentVariable("PATH"), _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable);
+        => ProgramOnPath(name, Environment.GetEnvironmentVariable(PathVariable), _platform.Current == PlatformId.Windows, _filePermissions.IsExecutable);
 
     /// <summary>
     /// What a failure to start <paramref name="resolved"/> means. It is reported as not found only when the

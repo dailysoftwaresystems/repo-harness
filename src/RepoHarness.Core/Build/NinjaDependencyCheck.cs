@@ -68,6 +68,11 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// <summary>Checks one build directory.</summary>
     /// <param name="buildDirectory">The directory to read.</param>
     /// <param name="appendToPath">The directories the build appended to its PATH, which ninja is looked up on too.</param>
+    /// <param name="program">
+    /// The ninja the build ran, as its configuration recorded it, or <see langword="null"/> to look one
+    /// up. Read by the program that wrote them, the records are read the way they were written, and a
+    /// ninja only the build's own environment could find is found all the same.
+    /// </param>
     /// <param name="cancellationToken">Stops the check.</param>
     /// <exception cref="HarnessException">
     /// The check could not run: the directory is missing, ninja could not be started, or it answered
@@ -78,6 +83,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     public async Task<NinjaDependencyReport> CheckAsync(
         string buildDirectory,
         IReadOnlyList<string> appendToPath,
+        string? program = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(appendToPath);
@@ -102,11 +108,11 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
             .RunAsync(
                 new ProcessRequest
                 {
-                    FileName = Program,
+                    FileName = string.IsNullOrWhiteSpace(program) ? Program : program,
                     Arguments = ["-C", buildDirectory, "-t", "deps"],
 
-                    // The directories the build was given: the ninja the survey found for the build
-                    // is the ninja this reads the records of, not "not installed".
+                    // The directories the build was given, for a ninja looked up by name: the one the
+                    // survey found for the build, not "not installed".
                     AppendToPath = appendToPath,
                     WorkingDirectory = buildDirectory,
                     Timeout = Budget,

@@ -245,6 +245,111 @@ public sealed class HostProgramResolverTests
         Assert.Contains("/usr/local/bin/dotnet", candidates);
     }
 
+    /// <summary>
+    /// A POSIX 'ls' given a candidate that is a directory prints what is in it as well. The candidate
+    /// it printed as given is found all the same: read as "some other shell's listing", every program
+    /// beside such a directory would be unknown.
+    /// </summary>
+    [Fact]
+    public async Task ACandidateTheListingPrinted_IsFound_WhateverElseItPrinted()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Ok(Home + "\n"),
+            "ls" => HostResults.Ok("/usr/local/bin/cmake\n\n/opt/homebrew/bin/cmake:\nbin\nshare\n"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["cmake"])).Located("cmake");
+
+        Assert.Equal(new ProgramLocation("cmake", ProgramFound.OffPath, "/usr/local/bin/cmake"), located);
+    }
+
+    /// <summary>
+    /// wsl.exe --exec hands each argument to the program as it is, with no shell to split it, so a
+    /// home directory holding a space is looked in there - never passed over as it must be over ssh.
+    /// </summary>
+    [Fact]
+    public async Task InAWslDistribution_AHomeDirectoryHoldingASpace_IsLookedIn()
+    {
+        const string home = "/home/two words";
+
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "sh" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Ok(home + "\n"),
+            "ls" => HostResults.Ok(string.Join('\n', command.Arguments.Where(path => path == home + "/.dotnet/dotnet")) + "\n"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(
+            commands,
+            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            ["dotnet"])).Located("dotnet");
+
+        Assert.Equal(new ProgramLocation("dotnet", ProgramFound.OffPath, home + "/.dotnet/dotnet"), located);
+    }
+
+    /// <summary>
+    /// A name no command line sent there can carry is never looked for, and says that: "the host did
+    /// not answer" would send somebody to a host that was never asked.
+    /// </summary>
+    [Fact]
+    public async Task AProgramNoCommandLineCanCarry_IsUnknown_SayingWhy()
+    {
+        var commands = new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command));
+
+        var located = (await Resolve(commands, SshHost, ["my tool"])).Located("my tool");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Equal("'my tool' holds characters a command line sent there cannot carry, so it could not be looked for", located?.WhyUnestablished());
+        Assert.Empty(commands.Calls);
+    }
+
+    /// <summary>
+    /// A listing the host never answered - ssh's own 255 - looked nowhere, so a program not on the
+    /// PATH is not known either way rather than missing.
+    /// </summary>
+    [Fact]
+    public async Task AListingTheHostNeverAnswered_LeavesTheProgramUnknown_NotMissing()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Ok(Home + "\n"),
+            "ls" => HostResults.Failed(HostProbes.SshFailed, "Connection closed by remote host"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["cmake"])).Located("cmake");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Equal("the host did not answer when asked where 'cmake' is", located?.WhyUnestablished());
+    }
+
+    /// <summary>
+    /// A home directory the host never said, because it did not answer, is no reason of the
+    /// search's own: that is the host not answering, which running again may change - never "its
+    /// home directory could not be read".
+    /// </summary>
+    [Fact]
+    public async Task AHomeTheHostNeverAnsweredFor_LeavesTheProgramUnanswered_NotUnreadable()
+    {
+        var commands = new ScriptedHostCommands((_, command) => command.Program switch
+        {
+            "command" or "where" => HostResults.Failed(1, string.Empty),
+            "pwd" => HostResults.Failed(HostProbes.SshFailed, "Connection closed by remote host"),
+            _ => throw HostResults.Unexpected(command),
+        });
+
+        var located = (await Resolve(commands, SshHost, ["dotnet"], ["~/.dotnet", "/usr/local/bin"])).Located("dotnet");
+
+        Assert.Equal(ProgramFound.Unreadable, located?.Found);
+        Assert.Null(located?.Reason);
+        Assert.Equal("the host did not answer when asked where 'dotnet' is", located?.WhyUnestablished());
+    }
+
     [Fact]
     public async Task AProgramAlreadyMeasured_IsNotMeasuredAgain()
     {

@@ -41,7 +41,9 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
     /// the PATH a leg's own run is given, rather than either being looked for on a PATH no leg uses.
     /// </param>
     /// <param name="cancellationToken">Stops the witness.</param>
-    /// <exception cref="ArgumentException">A requirement named by name was not searched for.</exception>
+    /// <exception cref="ArgumentException">
+    /// A requirement named by name, or the program the witness starts, was not searched for.
+    /// </exception>
     public async Task<EmulatorCheck> CheckAsync(
         EmulatorConfig emulator,
         ProgramSearch found,
@@ -56,7 +58,12 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                 $"it runs on {emulator.HostOs} {emulator.HostProcessor} hosts, and this one is {_platform.PlatformKey} {_platform.Processor}");
         }
 
-        foreach (var requirement in emulator.Requires)
+        // A name is read from the search only where the witness is looked for on the PATH the search
+        // saw. An emulator whose environment sets PATH is found on that PATH, which no search can
+        // see: its programs are the witness's to find, and one the search missed is no missing one.
+        var searched = !ProcessRunner.SetsPath(emulator.Env.Keys);
+
+        foreach (var requirement in emulator.Requires.Where(requirement => searched || ProcessRunner.IsPath(requirement)))
         {
             if (Absence(requirement, found) is { } absent)
             {
@@ -65,6 +72,15 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
         }
 
         var command = WitnessCommand(emulator);
+
+        // The program the witness starts, when it is named rather than given by path, is read from
+        // the search as a requirement is: one nobody could look for everywhere is unknown, and
+        // starting it anyway would report it as not found.
+        if (searched && !ProcessRunner.IsPath(command[0]) && Absence(command[0], found) is { } unstarted)
+        {
+            return EmulatorCheck.Unavailable(unstarted);
+        }
+
         ProcessResult result;
 
         try
@@ -143,7 +159,7 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
         return location.Found switch
         {
             ProgramFound.OnPath or ProgramFound.OffPath => null,
-            ProgramFound.Unreadable => $"whether {requirement} is there could not be established: {location.Reason ?? "nothing was said"}",
+            ProgramFound.Unreadable => location.Unestablished(),
             _ => $"{requirement} is missing",
         };
     }

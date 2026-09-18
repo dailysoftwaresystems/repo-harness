@@ -253,6 +253,68 @@ public sealed class TestServiceTests
         Assert.Equal(Path.Combine(temp.Path, "tools", "run-tests"), runner.Started?.FileName);
     }
 
+    /// <summary>
+    /// And from the directory the runner starts in, where it names one: './run-tests' started in
+    /// 'tests/integration' is that directory's script, as the shell somebody types it in reads it.
+    /// </summary>
+    [Fact]
+    public async Task ARunnerNamedByARelativePath_IsReadFromTheDirectoryItStartsIn()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+        Directory.CreateDirectory(temp.Combine("tests", "integration"));
+
+        var runner = new ScriptedRunner(() => Task.CompletedTask, 0, "tests passed");
+
+        var result = await Service(factory, runner).RunAsync(
+            Config(),
+            Request(temp, new TestInvocation
+            {
+                Runner = "./run-tests",
+                Args = [],
+                WorkingDirectory = "tests/integration",
+                SuccessPattern = "tests passed",
+            }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(Path.Combine(temp.Path, "tests", "integration", "run-tests"), runner.Started?.FileName);
+    }
+
+    /// <summary>
+    /// A working directory rooted but not whole - '\tests' on Windows, the root of the current drive -
+    /// is made whole against the tree's own drive, so a relative runner is read from a directory
+    /// every part of the run agrees on, instead of the start refusing to anchor it to anything.
+    /// </summary>
+    [Fact]
+    public async Task AWorkingDirectoryRootedButNotWhole_IsReadAgainstTheTreesOwnDrive()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows has a path rooted at no drive.");
+
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var runner = new ScriptedRunner(() => Task.CompletedTask, 0, "tests passed");
+
+        var result = await Service(factory, runner).RunAsync(
+            Config(),
+            Request(temp, new TestInvocation
+            {
+                Runner = "./run-tests",
+                Args = [],
+                WorkingDirectory = @"\integration",
+                SuccessPattern = "tests passed",
+            }),
+            TestContext.Current.CancellationToken);
+
+        var drive = Path.GetPathRoot(temp.Path)!;
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(Path.Combine(drive, "integration", "run-tests"), runner.Started?.FileName);
+    }
+
     private static TestService Service(HarnessFactory factory, IProcessRunner? phaseRunner = null)
         => new(
             new PhaseRunner(phaseRunner ?? factory.ProcessRunner, factory.FileSystem, factory.Output),
@@ -309,6 +371,7 @@ public sealed class TestServiceTests
             Runner = child.Runner,
             Args = child.Args,
             Env = child.Env,
+            WorkingDirectory = child.WorkingDirectory,
             SuccessPattern = successPattern ?? child.SuccessPattern,
             CountPattern = countPattern,
             FilterArg = filterArg,

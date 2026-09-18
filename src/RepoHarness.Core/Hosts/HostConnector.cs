@@ -67,9 +67,6 @@ public sealed class HostConnector(
     /// <summary>Longest one probe of a connected host may take.</summary>
     public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
 
-    /// <summary>ssh's own exit code for a failure of ssh itself, such as a connection or authentication failure.</summary>
-    private const int SshFailed = 255;
-
     private readonly IHostPlatform _platform = platform;
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
@@ -221,7 +218,7 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused(probe switch
             {
                 { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
-                { ExitCode: SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
+                { ExitCode: HostProbes.SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
                 _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
             });
         }

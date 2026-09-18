@@ -25,6 +25,9 @@ public sealed class ToolProvisionServiceTests
     /// <summary>A second distribution, so two hosts that each need a password can be told apart.</summary>
     private const string OtherDistro = "lane-b";
 
+    /// <summary>The ssh host a fixture declares when asked to reach its leg over ssh.</summary>
+    private const string SshName = "build-box";
+
     private const string Home = "/home/harness";
 
     private const string Credential = "not-a-real-password";
@@ -142,14 +145,15 @@ public sealed class ToolProvisionServiceTests
     {
         using var fixture = new Fixture(
             tools: [Apt("ninja")],
-            searchDirectories: new() { ["linux"] = ["/opt/two words"] });
+            searchDirectories: new() { ["linux"] = ["~/tools"] },
+            homeUnreadable: true);
 
         var report = await fixture.ProvisionAsync();
 
         var ninja = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "ninja");
         Assert.Equal(ToolState.Unknown, ninja.State);
         Assert.Equal(
-            "'ninja' is not on the PATH there, and '/opt/two words' could not be looked in, because a path holding a space cannot be named in a command line sent there",
+            "'ninja' is not on the PATH there, and '~/tools' could not be looked in, because its home directory could not be read",
             ninja.Detail);
         Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "sudo");
     }
@@ -710,6 +714,25 @@ public sealed class ToolProvisionServiceTests
         Assert.Contains(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja");
     }
 
+    /// <summary>
+    /// An ssh host that did not answer <c>uname</c> at all said nothing about what it is. Read as
+    /// Windows, it would have been asked about no tool scoped to Linux and reported as having
+    /// everything it needs.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatDidNotAnswerWhatItIs_StillHasEveryToolChecked()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja", platforms: ["linux"])],
+            present: new() { ["ninja"] = "1.12.0" },
+            kernel: null,
+            ssh: true);
+
+        var report = await fixture.ProvisionAsync();
+
+        Assert.Equal(ToolState.AlreadyCurrent, Assert.Single(Assert.Single(report.Legs).Tools, entry => entry.Tool == "ninja").State);
+    }
+
     [Fact]
     public void RepositoryPath_IsRequiredOfEveryRemoteHost()
     {
@@ -776,9 +799,10 @@ public sealed class ToolProvisionServiceTests
         Dictionary<string, string> installs,
         bool passwordlessSudo,
         string? installFails,
-        string kernel,
+        string? kernel,
         Func<HostId, string> rootPassword,
-        bool checkNeverFinishes)
+        bool checkNeverFinishes,
+        bool homeUnreadable)
     {
         private readonly Dictionary<string, Dictionary<string, string>> _present = new(StringComparer.Ordinal);
         private readonly HashSet<string> _dotnet = new(StringComparer.Ordinal);
@@ -808,8 +832,10 @@ public sealed class ToolProvisionServiceTests
 
             return (command.Program, command.Arguments.FirstOrDefault()) switch
             {
-                ("uname", _) => HostResults.Ok($"{kernel} x86_64\n"),
-                ("pwd", _) => HostResults.Ok(Home + "\n"),
+                ("uname", _) => kernel is null
+                    ? HostResults.Failed(HostProbes.SshFailed, "Connection closed by remote host")
+                    : HostResults.Ok($"{kernel} x86_64\n"),
+                ("pwd", _) => homeUnreadable ? HostResults.Failed(1, "pwd: cannot read the current directory") : HostResults.Ok(Home + "\n"),
                 ("ls", _) => HostResults.Ok(dotnet
                     ? string.Join('\n', command.Arguments.Where(path => path == dotnetPath)) + "\n"
                     : "\n"),
@@ -846,11 +872,17 @@ public sealed class ToolProvisionServiceTests
             return found;
         }
 
-        /// <summary>The program a PATH lookup asked about; a distribution is asked through a shell.</summary>
-        private static string? Lookup(HostCommand command)
-            => command.Program == "sh" && command.Arguments.FirstOrDefault() == "-c"
-                ? command.Arguments[1].Split(' ')[^1]
-                : null;
+        /// <summary>
+        /// The program a PATH lookup asked about: a distribution is asked through a shell, and an ssh
+        /// host with its shell's own builtin.
+        /// </summary>
+        private static string? Lookup(HostCommand command) => (command.Program, command.Arguments.FirstOrDefault()) switch
+        {
+            ("sh", "-c") => command.Arguments[1].Split(' ')[^1],
+            ("command", "-v") => command.Arguments[1],
+            ("where", not null) => command.Arguments[0],
+            _ => null,
+        };
 
         private ProcessResult Install(HostId host, bool dotnet, HostCommand? command = null)
         {
@@ -887,14 +919,16 @@ public sealed class ToolProvisionServiceTests
             string? credential = Credential,
             bool passwordlessSudo = false,
             string? installFails = null,
-            string kernel = "Linux",
+            string? kernel = "Linux",
             PromptAvailability prompting = PromptAvailability.Unavailable,
             Func<HostId, string>? typed = null,
             PlatformId localPlatform = PlatformId.Windows,
             bool secondDistro = false,
             Func<HostId, string>? rootPassword = null,
             bool checkNeverFinishes = false,
-            Dictionary<string, List<string>>? searchDirectories = null)
+            Dictionary<string, List<string>>? searchDirectories = null,
+            bool homeUnreadable = false,
+            bool ssh = false)
         {
             var declared = tools ?? [];
 
@@ -908,11 +942,19 @@ public sealed class ToolProvisionServiceTests
                 installFails,
                 kernel,
                 rootPassword ?? (_ => Credential),
-                checkNeverFinishes);
+                checkNeverFinishes,
+                homeUnreadable);
 
             _repository.WriteFile(
                 Path.Combine(".harness-config", "wslDistros", Distro, ".env"),
                 $"DISTRO=Example-Linux\n{(credential is null ? string.Empty : $"SUDO_PASSWORD={credential}\n")}");
+
+            if (ssh)
+            {
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".env"), "ADDRESS=192.0.2.10\nUSER=harness\n");
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".key"), "not a real key");
+                _repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, "known_hosts"), "192.0.2.10 ssh-ed25519 AAAA\n");
+            }
 
             if (secondDistro)
             {
@@ -937,6 +979,15 @@ public sealed class ToolProvisionServiceTests
             if (twoLegs)
             {
                 config.Legs["only-local"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" };
+            }
+
+            if (ssh)
+            {
+                // In place of the distribution's leg, so the one host provisioned is reached over ssh.
+                config.SshItems.Add(SshName);
+                config.Hosts.Ssh[SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 };
+                config.Legs.Remove("on-distro");
+                config.Legs["on-ssh"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug", Ssh = SshName };
             }
 
             if (secondDistro)

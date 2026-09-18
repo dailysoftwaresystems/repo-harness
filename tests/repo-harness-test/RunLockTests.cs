@@ -39,6 +39,40 @@ public sealed class RunLockTests
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), $"the refusal took {watch.Elapsed}");
     }
 
+    /// <summary>
+    /// A lock another run holds is an answer, returned as one and written nowhere, which a caller can
+    /// turn into a verdict for the legs on that tree; a lock file nobody can use is not, and is still
+    /// raised, since it stops every run on every tree alike.
+    /// </summary>
+    [Fact]
+    public async Task AHeldLock_IsAnAnswer_AndALockFileNobodyCanUse_IsNot()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        await using (var held = await runLock.AcquireAsync(layout, Request(LockScope.TreeExclusive, "sync"), TestContext.Current.CancellationToken))
+        {
+            var before = File.ReadAllText(layout.LockFile);
+
+            var attempt = await runLock.TryAcquireAsync(layout, Request(LockScope.TreeExclusive, "build"), TestContext.Current.CancellationToken);
+
+            Assert.Null(attempt.Handle);
+            Assert.Contains(held.Entry.Holder.RunId, attempt.HeldBy, StringComparison.Ordinal);
+            Assert.Equal(before, File.ReadAllText(layout.LockFile));
+        }
+
+        File.WriteAllText(layout.LockFile, "not a lock file");
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => runLock.TryAcquireAsync(
+            layout,
+            Request(LockScope.TreeExclusive, "build"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+    }
+
     [Fact]
     public async Task ARecycledProcessId_IsNotMistakenForALiveHolder()
     {

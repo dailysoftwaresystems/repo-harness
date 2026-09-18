@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Runs;
@@ -48,9 +49,10 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     /// <param name="arguments">The command's own options, without <c>--legs</c> or <c>--json</c>.</param>
     /// <param name="cancellationToken">Stops the command on the host as well as here.</param>
     /// <exception cref="HarnessException">
-    /// The host never reported how the command finished, or reported a ledger this build cannot
-    /// read. Neither is a verdict about the code, so neither is reported as one. Or the command
-    /// refused the whole run there, which is raised as that refusal, with what the host said.
+    /// The host could not be reached - its transport would not start - or never reported how the
+    /// command finished, or reported a ledger this build cannot read. None is a verdict about the
+    /// code, so none is reported as one. Or the command refused the whole run there, which is raised
+    /// as that refusal, with what the host said.
     /// </exception>
     public async Task<LegEntry> RunAsync(
         string commandName,
@@ -82,8 +84,10 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
         var ledger = new System.Text.StringBuilder();
         int? finished = null;
-        string? failure = null;
+        var failure = new List<string>();
 
+        // A transport that will not start leaves the host unavailable, raised as that by the runner
+        // that starts it.
         var result = await _hostCommands.RunAsync(
                 session.Connection,
                 new HostCommand
@@ -103,18 +107,27 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;
+                            return;
                         }
-                        else
-                        {
-                            // Kept as well as shown: a command that refuses before any leg has a
-                            // verdict leaves no ledger, and this line is then all it said about why.
-                            if (FailureLine.TryRead(line, commandName, out var said))
-                            {
-                                failure = said;
-                            }
 
-                            _output.RawError(line);
+                        // Kept as well as shown: a command that refuses before any leg has a
+                        // verdict leaves no entry, and its failure is then all it said about why -
+                        // from its failure line to the end, because a message runs over several
+                        // lines and git's own fix is on the last of them. The host's agent fails
+                        // in the same form under its own name, when it could not start the
+                        // command at all.
+                        if (FailureLine.TryRead(line, commandName, out var said)
+                            || FailureLine.TryRead(line, HostAgentProtocol.CommandName, out said))
+                        {
+                            failure.Clear();
+                            failure.Add(said);
                         }
+                        else if (failure.Count > 0)
+                        {
+                            failure.Add(line);
+                        }
+
+                        _output.RawError(line);
                     },
                 },
                 cancellationToken)
@@ -131,7 +144,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                 + $"exit {result.ExitCode}{Detail(result.StandardError)}");
         }
 
-        return Read(ledger.ToString(), leg, commandName, finished.Value, failure);
+        return Read(ledger.ToString(), leg, commandName, finished.Value, failure.Count == 0 ? null : string.Join(Environment.NewLine, failure));
     }
 
     /// <summary>Reads the one leg's entry out of the ledger the host wrote.</summary>

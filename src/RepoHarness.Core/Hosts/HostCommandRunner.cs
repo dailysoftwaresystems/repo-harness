@@ -1,6 +1,7 @@
 using System.Collections.Frozen;
 using System.Globalization;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Hosts;
 
@@ -169,7 +170,7 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
 
     private readonly IProcessRunner _processRunner = processRunner;
 
-    public Task<ProcessResult> RunAsync(
+    public async Task<ProcessResult> RunAsync(
         HostConnection connection,
         HostCommand command,
         CancellationToken cancellationToken = default)
@@ -177,7 +178,19 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(command);
 
-        return _processRunner.RunAsync(BuildRequest(connection, command), cancellationToken);
+        try
+        {
+            return await _processRunner.RunAsync(BuildRequest(connection, command), cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProgramStartException ex) when (connection.Host.Kind != HostKind.Local)
+        {
+            // What would not start is the transport itself - ssh, or wsl.exe in the middle of an
+            // update - so the host was never reached, whatever was asked of it: it is unavailable,
+            // which is no verdict about anything that runs there. Said here, where the program is
+            // known to be the transport, and not by a caller that cannot tell it from a program of
+            // its own.
+            throw new HarnessException(HarnessExit.HostUnavailable, $"{connection.Host} could not be reached: {ex.Message}", ex);
+        }
     }
 
     public Task<ProcessResult> ProbeShellAsync(
