@@ -102,6 +102,9 @@ public sealed class AnchorCitationServiceTests
 
         await harness.CommitAllAsync(temp.Path, "src", cancellationToken);
 
+        // Changed on disk since: the commit's own text is what a commit's check reads.
+        temp.WriteFile(Path.Combine("src", "file0.cpp"), "// D-AREA-TOPIC-CHANGED\n");
+
         var processes = new CountingProcesses(harness.ProcessRunner);
         var service = new AnchorCitationService(
             harness.ContextLoader,
@@ -112,7 +115,9 @@ public sealed class AnchorCitationServiceTests
         var report = await service.CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken);
 
         Assert.Equal(5, report.FilesScanned);
-        Assert.Equal(5, report.Unresolved.Count);
+        Assert.Equal(
+            ["D-AREA-TOPIC-FILE0", "D-AREA-TOPIC-FILE1", "D-AREA-TOPIC-FILE2", "D-AREA-TOPIC-FILE3", "D-AREA-TOPIC-FILE4"],
+            report.Unresolved.Select(citation => citation.Id).Order(StringComparer.Ordinal));
         Assert.Single(processes.Started, request => request.Arguments[0] == "cat-file");
         Assert.DoesNotContain(processes.Started, request => request.Arguments[0] == "show");
     }
