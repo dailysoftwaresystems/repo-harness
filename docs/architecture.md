@@ -681,9 +681,10 @@ sync (when the host needs it)  →  build on buildCores  →  test on testCores
   lowest to highest: for a build, the host's `env` then the variant's (its toolchain's,
   build config's, sanitizer's and project's); for a test, the host's then the test invocation's; for
   a runner, the host's, then the runner's values and secrets, its own `env`, and the
-  step's. Names compare ignoring case on every platform, as they do on Windows: a process is
-  given one variable per name, spelled as its machine already spells it, so `Path` written for
-  a Linux host sets its `PATH`.
+  step's. Names compare ignoring case on every platform, as they do on Windows: a value reaches
+  every spelling of its name the machine already has, and the one written, so `Path` written for
+  a Linux host sets its `PATH`, and `http_proxy` reaches both the curl that reads it and the
+  tools that read `HTTP_PROXY`.
 - **A PATH a host sets is the run's.** It is where that host finds every program a leg
   starts there, and no survey can see it, so none of those programs is required of the
   host before the leg starts - each is looked for, so the directory it is found in still

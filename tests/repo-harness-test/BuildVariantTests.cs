@@ -119,7 +119,7 @@ public sealed class BuildVariantTests
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: "clang", expectedCxxCompiler: null, expectedBuildType: null));
+            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: CompilerValue.Read("clang"), expectedCxxCompiler: null, expectedBuildType: null));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
     }
@@ -134,7 +134,30 @@ public sealed class BuildVariantTests
             temp,
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
-        Guard().Check(buildDirectory, temp.Path, expectedCompiler: "gcc", expectedCxxCompiler: null, expectedBuildType: null);
+        Guard().Check(buildDirectory, temp.Path, expectedCompiler: CompilerValue.Read("gcc"), expectedCxxCompiler: null, expectedBuildType: null);
+    }
+
+    /// <summary>
+    /// A compiler value that carries words after its program is compared as CMake recorded it: the
+    /// program as CMAKE_C_COMPILER, the words as CMAKE_C_COMPILER_ARG1. The same value rebuilds, and a
+    /// change in the words alone - ccache over clang, then over gcc - is refused, which CMake itself
+    /// never notices.
+    /// </summary>
+    [Fact]
+    public void ACompilerWithWordsAfterIt_IsComparedAsCMakeRecordedIt()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = WriteCache(
+            temp,
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/ccache\nCMAKE_C_COMPILER_ARG1:STRING= clang");
+
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("ccache clang"), null, null);
+
+        var refusal = Assert.Throws<HarnessException>(
+            () => Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("ccache gcc"), null, null));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("configured with '/usr/bin/ccache clang', and this leg builds with 'ccache gcc'", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -144,7 +167,7 @@ public sealed class BuildVariantTests
         // impossible to build.
         using var temp = new TempDirectory();
 
-        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, "gcc", "g++", "Debug");
+        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, CompilerValue.Read("gcc"), CompilerValue.Read("g++"), "Debug");
     }
 
     /// <summary>

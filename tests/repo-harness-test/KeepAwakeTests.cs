@@ -117,6 +117,37 @@ public sealed class KeepAwakeTests
         }
     }
 
+    /// <summary>
+    /// A command the stop cannot reach - a descendant running as root under sudo keeps its output
+    /// open - is waited for a bounded time and said, and never holds a leg whose work is done.
+    /// </summary>
+    [Fact]
+    public async Task ACommandTheStopCannotReach_IsSaid_AndDoesNotHoldTheLeg()
+    {
+        var factory = new HarnessFactory();
+        var host = new LocalHostConfig { KeepAwake = ["sudo", "systemd-inhibit", "sleep", "infinity"] };
+        var holding = new KeepAwake(new UnstoppableProcesses(), factory.Output, TimeSpan.FromMilliseconds(200))
+            .Hold("test", "native", host, [], TestContext.Current.CancellationToken);
+        var clock = Stopwatch.StartNew();
+
+        await holding.DisposeAsync();
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"stopping took {clock.Elapsed}");
+        Assert.Contains("native: keepAwake did not stop within", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>Every program runs on whatever is asked of it, as one out of the stop's reach does.</summary>
+    private sealed class UnstoppableProcesses : IProcessRunner
+    {
+        public async Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, CancellationToken.None);
+            throw new UnreachableException();
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
     /// <summary>Every program ends at once, with <paramref name="result"/>.</summary>
     private sealed class EndedProcesses(ProcessResult result) : IProcessRunner
     {

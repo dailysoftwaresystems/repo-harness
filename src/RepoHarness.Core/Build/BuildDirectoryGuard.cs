@@ -10,12 +10,16 @@ namespace RepoHarness.Core.Build;
 /// <param name="CxxCompiler">The C++ compiler recorded in it, or null.</param>
 /// <param name="BuildType">The build type recorded in it, or null.</param>
 /// <param name="MakeProgram">The program that builds it, such as the ninja the build ran, or null.</param>
+/// <param name="CCompilerArguments">The words recorded after the C compiler, or null when none were.</param>
+/// <param name="CxxCompilerArguments">The words recorded after the C++ compiler, or null when none were.</param>
 public sealed record BuildDirectoryRecord(
     string? HomeDirectory,
     string? CCompiler,
     string? CxxCompiler,
     string? BuildType,
-    string? MakeProgram = null);
+    string? MakeProgram = null,
+    string? CCompilerArguments = null,
+    string? CxxCompilerArguments = null);
 
 /// <summary>
 /// Refuses a build directory that was configured for something other than this leg.
@@ -52,6 +56,8 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
         string? cxxCompiler = null;
         string? buildType = null;
         string? makeProgram = null;
+        string? cArguments = null;
+        string? cxxArguments = null;
 
         foreach (var line in _fileSystem.ReadAllText(cache).Split('\n'))
         {
@@ -62,9 +68,14 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
             cxxCompiler ??= ValueOf(text, "CMAKE_CXX_COMPILER");
             buildType ??= ValueOf(text, "CMAKE_BUILD_TYPE");
             makeProgram ??= ValueOf(text, "CMAKE_MAKE_PROGRAM");
+
+            // Where CMake puts what followed the program in CC or CXX: 'ccache gcc' is recorded as
+            // /usr/bin/ccache with ' gcc' here.
+            cArguments ??= ValueOf(text, "CMAKE_C_COMPILER_ARG1");
+            cxxArguments ??= ValueOf(text, "CMAKE_CXX_COMPILER_ARG1");
         }
 
-        return new BuildDirectoryRecord(home, cCompiler, cxxCompiler, buildType, makeProgram);
+        return new BuildDirectoryRecord(home, cCompiler, cxxCompiler, buildType, makeProgram, cArguments, cxxArguments);
     }
 
     /// <summary>
@@ -78,15 +89,18 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
     /// — so a project living in a subdirectory must be compared with the subdirectory, or every
     /// second build of every such leg is refused for a mismatch that is not one.
     /// </param>
-    /// <param name="expectedCompiler">The C compiler this leg builds with, or null when it names none.</param>
-    /// <param name="expectedCxxCompiler">The C++ compiler this leg builds with, or null when it names none.</param>
+    /// <param name="expectedCompiler">
+    /// The C compiler this leg builds with, or null when it names none or names one only CMake can
+    /// read.
+    /// </param>
+    /// <param name="expectedCxxCompiler">The C++ compiler, the same way.</param>
     /// <param name="expectedBuildType">The build type this leg builds, or null when it names none.</param>
     /// <exception cref="HarnessException">The directory belongs to a different build.</exception>
     public void Check(
         string buildDirectory,
         string sourceDirectory,
-        string? expectedCompiler,
-        string? expectedCxxCompiler,
+        CompilerValue? expectedCompiler,
+        CompilerValue? expectedCxxCompiler,
         string? expectedBuildType)
     {
         var record = Read(buildDirectory);
@@ -105,13 +119,13 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
                 + "at its own build directory.");
         }
 
-        if (expectedCompiler is { Length: > 0 }
+        if (expectedCompiler is not null
             && record.CCompiler is { Length: > 0 } recordedCompiler
-            && !NamesSameProgram(recordedCompiler, expectedCompiler))
+            && !SameCompiler(recordedCompiler, record.CCompilerArguments, expectedCompiler))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"'{buildDirectory}' was configured with '{recordedCompiler}', and this leg builds with "
+                $"'{buildDirectory}' was configured with '{Recorded(recordedCompiler, record.CCompilerArguments)}', and this leg builds with "
                 + $"'{expectedCompiler}'. A build system refuses that change on an existing cache; "
                 + "delete the directory rather than reconfiguring it.");
         }
@@ -119,13 +133,13 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
         // The C++ compiler as well as the C one. A directory configured with clang++ and rebuilt
         // with g++ mixes two ABIs in one place, and reading only CMAKE_C_COMPILER misses it entirely
         // for a project that compiles no C at all.
-        if (expectedCxxCompiler is { Length: > 0 }
+        if (expectedCxxCompiler is not null
             && record.CxxCompiler is { Length: > 0 } recordedCxx
-            && !NamesSameProgram(recordedCxx, expectedCxxCompiler))
+            && !SameCompiler(recordedCxx, record.CxxCompilerArguments, expectedCxxCompiler))
         {
             throw new HarnessException(
                 HarnessExit.Refused,
-                $"'{buildDirectory}' was configured with '{recordedCxx}', and this leg builds with "
+                $"'{buildDirectory}' was configured with '{Recorded(recordedCxx, record.CxxCompilerArguments)}', and this leg builds with "
                 + $"'{expectedCxxCompiler}'. A build system refuses that change on an existing cache; "
                 + "delete the directory rather than reconfiguring it.");
         }
@@ -149,6 +163,21 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
             Path.TrimEndingDirectorySeparator(Path.GetFullPath(left.Replace('/', Path.DirectorySeparatorChar))),
             Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
             _platform.PathComparison);
+
+    /// <summary>
+    /// Whether a directory's recorded compiler is <paramref name="expected"/>: the same program, and
+    /// the same words after it. A switch from <c>ccache clang</c> to <c>ccache gcc</c> changes only
+    /// the words, and CMake keeps what it cached either way.
+    /// </summary>
+    private bool SameCompiler(string recorded, string? recordedArguments, CompilerValue expected)
+        => NamesSameProgram(recorded, expected.Program)
+            && (recordedArguments ?? string.Empty)
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                .SequenceEqual(expected.Arguments, StringComparer.Ordinal);
+
+    /// <summary>A recorded compiler as a message quotes it, with the words recorded after it.</summary>
+    private static string Recorded(string compiler, string? arguments)
+        => arguments is { Length: > 0 } ? $"{compiler} {arguments}" : compiler;
 
     /// <summary>
     /// Whether two recorded compilers name the same program. Compared by file name without its

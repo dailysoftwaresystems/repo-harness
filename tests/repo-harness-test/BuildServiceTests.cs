@@ -563,6 +563,32 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A compiler the host names with words after it rebuilds the directory it configured: CMake
+    /// cached ccache as the compiler and clang as its argument, and the guard reads the value the
+    /// same way. Compared whole, 'ccache clang' against '/usr/bin/ccache' refused every rebuild, and
+    /// the refusal ended the whole run.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerTheHostNamesWithWordsAfterIt_RebuildsTheDirectoryItConfigured()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "ccache clang" } };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/ccache\nCMAKE_C_COMPILER_ARG1:STRING= clang\n",
+            cancellationToken);
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+    }
+
+    /// <summary>
     /// A relative program the build recorded is read from the build directory, where the check starts,
     /// never from wherever this process began.
     /// </summary>

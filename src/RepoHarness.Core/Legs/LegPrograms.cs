@@ -29,9 +29,6 @@ namespace RepoHarness.Core.Legs;
 /// </remarks>
 public static class LegPrograms
 {
-    /// <summary>The variables a variant names its compilers in.</summary>
-    private static readonly string[] CompilerVariables = ["CC", "CXX"];
-
     /// <summary>The programs <paramref name="leg"/> starts for <paramref name="workload"/> that its host must have.</summary>
     /// <param name="config">The whole configuration.</param>
     /// <param name="leg">The leg.</param>
@@ -176,36 +173,13 @@ public static class LegPrograms
 
         var environment = PhaseEnvironment.Layered(hostEnvironment, overlay.Env);
 
-        foreach (var variable in CompilerVariables)
+        foreach (var variable in CompilerValue.Variables)
         {
-            if (environment.TryGetValue(variable, out var compiler) && CompilerProgram(compiler) is { } program)
+            if (environment.TryGetValue(variable, out var compiler) && CompilerValue.Read(compiler) is { } read)
             {
-                yield return (program, ownPath);
+                yield return (read.Program, ownPath);
             }
         }
-    }
-
-    /// <summary>
-    /// The program a compiler variable starts, where that can be read from the value alone: the whole
-    /// value when it holds no space, and its first word when that is a name.
-    /// </summary>
-    /// <remarks>
-    /// CMake reads the whole value as the compiler when it names a file, and splits off its first
-    /// word otherwise, so <c>gcc -m32</c> and <c>ccache gcc</c> start <c>gcc</c> and <c>ccache</c>.
-    /// A value with a space whose first word is a path is the one it cannot be read from: in
-    /// <c>C:\Program Files\LLVM\bin\clang-cl.exe</c> that word is half a file name, and only the host
-    /// knows whether the whole value is a file. Left to CMake rather than reported missing.
-    /// </remarks>
-    private static string? CompilerProgram(string? value)
-    {
-        var words = value?.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries) ?? [];
-
-        return words switch
-        {
-            [var whole] => whole,
-            [var first, _] when !ProcessRunner.IsPath(first) => first,
-            _ => null,
-        };
     }
 
     /// <summary>

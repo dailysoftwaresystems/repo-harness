@@ -291,6 +291,42 @@ public sealed class ProcessRunnerTests
         Assert.Equal(configured, result.StandardOutput.Trim());
     }
 
+    /// <summary>
+    /// A value reaches every spelling of its name this machine has, and the one written: on Linux
+    /// and macOS programs differ in which they read - curl reads http_proxy, others HTTP_PROXY - so
+    /// folded into one, the other lost it. A name removed is removed in every spelling.
+    /// </summary>
+    [Fact]
+    public async Task AValue_ReachesEverySpellingOfItsName_AndARemovedNameGoesFromAll()
+    {
+        var inherited = "RH_SPELLING_" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+        var written = inherited.ToLowerInvariant();
+
+        Environment.SetEnvironmentVariable(inherited, "inherited");
+
+        try
+        {
+            async Task<string> SeenAs(string name, string? value)
+            {
+                var child = TestHost.ChildRequest("print-env", name);
+                var request = child with
+                {
+                    Environment = new Dictionary<string, string?>(child.Environment, StringComparer.Ordinal) { [written] = value },
+                };
+
+                return (await CreateRunner().RunAsync(request, TestContext.Current.CancellationToken)).StandardOutput.Trim();
+            }
+
+            Assert.Equal("configured", await SeenAs(inherited, "configured"));
+            Assert.Equal("configured", await SeenAs(written, "configured"));
+            Assert.Equal("<unset>", await SeenAs(inherited, null));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(inherited, null);
+        }
+    }
+
     [Fact]
     public async Task RunAsync_ReportsAMissingWorkingDirectory_AsThat_RatherThanAsAMissingExecutable()
     {

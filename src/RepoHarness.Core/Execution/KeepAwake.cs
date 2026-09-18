@@ -17,13 +17,35 @@ namespace RepoHarness.Core.Execution;
 /// prevent is still seen, as wall time outrunning the monotonic clock, and marks the phase it
 /// interrupted suspect, as it does on a machine that declares no command at all.
 /// </remarks>
-public sealed class KeepAwake(IProcessRunner processRunner, IHarnessOutput output)
+public sealed class KeepAwake
 {
     /// <summary>The one name a <c>keepAwake</c> command is filled in with: the process running the leg.</summary>
     public const string ProcessName = "pid";
 
-    private readonly IProcessRunner _processRunner = processRunner;
-    private readonly IHarnessOutput _output = output;
+    /// <summary>
+    /// How long a stopped command is waited for. Bounded: a descendant the stop cannot reach - one
+    /// running as root under sudo - keeps its output open, and a leg whose work is done would
+    /// otherwise wait on it forever.
+    /// </summary>
+    public static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(10);
+
+    private readonly IProcessRunner _processRunner;
+    private readonly IHarnessOutput _output;
+    private readonly TimeSpan _stopBudget;
+
+    /// <summary>Holds machines awake with <paramref name="processRunner"/>, saying what goes wrong through <paramref name="output"/>.</summary>
+    public KeepAwake(IProcessRunner processRunner, IHarnessOutput output)
+        : this(processRunner, output, StopBudget)
+    {
+    }
+
+    /// <summary>The same, waiting <paramref name="stopBudget"/> for a stopped command.</summary>
+    internal KeepAwake(IProcessRunner processRunner, IHarnessOutput output, TimeSpan stopBudget)
+    {
+        _processRunner = processRunner;
+        _output = output;
+        _stopBudget = stopBudget;
+    }
 
     /// <summary>The names a <c>keepAwake</c> command is filled in with, for the process <paramref name="processId"/>.</summary>
     /// <param name="processId">The DssHarness process running the leg.</param>
@@ -77,7 +99,7 @@ public sealed class KeepAwake(IProcessRunner processRunner, IHarnessOutput outpu
             },
             stop.Token);
 
-        return new Holding(Watch(commandName, leg, running, stop.Token), stop);
+        return new Holding(this, commandName, leg, Watch(commandName, leg, running, stop.Token), stop);
     }
 
     /// <summary>Says so when the command stops holding the machine awake before the leg's work is done.</summary>
@@ -105,13 +127,23 @@ public sealed class KeepAwake(IProcessRunner processRunner, IHarnessOutput outpu
     }
 
     /// <summary>A command holding the machine awake, stopped and waited for when the leg's work ends.</summary>
-    private sealed class Holding(Task watching, CancellationTokenSource stop) : IAsyncDisposable
+    private sealed class Holding(KeepAwake owner, string commandName, string leg, Task watching, CancellationTokenSource stop) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
         {
             await stop.CancelAsync().ConfigureAwait(false);
-            await watching.ConfigureAwait(false);
-            stop.Dispose();
+
+            try
+            {
+                await watching.WaitAsync(owner._stopBudget).ConfigureAwait(false);
+                stop.Dispose();
+            }
+            catch (TimeoutException)
+            {
+                // Said, and left behind: the leg's work is done, and its verdict does not wait on a
+                // command the stop could not reach.
+                owner._output.Warn(commandName, $"{leg}: keepAwake did not stop within {owner._stopBudget.TotalSeconds:0} seconds, and may still be holding this machine awake.");
+            }
         }
     }
 
