@@ -289,6 +289,59 @@ public sealed class GitClientTests
         Assert.Null(await harness.GitClient.ReadFileAtCommitAsync(temp.Path, head!, "docs/absent.md", cancellationToken));
     }
 
+    /// <summary>
+    /// Every file of a commit is read by one git process, as it was committed: its line breaks, its
+    /// characters beyond ASCII, a byte order mark dropped as reading the file on its own drops it,
+    /// bytes that are not text as the replacement they decode to - and null for a file that was not
+    /// there, among files that were.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_ReadsEveryFile_ThroughOneProcess()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "notes.md"), "committed ✅\r\nline two\n");
+        temp.WriteFile(Path.Combine("src", "naïve name.txt"), "日本語\n");
+        await File.WriteAllBytesAsync(temp.Combine("bom.txt"), [0xEF, 0xBB, 0xBF, (byte)'b', (byte)'o', (byte)'m'], cancellationToken);
+        await File.WriteAllBytesAsync(temp.Combine("data.bin"), [0x00, 0xFF, 0x0A, 0x41], cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "files", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+        var processes = new CountingProcesses(harness.ProcessRunner);
+
+        var read = await new GitClient(processes, harness.Output).ReadFilesAtCommitAsync(
+            temp.Path,
+            head!,
+            ["docs/notes.md", "src/naïve name.txt", "bom.txt", "data.bin", "docs/absent.md"],
+            cancellationToken);
+
+        Assert.Equal("committed ✅\r\nline two\n", read["docs/notes.md"]);
+        Assert.Equal("日本語\n", read["src/naïve name.txt"]);
+        Assert.Equal("bom", read["bom.txt"]);
+        Assert.Equal("\0\uFFFD\nA", read["data.bin"]);
+        Assert.Null(read["docs/absent.md"]);
+        Assert.Equal(["cat-file"], processes.Started.Select(request => request.Arguments[0]));
+    }
+
+    /// <summary>
+    /// A commit git cannot read is refused when many files are read from it as when one is: git
+    /// answers 'missing' for it as it does for an absent file, and read that way it passed off a
+    /// commit nobody could read as files that were not there.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_Throws_ForACommitGitCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+
+        await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ReadFilesAtCommitAsync(
+            temp.Path, new string('0', 40), ["README.md", "docs/notes.md"], cancellationToken));
+    }
+
     [Fact]
     public async Task ReadFileAtCommitAsync_Throws_ForACommitGitCannotRead()
     {
@@ -544,4 +597,34 @@ public sealed class GitCommandResultTests
 
         Assert.Equal(["one", "two"], result.OutputLines);
     }
+}
+
+/// <summary>Runs every program through <paramref name="inner"/>, and keeps what each was asked to start.</summary>
+internal sealed class CountingProcesses(IProcessRunner inner) : IProcessRunner
+{
+    private readonly List<ProcessRequest> _started = [];
+
+    /// <summary>Every program started, in order.</summary>
+    public IReadOnlyList<ProcessRequest> Started
+    {
+        get
+        {
+            lock (_started)
+            {
+                return [.. _started];
+            }
+        }
+    }
+
+    public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+    {
+        lock (_started)
+        {
+            _started.Add(request);
+        }
+
+        return inner.RunAsync(request, cancellationToken);
+    }
+
+    public string? FindExecutable(string command) => inner.FindExecutable(command);
 }

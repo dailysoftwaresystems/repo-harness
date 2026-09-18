@@ -346,8 +346,12 @@ tool can infer. An empty list scans nothing and the command says so, rather than
 pass over a check that looked at no file. `--current-commit` reads HEAD, `--current-tree` reads
 the disk, `--current-pr` reads only what this branch changed.
 
-Resolution is by substring, so a row naming a more specific child answers a citation of its
-parent.
+A citation resolves to a row whose id is exactly the id cited, by the rule `read-anchor` finds
+a row by, so the two verbs never disagree about whether a row exists. Resolved by containment
+instead, a citation of `D-FF3-3` passed through a row `D-FF3-30-…`, and a wrapped fragment
+`D-PP-PRESCAN-` passed through the id it was cut from: a truncated or ambiguous citation was
+invisible to the gate. `--current-commit` reads every file of the commit through one git
+process; asked for one at a time, each cost two, and 2,385 files took twenty minutes.
 
 The scanner is the point of the command. The guard it replaces required a word boundary before
 an id, which is right for `FIXED-32-BIT-WORD` — whose tail is anchor-shaped and is correctly

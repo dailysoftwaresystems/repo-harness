@@ -1,5 +1,6 @@
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Git;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -49,19 +50,71 @@ public sealed class AnchorCitationServiceTests
         Assert.Equal(1, report.CitationsFound);
     }
 
+    /// <summary>
+    /// A citation resolves to a row whose id is exactly the id cited, by the rule read-anchor finds a
+    /// row by. A parent's id is not answered by a more specific row, and a fragment a wrapped line cut
+    /// short is not answered by the id it was cut from: resolved by containment, both passed, and
+    /// the gate called present a row read-anchor could not find.
+    /// </summary>
     [Fact]
-    public async Task ACitationOfAParent_IsResolvedByAMoreSpecificRow()
+    public async Task ACitation_ResolvesOnlyToARowWhoseIdItIs_AsReadAnchorFindsIt()
     {
         using var temp = new TempDirectory();
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp, ["src"]);
         await WriteAnchorAsync(harness, temp, Known + "-DETAIL");
+        await WriteAnchorAsync(harness, temp, "D-AREA-TOPIC-THIRTY");
 
-        temp.WriteFile(Path.Combine("src", "thing.cpp"), $"// see {Known}\n");
+        temp.WriteFile(
+            Path.Combine("src", "thing.cpp"),
+            $"// see {Known}\n// see D-AREA-TOPIC-THIRTY\n// a note that wraps (D-AREA-TOPIC-THIR-\n");
 
         var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken);
 
-        Assert.True(report.Passed);
+        Assert.Equal([Known, "D-AREA-TOPIC-THIR"], report.Unresolved.Select(citation => citation.Id));
+
+        var lookup = await harness.AnchorRegistryService.ReadAsync(
+            temp.Path,
+            [Known, "D-AREA-TOPIC-THIRTY", "D-AREA-TOPIC-THIR"],
+            AnchorScope.All,
+            cancellationToken);
+
+        Assert.Equal(
+            report.Unresolved.Select(citation => citation.Id),
+            lookup.Missing.Select(result => result.Id));
+    }
+
+    /// <summary>
+    /// A commit's files are read by one git process however many there are. Asked for one at a time,
+    /// each cost two, and 2,385 files took twenty minutes where reading the disk took seconds.
+    /// </summary>
+    [Fact]
+    public async Task ACommitsFiles_AreReadByOneGitProcess()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        for (var index = 0; index < 5; index++)
+        {
+            temp.WriteFile(Path.Combine("src", $"file{index}.cpp"), $"// D-AREA-TOPIC-FILE{index}\n");
+        }
+
+        await harness.CommitAllAsync(temp.Path, "src", cancellationToken);
+
+        var processes = new CountingProcesses(harness.ProcessRunner);
+        var service = new AnchorCitationService(
+            harness.ContextLoader,
+            harness.AnchorRegistryService,
+            new GitClient(processes, harness.Output),
+            harness.FileSystem);
+
+        var report = await service.CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken);
+
+        Assert.Equal(5, report.FilesScanned);
+        Assert.Equal(5, report.Unresolved.Count);
+        Assert.Single(processes.Started, request => request.Arguments[0] == "cat-file");
+        Assert.DoesNotContain(processes.Started, request => request.Arguments[0] == "show");
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -400,11 +401,160 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         string relativePath,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
         ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
 
-        var path = relativePath.Replace('\\', '/');
+        var read = await ReadFilesAtCommitAsync(directory, commit, [relativePath], cancellationToken).ConfigureAwait(false);
 
+        return read[relativePath.Replace('\\', '/')];
+    }
+
+    public async Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> relativePaths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
+        ArgumentNullException.ThrowIfNull(relativePaths);
+
+        var paths = relativePaths.Select(path => path.Replace('\\', '/')).Distinct(StringComparer.Ordinal).ToList();
+        var read = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        // Named to git one to a line, so a path holding a line break - which git allows and no line
+        // can carry - is read on its own.
+        var batched = paths.Where(path => path.IndexOfAny(['\n', '\r']) < 0).ToList();
+
+        if (batched.Count > 0)
+        {
+            foreach (var (path, content) in batched.Zip(await ReadBatchAsync(directory, commit, batched, cancellationToken).ConfigureAwait(false)))
+            {
+                read[path] = content;
+            }
+        }
+
+        foreach (var path in paths.Except(batched, StringComparer.Ordinal))
+        {
+            read[path] = await ReadOneAsync(directory, commit, path, cancellationToken).ConfigureAwait(false);
+        }
+
+        return read;
+    }
+
+    /// <summary>
+    /// The files at <paramref name="commit"/>, in the order asked, read by one <c>git cat-file
+    /// --batch</c>, with <see langword="null"/> for one that is not a file there.
+    /// </summary>
+    /// <remarks>
+    /// The commit is asked about first, in the same process: git answers "missing" for a commit it
+    /// cannot read exactly as it does for a file that was not there, and an unreadable commit passed
+    /// off as absent files would pass a check that read nothing. Read as Latin-1, which turns each
+    /// byte into one character, so the answer is cut by the byte counts git gives, and each file is
+    /// then decoded as UTF-8 - as reading it on its own through <c>git show</c> did.
+    /// </remarks>
+    private async Task<IReadOnlyList<string?>> ReadBatchAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var input = new StringBuilder().Append(commit).Append("^{commit}\n");
+
+        foreach (var path in paths)
+        {
+            input.Append(commit).Append(':').Append(path).Append('\n');
+        }
+
+        var result = await RunCoreAsync(
+                directory,
+                ["cat-file", "--batch"],
+                echoOutput: false,
+                untranslated: false,
+                indexFile: null,
+                standardInput: input.ToString(),
+                cancellationToken,
+                Encoding.Latin1)
+            .ConfigureAwait(false);
+
+        Ensure(result, $"read {paths.Count} file(s) at {commit}");
+
+        var answers = new BatchAnswers(result.StandardOutput);
+
+        if (answers.Next() is not { Type: "commit" })
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Could not read {paths.Count} file(s) at {commit}: git cannot read that commit.");
+        }
+
+        return [.. paths.Select(_ => answers.Next() is { Type: "blob" } blob ? Decoded(blob.Content) : null)];
+    }
+
+    /// <summary>A file's bytes, carried one to a character, as the UTF-8 text they are.</summary>
+    private static string Decoded(string bytes)
+    {
+        var text = Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(bytes));
+
+        // A byte order mark says how the file is encoded, and is not its text: reading the file on
+        // its own dropped it, as every reader of UTF-8 does.
+        return text.StartsWith('\uFEFF') ? text[1..] : text;
+    }
+
+    /// <summary>
+    /// Reads git's batch answers in order: for each object asked about, its header, then as many
+    /// bytes as the header names, then a line break; or one line saying it names nothing.
+    /// </summary>
+    private sealed class BatchAnswers(string output)
+    {
+        private int _position;
+
+        /// <summary>The next object's type and bytes, or <see langword="null"/> when it names nothing.</summary>
+        /// <exception cref="HarnessException">git answered for fewer objects, or with fewer bytes, than it said.</exception>
+        public (string Type, string Content)? Next()
+        {
+            var end = output.IndexOf('\n', _position);
+
+            if (end < 0)
+            {
+                throw Short();
+            }
+
+            var header = output[_position..end].Split(' ');
+            _position = end + 1;
+
+            // '<object id> <type> <size>'; anything else - '<name> missing', '<name> ambiguous' -
+            // names nothing, and has no content after it.
+            if (header is not [var id, var type, var bytes]
+                || !id.All(char.IsAsciiHexDigit)
+                || !int.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var size))
+            {
+                return null;
+            }
+
+            if (_position + size >= output.Length)
+            {
+                throw Short();
+            }
+
+            var content = output.Substring(_position, size);
+            _position += size + 1;
+
+            return (type, content);
+        }
+
+        private static HarnessException Short()
+            => new(HarnessExit.CommandFailed, "git cat-file answered with less than it said it would.");
+    }
+
+    /// <summary>
+    /// One file at <paramref name="commit"/>, read on its own: for a path git cannot be handed one to
+    /// a line.
+    /// </summary>
+    private async Task<string?> ReadOneAsync(
+        string directory,
+        string commit,
+        string path,
+        CancellationToken cancellationToken)
+    {
         // Whether the file exists at the commit is asked separately, of a command whose exit code does
         // not depend on the answer. Reading the error text of a failed `git show` instead would mistake
         // a commit git cannot read for a file that was simply not there yet.
@@ -480,7 +630,8 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         bool untranslated,
         string? indexFile,
         string? standardInput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Encoding? outputEncoding = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
 
@@ -521,6 +672,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             OnErrorLine = echoOutput ? _output.RawError : null,
             Environment = environment,
             StandardInput = standardInput,
+            StandardOutputEncoding = outputEncoding,
         };
 
         var result = await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false);

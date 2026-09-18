@@ -819,6 +819,13 @@ internal sealed class InterceptingGitClient(IGitClient inner) : IGitClient
         CancellationToken cancellationToken = default)
         => Call(() => inner.ReadFileAtCommitAsync(directory, commit, relativePath, Token(cancellationToken)));
 
+    public Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> relativePaths,
+        CancellationToken cancellationToken = default)
+        => Call(() => inner.ReadFilesAtCommitAsync(directory, commit, relativePaths, Token(cancellationToken)));
+
     /// <summary>
     /// An answer to give once the call's own token is in hand, or <see langword="null"/> to run the
     /// command: a stand-in for a git that hangs until it is stopped.

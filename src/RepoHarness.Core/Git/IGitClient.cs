@@ -142,6 +142,21 @@ public interface IGitClient
         string relativePath,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Each file's content at <paramref name="commit"/>, keyed by its path as given, with
+    /// <see langword="null"/> for one that did not exist there - all of them read by one git process.
+    /// </summary>
+    /// <param name="directory">The repository's root, which the paths are relative to.</param>
+    /// <param name="commit">A commit id, as <see cref="ResolveCommitAsync"/> returns.</param>
+    /// <param name="relativePaths">The files, relative to the repository root.</param>
+    /// <param name="cancellationToken">Cancels the git processes.</param>
+    /// <exception cref="HarnessException">git could not read the commit.</exception>
+    Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> relativePaths,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Runs an arbitrary git subcommand, returning its exit code and output.</summary>
     Task<GitCommandResult> RunAsync(
         string directory,

@@ -56,7 +56,7 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             WorkingDirectory = request.WorkingDirectory ?? string.Empty,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = Utf8NoBom,
+            StandardOutputEncoding = request.StandardOutputEncoding ?? Utf8NoBom,
             StandardErrorEncoding = Utf8NoBom,
 
             // Every child gets an input of its own, never this process's. A tool that reads its input would

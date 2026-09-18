@@ -119,12 +119,19 @@ public sealed class AnchorCitationService(
 
         var citations = new List<AnchorCitation>();
         var scanned = 0;
+        var inRoots = selection.Paths.Where(path => IsInsideARoot(path, roots)).ToList();
 
-        foreach (var path in selection.Paths.Where(path => IsInsideARoot(path, roots)))
+        // Every file of a commit read by one git process. Asked for one at a time, each cost two
+        // processes, which was measured at 20 minutes over 2,385 files where the disk took 6.5 seconds.
+        var committed = selection.Commit is { } commit
+            ? await _gitClient.ReadFilesAtCommitAsync(root, commit, inRoots, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        foreach (var path in inRoots)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var text = await ReadAsync(root, selection.Commit, path, cancellationToken).ConfigureAwait(false);
+            var text = committed is not null ? committed[path] : ReadFromDisk(root, path);
 
             if (text is null || IsBinary(text))
             {
@@ -139,8 +146,10 @@ public sealed class AnchorCitationService(
             .ListAsync(startDirectory, new AnchorListFilter(), cancellationToken)
             .ConfigureAwait(false);
 
-        var ids = rows.Select(entry => entry.Row.Id).ToList();
-        var unresolved = citations.Where(citation => !Resolves(citation.Id, ids)).ToList();
+        // By the rule read-anchor finds a row by, so the two verbs cannot disagree about whether a
+        // row exists.
+        var ids = rows.Select(entry => entry.Row.Id).ToHashSet(AnchorIdMatch.Comparer);
+        var unresolved = citations.Where(citation => !ids.Contains(citation.Id)).ToList();
 
         return new AnchorCitationReport(
             subject,
@@ -148,18 +157,9 @@ public sealed class AnchorCitationService(
             roots,
             scanned,
             citations.Count,
-            ids.Count,
+            rows.Count,
             unresolved);
     }
-
-    /// <summary>
-    /// Whether a cited id resolves. Resolution is by substring rather than by equality, following the
-    /// guard this replaces: a registry row naming a more specific child (<c>D-AREA-TOPIC-DETAIL</c>)
-    /// answers a citation of the parent (<c>D-AREA-TOPIC</c>), which is how a registry that grew more
-    /// specific does not orphan the citations written before it did.
-    /// </summary>
-    private static bool Resolves(string id, IEnumerable<string> rows)
-        => rows.Any(row => row.Contains(id, StringComparison.Ordinal));
 
     /// <summary>
     /// Whether a repository-relative path lies inside a declared root. A root names a file or a
@@ -234,20 +234,11 @@ public sealed class AnchorCitationService(
     }
 
     /// <summary>
-    /// A file's text: from the commit when one is being checked, so a smudged checkout cannot change
-    /// what a committed file is judged to say, and from disk otherwise.
+    /// A file's text as the disk holds it. A commit's files are read from the commit instead, so a
+    /// smudged checkout cannot change what a committed file is judged to say.
     /// </summary>
-    private async Task<string?> ReadAsync(
-        string root,
-        string? commit,
-        string path,
-        CancellationToken cancellationToken)
+    private string? ReadFromDisk(string root, string path)
     {
-        if (commit is not null)
-        {
-            return await _gitClient.ReadFileAtCommitAsync(root, commit, path, cancellationToken).ConfigureAwait(false);
-        }
-
         var full = Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar));
 
         // A path git listed can be gone by the time it is read: a file staged and then deleted, or
