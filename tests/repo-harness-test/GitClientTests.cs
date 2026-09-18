@@ -329,6 +329,27 @@ public sealed class GitClientTests
     }
 
     /// <summary>
+    /// One path this machine spelled has this machine's separator turned into git's: on Windows,
+    /// 'docs\notes.md' is the file git calls 'docs/notes.md'.
+    /// </summary>
+    [Fact]
+    public async Task ReadFileAtCommitAsync_ReadsAPathThisMachineSpelled()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows separates a path with a backslash.");
+
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "notes.md"), "notes\n");
+        await harness.CommitAllAsync(temp.Path, "notes", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+
+        Assert.Equal("notes\n", await harness.GitClient.ReadFileAtCommitAsync(temp.Path, head!, @"docs\notes.md", cancellationToken));
+    }
+
+    /// <summary>
     /// A path is read as git spells it. A backslash is an ordinary character in a name on Linux and
     /// macOS; rewritten as a separator, the name read another file, and its answer was filed under a
     /// key nobody had asked for.
