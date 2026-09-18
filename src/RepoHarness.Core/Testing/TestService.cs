@@ -274,7 +274,7 @@ public sealed class TestService(
         var contention = seen.Contention!;
         var comparison = seen.Inputs;
 
-        Report(request, contention);
+        ContentionWarnings.Write(_output, CommandName, request.Leg, contention, config.Contention);
 
         var reached = seen.Decide(request.Leg, [phase.Verdict()]);
         var entry = new LegEntry
@@ -454,33 +454,6 @@ public sealed class TestService(
         catch (HarnessException ex)
         {
             return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Says what sampling found besides a contender, and what it could not see. A clean report read
-    /// without its limits is read as more than it is.
-    /// </summary>
-    private void Report(TestRequest request, ContentionReport contention)
-    {
-        foreach (var shared in contention.SharedResourceUsers)
-        {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: {shared.Tool} (pid {shared.Process.Id}) ran outside this run, seen "
-                + $"{ContentionReport.Describe(shared.Seen)}; it shares state rather than this build directory.");
-        }
-
-        foreach (var unreadable in contention.Unreadable)
-        {
-            // Reported as unknown, never as nothing found: "no contender was running" and "nobody
-            // looked" are different facts and only one of them is evidence.
-            _output.Warn(CommandName, $"{request.Leg}: the process table was not read for one sample ({unreadable}).");
-        }
-
-        foreach (var limit in contention.Limits)
-        {
-            _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
         }
     }
 

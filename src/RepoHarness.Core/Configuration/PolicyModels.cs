@@ -54,6 +54,16 @@ public sealed class ContentionConfig
     /// legs legitimately run them at the same time.
     /// </summary>
     public List<string> SharedResourceTools { get; init; } = [];
+
+    /// <summary>
+    /// What each of <see cref="SharedResourceTools"/> shares, by tool name, said in the warning when
+    /// one is found beside a leg - "the per-user compiler cache under ~/.cache/dsscp".
+    /// </summary>
+    /// <remarks>
+    /// The harness cannot know what a tool shares; the file's author does. Without it the warning can
+    /// only say that the tool shares something, and a reader cannot judge whether that matters.
+    /// </remarks>
+    public Dictionary<string, string> SharedState { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>What the tree mirror carries, what it must never carry, and how far a deletion may go.</summary>

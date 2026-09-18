@@ -1,3 +1,4 @@
+using System.IO.Enumeration;
 using System.Text;
 using RepoHarness.Core.Platform;
 
@@ -119,10 +120,26 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
     }
 
     public IEnumerable<string> EnumerateFiles(string path, bool recursive)
-        => Directory.EnumerateFiles(
+        => new FileSystemEnumerable<string>(
             path,
-            "*",
-            recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+            (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath(),
+
+            // What the plain overload did - nothing skipped, and a directory that cannot be read
+            // said so - with one difference: a directory reached through a link or a junction is
+            // never walked. Every caller walks a tree the harness owns, and a link inside one leads
+            // either out of it, to files that tree does not contain, or back into it, which a walk
+            // follows until the stack goes.
+            new EnumerationOptions
+            {
+                RecurseSubdirectories = recursive,
+                AttributesToSkip = 0,
+                IgnoreInaccessible = false,
+                MatchType = MatchType.Win32,
+            })
+        {
+            ShouldIncludePredicate = (ref FileSystemEntry entry) => !entry.IsDirectory,
+            ShouldRecursePredicate = (ref FileSystemEntry entry) => (entry.Attributes & FileAttributes.ReparsePoint) == 0,
+        };
 
     public IEnumerable<string> EnumerateDirectories(string path) => Directory.EnumerateDirectories(path);
 

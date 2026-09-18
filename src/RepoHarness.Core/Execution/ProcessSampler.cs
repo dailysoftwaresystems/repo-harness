@@ -28,6 +28,12 @@ public sealed record ContentionRequest
 
     /// <summary>Seconds between samples, beyond the ones always taken at the start and at the end.</summary>
     public int SampleSeconds { get; init; }
+
+    /// <summary>
+    /// Every other leg this machine could build, with its build directory, so work found beside this
+    /// leg can be said to be that leg's rather than a stranger's.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> OtherLegs { get; init; } = new Dictionary<string, string>();
 }
 
 /// <summary>

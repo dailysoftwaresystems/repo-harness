@@ -40,11 +40,18 @@ public sealed class WorktreeSettings
     public int MaxNameLength { get; init; } = DefaultMaxNameLength;
 
     /// <summary>
-    /// Longest path a build generates below a tree root, used to budget against the
-    /// Windows path limit. The default is measured against CMake and Ninja, whose
-    /// generated dependency files are the longest paths they produce; a project
-    /// whose build system nests more deeply should raise it.
+    /// Longest path a build system generates below its own build directory,
+    /// <c>build/&lt;variant&gt;</c>, used to budget against the Windows path limit. The build
+    /// directory's own name is added by the check itself, sized to the longest variant this machine
+    /// builds, because the harness knows it and a number that had to include it went stale the day
+    /// build directories were keyed by variant. The default is measured against CMake and Ninja,
+    /// whose generated dependency files are the longest paths they produce there.
     /// </summary>
+    /// <remarks>
+    /// Checked by every build, which measures the longest path it actually produced below its build
+    /// directory and warns with both numbers when this is lower, so the number cannot go stale
+    /// unnoticed.
+    /// </remarks>
     public int PathBudgetReserve { get; init; } = 163;
 
     /// <summary>Headroom kept beyond the reserve.</summary>

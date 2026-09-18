@@ -32,6 +32,50 @@ public sealed class BuildServiceTests
         Assert.Contains("declares no buildOutputs", result.Verdict.Detail, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// worktrees.pathBudgetReserve is a number measured once, against whatever the build produced
+    /// then. Every build measures what it actually left below its build directory and says so, with
+    /// both numbers, when that went deeper - and says nothing when it did not, at the boundary too.
+    /// </summary>
+    [Theory]
+    [InlineData(-1, true)]
+    [InlineData(0, false)]
+    public async Task ABuildDeeperThanTheReserve_SaysSo_WithBothNumbers(int reserveAgainstDeepest, bool warned)
+    {
+        using var temp = new TempDirectory();
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        var directory = request.Variant.DirectoryUnder(temp.Path);
+        var deepest = Path.Combine("obj", "nested", "deeper", "still", "file.obj");
+
+        foreach (var file in new[] { Path.Combine("bin", "app.dll"), deepest })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(directory, file))!);
+            await File.WriteAllTextAsync(Path.Combine(directory, file), "built", TestContext.Current.CancellationToken);
+        }
+
+        var (service, factory) = await TrackedWithFactoryAsync(temp, TestContext.Current.CancellationToken);
+        var reserve = deepest.Length + reserveAgainstDeepest;
+
+        await service.BuildAsync(
+            new HarnessConfig
+            {
+                Defaults = new HarnessDefaults { StallSeconds = 0 },
+                Worktrees = new WorktreeSettings { PathBudgetReserve = reserve },
+            },
+            request,
+            TestContext.Current.CancellationToken);
+
+        var said = factory.StandardError.ToString();
+
+        Assert.Equal(warned, said.Contains("worktrees.pathBudgetReserve declares", StringComparison.Ordinal));
+
+        if (warned)
+        {
+            Assert.Contains($"{deepest.Length} characters long", said, StringComparison.Ordinal);
+            Assert.Contains($"declares {reserve}", said, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task ABuildThatExitedZeroAndProducedNothingItDeclared_IsUnwitnessed()
     {
@@ -251,6 +295,13 @@ public sealed class BuildServiceTests
     /// reason and not because these tests are about git.
     /// </summary>
     private static async Task<BuildService> TrackedAsync(TempDirectory temp, CancellationToken cancellationToken, int exitCode = 0)
+        => (await TrackedWithFactoryAsync(temp, cancellationToken, exitCode)).Service;
+
+    /// <summary>The same, with the factory, for a test that reads what the build said.</summary>
+    private static async Task<(BuildService Service, HarnessFactory Factory)> TrackedWithFactoryAsync(
+        TempDirectory temp,
+        CancellationToken cancellationToken,
+        int exitCode = 0)
     {
         var factory = new HarnessFactory();
 
@@ -260,7 +311,7 @@ public sealed class BuildServiceTests
         await File.WriteAllTextAsync(temp.Combine("src.cs"), "class App;" + Environment.NewLine, cancellationToken);
         await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
 
-        return Service(factory, exitCode);
+        return (Service(factory, exitCode), factory);
     }
 
     private static BuildService Service(HarnessFactory factory, int exitCode)

@@ -85,6 +85,34 @@ public sealed class PhysicalFileSystemTests
         Assert.True(Directory.Exists(temp.Path));
     }
 
+    /// <summary>
+    /// A walk of a tree never descends through a directory link: one leads out of the tree, to files
+    /// it does not contain, and one leads back into it, round and round. Both are here - a link out,
+    /// and a link to the tree's own root - and the walk lists the tree's own file and ends.
+    /// </summary>
+    [Fact]
+    public void EnumerateFiles_Recursive_NeverDescendsThroughADirectoryLink()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("outside", "elsewhere.txt"), "x");
+        var own = temp.WriteFile(Path.Combine("tree", "sub", "own.txt"), "x");
+        var tree = temp.Combine("tree");
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(tree, "out"), temp.Combine("outside"));
+            Directory.CreateSymbolicLink(Path.Combine(tree, "sub", "loop"), tree);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        var files = Create().EnumerateFiles(tree, recursive: true).ToList();
+
+        Assert.Equal([own], files);
+    }
+
     [Fact]
     public void DeleteDirectory_RemovesALink_WithoutTouchingWhatItPointsAt()
     {

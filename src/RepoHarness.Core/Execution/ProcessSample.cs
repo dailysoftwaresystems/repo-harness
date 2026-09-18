@@ -35,7 +35,12 @@ public enum ProcessSeen
 /// <param name="Process">The process, as the sample that first saw it reported it.</param>
 /// <param name="Seen">When it was seen.</param>
 /// <param name="Tool">The configured tool name it matched, so the report says which rule it broke.</param>
-public sealed record ContendingProcess(SampledProcess Process, ProcessSeen Seen, string Tool);
+/// <param name="Owner">
+/// The other leg whose build directory its command line names, or <see langword="null"/> when no
+/// declared leg's does. A sibling leg run on the same host by a harness process of its own is
+/// outside this leg's process tree, and without this it read as a stranger's work.
+/// </param>
+public sealed record ContendingProcess(SampledProcess Process, ProcessSeen Seen, string Tool, string? Owner = null);
 
 /// <summary>What sampling the process table during a leg found.</summary>
 /// <param name="Samples">Every reading, kept in full.</param>

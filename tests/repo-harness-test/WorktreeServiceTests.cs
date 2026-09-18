@@ -138,6 +138,99 @@ public sealed class WorktreeServiceTests
         Assert.False(Directory.Exists(HarnessFactory.WorktreePath(temp.Path, "wt")));
     }
 
+    /// <summary>
+    /// The reserve is what the build system generates below build/&lt;variant&gt;, and the budget adds
+    /// that directory itself, sized to the longest variant this machine builds. Folded into the
+    /// reserve, it went stale the day build directories were keyed by variant: a consumer's check
+    /// believed it had twenty characters to spare where it had four. A leg of another operating
+    /// system, and one naming a host of its own, never builds here and adds nothing, however long.
+    /// </summary>
+    [Fact]
+    public async Task CreateAsync_AddsTheLongestBuildDirectoryThisMachineBuilds_ToTheBudget()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var other = platform.PlatformKey == RepoHarness.Core.Platform.PlatformNames.Linux
+            ? RepoHarness.Core.Platform.PlatformNames.MacOs
+            : RepoHarness.Core.Platform.PlatformNames.Linux;
+
+        var path = HarnessFactory.WorktreePath(temp.Path, "wt");
+        const int Reserve = 5;
+        const int Margin = 2;
+
+        await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            // Exactly enough for the worktree and the reserve, and nothing for a build directory.
+            Worktrees = new WorktreeSettings { PathBudgetReserve = Reserve, PathBudgetMargin = Margin, PathLimit = path.Length + Reserve + Margin },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { ["box"] = new SshHostConfig { RepositoryPath = "/srv/repo" } } },
+            SshItems = { "box" },
+            Legs =
+            {
+                ["short"] = new LegConfig { Os = platform.PlatformKey, Processor = "arm64", Config = "debug" },
+                ["long"] = new LegConfig { Os = platform.PlatformKey, Processor = "x86_64", Config = "debug" },
+                ["elsewhere"] = new LegConfig { Os = other, Processor = "loongarch64", Config = "debug" },
+                ["remote"] = new LegConfig { Os = platform.PlatformKey, Processor = "loongarch64", Config = "debug", Ssh = "box" },
+            },
+        });
+
+        var outcome = await harness.WorktreeService.CreateAsync(
+            temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
+
+        // '/build/x86_64-none-debug/': the long leg's, not the remote or the foreign one's.
+        var added = "build".Length + "x86_64-none-debug".Length + 3;
+
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains($"needs {path.Length + added + Reserve + Margin} characters", outcome.Outcome.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A machine that builds no leg grows no build directory, and nothing is added for one.</summary>
+    [Fact]
+    public async Task CreateAsync_AddsNothing_WhenNoLegBuildsOnThisMachine()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var other = harness.Platform.PlatformKey == RepoHarness.Core.Platform.PlatformNames.Linux
+            ? RepoHarness.Core.Platform.PlatformNames.MacOs
+            : RepoHarness.Core.Platform.PlatformNames.Linux;
+
+        var path = HarnessFactory.WorktreePath(temp.Path, "wt");
+
+        await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 5, PathBudgetMargin = 2, PathLimit = path.Length + 5 + 2 },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs = { ["elsewhere"] = new LegConfig { Os = other, Processor = "x86_64", Config = "debug" } },
+        });
+
+        var outcome = await harness.WorktreeService.CreateAsync(
+            temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+    }
+
+    /// <summary>
+    /// A worktree is what git records as one. Every directory under the root was counted, so a data
+    /// directory a lane script keeps there read as a sixth worktree beside git's five.
+    /// </summary>
+    [Fact]
+    public async Task ListAsync_CountsWhatGitRecords_NotEveryDirectoryUnderTheRoot()
+    {
+        using var temp = new TempDirectory();
+        var harness = await PrepareAsync(temp);
+        var token = TestContext.Current.CancellationToken;
+
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "wt", useRandomName: false, token);
+        Assert.True(created.Succeeded, created.Outcome.Message);
+
+        Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(created.Path)!, ".manifests"));
+
+        var listed = await harness.WorktreeService.ListAsync(temp.Path, token);
+
+        Assert.Equal(["wt"], listed.Select(listing => listing.Name));
+    }
+
     [Fact]
     public async Task CreateAsync_AcceptsTheDefaultReserve_WhenThePathLimitIsRaised()
     {

@@ -1354,6 +1354,23 @@ public static class HarnessConfigValidator
         {
             problems.Add("contention.sharedResourceTools contains a blank name");
         }
+
+        // A description of a tool nothing watches for reads as protection that does not exist, and
+        // it is what a renamed or misspelt entry in sharedResourceTools leaves behind.
+        foreach (var (tool, state) in contention.SharedState)
+        {
+            if (!contention.SharedResourceTools.Contains(tool, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"contention.sharedState describes '{tool}', which contention.sharedResourceTools does not "
+                    + "list, so nothing is ever found for it to describe");
+            }
+
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                problems.Add($"contention.sharedState.{tool} is blank; say what the tool shares, or leave it out");
+            }
+        }
     }
 
     /// <summary>

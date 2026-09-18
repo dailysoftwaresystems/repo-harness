@@ -300,14 +300,12 @@ public sealed class RunnerRunService(
                         ? LegInputs.Unmeasured(unmeasurable)
                         : LegInputs.Watch(guarded ?? []),
                     Contention = watching
-                        ? new ContentionRequest
-                        {
-                            Leg = request.Leg,
-                            BuildDirectory = request.BuildDirectory!,
-                            BuildTools = config.Contention.BuildTools,
-                            SharedResourceTools = config.Contention.SharedResourceTools,
-                            SampleSeconds = config.Defaults.ProcessSampleSeconds,
-                        }
+                        ? Build.ContentionRequests.For(
+                            config,
+                            request.Leg,
+                            request.BuildDirectory!,
+                            request.TreeRoot,
+                            _platform.PlatformKey)
                         : null,
                 },
                 cancellationToken)
@@ -389,6 +387,13 @@ public sealed class RunnerRunService(
             .ConfigureAwait(false);
 
         var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
+
+        // Said as build and test say it. A runner's steps are sampled with the same rules, and what
+        // that found beside them was dropped without a word.
+        if (seen.Contention is { } contention)
+        {
+            ContentionWarnings.Write(_output, CommandName, request.Leg, contention, config.Contention);
+        }
         var decided = await DecideAsync(request, state, values, cancellationToken).ConfigureAwait(false);
 
         // What the guards saw is folded in the same way every other verb folds it, so a step whose

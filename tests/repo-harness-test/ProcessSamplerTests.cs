@@ -1,3 +1,4 @@
+using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Execution;
 
@@ -300,9 +301,120 @@ public sealed class ProcessSamplerTests
         Assert.Equal(LegVerdict.Contended, report.Verdict()!.Verdict);
     }
 
+    /// <summary>
+    /// A directory whose name merely starts with this leg's is another directory. Matched as a
+    /// substring, a sanitizer leg's work in build/x86_64-msvc-release-asan named this leg's
+    /// build/x86_64-msvc-release, and forced this leg's verdict to contended over work it never shared.
+    /// </summary>
+    [Fact]
+    public void ADirectoryWhoseNameOnlyStartsWithThisLegs_IsNotThisLegsBuildDirectory()
+    {
+        var sibling = BuildDirectory + "-asan";
+        var ninja = Process(4242, "ninja", $"ninja -C \"{sibling}\" all", parent: 9999);
+
+        Assert.Empty(Classify([Sample(0, ninja)]).Contenders);
+
+        // And the directory itself, however it ends, still is.
+        var own = Process(4343, "ninja", $"ninja -C \"{BuildDirectory}\" all", parent: 9999);
+        Assert.Single(Classify([Sample(0, own)]).Contenders);
+    }
+
+    /// <summary>
+    /// A shared tool working in another leg's build directory is that leg's work. Each leg a host
+    /// runs is run by a harness process of its own, so a sibling's compilers are outside this leg's
+    /// process tree; without this they were reported as "outside this run" - 597 times, on one
+    /// consumer's host, for one sibling leg of the same invocation.
+    /// </summary>
+    [Fact]
+    public void ASharedToolInASiblingsBuildDirectory_IsThatSiblingsWork_AndOneNamingNoneIsNobodysKnown()
+    {
+        var sibling = Process(5001, "dsscp", $"dsscp -o \"{Path.Combine(OtherBuildDirectory, "a.o")}\"", parent: 9999);
+        var stranger = Process(5002, "dsscp", "dsscp --serve", parent: 9999);
+
+        var report = Classify(
+            [Sample(0, sibling, stranger)],
+            sharedResourceTools: ["dsscp"],
+            otherLegs: new Dictionary<string, string> { ["lin-gcc-release"] = OtherBuildDirectory });
+
+        Assert.Equal("lin-gcc-release", report.SharedResourceUsers.Single(user => user.Process.Id == 5001).Owner);
+        Assert.Null(report.SharedResourceUsers.Single(user => user.Process.Id == 5002).Owner);
+    }
+
+    /// <summary>
+    /// One line per tool and per whose it was, with a count and the range of ids - never one line per
+    /// process. And what the tool shares is said when the configuration says it, so a reader can
+    /// judge whether it matters.
+    /// </summary>
+    [Fact]
+    public void SharedToolSightings_AreOneLinePerSource_NamingTheSiblingAndWhatIsShared()
+    {
+        var report = Classify(
+            [
+                Sample(
+                    0,
+                    Process(7003, "dsscp", $"dsscp \"{Path.Combine(OtherBuildDirectory, "c.o")}\"", parent: 9999),
+                    Process(7001, "dsscp", $"dsscp \"{Path.Combine(OtherBuildDirectory, "a.o")}\"", parent: 9999),
+                    Process(7002, "dsscp", $"dsscp \"{Path.Combine(OtherBuildDirectory, "b.o")}\"", parent: 9999),
+                    Process(8001, "dsscp", "dsscp --serve", parent: 9999)),
+            ],
+            sharedResourceTools: ["dsscp"],
+            otherLegs: new Dictionary<string, string> { ["lin-gcc-release"] = OtherBuildDirectory });
+
+        var lines = ContentionWarnings.SharedLines(
+            "win-msvc-release",
+            report,
+            new ContentionConfig
+            {
+                SharedResourceTools = ["dsscp"],
+                SharedState = { ["dsscp"] = "the per-user compiler cache" },
+            });
+
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("3 processes, pids 7001-7003", lines[0], StringComparison.Ordinal);
+        Assert.Contains("working in leg 'lin-gcc-release''s build directory", lines[0], StringComparison.Ordinal);
+        Assert.Contains("it shares the per-user compiler cache", lines[0], StringComparison.Ordinal);
+        Assert.Contains("pid 8001", lines[1], StringComparison.Ordinal);
+        Assert.Contains("which no declared leg's build directory accounts for", lines[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("outside this run", string.Join("\n", lines), StringComparison.Ordinal);
+    }
+
+    /// <summary>Without a description the line says where one goes, rather than implying there is nothing to say.</summary>
+    [Fact]
+    public void ASharedToolNobodyDescribed_SaysWhereToDescribeIt()
+    {
+        var report = Classify(
+            [Sample(0, Process(9001, "dsscp", "dsscp --serve", parent: 9999))],
+            sharedResourceTools: ["dsscp"]);
+
+        var line = Assert.Single(ContentionWarnings.SharedLines(
+            "win-msvc-release",
+            report,
+            new ContentionConfig { SharedResourceTools = ["dsscp"] }));
+
+        Assert.Contains("contention.sharedState", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>A description of a tool nothing watches for reads as protection that does not exist.</summary>
+    [Fact]
+    public void ASharedStateDescription_OfAToolNothingWatches_OrBlank_IsRefused()
+    {
+        var problems = HarnessConfigValidator.Validate(new HarnessConfig
+        {
+            Contention = new ContentionConfig
+            {
+                SharedResourceTools = ["dsscp"],
+                SharedState = { ["dsscpp"] = "a typo's cache", ["dsscp"] = " " },
+            },
+        });
+
+        Assert.Contains(problems, problem => problem.Contains("describes 'dsscpp'", StringComparison.Ordinal));
+        Assert.Contains(problems, problem => problem.Contains("contention.sharedState.dsscp is blank", StringComparison.Ordinal));
+    }
+
     private static ContentionReport Classify(
         IReadOnlyList<ProcessSample> samples,
-        IReadOnlyList<string>? sharedResourceTools = null)
+        IReadOnlyList<string>? sharedResourceTools = null,
+        IReadOnlyDictionary<string, string>? otherLegs = null)
         => ProcessSamplingSession.Classify(
             samples,
             new ContentionRequest
@@ -311,6 +423,7 @@ public sealed class ProcessSamplerTests
                 BuildDirectory = BuildDirectory,
                 BuildTools = ["ninja", "ctest", "cmake"],
                 SharedResourceTools = sharedResourceTools ?? [],
+                OtherLegs = otherLegs ?? new Dictionary<string, string>(),
             },
             StringComparison.OrdinalIgnoreCase,
             harnessId: Environment.ProcessId);

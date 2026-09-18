@@ -139,14 +139,12 @@ public sealed class BuildService(
                 {
                     TreeRoot = request.TreeRoot,
                     Inputs = unmeasurable is null ? LegInputs.Watch(watched) : LegInputs.Unmeasured(unmeasurable),
-                    Contention = new ContentionRequest
-                    {
-                        Leg = request.Leg,
-                        BuildDirectory = buildDirectory,
-                        BuildTools = config.Contention.BuildTools,
-                        SharedResourceTools = config.Contention.SharedResourceTools,
-                        SampleSeconds = config.Defaults.ProcessSampleSeconds,
-                    },
+                    Contention = ContentionRequests.For(
+                        config,
+                        request.Leg,
+                        buildDirectory,
+                        request.TreeRoot,
+                        request.PlatformKey),
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -271,7 +269,8 @@ public sealed class BuildService(
             var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
             var verdict = seen.Decide(request.Leg, [reached]);
 
-            Report(request, seen.Contention!);
+            ContentionWarnings.Write(_output, CommandName, request.Leg, seen.Contention!, config.Contention);
+            WarnWhenDeeperThanTheReserve(request, buildDirectory, config.Worktrees.PathBudgetReserve);
 
             // Recorded for a build that reached a verdict on its own terms, and marked as
             // untrustworthy when anything doubted it. The record is what the next build's staleness
@@ -296,29 +295,59 @@ public sealed class BuildService(
     }
 
     /// <summary>
-    /// Says what sampling found besides a contender, and what it could not see. A clean report read
-    /// without its limits is read as more than it is.
+    /// Warns when this build produced a path deeper below its build directory than
+    /// worktrees.pathBudgetReserve declares, naming both numbers.
     /// </summary>
-    private void Report(BuildRequest request, ContentionReport contention)
+    /// <param name="request">The leg's build.</param>
+    /// <param name="buildDirectory">Where it built.</param>
+    /// <param name="reserve">What worktrees.pathBudgetReserve declares.</param>
+    /// <remarks>
+    /// What keeps the reserve honest. It is a number somebody measured once, against whatever the
+    /// build produced then; headers grow deeper and generators rename what they write, and nothing
+    /// else would notice until a worktree's build failed with compile errors in files it never
+    /// touched. Measured after every build, from the files the build itself left, and said when it
+    /// could not be measured rather than taken as fine.
+    /// </remarks>
+    private void WarnWhenDeeperThanTheReserve(BuildRequest request, string buildDirectory, int reserve)
     {
-        foreach (var shared in contention.SharedResourceUsers)
+        if (!_fileSystem.DirectoryExists(buildDirectory))
+        {
+            return;
+        }
+
+        var longest = 0;
+        var deepest = string.Empty;
+
+        try
+        {
+            foreach (var file in _fileSystem.EnumerateFiles(buildDirectory, recursive: true))
+            {
+                var below = Path.GetRelativePath(buildDirectory, file);
+
+                if (below.Length > longest)
+                {
+                    longest = below.Length;
+                    deepest = below;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _output.Warn(
                 CommandName,
-                $"{request.Leg}: {shared.Tool} (pid {shared.Process.Id}) ran outside this run, seen "
-                + $"{ContentionReport.Describe(shared.Seen)}; it shares state rather than this build directory.");
+                $"{request.Leg}: the deepest path this build produced could not be measured, so "
+                + $"worktrees.pathBudgetReserve was not checked against it: {ex.Message}");
+
+            return;
         }
 
-        foreach (var unreadable in contention.Unreadable)
+        if (longest > reserve)
         {
-            // Reported as unknown, never as nothing found: "no contender was running" and "nobody
-            // looked" are different facts and only one of them is evidence.
-            _output.Warn(CommandName, $"{request.Leg}: the process table was not read for one sample ({unreadable}).");
-        }
-
-        foreach (var limit in contention.Limits)
-        {
-            _output.Detail(CommandName, $"{request.Leg}: sampling cannot see {limit}");
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: this build produced a path {longest} characters long below its build "
+                + $"directory ('{deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
+                + $"to at least {longest}, or a worktree created against it may not leave its build room.");
         }
     }
 

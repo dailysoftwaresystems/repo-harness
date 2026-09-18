@@ -11,10 +11,11 @@ namespace RepoHarness.Core.Worktrees;
 /// </summary>
 /// <remarks>
 /// Names are short for a measured reason. A worktree's build tree sits below
-/// <c>.harness-config/worktrees/&lt;name&gt;</c>, and on Windows the whole path plus the
-/// longest path a build system generates beneath it must stay under the 260
-/// character limit. Exceeding it does not fail as a clean error: it surfaces as
-/// compile errors in files the worktree never touched.
+/// <c>.harness-config/worktrees/&lt;name&gt;</c>, and on Windows the whole path, plus
+/// <c>build/&lt;variant&gt;</c> for the longest variant this machine builds, plus the longest
+/// path the build system generates below that, must stay under the 260 character limit.
+/// Exceeding it does not fail as a clean error: it surfaces as compile errors in files the
+/// worktree never touched.
 /// </remarks>
 public static partial class WorktreeName
 {

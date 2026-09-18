@@ -269,9 +269,9 @@ public sealed class LedgerReportTests
     /// branch came to compose none.
     /// </summary>
     [Theory]
-    [InlineData(LegVerdict.Failed, false, "", "failed: 2 leg(s) reported")]
-    [InlineData(LegVerdict.InputsMoved, false, "", "inputs-moved: 2 leg(s) reported")]
-    [InlineData(LegVerdict.Poisoned, false, "", "poisoned: 2 leg(s) reported")]
+    [InlineData(LegVerdict.Failed, false, "", "failed: 1 of 2 leg(s); 1 passed")]
+    [InlineData(LegVerdict.InputsMoved, false, "", "inputs-moved: 1 of 2 leg(s); 1 passed")]
+    [InlineData(LegVerdict.Poisoned, false, "", "poisoned: 1 of 2 leg(s); 1 passed")]
     [InlineData(LegVerdict.SkippedToolMissing, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
     [InlineData(LegVerdict.SkippedUnavailable, false, "", "1 of 2 leg(s) passed; 1 did no work: b")]
     [InlineData(LegVerdict.Passed, false, "c", "2 of 2 leg(s) passed; 1 did no work: c")]
@@ -299,6 +299,30 @@ public sealed class LedgerReportTests
         {
             Assert.NotEqual(string.Empty, report.Summarize(cancelled, left));
         }
+    }
+
+    /// <summary>
+    /// The line a consumer's eight-leg gate ended on said "poisoned: 8 leg(s) reported" - read as eight
+    /// poisoned legs, when two were, three had failed and three had passed. The run's verdict comes
+    /// with the count that reached it, and the rest follow, worst first.
+    /// </summary>
+    [Fact]
+    public void Summarize_CountsTheWorstVerdictsOwnLegs_AndNamesTheRest()
+    {
+        var report = LedgerReport.From(
+            [
+                Entry("a", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("b", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("c", LegVerdict.Poisoned, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("d", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("e", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("f", LegVerdict.Poisoned, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("g", LegVerdict.Failed, TimeSpan.FromSeconds(1), string.Empty),
+                Entry("h", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            ],
+            durationWarningFactor: 0);
+
+        Assert.Equal("poisoned: 2 of 8 leg(s); 3 failed, 3 passed", report.Summarize(cancelled: false, []));
     }
 
     private static LegEntry Entry(string leg, LegVerdict verdict, TimeSpan duration, string detail, params PhaseRecord[] phases) => new()

@@ -43,6 +43,10 @@ public interface IFileSystem
     void DeleteDirectory(string path);
 
     /// <summary>Enumerates files under <paramref name="path"/>, recursively when asked.</summary>
+    /// <remarks>
+    /// A directory reached through a link or a junction is never walked: a link inside a tree leads
+    /// out of it, or back into it and round again.
+    /// </remarks>
     IEnumerable<string> EnumerateFiles(string path, bool recursive);
 
     /// <summary>Enumerates immediate subdirectories of <paramref name="path"/>.</summary>

@@ -126,7 +126,19 @@ public sealed class LedgerReport
 
         if (!Passed)
         {
-            return $"{Verdicts.Display(Verdict)}: {Lines.Count} leg(s) reported";
+            // The run's verdict with the count that reached it, then the rest. The worst verdict
+            // beside the total read as every leg having it: "poisoned: 8 leg(s) reported" was
+            // taken for eight poisoned legs when two were, three had failed and three had passed.
+            var worst = Lines.Count(line => line.Verdict == Verdict);
+            var others = Lines
+                .Where(line => line.Verdict != Verdict)
+                .GroupBy(line => line.Verdict)
+                .OrderBy(group => Verdicts.Rank(group.Key))
+                .Select(group => $"{group.Count()} {Verdicts.Display(group.Key)}")
+                .ToList();
+
+            return $"{Verdicts.Display(Verdict)}: {worst} of {Lines.Count} leg(s)"
+                + (others.Count == 0 ? string.Empty : $"; {string.Join(", ", others)}");
         }
 
         if (ExitCodeGiven(cancelled, unfinished) == HarnessExit.Success)
