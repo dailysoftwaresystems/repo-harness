@@ -27,6 +27,34 @@ public sealed class LedgerReportTests
         Assert.Empty(refused.RootElement.GetProperty("legs").EnumerateArray());
     }
 
+    /// <summary>
+    /// The document names where the run keeps its records, and a leg another host ran names that
+    /// host's own; a run that kept none, and a leg this machine ran, name nothing.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesWhereTheRecordsAre()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("here", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("there", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { RunDirectory = "/home/pi/repo/.harness-config/runs/r2" },
+        ],
+        durationWarningFactor: 0);
+
+        using var ran = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: [], runDirectory: "/repo/.harness-config/runs/r1"));
+        using var stopped = JsonDocument.Parse(report.ToJson(HarnessExit.Refused, "refused", runDirectory: "/repo/.harness-config/runs/r1"));
+        using var none = JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Refused, "refused"));
+
+        Assert.Equal("/repo/.harness-config/runs/r1", ran.RootElement.GetProperty("runDirectory").GetString());
+        Assert.Equal("/repo/.harness-config/runs/r1", stopped.RootElement.GetProperty("runDirectory").GetString());
+        Assert.False(none.RootElement.TryGetProperty("runDirectory", out _));
+
+        var legs = ran.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("runDirectory", out _));
+        Assert.Equal("/home/pi/repo/.harness-config/runs/r2", legs[1].GetProperty("runDirectory").GetString());
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

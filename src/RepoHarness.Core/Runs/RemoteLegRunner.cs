@@ -233,6 +233,10 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             Emulated = leg.Emulated,
             TestCount = entry.TestCount,
             TimingNotes = [.. entry.TimingNotes ?? []],
+
+            // The host ran the leg under a run of its own, whose records are there: named so the
+            // caller is told where, as it is for a leg this machine ran.
+            RunDirectory = ledger?.RunDirectory,
         };
     }
 
@@ -244,8 +248,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     }
 
     /// <summary>The shape a host's ledger arrives in, read back by name rather than by position.</summary>
+    /// <param name="Legs">Each leg's line.</param>
+    /// <param name="RunDirectory">Where the host's own run keeps its records, when it got that far.</param>
     private sealed record RemoteLedger(
-        [property: JsonPropertyName("legs")] IReadOnlyList<RemoteLedgerLeg>? Legs);
+        [property: JsonPropertyName("legs")] IReadOnlyList<RemoteLedgerLeg>? Legs,
+        [property: JsonPropertyName("runDirectory")] string? RunDirectory = null);
 
     /// <summary>One leg's line of a host's ledger.</summary>
     private sealed record RemoteLedgerLeg(

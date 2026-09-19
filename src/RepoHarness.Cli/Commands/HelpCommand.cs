@@ -723,7 +723,8 @@ internal static class HelpCommand
         builder.AppendLine($"exits {HarnessExit.CommandFailed}.");
         builder.AppendLine("Ignored files outside a declared evidenceRoots directory are deleted unchecked,");
         builder.AppendLine("even ones no build makes again, such as .env, and so are ignored directories");
-        builder.AppendLine("with everything in them, the history of a repository nested inside one included.");
+        builder.AppendLine("with everything in them, the history of a repository nested inside one and the");
+        builder.AppendLine("records of every run started in the worktree included.");
         builder.AppendLine("A worktree whose evidenceRoots directory holds anything is refused;");
         builder.AppendLine("--delete-evidence waives that one check and nothing else. --force skips every");
         builder.AppendLine("check and overrides a lock; whatever the worktree held is lost.");
@@ -854,7 +855,8 @@ internal static class HelpCommand
         builder.AppendLine("  .harness-config/worktrees/         ignored whole, with no placeholder; made by the");
         builder.AppendLine("                                     first create-worktree, not by init");
         builder.AppendLine("                                     (the default; worktrees.root moves it)");
-        builder.AppendLine("  .harness-config/runs/              ignored; one directory of logs per run");
+        builder.AppendLine("  .harness-config/runs/              ignored; one directory of records per run, in");
+        builder.AppendLine("                                     the tree that ran it");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");
         builder.AppendLine($"  {AnchorSettings.DefaultPendingAnchorsPath}");
         builder.AppendLine("                                     tracked; live anchors (anchors.pendingAnchorsPath)");
@@ -868,11 +870,13 @@ internal static class HelpCommand
         builder.AppendLine("init adds these rules to .gitignore inside a marked block, replacing that");
         builder.AppendLine("block on later runs and leaving every other rule untouched.");
         builder.AppendLine();
-        builder.AppendLine("Ignored state lives only in the main checkout. A worktree receives the tracked");
-        builder.AppendLine("part of .harness-config through git but never the ignored part, so connection");
-        builder.AppendLine("data and the run lock resolve back to the originating checkout. Action files");
-        builder.AppendLine("are tracked, so a worktree has its own and a runner acts on the tree it was");
-        builder.AppendLine("asked about.");
+        builder.AppendLine("Ignored state lives in the main checkout. A worktree receives the tracked part of");
+        builder.AppendLine(".harness-config through git but never the ignored part, so connection data and the");
+        builder.AppendLine("run lock resolve back to the originating checkout. A run's records are the");
+        builder.AppendLine("exception: they belong to the tree that ran it, so a run started inside a worktree");
+        builder.AppendLine("writes them there, and build, test and run name the directory in their output and");
+        builder.AppendLine("as runDirectory in --json. Action files are tracked, so a worktree has its own and a");
+        builder.AppendLine("runner acts on the tree it was asked about.");
 
         return builder.ToString();
     }

@@ -128,7 +128,8 @@ public sealed class LegRunService(
         {
             var nothing = LegRunPlan.NothingRuns(skipped);
 
-            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? []);
+            // Before any run exists: there is no directory to name.
+            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? [], runDirectory: null);
         }
 
         var runId = RunId.New();
@@ -155,7 +156,8 @@ public sealed class LegRunService(
                 held,
                 [.. skipped, .. placed.Select(leg => new LegEntry { Leg = leg.Name, Verdict = LegVerdict.LogHeld, Detail = held, Emulated = leg.Emulated })],
                 factor,
-                []);
+                [$"logs: {runDirectory}"],
+                runDirectory);
         }
 
         // Trees another run holds, by tree: a verdict for the legs that need one, as a variant
@@ -200,10 +202,17 @@ public sealed class LegRunService(
                 // already knew. The exit code is still the refusal's own.
                 var reached = ledger.Build(factor);
 
-                return Stopped(request, ex.ExitCode, ex.Message, ledger.Entries, factor, [.. reached.Render(), $"logs: {runDirectory}"]);
+                return Stopped(
+                    request,
+                    ex.ExitCode,
+                    ex.Message,
+                    ledger.Entries,
+                    factor,
+                    [.. reached.Render(), .. Logs(runDirectory, reached, placed)],
+                    runDirectory);
             }
 
-            return Report(commandName, context, ledger, execution, runDirectory, request.Json);
+            return Report(commandName, context, ledger, execution, runDirectory, placed, request.Json);
         }
         finally
         {
@@ -287,6 +296,9 @@ public sealed class LegRunService(
     /// <param name="entries">The legs' lines so far.</param>
     /// <param name="factor">The duration warning factor the ledger is built with.</param>
     /// <param name="details">What the table form says beneath the line.</param>
+    /// <param name="runDirectory">
+    /// Where the run keeps its records, once it has a directory; <see langword="null"/> before.
+    /// </param>
     /// <remarks>
     /// Asked for data, the ledger is the whole of standard output whatever ended the run: the document,
     /// with the code and the line the process ends on. Written as text instead - a table, a list of
@@ -299,10 +311,29 @@ public sealed class LegRunService(
         string message,
         IReadOnlyList<LegEntry> entries,
         double factor,
-        IReadOnlyList<string> details)
+        IReadOnlyList<string> details,
+        string? runDirectory)
         => request.Json
-            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message)] }
+            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message, runDirectory)] }
             : CommandOutcome.Failed(exitCode, message, details);
+
+    /// <summary>
+    /// Where a run's records are, as its text form says it: this run's directory, then the one each
+    /// leg another host ran keeps there, since a host runs a leg under a run of its own.
+    /// </summary>
+    private static IEnumerable<string> Logs(string runDirectory, LedgerReport report, IReadOnlyList<PlacedLeg> placed)
+    {
+        yield return $"logs: {runDirectory}";
+
+        foreach (var line in report.Lines.Where(line => line.RunDirectory is { Length: > 0 }))
+        {
+            var host = placed.FirstOrDefault(leg => leg.Name == line.Leg)?.Host.Host.ToString();
+
+            yield return host is null
+                ? $"logs of {line.Leg}: {line.RunDirectory}"
+                : $"logs of {line.Leg} on {host}: {line.RunDirectory}";
+        }
+    }
 
     private async Task<LegEntry?> RunLegAsync(
         HarnessContext context,
@@ -405,6 +436,7 @@ public sealed class LegRunService(
         LegLedger ledger,
         LegExecution execution,
         string runDirectory,
+        IReadOnlyList<PlacedLeg> placed,
         bool json)
     {
         var report = ledger.Build(context.Config.Defaults.DurationWarningFactor);
@@ -419,12 +451,13 @@ public sealed class LegRunService(
         {
             return new CommandOutcome(exitCode, message)
             {
-                Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
+                Data = [report.ToJson(execution.Cancelled, execution.Unfinished, runDirectory)],
                 Quiet = true,
             };
         }
 
-        var details = new List<string>(report.Render()) { $"logs: {runDirectory}" };
+        var details = new List<string>(report.Render());
+        details.AddRange(Logs(runDirectory, report, placed));
 
         if (execution.Unfinished.Count > 0)
         {

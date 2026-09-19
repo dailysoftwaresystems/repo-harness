@@ -112,7 +112,8 @@ public sealed class RunSegmentRecord
 /// <remarks>
 /// The record lives beside the run's logs, under the run's own directory, so it travels with the
 /// evidence it describes: a record kept elsewhere outlives the logs that would explain it, and a
-/// resumed run then skips units whose output nobody can find.
+/// resumed run then skips units whose output nobody can find. That directory is in the tree the run
+/// was started from, so a run is resumed from that same tree.
 /// </remarks>
 public sealed class RunSegments(IFileSystem fileSystem, IHarnessOutput output)
 {

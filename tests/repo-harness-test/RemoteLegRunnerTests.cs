@@ -53,6 +53,35 @@ public sealed class RemoteLegRunnerTests
         Assert.Equal(TimeSpan.FromSeconds(2.1), entry.CommandTime);
     }
 
+    /// <summary>
+    /// A host runs the leg under a run of its own, and says where that run keeps its records: the
+    /// leg's line carries it, so the caller is told where its records are as for a leg run here. A
+    /// host that says nothing about it names nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("/home/dev/repo/.harness-config/runs/20260919-101500-0a1b2c3d")]
+    [InlineData(null)]
+    public async Task TheHostsOwnRunDirectory_IsCarriedOnTheLegsLine(string? runDirectory)
+    {
+        var ledger = Ledger("passed", "412 tests", 2.5, 2.1, 412);
+
+        if (runDirectory is not null)
+        {
+            ledger = ledger.Replace("\"exitCode\": 0,", $"\"exitCode\": 0,\n  \"runDirectory\": \"{runDirectory}\",", StringComparison.Ordinal);
+        }
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, ledger);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(runDirectory, entry.RunDirectory);
+    }
+
     [Fact]
     public async Task TheVerdictTheHostReached_IsTheVerdictThisRunReports()
     {
@@ -319,17 +348,7 @@ public sealed class RemoteLegRunnerTests
     private static RemoteLegRunner Runner(ScriptedHostCommands hosts)
         => new(hosts, new HarnessFactory().Output);
 
-    /// <summary>
-    /// Writes a ledger where the host writes one: standard output. Standard error carries the
-    /// protocol's completion line, so an answer written there would be read as a transport message.
-    /// </summary>
-    private static void Answer(HostCommand command, string ledger)
-    {
-        foreach (var line in ledger.Split('\n'))
-        {
-            command.OnOutputLine?.Invoke(line.TrimEnd('\r'));
-        }
-    }
+    private static void Answer(HostCommand command, string ledger) => ScriptedHostCommands.Answer(command, ledger);
 
     private static HostAgentRequest Request(HostCommand? sent)
     {

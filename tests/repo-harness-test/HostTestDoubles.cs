@@ -20,6 +20,21 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
+    /// <summary>
+    /// Writes <paramref name="output"/> where a host writes what a command it ran said: standard
+    /// output. Standard error carries the protocol's completion line, so an answer written there would
+    /// be read as a transport message.
+    /// </summary>
+    /// <param name="command">The command being answered.</param>
+    /// <param name="output">What it says, line by line.</param>
+    public static void Answer(HostCommand command, string output)
+    {
+        foreach (var line in output.Split('\n'))
+        {
+            command.OnOutputLine?.Invoke(line.TrimEnd('\r'));
+        }
+    }
+
     /// <summary>What the ssh shell probe raises instead of answering, when set: ssh that would not start.</summary>
     public Exception? ShellProbeRaises { get; set; }
 
@@ -251,12 +266,15 @@ internal static class HostDoubles
         return platform;
     }
 
-    /// <summary>A loader that hands every command <paramref name="config"/>, for a repository at <paramref name="root"/>.</summary>
-    public static IHarnessContextLoader Loader(HarnessConfig config, string root)
+    /// <summary>
+    /// A loader that hands every command <paramref name="config"/>, for a tree at <paramref name="root"/>:
+    /// a worktree of the main checkout at <paramref name="mainCheckoutRoot"/> when one is given.
+    /// </summary>
+    public static IHarnessContextLoader Loader(HarnessConfig config, string root, string? mainCheckoutRoot = null)
     {
         var loader = Substitute.For<IHarnessContextLoader>();
         loader.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, root), config)));
+            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, mainCheckoutRoot ?? root), config)));
         return loader;
     }
 

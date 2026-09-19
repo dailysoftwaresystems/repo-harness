@@ -3,6 +3,7 @@ using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Processes;
@@ -335,6 +336,174 @@ public sealed class LegRunServiceTests
         Assert.StartsWith("local: 'rh-probe' is not installed there", verdicts["here"].Detail, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A run names where its records are - as 'logs:' in the text, as runDirectory in --json - so a
+    /// caller never works out which tree a run wrote into. Run in a worktree, they are in the
+    /// worktree: kept in the main checkout, a lane's records were out of the lane's reach.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ARun_NamesWhereItsRecordsAre_InTheTreeThatRanIt(bool json, bool inWorktree)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var tree = inWorktree ? temp.Combine("lane") : temp.Path;
+
+        var outcome = await OutcomeAsync(
+            temp,
+            harness,
+            OneLeg(harness),
+            SshAndLocal(harness),
+            new LegRunRequest(tree, null, Json: json) { Workload = LegWorkload.Copy },
+            tree: tree);
+
+        var directory = RunDirectoryOf(outcome, json);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.StartsWith(Path.Combine(tree, ".harness-config", "runs") + Path.DirectorySeparatorChar, directory, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(directory), $"the run named '{directory}', which it never made");
+    }
+
+    /// <summary>
+    /// A run ended by a refusal after it made its directory still names it, and so does one refused
+    /// because another run owns its log path: the text form of that one named nowhere at all.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ARunStoppedAfterItHadADirectory_StillNamesIt(bool json, bool logHeld)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        var outcome = await OutcomeAsync(
+            temp,
+            harness,
+            OneLeg(harness),
+            SshAndLocal(harness),
+            new LegRunRequest(temp.Path, null, Json: json) { Workload = LegWorkload.Copy },
+            work: _ => throw new HarnessException(HarnessExit.Refused, "the leg's configuration cannot be satisfied"),
+            logs: logHeld ? new LogOwnership(new LogsOwnedElsewhere(harness.FileSystem), harness.Output, harness.Identity) : null);
+
+        Assert.Equal(logHeld ? LegExit.LogHeld : HarnessExit.Refused, outcome.ExitCode);
+        Assert.StartsWith(Path.Combine(temp.Path, ".harness-config", "runs") + Path.DirectorySeparatorChar, RunDirectoryOf(outcome, json), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A leg another host ran was run there under a run of its own: its records are in that host's
+    /// directory, which the run names beside its own, in the text and on the leg's JSON line.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ALegAnotherHostRan_NamesThatHostsOwnDirectory(bool json)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        const string There = HostTree + "/.harness-config/runs/20260919-101500-0a1b2c3d";
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            ScriptedHostCommands.Answer(
+                command,
+                $$"""{"runDirectory": "{{There}}", "legs": [{"leg": "arm", "verdict": "passed", "durationSeconds": 1, "commandSeconds": 1}]}""");
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var outcome = await OutcomeAsync(
+            temp,
+            harness,
+            TwoLegs(harness),
+            SshAndLocal(harness),
+            new LegRunRequest(temp.Path, null, Json: json) { Workload = LegWorkload.Copy },
+            hosts: hosts);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+
+        if (json)
+        {
+            using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
+            var arm = document.RootElement.GetProperty("legs").EnumerateArray().Single(leg => leg.GetProperty("leg").GetString() == "arm");
+
+            Assert.Equal(There, arm.GetProperty("runDirectory").GetString());
+        }
+        else
+        {
+            Assert.Contains($"logs of arm on ssh {HostName}: {There}", outcome.Details ?? [], StringComparer.Ordinal);
+        }
+    }
+
+    /// <summary>A run no leg could be placed for made no directory, and names none.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARunNoLegCanTake_NamesNoDirectory(bool json)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var elsewhere = harness.Platform.PlatformKey == "linux" ? "macos" : "linux";
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs = { ["elsewhere"] = HostDoubles.Leg(elsewhere, "x86_64") },
+        };
+
+        var outcome = await OutcomeAsync(
+            temp, harness, config, SshAndLocal(harness), new LegRunRequest(temp.Path, null, Json: json) { Workload = LegWorkload.Copy });
+
+        Assert.NotEqual(HarnessExit.Success, outcome.ExitCode);
+
+        if (json)
+        {
+            using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
+            Assert.False(document.RootElement.TryGetProperty("runDirectory", out _));
+        }
+        else
+        {
+            Assert.DoesNotContain(outcome.Details ?? [], line => line.StartsWith("logs:", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>A leg on this machine.</summary>
+    private static HarnessConfig OneLeg(HarnessFactory harness) => new()
+    {
+        BuildConfigs = { ["debug"] = new BuildConfiguration() },
+        Legs = { ["native"] = HostDoubles.Leg(harness.Platform.PlatformKey, harness.Platform.Processor) },
+    };
+
+    /// <summary>The run directory an outcome names, read the way its caller reads it.</summary>
+    private static string RunDirectoryOf(CommandOutcome outcome, bool json)
+    {
+        if (json)
+        {
+            using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
+            return document.RootElement.GetProperty("runDirectory").GetString()!;
+        }
+
+        var logs = Assert.Single(outcome.Details ?? [], line => line.StartsWith("logs: ", StringComparison.Ordinal));
+        return logs["logs: ".Length..];
+    }
+
+    /// <summary>The real file system, except that every log path reads as owned by a run on another machine.</summary>
+    private sealed class LogsOwnedElsewhere(IFileSystem inner) : PassThroughFileSystem(inner)
+    {
+        private static readonly string Owner = JsonSerializer.Serialize(
+            new LogOwner("another-machine", 4242, null, "20260101-000000-00000000", DateTimeOffset.UnixEpoch),
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+
+        public override bool FileExists(string path)
+            => path.EndsWith(LogOwnership.OwnerSuffix, StringComparison.Ordinal) || base.FileExists(path);
+
+        public override string ReadAllText(string path)
+            => path.EndsWith(LogOwnership.OwnerSuffix, StringComparison.Ordinal) ? Owner : base.ReadAllText(path);
+    }
+
     /// <summary>A leg on this machine and one on the ssh host.</summary>
     private static HarnessConfig TwoLegs(HarnessFactory harness) => new()
     {
@@ -380,7 +549,11 @@ public sealed class LegRunServiceTests
             leg => (leg.GetProperty("verdict").GetString(), leg.GetProperty("detail").GetString()));
     }
 
-    /// <summary>Runs the command over <paramref name="config"/>, a leg on this machine passing, and returns how it ended.</summary>
+    /// <summary>
+    /// Runs the command over <paramref name="config"/>, a leg on this machine passing unless
+    /// <paramref name="work"/> says otherwise, and returns how it ended. The tree is the repository's
+    /// root unless <paramref name="tree"/> names a worktree of it.
+    /// </summary>
     private static async Task<CommandOutcome> OutcomeAsync(
         TempDirectory temp,
         HarnessFactory harness,
@@ -390,19 +563,23 @@ public sealed class LegRunServiceTests
         RunLock? runLock = null,
         ISyncService? sync = null,
         Action<PlacedLeg>? ran = null,
-        IProcessRunner? keepAwake = null)
+        IProcessRunner? keepAwake = null,
+        string? tree = null,
+        Func<LegWork, LegEntry>? work = null,
+        LogOwnership? logs = null,
+        ScriptedHostCommands? hosts = null)
     {
-        var loader = HostDoubles.Loader(config, temp.Path);
+        var loader = HostDoubles.Loader(config, tree ?? temp.Path, temp.Path);
 
         var service = new LegRunService(
             loader,
             new LegsService(loader, inspector, harness.Output),
             new LegExecutor(harness.Platform, harness.Output),
             runLock ?? new RunLock(harness.FileSystem, harness.Output, harness.Identity),
-            new LogOwnership(harness.FileSystem, harness.Output, harness.Identity),
+            logs ?? new LogOwnership(harness.FileSystem, harness.Output, harness.Identity),
             sync ?? Substitute.For<ISyncService>(),
             Substitute.For<ISyncTransportFactory>(),
-            new RemoteLegRunner(new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
+            new RemoteLegRunner(hosts ?? new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
             new KeepAwake(keepAwake ?? new HeldProcesses(), harness.Output),
             harness.Platform,
             harness.Output);
@@ -410,10 +587,10 @@ public sealed class LegRunServiceTests
         return await service.RunAsync(
             "test",
             request,
-            (work, _) =>
+            (leg, _) =>
             {
-                ran?.Invoke(work.Leg);
-                return Task.FromResult(new LegEntry { Leg = work.Leg.Name, Verdict = LegVerdict.Passed });
+                ran?.Invoke(leg.Leg);
+                return Task.FromResult(work?.Invoke(leg) ?? new LegEntry { Leg = leg.Leg.Name, Verdict = LegVerdict.Passed });
             },
             TestContext.Current.CancellationToken);
     }

@@ -246,10 +246,18 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
         => Path.Combine(MainHarnessDirectory, RunnerDirectoryName, RunnerSecretsDirectoryName);
 
     /// <summary>
-    /// Where a run's logs live, resolved against the main checkout so that two runs started from
-    /// different trees of one repository cannot write the same file without seeing each other.
+    /// Where a run's records live: in the tree that ran it, a worktree's own included, so a lane
+    /// reads what it judged without leaving its tree.
     /// </summary>
-    public string RunsDirectory => Path.Combine(MainHarnessDirectory, RunsDirectoryName);
+    /// <remarks>
+    /// Resolved against the main checkout instead, a worktree's runs landed beside the main
+    /// checkout's, where a caller confined to the worktree could not reach them. Nothing is shared
+    /// across runs here: each writes only a directory named by its own id, which no other run can
+    /// hold. What two runs from different trees do contend over is the lock, which stays in the main
+    /// checkout (<see cref="LockFile"/>). Ignored like the rest of the harness's state, so no sync
+    /// carries it, and deleting a worktree deletes its records with it.
+    /// </remarks>
+    public string RunsDirectory => Path.Combine(HarnessDirectory, RunsDirectoryName);
 
     /// <summary>One run's directory, named by its id.</summary>
     /// <param name="runId">The run's id.</param>

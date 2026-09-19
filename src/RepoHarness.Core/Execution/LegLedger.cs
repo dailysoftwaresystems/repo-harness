@@ -75,6 +75,13 @@ public sealed record LegEntry
     /// </summary>
     public IReadOnlyList<string> TimingNotes { get; init; } = [];
 
+    /// <summary>
+    /// Where this leg's records are when another host ran it: that host's own run directory, since a
+    /// host runs a leg under a run of its own. Null for a leg this machine ran, whose records are in
+    /// this run's directory.
+    /// </summary>
+    public string? RunDirectory { get; init; }
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }

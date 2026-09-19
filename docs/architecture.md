@@ -978,6 +978,22 @@ while their sources are being replaced. A lock is released only by the run that 
   and the work's verdict stands. The entry names a process that has ended, and is reclaimed as
   a dead holder's is.
 
+### Where a run's records live
+
+A run's records - its logs, and what it has already completed - are kept in
+`.harness-config/runs/<run id>/` of **the tree that ran it**, a worktree's own included, so a
+lane reads what it judged without leaving its tree. Kept in the main checkout instead, as they
+once were, a worktree's runs landed beside the main checkout's. Nothing in `runs/` is shared
+between runs: each writes only the directory named by its own id. What two runs from different
+trees contend over is the lock above, which stays in the main checkout.
+
+The directory is ignored, so no sync carries it; deleting a worktree deletes its runs with it;
+and a run is resumed from the tree it was started in. A caller never works the directory out:
+`build`, `test` and `run` name it on every exit that created one, as `logs: <directory>` and as
+`runDirectory` in `--json`. A leg another host ran was run there under a run of its own, and its
+line names that host's directory, as `logs of <leg> on <host>: <directory>` and as the leg's own
+`runDirectory`.
+
 ## Syncing a tree
 
 `sync` puts a host's copy of the repository in step with this tree. It is the same code path
@@ -1213,6 +1229,10 @@ mac-clang-release     passed           12m40s  412 tests; timings suspect: the h
 lin-gcc-release       inputs-moved      3m51s  2 inputs changed: config/c.lang.json, ...
 vps-arm64-gcc-rel     skipped-unavailable      ssh vps: ssh could not connect
 ```
+
+Beneath it, `logs:` names where the run's records are, and each leg another host ran names
+that host's own; `--json` carries the same as `runDirectory`, at the top and on such a leg (see
+"Where a run's records live").
 
 ## Exit codes
 

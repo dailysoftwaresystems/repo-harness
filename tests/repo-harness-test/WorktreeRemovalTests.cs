@@ -570,50 +570,14 @@ public sealed class WorktreeRemovalTests
     }
 
     /// <summary>The real file system, except that git's worktree records cannot be listed.</summary>
-    private sealed class RecordHidingFileSystem(IFileSystem inner) : IFileSystem
+    private sealed class RecordHidingFileSystem(IFileSystem inner) : PassThroughFileSystem(inner)
     {
         private static readonly string Records = Path.Combine(".git", "worktrees");
 
-        public bool FileExists(string path) => inner.FileExists(path);
-
-        public bool DirectoryExists(string path) => inner.DirectoryExists(path);
-
-        public string ResolveLinks(string path) => inner.ResolveLinks(path);
-
-
-        public Stream OpenRead(string path) => inner.OpenRead(path);
-
-        public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
-
-
-        public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
-
-            => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
-
-        public void CreateDirectory(string path) => inner.CreateDirectory(path);
-
-        public void DeleteFile(string path) => inner.DeleteFile(path);
-
-        public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
-        public void CopyFile(string source, string destination, bool overwrite = false)
-            => inner.CopyFile(source, destination, overwrite);
-
-        public void DeleteDirectory(string path) => inner.DeleteDirectory(path);
-
-        public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
-
-        public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
-
-        public IEnumerable<string> EnumerateDirectories(string path)
+        public override IEnumerable<string> EnumerateDirectories(string path)
             => Path.TrimEndingDirectorySeparator(path).EndsWith(Records, StringComparison.OrdinalIgnoreCase)
                 ? []
-                : inner.EnumerateDirectories(path);
-
-        public string ReadAllText(string path) => inner.ReadAllText(path);
-
-        public void WriteAllTextAtomic(string path, string contents) => inner.WriteAllTextAtomic(path, contents);
-
-        public void ProtectSecretFile(string path) => inner.ProtectSecretFile(path);
+                : base.EnumerateDirectories(path);
     }
 
     /// <summary>Replaces the worktrees directory of <paramref name="temp"/> with a link to <paramref name="target"/>.</summary>
@@ -669,46 +633,10 @@ public sealed class WorktreeRemovalTests
 }
 
 /// <summary>The real file system, except that a directory cannot be deleted, as while another program holds a file in it open.</summary>
-internal sealed class UndeletableFileSystem(IFileSystem inner) : IFileSystem
+internal sealed class UndeletableFileSystem(IFileSystem inner) : PassThroughFileSystem(inner)
 {
-    public bool FileExists(string path) => inner.FileExists(path);
-
-    public bool DirectoryExists(string path) => inner.DirectoryExists(path);
-
-    public string ResolveLinks(string path) => inner.ResolveLinks(path);
-
-
-    public Stream OpenRead(string path) => inner.OpenRead(path);
-
-    public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
-
-
-    public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
-
-        => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
-
-    public void CreateDirectory(string path) => inner.CreateDirectory(path);
-
-    public void DeleteFile(string path) => inner.DeleteFile(path);
-
-    public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
-    public void CopyFile(string source, string destination, bool overwrite = false)
-        => inner.CopyFile(source, destination, overwrite);
-
-    public void DeleteDirectory(string path)
+    public override void DeleteDirectory(string path)
         => throw new IOException("The process cannot access the file because it is being used by another process.");
-
-    public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
-
-    public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
-
-    public IEnumerable<string> EnumerateDirectories(string path) => inner.EnumerateDirectories(path);
-
-    public string ReadAllText(string path) => inner.ReadAllText(path);
-
-    public void WriteAllTextAtomic(string path, string contents) => inner.WriteAllTextAtomic(path, contents);
-
-    public void ProtectSecretFile(string path) => inner.ProtectSecretFile(path);
 }
 
 /// <summary>

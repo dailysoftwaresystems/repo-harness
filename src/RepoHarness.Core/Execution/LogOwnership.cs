@@ -182,6 +182,14 @@ public sealed class LogOwnership(IFileSystem fileSystem, IHarnessOutput output, 
                 DateTimeOffset.UtcNow);
 
             Written(file, () => _fileSystem.WriteAllTextAtomic(file, JsonSerializer.Serialize(owner, JsonOptions) + "\n"));
+
+            // Made as it is claimed: a run names this directory as where its records are, and one
+            // whose legs wrote nothing would otherwise have named a directory that did not exist.
+            MachineWideFile.Written(
+                $"The log directory '{logDirectory}'",
+                "Until it can be, the run has nowhere to keep its records.",
+                () => _fileSystem.CreateDirectory(logDirectory));
+
             return new LogClaim(true, owner, file);
         });
 
