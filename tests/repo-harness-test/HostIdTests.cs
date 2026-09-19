@@ -19,6 +19,26 @@ public sealed class HostIdTests
         }
     }
 
+    /// <summary>
+    /// Two ids for one host are one host however they are compared, ignoring case as configuration
+    /// keys do, and ids for different hosts are not.
+    /// </summary>
+    [Fact]
+    public void TwoIdsForOneHost_AreOneHost_ByOperatorAsByEquals()
+    {
+        var one = HostId.Wsl("Example-Linux");
+        var again = HostId.Wsl("example-linux");
+        HostId? none = null;
+
+        Assert.True(one == again);
+        Assert.False(one != again);
+        Assert.True(one.Equals(again));
+        Assert.False(one == HostId.Ssh("Example-Linux"));
+        Assert.True(one != HostId.Local);
+        Assert.False(one == none);
+        Assert.True(none == null);
+    }
+
     /// <summary>What names no host in the one spelling hosts have is no host, never a guess at one.</summary>
     [Theory]
     [InlineData(null)]

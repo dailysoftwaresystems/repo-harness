@@ -364,6 +364,73 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         };
     }
 
+    public async Task<IReadOnlyList<IgnoreDecision>> ExplainIgnoredAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        if (paths.Count == 0)
+        {
+            return [];
+        }
+
+        // NUL-separated both ways, so a path or a rule may hold anything a line can; and every path
+        // answered, matched or not, so the answer lines up with the question.
+        var result = await RunForBytesAsync(
+                directory,
+                ["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"],
+                cancellationToken,
+                string.Join('\0', paths) + '\0')
+            .ConfigureAwait(false);
+
+        // 0 when some path matched a rule and 1 when none did; anything else is git unable to answer,
+        // and folded into "nothing matched" it would report every managed path as unruled.
+        if (result.TimedOut || result.ExitCode is not (0 or 1))
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Could not ask git which rules decide {paths.Count} path(s) in '{directory}': {result.FailureMessage}");
+        }
+
+        // Four fields to a path - source, line, pattern, path - and nothing after the last NUL.
+        var fields = result.StandardOutput.Split('\0');
+
+        if (fields.Length != (paths.Count * 4) + 1)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git answered which rules decide {paths.Count} path(s) in a form this build cannot read.");
+        }
+
+        var decisions = new List<IgnoreDecision>(paths.Count);
+
+        for (var index = 0; index < paths.Count; index++)
+        {
+            var source = GitName.FromBytes(fields[index * 4]).Quoted;
+            var pattern = GitName.FromBytes(fields[(index * 4) + 2]).Quoted;
+            var path = GitName.FromBytes(fields[(index * 4) + 3]).Text;
+
+            if (!string.Equals(path, paths[index], StringComparison.Ordinal))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git answered about '{path}' where it was asked about '{paths[index]}'.");
+            }
+
+            decisions.Add(source.Length == 0
+                ? new IgnoreDecision(path, null, 0, null)
+                : new IgnoreDecision(
+                    path,
+                    source,
+                    int.Parse(fields[(index * 4) + 1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture),
+                    pattern));
+        }
+
+        return decisions;
+    }
+
     public async Task<string?> ResolveCommitAsync(
         string directory,
         string reference,

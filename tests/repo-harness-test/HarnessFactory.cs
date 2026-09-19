@@ -56,7 +56,7 @@ public sealed class HarnessFactory
         // somewhere, which is not what any of these tests are about.
         ToolProvisionService = Substitute.For<IToolProvisionService>();
         ToolProvisionService
-            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new ToolProvisionReport([])));
 
         InitService = new InitService(
@@ -68,6 +68,7 @@ public sealed class HarnessFactory
             VerifyGitService,
             AnchorRegistryLocator,
             ToolProvisionService,
+            new ManagedIgnoreCheck(GitClient, FileSystem),
             Platform);
     }
 

@@ -7,6 +7,7 @@ using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
+using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Tests;
 
@@ -599,6 +600,62 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal("passed", leg.GetProperty("verdict").GetString());
         Assert.Equal(["fetch"], leg.GetProperty("skippedSteps").EnumerateArray().Select(step => step.GetString()));
+    }
+
+    /// <summary>
+    /// --dry-run reaches the leg's host and installs nothing: the tool it would install is named
+    /// with the command that would run, and the answer is still "not provisioned". The install
+    /// declared here is harmless, so a dry run that ran it anyway fails this rather than a machine.
+    /// </summary>
+    [Fact]
+    public async Task InstallMissingTools_DryRun_NamesTheCommand_AndRunsNothing()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs = { ["native"] = new LegConfig { Os = harness.Platform.PlatformKey, Processor = harness.Platform.Processor, Config = "debug" } },
+            Tools = { new ToolConfig { Name = "dssharness-absent-tool", Install = { ["all"] = new ToolInstall { Command = ["dotnet", "--version"] } } } },
+        });
+
+        var result = await CliRunner.RunAsync(["install-missing-tools", "--dry-run", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(ToolsExit.NotProvisioned, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var tool = Assert.Single(Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("tools").EnumerateArray());
+
+        Assert.True(document.RootElement.GetProperty("dryRun").GetBoolean());
+        Assert.Equal("would install", tool.GetProperty("state").GetString());
+        Assert.Equal("would run 'dotnet --version'", tool.GetProperty("detail").GetString());
+    }
+
+    /// <summary>
+    /// init installs tools only when given --install-tools, and otherwise says how.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Init_InstallsTools_OnlyWithTheFlag(bool installTools)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs = { ["native"] = new LegConfig { Os = harness.Platform.PlatformKey, Processor = harness.Platform.Processor, Config = "debug" } },
+        });
+
+        var result = await CliRunner.RunAsync(installTools ? ["init", "--install-tools", "-C", temp.Path] : ["init", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Equal(installTools, result.StandardOutput.Contains("tools   native on local", StringComparison.Ordinal));
+        Assert.Equal(!installTools, result.StandardOutput.Contains("tools   not checked", StringComparison.Ordinal));
     }
 
     /// <summary>

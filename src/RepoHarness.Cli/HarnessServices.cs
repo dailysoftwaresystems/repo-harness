@@ -58,6 +58,7 @@ internal static class HarnessServices
         services.AddSingleton<IRepositoryLocator, RepositoryLocator>();
         services.AddSingleton<IConfigStore, JsonConfigStore>();
         services.AddSingleton<IGitIgnoreManager, GitIgnoreManager>();
+        services.AddSingleton<ManagedIgnoreCheck>();
         services.AddSingleton<IProjectDetector, ProjectDetector>();
         services.AddSingleton<IPathBudget, PathBudget>();
         services.AddSingleton<IHarnessContextLoader, HarnessContextLoader>();

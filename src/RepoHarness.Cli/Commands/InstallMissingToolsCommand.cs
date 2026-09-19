@@ -20,6 +20,11 @@ internal static class InstallMissingToolsCommand
         Description = "Write what each leg's host has, and what was installed there, as JSON.",
     };
 
+    private static readonly Option<bool> DryRunOption = new("--dry-run")
+    {
+        Description = "Reach and ask every host as usual, and install nothing: name each command that would run, sudo and all, without asking for a password.",
+    };
+
     internal static Command Create()
     {
         var command = new Command(
@@ -29,6 +34,7 @@ internal static class InstallMissingToolsCommand
 
         command.Options.Add(LegsOption);
         command.Options.Add(JsonOption);
+        command.Options.Add(DryRunOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -49,7 +55,7 @@ internal static class InstallMissingToolsCommand
             using var document = json ? context.Get<IHarnessOutput>().DataOnly() : null;
 
             var report = await context.Get<IToolProvisionService>()
-                .ProvisionAsync(context.Directory, legs, cancellationToken)
+                .ProvisionAsync(context.Directory, legs, arguments.GetValue(DryRunOption), cancellationToken)
                 .ConfigureAwait(false);
 
             return ToolProvisionReports.Render(report, json);

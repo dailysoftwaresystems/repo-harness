@@ -665,6 +665,9 @@ internal sealed class InterceptingGitClient(IGitClient inner) : IGitClient
     /// <summary>A failure every worktree listing throws instead of asking git.</summary>
     public HarnessException? ListWorktreesFailure { get; init; }
 
+    /// <summary>Replaces what git said decides each path, once it has said it, given the directory asked in.</summary>
+    public Func<string, IReadOnlyList<IgnoreDecision>, IReadOnlyList<IgnoreDecision>>? AfterExplainIgnored { get; init; }
+
     public Task<int> CountRepositoryCommitsAsync(
         string gitDirectory,
         IReadOnlyList<string> revisions,
@@ -736,6 +739,17 @@ internal sealed class InterceptingGitClient(IGitClient inner) : IGitClient
 
     public Task<bool> IsIgnoredAsync(string directory, string path, CancellationToken cancellationToken = default)
         => Call(() => inner.IsIgnoredAsync(directory, path, Token(cancellationToken)));
+
+    public Task<IReadOnlyList<IgnoreDecision>> ExplainIgnoredAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default)
+        => Call(async () =>
+        {
+            var decisions = await inner.ExplainIgnoredAsync(directory, paths, Token(cancellationToken));
+
+            return AfterExplainIgnored is { } replace ? replace(directory, decisions) : decisions;
+        });
 
     public Task<string?> ResolveCommitAsync(string directory, string reference, CancellationToken cancellationToken = default)
         => Call(() => inner.ResolveCommitAsync(directory, reference, Token(cancellationToken)));

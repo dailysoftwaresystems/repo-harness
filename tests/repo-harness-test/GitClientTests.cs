@@ -570,6 +570,53 @@ public sealed class GitClientTests
         await Assert.ThrowsAsync<HarnessException>(() =>
             new HarnessFactory().GitClient.IsIgnoredAsync(temp.Path, ".secret", TestContext.Current.CancellationToken));
     }
+
+    /// <summary>
+    /// git names the rule deciding each path, in the order asked, whether or not the path exists: one
+    /// that ignores, a re-include, a directory above the path - which no re-include below it reaches -
+    /// and none at all.
+    /// </summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_NamesTheRuleDecidingEachPath_InTheOrderAsked()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, token);
+        temp.WriteFile(".gitignore", "*.log\n!keep.log\nout/\n!out/kept.txt\n");
+
+        var decisions = await harness.GitClient.ExplainIgnoredAsync(
+            temp.Path,
+            ["a.log", "keep.log", "out/kept.txt", "src/main.c"],
+            token);
+
+        Assert.Equal(
+            [
+                new IgnoreDecision("a.log", ".gitignore", 1, "*.log"),
+                new IgnoreDecision("keep.log", ".gitignore", 2, "!keep.log"),
+                new IgnoreDecision("out/kept.txt", ".gitignore", 3, "out/"),
+                new IgnoreDecision("src/main.c", null, 0, null),
+            ],
+            decisions);
+        Assert.Equal([true, false, true, false], decisions.Select(decision => decision.Ignored));
+    }
+
+    /// <summary>
+    /// A question git could not answer is refused, never read as "no rule": every managed path would
+    /// then read as ruled by nothing.
+    /// </summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_Throws_WhenGitCannotAnswer()
+    {
+        using var temp = new TempDirectory();
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() =>
+            new HarnessFactory().GitClient.ExplainIgnoredAsync(temp.Path, [".secret"], TestContext.Current.CancellationToken));
+
+        // Refused for git's own failure, naming it - never for an answer read in a form it was not.
+        Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+        Assert.StartsWith("Could not ask git which rules decide 1 path(s)", refusal.Message, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>What the git client sends to git, and how it reads answers, against scripted results.</summary>

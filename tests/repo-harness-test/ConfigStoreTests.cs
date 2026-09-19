@@ -1200,6 +1200,77 @@ public sealed class ConfigStoreTests
         Assert.Contains("never be checked anywhere", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A tool may be scoped narrower than an operating system: to toolchains, legs or leg sets,
+    /// processors and emulators, each read as written.
+    /// </summary>
+    [Fact]
+    public void ATool_MayNameTheToolchainsLegsProcessorsAndEmulatorsItIsNeededFor()
+    {
+        var tool = Assert.Single(LoadValid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "emulators": { "qemu-arm64": {{QemuArm64}} },
+              "legs": { "arm": { "os": "linux", "processor": "arm64", "config": "debug", "toolchain": "gcc", "emulator": "qemu-arm64" } },
+              "legSets": { "gate": ["arm"] },
+              "tools": [ { "name": "qemu-aarch64", "toolchains": ["gcc"], "legs": ["gate"], "processors": ["arm64"], "emulators": ["qemu-arm64"] } ]
+            }
+            """).Tools);
+
+        Assert.Equal(["gcc"], tool.Toolchains);
+        Assert.Equal(["gate"], tool.Legs);
+        Assert.Equal(["arm64"], tool.Processors);
+        Assert.Equal(["qemu-arm64"], tool.Emulators);
+    }
+
+    /// <summary>
+    /// A scope naming nothing declared is refused naming it: read as no scope, the tool would be
+    /// needed everywhere, and read as an empty one, nowhere.
+    /// </summary>
+    [Theory]
+    [InlineData("\"toolchains\": [\"msvcc\"]", "tool 'cl' names toolchain 'msvcc', which is not declared under toolchains")]
+    [InlineData("\"legs\": [\"wn\"]", "tool 'cl' names leg 'wn', which is neither a leg nor a leg set")]
+    [InlineData("\"emulators\": [\"qemu\"]", "tool 'cl' names emulator 'qemu', which is not declared under emulators")]
+    [InlineData("\"processors\": [\"aarch64\"]", "tool 'cl' names processor 'aarch64', which is not a processor; expected one of")]
+    public void Load_RejectsAToolScopeThatNamesNothingDeclared(string scope, string expected)
+    {
+        var exception = LoadInvalid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "legs": { "win": { "os": "windows", "processor": "x86_64", "config": "debug" } },
+              "tools": [ { "name": "cl", {{scope}} } ]
+            }
+            """);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every scope must hold at once, so two that no one leg satisfies together cover nothing: the
+    /// tool would never be checked anywhere, which reads exactly like never having declared it.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolWhoseScopesTogetherCoverNoLeg()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "msvc": { "platforms": ["windows"] }, "gcc": { "platforms": ["linux"] } },
+              "legs": {
+                "win": { "os": "windows", "processor": "x86_64", "config": "debug", "toolchain": "msvc" },
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "gcc" }
+              },
+              "tools": [ { "name": "cl", "platforms": ["linux"], "toolchains": ["msvc"] } ]
+            }
+            """);
+
+        Assert.Contains(
+            "tool 'cl' is needed only by legs of platforms linux and toolchains msvc, and no declared leg is one, so it would never be checked anywhere",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

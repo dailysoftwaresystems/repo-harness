@@ -121,6 +121,26 @@ public interface IGitClient
     Task<bool> IsIgnoredAsync(string directory, string path, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Which rule decides each of <paramref name="paths"/> in the work tree at
+    /// <paramref name="directory"/>, whether or not the path exists or is tracked.
+    /// </summary>
+    /// <param name="directory">The work tree's root.</param>
+    /// <param name="paths">Paths relative to that root, with forward separators.</param>
+    /// <param name="cancellationToken">Stops the question.</param>
+    /// <returns>One decision per path, in the order asked.</returns>
+    /// <exception cref="HarnessException">git could not answer, or answered about other paths.</exception>
+    /// <remarks>
+    /// git's own answer rather than a reading of the rules: what a rule matches depends on its file's
+    /// directory, on every rule before and after it, and on whether a directory above the path is
+    /// already excluded, where no re-include reaches. Asked without the index, so a tracked file is
+    /// judged by the rules alone.
+    /// </remarks>
+    Task<IReadOnlyList<IgnoreDecision>> ExplainIgnoredAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// The full id of the commit <paramref name="reference"/> names, or <see langword="null"/> when it
     /// names none.
     /// </summary>

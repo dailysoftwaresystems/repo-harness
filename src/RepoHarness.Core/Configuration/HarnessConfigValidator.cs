@@ -6,6 +6,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
+using RepoHarness.Core.Tools;
 using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Core.Configuration;
@@ -880,10 +881,10 @@ public static class HarnessConfigValidator
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var legPlatforms = config.Legs.Values
-            .Select(leg => leg.Os)
-            .Where(os => !string.IsNullOrWhiteSpace(os))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        // Only a leg that names its operating system can be asked which tools it needs; one that does
+        // not is refused on its own account.
+        var legs = config.Legs
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Value.Os))
             .ToList();
 
         foreach (var tool in config.Tools)
@@ -911,17 +912,27 @@ public static class HarnessConfigValidator
                 }
             }
 
-            // A list naming only platforms no leg runs on removes the tool from every host, which
-            // reads exactly like never having declared it. Refused for the reason a buildOutput
-            // covering no leg is: a rule that applies nowhere is one the file appears to state and
-            // nothing enforces, and the spelling that causes it is a single mistyped word.
-            if (tool.Platforms.Count > 0
-                && legPlatforms.Count > 0
-                && !legPlatforms.Any(os => PlatformScope.Applies(tool.Platforms, os)))
+            RequireDeclared(tool, "toolchain", tool.Toolchains, name => config.Toolchains.ContainsKey(name), "is not declared under toolchains", problems);
+            RequireDeclared(tool, "leg", tool.Legs, name => config.Legs.ContainsKey(name) || config.LegSets.ContainsKey(name), "is neither a leg nor a leg set", problems);
+            RequireDeclared(tool, "emulator", tool.Emulators, name => config.Emulators.ContainsKey(name), "is not declared under emulators", problems);
+            RequireDeclared(
+                tool,
+                "processor",
+                tool.Processors,
+                name => PlatformNames.Processors.Contains(name, StringComparer.OrdinalIgnoreCase),
+                $"is not a processor; expected one of {string.Join(", ", PlatformNames.Processors)}",
+                problems);
+
+            // A scope covering no declared leg removes the tool from every host, which reads exactly
+            // like never having declared it. Refused for the reason a buildOutput covering no leg is:
+            // a rule that applies nowhere is one the file appears to state and nothing enforces, and
+            // the spelling that causes it is a single mistyped word.
+            if (Scope(tool) is { Length: > 0 } scope
+                && legs.Count > 0
+                && !legs.Any(pair => ToolScope.Covers(tool, config, pair.Key, pair.Value)))
             {
                 problems.Add(
-                    $"tool '{tool.Name}' is needed only on {string.Join(", ", tool.Platforms)}, "
-                    + $"and no declared leg runs on any of those ({string.Join(", ", legPlatforms)}), "
+                    $"tool '{tool.Name}' is needed only by legs of {scope}, and no declared leg is one, "
                     + "so it would never be checked anywhere");
             }
 
@@ -1493,6 +1504,36 @@ public static class HarnessConfigValidator
             }
         }
     }
+
+    /// <summary>Refuses each name in one of a tool's scopes that names nothing declared.</summary>
+    private static void RequireDeclared(
+        ToolConfig tool,
+        string kind,
+        IReadOnlyList<string> names,
+        Func<string, bool> declared,
+        string otherwise,
+        List<string> problems)
+    {
+        foreach (var name in names.Where(name => string.IsNullOrWhiteSpace(name) || !declared(name)))
+        {
+            problems.Add($"tool '{tool.Name}' names {kind} '{name}', which {otherwise}");
+        }
+    }
+
+    /// <summary>A tool's scopes as a refusal names them, or empty where it declares none.</summary>
+    private static string Scope(ToolConfig tool)
+        => string.Join(
+            " and ",
+            new (string Name, List<string> Values)[]
+            {
+                ("platforms", tool.Platforms),
+                ("toolchains", tool.Toolchains),
+                ("legs", tool.Legs),
+                ("processors", tool.Processors),
+                ("emulators", tool.Emulators),
+            }
+            .Where(axis => axis.Values.Count > 0)
+            .Select(axis => $"{axis.Name} {string.Join(", ", axis.Values)}"));
 
     /// <summary>Checks a pattern that must compile and capture a named group <c>total</c>.</summary>
     private static void CheckCountPattern(string? pattern, string setting, List<string> problems)

@@ -28,10 +28,15 @@ public interface IToolProvisionService
     /// </summary>
     /// <param name="directory">A directory in the repository whose configuration declares the legs.</param>
     /// <param name="legNames">What <c>--legs</c> was given, or <see langword="null"/>.</param>
+    /// <param name="dryRun">
+    /// Whether to only say what would be installed: every host is reached and asked as usual, and
+    /// nothing is installed, updated or run as a superuser there.
+    /// </param>
     /// <param name="cancellationToken">Stops the run; a host already being installed on is left to finish its command.</param>
     Task<ToolProvisionReport> ProvisionAsync(
         string directory,
         IReadOnlyList<string>? legNames,
+        bool dryRun = false,
         CancellationToken cancellationToken = default);
 }
 
@@ -69,6 +74,7 @@ public sealed class ToolProvisionService(
     public async Task<ToolProvisionReport> ProvisionAsync(
         string directory,
         IReadOnlyList<string>? legNames,
+        bool dryRun = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
@@ -85,25 +91,33 @@ public sealed class ToolProvisionService(
             .Select(leg => (Leg: leg, Host: LegPlacement.Candidates(config, leg.Leg)[0]))
             .ToList();
 
-        var done = new Dictionary<HostId, LegProvision>();
-        var report = new List<LegProvision>();
+        var done = new Dictionary<HostId, HostProvision>();
 
-        foreach (var (leg, host) in placed)
+        foreach (var host in placed.Select(entry => entry.Host).Distinct())
         {
-            if (!done.TryGetValue(host, out var provision))
-            {
-                provision = await ProvisionHostAsync(context, host, cancellationToken).ConfigureAwait(false);
-                done[host] = provision;
-            }
+            // What any of the host's legs needs, asked there once: two legs on one host share what
+            // is installed on it, and differ only in which of it they are told about.
+            var needed = config.Tools
+                .Where(tool => placed.Any(entry => entry.Host == host && ToolScope.Covers(tool, config, entry.Leg.Name, entry.Leg.Leg)))
+                .ToList();
 
-            report.Add(provision with { Leg = leg.Name });
+            done[host] = await ProvisionHostAsync(context, host, needed, dryRun, cancellationToken).ConfigureAwait(false);
         }
 
-        return new ToolProvisionReport(report);
+        return new ToolProvisionReport(
+            [.. placed.Select(entry => done[entry.Host].For(entry.Leg.Name, tool => ToolScope.Covers(tool, config, entry.Leg.Name, entry.Leg.Leg)))])
+        {
+            DryRun = dryRun,
+        };
     }
 
-    /// <summary>Provisions one host, which may carry several legs.</summary>
-    private async Task<LegProvision> ProvisionHostAsync(HarnessContext context, HostId host, CancellationToken cancellationToken)
+    /// <summary>Provisions one host, which may carry several legs, with the tools any of them needs.</summary>
+    private async Task<HostProvision> ProvisionHostAsync(
+        HarnessContext context,
+        HostId host,
+        IReadOnlyList<ToolConfig> needed,
+        bool dryRun,
+        CancellationToken cancellationToken)
     {
         var config = context.Config;
 
@@ -123,7 +137,8 @@ public sealed class ToolProvisionService(
 
         try
         {
-            return await ProvisionConnectedAsync(host, connection, opened, config, context, cancellationToken).ConfigureAwait(false);
+            return await ProvisionConnectedAsync(host, connection, opened, config, context, needed, dryRun, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
         {
@@ -134,64 +149,71 @@ public sealed class ToolProvisionService(
     }
 
     /// <summary>A host that could not be reached, named, and what provisioning it reports.</summary>
-    private LegProvision Unreachable(HostId host, string reason)
+    private HostProvision Unreachable(HostId host, string reason)
     {
         _output.Warn(CommandName, $"{host} could not be reached: {reason}");
-        return new LegProvision { Leg = string.Empty, Host = host, Unreachable = reason };
+        return new HostProvision(host, reason, [], []);
     }
 
     /// <summary>Provisions a host that was reached.</summary>
-    private async Task<LegProvision> ProvisionConnectedAsync(
+    private async Task<HostProvision> ProvisionConnectedAsync(
         HostId host,
         HostConnection connection,
         HostConnectionResult opened,
         HarnessConfig config,
         HarnessContext context,
+        IReadOnlyList<ToolConfig> needed,
+        bool dryRun,
         CancellationToken cancellationToken)
     {
-        var outcomes = new List<ToolOutcome>();
+        var always = new List<ToolOutcome>();
+        var declared = new List<(ToolConfig Tool, ToolOutcome Outcome)>();
         var superuser = new Superuser(host, opened.Superuser, ItemEnvFile(context.Layout, host));
 
         // .NET is the default tool on every host reached through a transport: a host that cannot run
         // DssHarness is a host with no SDK, and every other command begins by running DssHarness there.
         if (host.Kind != HostKind.Local)
         {
-            var (outcome, updated) = await ProvisionDotnetAsync(host, connection, cancellationToken).ConfigureAwait(false);
+            var (outcome, updated) = await ProvisionDotnetAsync(host, connection, dryRun, cancellationToken).ConfigureAwait(false);
             connection = updated;
-            outcomes.Add(outcome);
+            always.Add(outcome);
         }
 
         var platformKey = await PlatformKeyAsync(connection, opened.Os, cancellationToken).ConfigureAwait(false);
         var searched = ToolSearchDirectories.For(config.ToolSearchDirectories, platformKey);
 
+        // A tool none of this host's legs needs, or one its platform does not, is neither looked for
+        // nor probed here, rather than probed and excused. Asking costs a round trip to the host for
+        // an answer nothing would read, and an outcome recorded for it would have to be excused again
+        // by everything that counts outcomes.
+        var asked = needed.Where(tool => PlatformScope.Applies(tool.Platforms, platformKey)).ToList();
+
         connection = await _programs
-            .ResolveAsync(connection, [.. config.Tools.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
+            .ResolveAsync(connection, [.. asked.Select(tool => tool.Name)], searched, ProbeBudget, cancellationToken)
             .ConfigureAwait(false);
 
-        // A tool this platform does not need is not probed here, rather than probed and excused.
-        // Probing costs a round trip to the host for an answer nothing would read, and an outcome
-        // recorded for it would have to be excused again by everything that counts outcomes.
-        foreach (var tool in config.Tools.Where(tool => PlatformScope.Applies(tool.Platforms, platformKey)))
+        foreach (var tool in asked)
         {
-            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, searched, superuser, cancellationToken)
+            var (outcome, updated) = await ProvisionToolAsync(host, connection, tool, platformKey, searched, superuser, dryRun, cancellationToken)
                 .ConfigureAwait(false);
 
             connection = updated;
-            outcomes.Add(outcome);
+            declared.Add((tool, outcome));
         }
 
         // Every reason a host gave is scrubbed at this one point rather than where it was built: a host
         // that echoes what it was handed does so from whichever command it likes, and a credential that
         // reached one report would be in every log that kept it.
-        return new LegProvision
-        {
-            Leg = string.Empty,
-            Host = host,
-            Tools = [.. outcomes.Select(outcome => outcome.Detail is { } detail
-                ? outcome with { Detail = superuser.Hide(detail) }
-                : outcome)],
-        };
+        return new HostProvision(
+            host,
+            null,
+            [.. always.Select(outcome => Hidden(outcome, superuser))],
+            [.. declared.Select(entry => (entry.Tool, Hidden(entry.Outcome, superuser)))]);
     }
+
+    /// <summary>An outcome whose reason carries nothing a superuser was given.</summary>
+    private static ToolOutcome Hidden(ToolOutcome outcome, Superuser superuser)
+        => outcome.Detail is { } detail ? outcome with { Detail = superuser.Hide(detail) } : outcome;
 
     /// <summary>
     /// Installs the .NET SDK on a host that has none, into the home directory, where it needs no
@@ -201,6 +223,7 @@ public sealed class ToolProvisionService(
     private async Task<(ToolOutcome Outcome, HostConnection Connection)> ProvisionDotnetAsync(
         HostId host,
         HostConnection connection,
+        bool dryRun,
         CancellationToken cancellationToken)
     {
         const string Name = HostInspector.DotnetProgram;
@@ -224,6 +247,13 @@ public sealed class ToolProvisionService(
                 new ToolOutcome(Name, ToolState.Failed, null,
                     $"the {needed} SDK is installed there with the Windows installer, which this command cannot run; "
                     + $"install it on that host and run '{CommandName}' again"),
+                connection);
+        }
+
+        if (dryRun)
+        {
+            return (
+                new ToolOutcome(Name, ToolState.WouldInstall, null, $"the {needed} SDK, under the home directory, with dotnet-install.sh"),
                 connection);
         }
 
@@ -295,6 +325,7 @@ public sealed class ToolProvisionService(
         string? platformKey,
         IReadOnlyList<string> searched,
         Superuser superuser,
+        bool dryRun,
         CancellationToken cancellationToken)
     {
         var located = connection.Located(tool.Name) ?? new ProgramLocation(tool.Name, ProgramFound.Unreadable);
@@ -315,8 +346,10 @@ public sealed class ToolProvisionService(
                 return (new ToolOutcome(tool.Name, ToolState.Missing, null, Needed(tool, platformKey)), connection);
             }
 
-            return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: false, cancellationToken)
-                .ConfigureAwait(false);
+            return dryRun
+                ? (WouldRun(tool, install, found: null, update: false), connection)
+                : await RunInstallAsync(host, connection, tool, install, searched, superuser, update: false, cancellationToken)
+                    .ConfigureAwait(false);
         }
 
         var (version, problem) = await ProbeVersionAsync(connection, tool, cancellationToken).ConfigureAwait(false);
@@ -353,9 +386,33 @@ public sealed class ToolProvisionService(
                 connection);
         }
 
-        return await RunInstallAsync(host, connection, tool, install, searched, superuser, update: true, cancellationToken)
-            .ConfigureAwait(false);
+        return dryRun
+            ? (WouldRun(tool, install, version, update: true), connection)
+            : await RunInstallAsync(host, connection, tool, install, searched, superuser, update: true, cancellationToken)
+                .ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// What a dry run reports for a tool it would install or update: the command, exactly as the
+    /// configuration makes it, <c>sudo</c> and all, and never run.
+    /// </summary>
+    /// <remarks>
+    /// Nothing is asked of the host's superuser either - not a password, not whether one is needed -
+    /// because a dry run that stopped to ask for a password would be the install it says it is not.
+    /// </remarks>
+    private static ToolOutcome WouldRun(ToolConfig tool, ToolInstall install, string? found, bool update)
+    {
+        var state = update ? ToolState.WouldUpdate : ToolState.WouldInstall;
+
+        return ToolCommands.For(install, update) is { Count: > 0 } command
+            ? new ToolOutcome(tool.Name, state, found, $"would run '{string.Join(' ', command)}'")
+            : new ToolOutcome(tool.Name, ToolState.Failed, found, NoCommand);
+    }
+
+    /// <summary>Why an install entry cannot be run, whether or not this run would run it.</summary>
+    private static string NoCommand =>
+        $"its install declares neither a command nor a manager this build knows; known managers are "
+        + $"{string.Join(", ", ToolCommands.KnownManagers)}";
 
     /// <summary>Runs one tool's install, then measures the host again rather than believing it.</summary>
     private async Task<(ToolOutcome Outcome, HostConnection Connection)> RunInstallAsync(
@@ -370,11 +427,7 @@ public sealed class ToolProvisionService(
     {
         if (ToolCommands.For(install, update) is not { Count: > 0 } command)
         {
-            return (
-                new ToolOutcome(tool.Name, ToolState.Failed, null,
-                    $"its install declares neither a command nor a manager this build knows; known managers are "
-                    + $"{string.Join(", ", ToolCommands.KnownManagers)}"),
-                connection);
+            return (new ToolOutcome(tool.Name, ToolState.Failed, null, NoCommand), connection);
         }
 
         var privileged = await superuser.PrepareAsync(this, connection, command, cancellationToken).ConfigureAwait(false);
@@ -477,7 +530,7 @@ public sealed class ToolProvisionService(
         if (probe.Regex is not { Length: > 0 } pattern)
         {
             // With no pattern, the last word of the first line is the version a tool usually prints:
-        // "ninja version 1.12.1", "git version 2.47.0".
+            // "ninja version 1.12.1", "git version 2.47.0".
             return (text.Split('\n').FirstOrDefault()?.Trim().Split(' ').LastOrDefault(), null);
         }
 
@@ -496,16 +549,13 @@ public sealed class ToolProvisionService(
     }
 
     /// <summary>
-    /// Which operating system's install entry applies. Measured rather than taken from this machine: an
-    /// ssh host is usually not the same system as the one reaching it, and the entry chosen decides
-    /// which package manager runs.
-    /// </summary>
-    /// <summary>
     /// The platform a host's tools are chosen for, or <see langword="null"/> when it could not be
-    /// established.
+    /// established: which operating system's install entry applies.
     /// </summary>
     /// <remarks>
-    /// Null rather than a guess, because a guess here decides which tools a host is asked about at
+    /// Measured rather than taken from this machine: an ssh host is usually not the same system as the
+    /// one reaching it, and the entry chosen decides which package manager runs. Null rather than a
+    /// guess, because a guess here decides which tools a host is asked about at
     /// all. A host that answered <c>uname</c> with a system this build has no name for is some
     /// POSIX machine; calling it Windows would skip every tool scoped to Linux and then report the
     /// leg as having everything it needs. Unknown instead means every tool is probed, which costs a
@@ -667,6 +717,28 @@ public sealed class ToolProvisionService(
 
         return Path.GetRelativePath(layout.MainCheckoutRoot, Path.Combine(directory, HarnessLayout.ItemEnvFileName))
             .Replace('\\', '/');
+    }
+
+    /// <summary>What provisioning one host established, before it is told per leg.</summary>
+    /// <param name="Host">The host.</param>
+    /// <param name="Unreachable">Why nothing could be done there, or <see langword="null"/> when it answered.</param>
+    /// <param name="Always">What every leg there is told: the .NET SDK a transport's host needs whatever its legs do.</param>
+    /// <param name="Declared">Each declared tool any of its legs needs, with what was done about it.</param>
+    private sealed record HostProvision(
+        HostId Host,
+        string? Unreachable,
+        IReadOnlyList<ToolOutcome> Always,
+        IReadOnlyList<(ToolConfig Tool, ToolOutcome Outcome)> Declared)
+    {
+        /// <summary>What the leg <paramref name="leg"/> is told: the host's outcomes for the tools it needs.</summary>
+        public LegProvision For(string leg, Func<ToolConfig, bool> needs)
+            => new()
+            {
+                Leg = leg,
+                Host = Host,
+                Unreachable = Unreachable,
+                Tools = [.. Always, .. Declared.Where(entry => needs(entry.Tool)).Select(entry => entry.Outcome)],
+            };
     }
 
     /// <summary>

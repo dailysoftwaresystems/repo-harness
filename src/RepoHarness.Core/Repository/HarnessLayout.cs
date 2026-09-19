@@ -122,6 +122,24 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     public const string GitKeepFileName = ".gitkeep";
 
     /// <summary>
+    /// The directories under <see cref="DirectoryName"/> that carry a <see cref="GitKeepFileName"/>,
+    /// relative to it: the two connection-data slots, the actions, and the two value slots.
+    /// </summary>
+    /// <remarks>
+    /// Every tree tracks them, a worktree's included, so a clone of any branch arrives with each
+    /// directory in place. What the ignored ones hold is read from the main checkout whichever tree
+    /// asks: <see cref="SshItemsDirectory"/> and the others resolve there.
+    /// </remarks>
+    public static IReadOnlyList<string> PlaceholderDirectories { get; } =
+    [
+        SshItemsDirectoryName,
+        WslDistrosDirectoryName,
+        Path.Combine(RunnerDirectoryName, RunnerActionsDirectoryName),
+        Path.Combine(RunnerDirectoryName, RunnerEnvDirectoryName),
+        Path.Combine(RunnerDirectoryName, RunnerSecretsDirectoryName),
+    ];
+
+    /// <summary>
     /// Whether the command is running inside a linked worktree.
     /// </summary>
     /// <param name="platform">
@@ -145,9 +163,9 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// Configuration file of the tree being acted on. Tracked by git.
     /// </summary>
     /// <remarks>
-    /// Services deliberately load configuration from <see cref="MainHarnessDirectory"/>
-    /// instead: a worktree's checked-out copy is not the one the harness maintains.
-    /// Do not substitute this for that.
+    /// The one every command reads, a worktree's included: a branch may change its own
+    /// configuration, and a lane runs what its tree says. Only a worktree whose branch has none
+    /// falls back to the main checkout's, and is warned that it does.
     /// </remarks>
     public string ConfigFile => Path.Combine(HarnessDirectory, ConfigFileName);
 

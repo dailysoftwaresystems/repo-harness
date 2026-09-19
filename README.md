@@ -24,7 +24,7 @@ configuration, that is a defect.
 
 ```bash
 DssHarness verify-git     # is git installed, and is this a repository?
-DssHarness init           # create .harness-config and seed config.json
+DssHarness init           # create .harness-config in this tree and seed config.json
 DssHarness legs           # where each leg can run, or why it cannot
 DssHarness help           # reference material: exit codes, config, legs, layout
 ```
@@ -38,7 +38,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 
 | Command | Does |
 |---|---|
-| `init` | Create `.harness-config`, seed `config.json`, add ignore rules |
+| `init [--install-tools]` | Create `.harness-config` in the tree it runs in, a worktree's included, seed `config.json`, add ignore rules; installs tools only when asked |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
 | `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
@@ -53,7 +53,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `fix-line-endings [--all \| --changed]` | Apply the line-ending policy `.gitattributes` declares; `--check` refuses instead |
 | `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
-| `install-missing-tools [--legs a,b]` | Install or update what each configured leg's host is missing |
+| `install-missing-tools [--legs a,b] [--dry-run]` | Install or update what each configured leg's host is missing; `--dry-run` names each command and runs none |
 | `sync` | Put a host's copy of the repository in step with this tree, deletions included |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
 | `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
@@ -201,7 +201,10 @@ written anywhere. A run with no terminal, a run answering with `--json`, and a r
 `--no-prompt` all refuse instead, naming what would fix it; running the harness as root needs no
 password at all, which is usually the answer in CI. An entry may name the platforms it
 is needed on — `"platforms": ["windows"]` — and a host whose platform it does not name is never
-asked about it, so a repository can declare both a Windows compiler and a POSIX one. `sync` creates the host's copy
+asked about it, so a repository can declare both a Windows compiler and a POSIX one. It may
+narrow that further, to `toolchains`, `legs`, `processors` and `emulators`, so `cl` scoped to
+`msvc` is never reported missing on a MinGW leg of the same machine. `--dry-run` asks every host
+and installs nothing, naming each command that would run. `sync` creates the host's copy
 of the repository at its `repositoryPath` and keeps it in step, deletions included. An
 emulator counts only once its witness proves it runs programs for its processor.
 

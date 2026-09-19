@@ -156,11 +156,28 @@ showed as untracked until committed, which is exactly the state sync's no-longer
 refuses.
 
 `init` leaves hand-written `.gitignore` rules alone, so a repository that already ignored one of
-these paths by hand keeps its rule beside the managed one. `init` reports each such pair as a note,
-naming the line and saying whether the two rules repeat each other or point opposite ways, since
-whichever of two contradicting rules comes later in the file wins. The comparison is by exact path
-after dropping a leading `!`, one anchoring `/`, a trailing `/*` and a trailing `/`; a rule that
-reaches a managed path only through a wildcard is not reported.
+these paths by hand keeps its rule beside the managed one. What `init` reports is git's own answer,
+never a reading of how the rules are spelled. Each managed rule carries a path it decides - the
+file it names, or a name inside the directory it rules on - and `git check-ignore -v --no-index`
+says which rule decides each of those paths in the tree. A rule deciding one against the block is
+named as the rule git follows: it undoes the block there, whether it is a re-include after the
+block, a nested `.gitignore`, or a whole-directory rule such as `.env` - which takes the
+`runner/.env` directory, from which git re-includes no placeholder. The same paths are then asked of
+the tree's own `.gitignore` with the block blanked out, in a scratch repository holding nothing
+else; a hand-written rule that would decide one the other way, where the tree's answer is the
+block's, is named as doing nothing there. A rule agreeing with the block is not named at all: it
+changes nothing, and a broad rule covering a managed path is not a copy of the block's rule. The
+spelling comparison this replaced named rules that match nothing as overriding the block, and
+could not see a rule reaching a managed path through a wildcard.
+
+`init` writes the tree it runs in, a worktree's own included: its configuration, its `.gitignore`
+and the placeholders that keep each directory in git. A lane adopting the harness adopts it on its
+own branch; written into the main checkout, the lane's `.gitignore` never changed and main's did. A
+worktree with no configuration of its own gets a copy of the main checkout's, which it was running
+with and warned about on every command; a default in its place would drop every leg, host and
+runner main declares. What git ignores - connection data, runner values and secrets, the lock - is
+read from the main checkout whichever tree asks, and `init` in a worktree says so rather than
+creating any of it there.
 
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
@@ -552,8 +569,14 @@ build, or has no copy of the repository.
 
 `install-missing-tools` runs over every declared leg, or those `--legs` names, on the host each
 leg names with `wsl` or `ssh` and on this machine otherwise. Its logic lives in the core, so
-other commands share it, and `init` calls it: a fresh clone should be ready to run rather than
-ready to be told what is missing.
+other commands share it, and `init --install-tools` calls it. Plain `init` installs nothing and
+says how: adopting the harness's files changes one tree, and an install changes machines.
+
+- **`--dry-run` installs nothing.** It reaches and asks every host exactly as a run does, and
+  reports each tool it would install or update as `would install` or `would update`, with the
+  command that would run, `sudo` and all. Nobody is asked for a password, and no host is asked
+  whether one is needed: a dry run that stopped for a password would be the install it says it
+  is not. It exits `1` while anything is missing, and `--json` carries `dryRun`.
 
 - **The .NET SDK is the default tool on every remote leg.** A WSL distribution or ssh host that
   cannot run DssHarness has it installed, under the home directory, where no login-free PATH
@@ -570,6 +593,16 @@ ready to be told what is missing.
   Left out, a tool is needed everywhere, which is what every list written before this meant.
   Without it a repository could not declare both a Windows compiler and a POSIX one: each was
   reported missing on the other's hosts, and no leg was ever fully provisioned.
+- **A tool may narrow that to the legs that need it**, and every scope it names must hold:
+  `toolchains` (legs whose variant builds with one), `legs` (legs or leg sets, by name),
+  `processors` and `emulators`. `processors` is the leg's processor, the one it is built for, which
+  under an emulator is not the host's - so it reaches a native arm64 host as surely as an emulated
+  leg, and what only the emulating host needs, such as the emulator itself, is scoped with
+  `emulators` instead. Two legs on one host share what is installed there, and each is told only
+  about the tools it needs: `cl` scoped to Windows alone was reported missing on a MinGW leg,
+  because that leg is Windows too. A host is asked about a tool once, whichever of its legs need it,
+  and not at all when none of them do. A scope naming nothing declared, or one covering no declared
+  leg, is refused when the configuration is read.
 - **A privileged install takes its credential from that host's own item, on standard input
   only.** The item declares it as `SUDO_PASSWORD` in its `.env`, beside the address and user:
   `.harness-config/sshItems/<name>/.env`, or `.harness-config/wslDistros/<distro>/.env`. It never

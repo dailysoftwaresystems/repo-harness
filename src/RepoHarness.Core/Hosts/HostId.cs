@@ -59,6 +59,17 @@ public sealed class HostId : IEquatable<HostId>
 
     public override int GetHashCode() => HashCode.Combine(Kind, StringComparer.OrdinalIgnoreCase.GetHashCode(Name));
 
+    /// <summary>Whether two hosts are one host, as <see cref="Equals(HostId?)"/> says - never whether they are one object.</summary>
+    /// <remarks>
+    /// Without it, <c>==</c> compared references: two ids made for one distribution were two hosts
+    /// to it and one host to every dictionary, and a leg sharing a host with another was provisioned
+    /// as though it stood on a host of its own.
+    /// </remarks>
+    public static bool operator ==(HostId? left, HostId? right) => left is null ? right is null : left.Equals(right);
+
+    /// <summary>Whether two hosts are different hosts.</summary>
+    public static bool operator !=(HostId? left, HostId? right) => !(left == right);
+
     /// <summary>
     /// The physical machine this host runs on, which two hosts share when they contend for one
     /// machine's processors, memory and disk.

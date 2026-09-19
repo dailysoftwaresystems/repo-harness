@@ -145,6 +145,42 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The tools topic says what --dry-run does, that init installs only when asked, and how a tool
+    /// narrows the legs that need it; the layout topic says init writes the tree it runs in and names
+    /// a rule by git's own answer.
+    /// </summary>
+    [Fact]
+    public async Task ToolsAndLayoutTopics_SayWhatInitAndInstallMissingToolsDo()
+    {
+        var tools = await CliRunner.RunAsync(["help", "tools"], TestContext.Current.CancellationToken);
+        var layout = await CliRunner.RunAsync(["help", "layout"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "--install-tools' runs it too; plain init installs nothing and says how.",
+            "--dry-run reaches and asks every host as a run does, and installs nothing",
+            "\"toolchains\": [\"msvc\"]",
+            "\"legs\": [\"win-arm\", \"gate\"]",
+            "\"processors\": [\"arm64\"]",
+            "\"emulators\": [\"qemu-arm64\"]",
+            "scope naming nothing declared, or one covering no declared leg, is refused.",
+        })
+        {
+            Assert.Contains(text, tools.StandardOutput, StringComparison.Ordinal);
+        }
+
+        foreach (var text in new[]
+        {
+            "block on later runs and leaving every other rule untouched. It then asks git which",
+            "overrules does nothing there.",
+            "init writes the tree it runs in, a worktree's own included",
+        })
+        {
+            Assert.Contains(text, layout.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
     {
