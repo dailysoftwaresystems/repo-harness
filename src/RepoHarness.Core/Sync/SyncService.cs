@@ -672,9 +672,12 @@ public sealed class SyncService(
                 + $"local to this machine: {result.FailureMessage}");
         }
 
+        // Each name as git gives it, less the slash that marks a directory. Trimmed as well, a name
+        // beginning or ending with a space became one no file has, and the ignored file under it was
+        // copied to the host.
         return [.. result.StandardOutput
             .Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Select(path => path.Trim().TrimEnd('/'))
+            .Select(path => path.TrimEnd('/'))
             .Where(path => path.Length > 0)];
     }
 

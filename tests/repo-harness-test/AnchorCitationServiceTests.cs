@@ -105,7 +105,101 @@ public sealed class AnchorCitationServiceTests
         var cut = Assert.Single(report.Unresolved);
         Assert.Equal(Known, cut.Id);
         Assert.True(cut.Cut);
-        Assert.Equal($"src/thing.cpp:1: {Known}- (cut at the end of the line)", Assert.Single(AnchorCitationReports.Render(report, json: false).Data));
+
+        // Nor does the headline send the reader to add a row: a cut fails whatever rows exist.
+        var outcome = AnchorCitationReports.Render(report, json: false);
+        Assert.Equal($"src/thing.cpp:1: {Known}- (cut at the end of the line)", Assert.Single(outcome.Data));
+        Assert.StartsWith("1 citation(s) are cut at the end of a line", outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("add the row", outcome.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The headline says cut citations apart from those no row resolves, each with its own remedy. An
+    /// id cut at its second hyphen is found too, where the next line carries it on.
+    /// </summary>
+    [Fact]
+    public async Task TheHeadline_SaysCutCitationsApart_FromThoseNoRowResolves()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        temp.WriteFile(Path.Combine("src", "thing.cpp"), "// D-AREA-TOPIC-MISSING, and a wrapped (D-PP-\n// PRESCAN)\n");
+
+        var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken);
+        var outcome = AnchorCitationReports.Render(report, json: false);
+
+        Assert.Equal(
+            ["src/thing.cpp:1: D-AREA-TOPIC-MISSING", "src/thing.cpp:1: D-PP- (cut at the end of the line)"],
+            outcome.Data);
+        Assert.StartsWith(
+            "1 citation(s) of 1 anchor id(s) resolve to no row in either registry; add the row, or correct the citation. "
+            + "1 citation(s) are cut at the end of a line, so none spells the id it was cut from; keep each id whole on one line. "
+            + "Scanned ",
+            outcome.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A file in conflict is scanned once: git lists it once for each side of the conflict, and scanned
+    /// that many times, each citation in it was reported that many times.
+    /// </summary>
+    [Fact]
+    public async Task AFileInConflict_IsScannedOnce()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+        var thing = Path.Combine("src", "thing.cpp");
+
+        temp.WriteFile(thing, "// D-AREA-TOPIC-MISSING\nbase\n");
+        await harness.CommitAllAsync(temp.Path, "base", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["checkout", "--quiet", "-b", "side"], cancellationToken);
+        temp.WriteFile(thing, "// D-AREA-TOPIC-MISSING\nside\n");
+        await harness.CommitAllAsync(temp.Path, "side", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["checkout", "--quiet", "-"], cancellationToken);
+        temp.WriteFile(thing, "// D-AREA-TOPIC-MISSING\nmain\n");
+        await harness.CommitAllAsync(temp.Path, "main", cancellationToken);
+
+        var merge = await harness.GitClient.RunAsync(temp.Path, ["merge", "--quiet", "side"], cancellationToken: cancellationToken);
+        Assert.False(merge.Succeeded, "the merge was to leave src/thing.cpp in conflict");
+
+        var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken);
+
+        Assert.Equal(1, report.FilesScanned);
+        Assert.Equal(["D-AREA-TOPIC-MISSING"], report.Unresolved.Select(citation => citation.Id));
+    }
+
+    /// <summary>
+    /// A file in a root whose name is not UTF-8 refuses the check, naming it, however the files are
+    /// read: no file opens by such a name here, and read as UTF-8 it became another name - one the
+    /// commit "could not read", sending the reader to git fsck, and one the disk silently did not
+    /// have. Outside every root it is no concern of the check.
+    /// </summary>
+    [Fact]
+    public async Task ANameThatIsNotUtf8_InARoot_RefusesTheCheck_HoweverTheFilesAreRead()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        await harness.StageAsync(temp.Path, "\"notes/caf\\351.md\"", "// D-AREA-TOPIC-ELSEWHERE\n", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "outside"], cancellationToken);
+
+        Assert.True((await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken)).Passed);
+        Assert.True((await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken)).Passed);
+
+        await harness.StageAsync(temp.Path, "\"src/caf\\351.cpp\"", "// D-AREA-TOPIC-INSIDE\n", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "inside"], cancellationToken);
+
+        foreach (var subject in new[] { AnchorCitationSubject.CurrentCommit, AnchorCitationSubject.CurrentTree })
+        {
+            var refusal = await Assert.ThrowsAsync<HarnessException>(
+                () => Service(harness).CheckAsync(temp.Path, subject, cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains(@"'src/caf\351.cpp' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>
@@ -121,11 +215,7 @@ public sealed class AnchorCitationServiceTests
 
         temp.WriteFile(Path.Combine("src", "lost.cpp"), "// D-AREA-TOPIC-LOST\n");
         await harness.CommitAllAsync(temp.Path, "src", cancellationToken);
-
-        var blob = (await harness.GitClient.RunAsync(temp.Path, ["rev-parse", "HEAD:src/lost.cpp"], cancellationToken: cancellationToken)).StandardOutput.Trim();
-        var loose = Path.Combine(temp.Path, ".git", "objects", blob[..2], blob[2..]);
-        File.SetAttributes(loose, FileAttributes.Normal);
-        File.Delete(loose);
+        await harness.LoseObjectAsync(temp.Path, "HEAD:src/lost.cpp", cancellationToken);
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(
             () => Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken));

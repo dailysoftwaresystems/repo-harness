@@ -128,14 +128,16 @@ public interface IGitClient
     Task<string?> ResolveCommitAsync(string directory, string reference, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// A file's content at <paramref name="commit"/>, or <see langword="null"/> when the file did not
-    /// exist there.
+    /// A file's content at <paramref name="commit"/>, or <see langword="null"/> when no file was
+    /// there.
     /// </summary>
     /// <param name="directory">The repository's root, which <paramref name="relativePath"/> is relative to.</param>
     /// <param name="commit">A commit id, as <see cref="ResolveCommitAsync"/> returns.</param>
     /// <param name="relativePath">The file, relative to the repository root.</param>
     /// <param name="cancellationToken">Cancels the git processes.</param>
-    /// <exception cref="HarnessException">git could not read the commit.</exception>
+    /// <exception cref="HarnessException">
+    /// git could not read the commit, or lists the file there and could not read it.
+    /// </exception>
     Task<string?> ReadFileAtCommitAsync(
         string directory,
         string commit,
@@ -144,17 +146,47 @@ public interface IGitClient
 
     /// <summary>
     /// Each file's content at <paramref name="commit"/>, keyed by its path as given, with
-    /// <see langword="null"/> for one that is not a file there - all of them read by one git process.
+    /// <see langword="null"/> for one that is not a file there. All of them are read by one git
+    /// process; a path that names no file costs one listing of the commit more, which is what tells it
+    /// from a file git lists and cannot read.
     /// </summary>
     /// <param name="directory">The repository's root, which the paths are relative to.</param>
     /// <param name="commit">A commit id, as <see cref="ResolveCommitAsync"/> returns.</param>
     /// <param name="relativePaths">The files, relative to the repository root and spelled as git spells them.</param>
     /// <param name="cancellationToken">Cancels the git processes.</param>
-    /// <exception cref="HarnessException">git could not read the commit.</exception>
+    /// <exception cref="HarnessException">
+    /// git could not read the commit, or lists one of the files there and could not read it.
+    /// </exception>
     Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
         string directory,
         string commit,
         IReadOnlyList<string> relativePaths,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The files <paramref name="commit"/> holds, from the repository's root: a symbolic link is one;
+    /// a directory is not, nor is a submodule's entry, which names a commit in another repository.
+    /// </summary>
+    /// <param name="directory">A directory inside the repository.</param>
+    /// <param name="commit">A commit id, as <see cref="ResolveCommitAsync"/> returns.</param>
+    /// <param name="cancellationToken">Cancels the git process.</param>
+    /// <exception cref="HarnessException">git could not list the commit.</exception>
+    Task<IReadOnlyList<GitName>> ListFilesAtCommitAsync(
+        string directory,
+        string commit,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The names a git command lists, in its <c>-z</c> form - separated by NUL, with nothing quoted -
+    /// each as git holds it.
+    /// </summary>
+    /// <param name="directory">The directory git runs in.</param>
+    /// <param name="arguments">A git command that lists names and nothing else, with <c>-z</c>.</param>
+    /// <param name="cancellationToken">Cancels the git process.</param>
+    /// <exception cref="HarnessException">git failed.</exception>
+    Task<IReadOnlyList<GitName>> ListNamesAsync(
+        string directory,
+        IReadOnlyList<string> arguments,
         CancellationToken cancellationToken = default);
 
     /// <summary>Runs an arbitrary git subcommand, returning its exit code and output.</summary>

@@ -352,12 +352,24 @@ instead, a citation of `D-FF3-3` passed through a row `D-FF3-30-…`, and a wrap
 `D-PP-PRESCAN-` passed through the id it was cut from: a truncated or ambiguous citation was
 invisible to the gate. A citation that runs into a hyphen at the end of its line is reported as
 cut there whatever rows exist - even one named by the part before the cut - because it does not
-spell the id it was cut from.
+spell the id it was cut from. An id cut at its first or second hyphen is too short to be a
+citation on its own line, so it is one where the next line carries on with the segments that make
+it one: `D-PP-` before a line opening `PRESCAN` is reported cut, and `D-` before `day` - a wrapped
+D-day - is not. The failure says cut citations apart from those no row resolves, since adding a
+row answers only the second.
 
 `--current-commit` reads every file of the commit through one git process; asked for one at a
 time, each cost two, and 2,385 files took twenty minutes. A file is read as it would be from
-disk - its byte order mark, UTF-16 included, says how - and one the commit lists that git cannot
-read refuses the check, rather than passing with nothing read in it.
+disk - its byte order mark, UTF-16 included, says how. git answers "missing" for a file whose
+object it cannot read exactly as for a path that names none, so a path it answers that way is
+looked for in the commit's listing: one listed there refuses the read, naming it, rather than
+passing with nothing read in it. `check-anchor-balance` reads its base through the same rule, so
+a registry git cannot read is refused rather than reported missing at the base.
+
+git holds a name as bytes, and nothing makes them UTF-8. A file in a root whose name is not
+UTF-8 refuses the check, named as git's quoting writes it (`caf\351.md`): no file opens by such a
+name here, and read as UTF-8 it became another name, which the disk silently did not have. A file
+git lists once for each side of a conflict is scanned once.
 
 The scanner is the point of the command. The guard it replaces required a word boundary before
 an id, which is right for `FIXED-32-BIT-WORD` — whose tail is anchor-shaped and is correctly

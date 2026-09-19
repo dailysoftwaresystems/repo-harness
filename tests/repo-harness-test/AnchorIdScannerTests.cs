@@ -28,6 +28,37 @@ public sealed class AnchorIdScannerTests
             found.Select(citation => (citation.Id, citation.Cut)));
     }
 
+    /// <summary>
+    /// An id cut at its first hyphen or its second is too short to be a citation on its own line, so
+    /// it is one where the next line carries on with the segments that make it one - past that line's
+    /// indentation and comment marker. 'D-' before 'day' is a wrapped D-day, and a fragment with no
+    /// line after it carries on with nothing: neither is an id.
+    /// </summary>
+    [Fact]
+    public void AnIdCutAtItsFirstOrSecondHyphen_IsCut_WhereTheNextLineMakesItACitation()
+    {
+        var found = Scanner.Scan(
+            "notes.md",
+            "see D-PP-\r\n  // PRESCAN here\nplan D-\nday off\nsee (D-\nFF3-30) there\nend D-AREA-\n\nlast D-PP-");
+
+        Assert.Equal(
+            [("D-PP", 1, true), ("D", 5, true)],
+            found.Select(citation => (citation.Id, citation.LineNumber, citation.Cut)));
+        Assert.Empty(Scanner.ScanLine("see D-PP-"));
+    }
+
+    /// <summary>
+    /// A fragment glued to the word before it is no citation, as a whole id glued there is not; and a
+    /// citation cut at its end is reported once, not again as the shorter fragment it ends in.
+    /// </summary>
+    [Fact]
+    public void AGluedFragment_IsNoCut_AndACutCitationIsReportedOnce()
+    {
+        var found = Scanner.Scan("notes.md", "XD-PP-\nPRESCAN\nsee D-AA-D-\nPRE-SCAN\n");
+
+        Assert.Equal([("D-AA-D", 3, true)], found.Select(citation => (citation.Id, citation.LineNumber, citation.Cut)));
+    }
+
     [Fact]
     public void AnIdWrittenStraightAfterAnEscape_IsFound()
     {
