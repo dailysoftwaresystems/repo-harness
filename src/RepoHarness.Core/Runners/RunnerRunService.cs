@@ -29,6 +29,13 @@ public sealed record RunnerRunRequest
     /// <summary>The runner's configuration: its steps, its bounds and the failures it is allowed to produce.</summary>
     public required RunnerConfig Runner { get; init; }
 
+    /// <summary>
+    /// What <c>run --input</c> gave the action's inputs, by name: over the runner value directories
+    /// and each input's own default. Only the runner the command line named is given them; a runner
+    /// a run check starts reads its own values.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Inputs { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
     /// <summary>The leg, as the configuration names it and as the ledger shows it.</summary>
     public required string Leg { get; init; }
 
@@ -459,6 +466,26 @@ public sealed class RunnerRunService(
     public static string LogNameFor(string phase) => RunSegments.FileNameFor(phase);
 
     /// <summary>
+    /// What a host running one of a run's legs is given after the command's name, so it runs what
+    /// this machine was asked to run rather than a bare runner.
+    /// </summary>
+    /// <param name="runnerName">The runner, a positional argument rather than an option.</param>
+    /// <param name="time">Whether <c>--time</c> was given.</param>
+    /// <param name="inputs">What <c>--input</c> gave, each handed over as it was read.</param>
+    /// <remarks>
+    /// <c>--legs</c> and <c>--json</c> are the dispatch's own; the lock and the staging are this
+    /// machine's decisions about its own state. The inputs are not: a leg on another machine running
+    /// an input's default where the command line gave a value is a verdict about a run nobody asked
+    /// for.
+    /// </remarks>
+    public static IReadOnlyList<string> RemoteArguments(string runnerName, bool time, IReadOnlyDictionary<string, string> inputs)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runnerName);
+
+        return [runnerName, .. time ? ["--time"] : Array.Empty<string>(), .. CommandLineInputs.Arguments(inputs)];
+    }
+
+    /// <summary>
     /// The exception type <paramref name="output"/> names, or <see cref="StepFailureType"/> when it
     /// names none.
     /// </summary>
@@ -512,6 +539,10 @@ public sealed class RunnerRunService(
                 .LoadAsync(request.Layout.RunnerActionsDirectory, action, cancellationToken)
                 .ConfigureAwait(false);
 
+            // 'run' refuses these before anything starts; refused here as well, so a value given for
+            // an input the file never reads cannot reach a leg as though it had been used.
+            CommandLineInputs.RequireDeclared(request.RunnerName, declared, request.Inputs);
+
             // The steps this leg's operating system runs, taken before anything else reads the file:
             // the policy vets, the names are demanded and the phases are made from what will run, so
             // a step for another system never refuses this leg over a program it never starts.
@@ -523,7 +554,7 @@ public sealed class RunnerRunService(
             }
 
             skipped = [.. left.Select(step => step.Name)];
-            inputs = ResolveInputs(file, values);
+            inputs = ResolveInputs(file, values, request.Inputs);
 
             var supplied = Supplied(values, inputs);
             var scratch = ScratchFor(request, file.DirectoryName);
@@ -566,6 +597,7 @@ public sealed class RunnerRunService(
         }
         else
         {
+            CommandLineInputs.RequireDeclared(request.RunnerName, file: null, request.Inputs);
             Clean(request);
             phases = runner.Phases;
         }
@@ -1481,11 +1513,12 @@ public sealed class RunnerRunService(
     }
 
     /// <summary>
-    /// The value of every input the action declares: what the runner value directories supply under
-    /// that name, else the input's own default.
+    /// The value of every input the action declares: what <c>run --input</c> gave it, else what the
+    /// runner value directories supply under that name, else the input's own default.
     /// </summary>
     /// <param name="file">The action as it was read.</param>
     /// <param name="values">What the runner value directories hold.</param>
+    /// <param name="given">What <c>run --input</c> gave, every name one the file declares.</param>
     /// <exception cref="HarnessException">A required input has no value anywhere.</exception>
     /// <remarks>
     /// Resolved once, here, and handed to everything that needs it: the run lines that name an input
@@ -1499,13 +1532,22 @@ public sealed class RunnerRunService(
     /// environment, which is what <c>.secrets</c> is for.
     /// </para>
     /// </remarks>
-    private static IReadOnlyDictionary<string, string> ResolveInputs(ActionFile file, ActionValues values)
+    private static IReadOnlyDictionary<string, string> ResolveInputs(
+        ActionFile file,
+        ActionValues values,
+        IReadOnlyDictionary<string, string> given)
     {
         var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
         var missing = new List<string>();
 
         foreach (var input in file.Inputs)
         {
+            if (given.TryGetValue(input.Name, out var typed))
+            {
+                resolved[input.Name] = typed;
+                continue;
+            }
+
             if (values.Supplied.TryGetValue(input.Name, out var supplied))
             {
                 resolved[input.Name] = supplied;
@@ -1528,9 +1570,9 @@ public sealed class RunnerRunService(
         {
             throw new HarnessException(
                 HarnessExit.ConfigInvalid,
-                $"'{file.Path}' requires input(s) {string.Join(", ", missing)} and neither declares a "
-                + "default for them nor finds one in the runner value directories, so its steps would "
-                + "run with nothing where a value belongs.");
+                $"'{file.Path}' requires input(s) {string.Join(", ", missing)}, and none was given with "
+                + $"{CommandLineInputs.Option}, found in the runner value directories or declared as a "
+                + "default, so its steps would run with nothing where a value belongs.");
         }
 
         return resolved;

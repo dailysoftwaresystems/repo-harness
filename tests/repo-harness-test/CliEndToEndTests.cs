@@ -602,6 +602,38 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// --input gives a declared input its value over the default - here the program the step starts,
+    /// which as the default is one nobody declared - and a value for an input the action does not
+    /// declare refuses the run before anything starts, naming what it does declare.
+    /// </summary>
+    [Fact]
+    public async Task AnInputGivenOnTheCommandLine_ReachesTheStep_AndAnUndeclaredOneIsRefused()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+        var token = TestContext.Current.CancellationToken;
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            "name: probe\ninputs:\n  program:\n    default: curl\nsteps:\n  - name: version\n    run: \"{program} --version\"\n");
+
+        var given = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--input", "program=dotnet", "-C", temp.Path], token);
+        var undeclared = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--input", "programme=dotnet", "--json", "-C", temp.Path],
+            token);
+
+        Assert.Equal(HarnessExit.Success, given.ExitCode);
+        Assert.Equal(HarnessExit.UsageError, undeclared.ExitCode);
+        Assert.Contains("--input names 'programme'", undeclared.StandardError, StringComparison.Ordinal);
+        Assert.Contains("it declares program.", undeclared.StandardError, StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(undeclared.StandardOutput);
+
+        Assert.Equal(HarnessExit.UsageError, document.RootElement.GetProperty("exitCode").GetInt32());
+        Assert.False(document.RootElement.TryGetProperty("runDirectory", out _), "no run began, so none has records");
+    }
+
+    /// <summary>
     /// A leg on whose operating system no step runs would pass having run nothing, so the run is
     /// refused before a host is measured or a run begins, naming the leg. Left to each leg, one
     /// that no host can take made the run merely incomplete, and one a host could take passed.

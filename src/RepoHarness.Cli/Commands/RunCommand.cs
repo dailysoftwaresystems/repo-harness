@@ -48,6 +48,11 @@ internal static class RunCommand
         Description = "Run against what is already staged on each host, without syncing again.",
     };
 
+    private static readonly Option<string[]> InputOption = new(CommandLineInputs.Option)
+    {
+        Description = "Give one of the action's inputs a value for this run: --input name=value, once per input. Over the runner's .env values and the input's default; never a secret.",
+    };
+
     internal static Command Create()
     {
         var command = new Command(
@@ -60,6 +65,7 @@ internal static class RunCommand
         command.Options.Add(TimeOption);
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
+        command.Options.Add(InputOption);
         command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
@@ -71,6 +77,10 @@ internal static class RunCommand
             IReadOnlyList<string>? named = arguments.GetResult(LegsOption) is { Implicit: false }
                 ? arguments.GetValue(LegsOption) ?? []
                 : null;
+
+            // Read before anything else is: a pair that gives nothing is a mistake on this line
+            // alone, and costs no configuration read to name.
+            var inputs = CommandLineInputs.Parse(arguments.GetValue(InputOption) ?? []);
 
             var runners = context.Get<IRunnerRunService>();
             var builds = context.Get<IBuildService>();
@@ -102,6 +112,10 @@ internal static class RunCommand
                     .ConfigureAwait(false);
             }
 
+            // And every value given goes to an input the file declares, asked here for the same
+            // reason: once, before any leg's run has begun.
+            CommandLineInputs.RequireDeclared(runnerName, file, inputs);
+
             // The runner's own legs when --legs was left out. Resolved here rather than left to the
             // default of every declared leg, because running a benchmark on hosts nobody meant to
             // measure is not what "no --legs" asks for.
@@ -126,40 +140,19 @@ internal static class RunCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(DispatchOptions.Here),
-                        RemoteArguments(arguments))
+                        RunnerRunService.RemoteArguments(runnerName, arguments.GetValue(TimeOption), inputs))
                     {
                         // Built only where the runner requires it, and never tested: a host needs
                         // cmake for a runner that measures a build product, and not for one that
                         // only runs a script.
                         Workload = LegWorkload.ForRunner(runner, file),
                     },
-                    (work, token) => RunLegAsync(runners, builds, runnerName, work, token),
+                    (work, token) => RunLegAsync(runners, builds, runnerName, inputs, work, token),
                     cancellationToken)
                 .ConfigureAwait(false);
         }, JsonOption));
 
         return command;
-    }
-
-    /// <summary>
-    /// The options a host running one of this run's legs is given, so it runs the command this
-    /// machine was asked to run rather than a bare one.
-    /// </summary>
-    /// <remarks>
-    /// The runner's name is a positional argument, not an option, so it is added here too.
-    /// <c>--legs</c> and <c>--json</c> are the dispatch's own; the lock and the staging are this
-    /// machine's decisions about its own state.
-    /// </remarks>
-    private static IReadOnlyList<string> RemoteArguments(System.CommandLine.ParseResult arguments)
-    {
-        var remote = new List<string> { arguments.GetRequiredValue(RunnerArgument) };
-
-        if (arguments.GetValue(TimeOption))
-        {
-            remote.Add("--time");
-        }
-
-        return remote;
     }
 
     private static RunnerConfig Resolve(HarnessConfig config, string runnerName)
@@ -178,6 +171,7 @@ internal static class RunCommand
         IRunnerRunService runners,
         IBuildService builds,
         string runnerName,
+        IReadOnlyDictionary<string, string> inputs,
         LegWork work,
         CancellationToken cancellationToken)
     {
@@ -213,6 +207,10 @@ internal static class RunCommand
                 RequestFor(work, runnerName, runner) with
                 {
                     Time = work.Time,
+
+                    // Only the runner the command line named: the values were checked against its
+                    // action's inputs, and a runner a check starts reads its own.
+                    Inputs = inputs,
 
                     // One level deep by construction: the runner a check names carries no checks of
                     // its own, and this delegate reaches the service only for that one.

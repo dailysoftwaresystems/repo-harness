@@ -57,7 +57,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `sync` | Put a host's copy of the repository in step with this tree, deletions included |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
 | `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
-| `run <runner> [--legs a,b] [--time]` | Run a predefined runner across the legs it declares |
+| `run <runner> [--legs a,b] [--time] [--input name=value]` | Run a predefined runner across the legs it declares, giving its action's inputs values for this run |
 | `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a DssHarness command on an ssh host or in a WSL distribution |
 | `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout, secrets, runners |
 

@@ -1164,6 +1164,15 @@ sibling directory whose name merely starts the same way is outside, not inside.
   nothing there; the two take the same `runOn`. A run in which some leg's system runs no step at
   all is refused before any host is measured, naming every such leg: it would pass having run
   nothing.
+- **An input's value comes from `run --input name=value` first**, the runner value directories
+  second and the input's own `default` last. `--input` takes one pair each time it is given, for an
+  input the action declares, and only for the runner the command line names - a runner a run check
+  starts reads its own values. Any other name, a runner of phases, an empty value and a name given
+  twice are refused before a host is measured: an unset shell variable is not a request to run
+  with nothing, and a value for a name the file never reads changes nothing while the command line
+  says it did. A host running one of the run's legs is handed the same pairs, so no leg there runs
+  a default where the command line gave a value. The value is a plain one, on a command line and
+  so in the process table; a secret stays in `.secrets`.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

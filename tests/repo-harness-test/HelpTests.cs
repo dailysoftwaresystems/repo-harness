@@ -123,6 +123,28 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The runners topic says where an input's value comes from, in which order, what --input
+    /// refuses, and that a secret does not go there.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhereAnInputsValueComesFrom()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "resolved from 'run --input <name>=<value>' first, the",
+            "runner value directories second and each input's own 'default' last",
+            "--input takes one name=value each time it is given",
+            "an empty value and a name given twice",
+            "a secret stays in",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
     {
