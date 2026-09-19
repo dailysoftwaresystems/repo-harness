@@ -509,7 +509,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
                 ? new TreeEntry(type, objectId, GitName.FromBytes(entry[(tab + 1)..]))
                 : throw new HarnessException(
                     HarnessExit.CommandFailed,
-                    $"git listed a tree entry in a form this build cannot read: '{GitName.FromBytes(entry).Text}'"))];
+                    $"git listed a tree entry in a form this build cannot read: '{GitName.FromBytes(entry).Quoted}'"))];
     }
 
     /// <summary>
