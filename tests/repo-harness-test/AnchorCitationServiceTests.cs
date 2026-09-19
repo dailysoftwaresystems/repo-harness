@@ -141,6 +141,28 @@ public sealed class AnchorCitationServiceTests
     }
 
     /// <summary>
+    /// Two names that read alike are two files: one holding U+FFFD of its own, and one whose stray
+    /// byte reads as U+FFFD. Taken for one, the second - listed after the first - went unread and
+    /// unrefused.
+    /// </summary>
+    [Fact]
+    public async Task TwoNamesThatReadAlike_AreTwoFiles()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+
+        await harness.StageAsync(temp.Path, "\"src/caf\\357\\277\\275.cpp\"", "// D-AREA-TOPIC-OWN\n", cancellationToken);
+        await harness.StageAsync(temp.Path, "\"src/caf\\377.cpp\"", "// D-AREA-TOPIC-STRAY\n", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "alike"], cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken));
+
+        Assert.Contains(@"'src/caf\377.cpp' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A file in conflict is scanned once: git lists it once for each side of the conflict, and scanned
     /// that many times, each citation in it was reported that many times.
     /// </summary>
@@ -174,7 +196,8 @@ public sealed class AnchorCitationServiceTests
     /// A file in a root whose name is not UTF-8 refuses the check, naming it, however the files are
     /// read: no file opens by such a name here, and read as UTF-8 it became another name - one the
     /// commit "could not read", sending the reader to git fsck, and one the disk silently did not
-    /// have. Outside every root it is no concern of the check.
+    /// have. Outside every root it is no concern of the check - 'src' then a stray byte included,
+    /// which a quoted escape's backslash put inside the root 'src'.
     /// </summary>
     [Fact]
     public async Task ANameThatIsNotUtf8_InARoot_RefusesTheCheck_HoweverTheFilesAreRead()
@@ -184,6 +207,7 @@ public sealed class AnchorCitationServiceTests
         var harness = await PrepareAsync(temp, ["src"]);
 
         await harness.StageAsync(temp.Path, "\"notes/caf\\351.md\"", "// D-AREA-TOPIC-ELSEWHERE\n", cancellationToken);
+        await harness.StageAsync(temp.Path, "\"src\\351.bak\"", "// D-AREA-TOPIC-BESIDE\n", cancellationToken);
         await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "outside"], cancellationToken);
 
         Assert.True((await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentCommit, cancellationToken)).Passed);

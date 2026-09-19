@@ -129,7 +129,8 @@ public sealed class LineEndingServiceTests
     /// <summary>
     /// A file the policy reaches whose name is not UTF-8 refuses the run, naming it: read as UTF-8, its
     /// name became another, which the disk did not have, and the file was passed over without a word.
-    /// Excluded, it is no concern of the run.
+    /// Excluded, it is no concern of the run - but 'generated' then a stray byte is not under
+    /// 'generated', where a quoted escape's backslash put it, excluding it unread.
     /// </summary>
     [Fact]
     public async Task ANameThatIsNotUtf8_IsRefused_UnlessExcluded()
@@ -145,13 +146,38 @@ public sealed class LineEndingServiceTests
             ["declared.txt", "declared.win"],
             (await Service(harness).ApplyAsync(temp.Path, check, cancellationToken)).Changed.Select(change => change.Path).Order(StringComparer.Ordinal));
 
-        await harness.StageAsync(temp.Path, "\"caf\\351.txt\"", "one\r\ntwo\r\n", cancellationToken);
+        await harness.StageAsync(temp.Path, "\"generated\\240old/caf.txt\"", "one\r\ntwo\r\n", cancellationToken);
 
         var refusal = await Assert.ThrowsAsync<HarnessException>(
             () => Service(harness).ApplyAsync(temp.Path, check, cancellationToken));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
-        Assert.Contains(@"'caf\351.txt' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains(@"'generated\240old/caf.txt' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two names that read alike are two files: one holding U+FFFD of its own, and one whose stray
+    /// byte reads as U+FFFD. Taken for one, the second - listed after the first - went unchecked and
+    /// unrefused.
+    /// </summary>
+    [Theory]
+    [InlineData(LineEndingScope.All)]
+    [InlineData(LineEndingScope.Changed)]
+    public async Task TwoNamesThatReadAlike_AreTwoFiles(LineEndingScope scope)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+
+        await harness.StageAsync(temp.Path, "\"caf\\357\\277\\275.txt\"", "one\r\ntwo\r\n", cancellationToken);
+        await harness.StageAsync(temp.Path, "\"caf\\377.txt\"", "one\r\ntwo\r\n", cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(harness).ApplyAsync(
+            temp.Path,
+            new LineEndingRequest(scope, CheckOnly: true),
+            cancellationToken));
+
+        Assert.Contains(@"'caf\377.txt' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

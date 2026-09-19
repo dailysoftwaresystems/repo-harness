@@ -7,9 +7,10 @@ namespace RepoHarness.Core.Git;
 
 /// <summary>A name git holds - a path, from the repository's root - as git listed it.</summary>
 /// <param name="Text">
-/// The name as text. git holds a name as bytes and nothing makes them UTF-8, so a byte that begins no
-/// UTF-8 character is written as the octal escape git's own quoting writes it in (<c>\351</c>): the
-/// text still tells a person which file is meant, but it is not the name.
+/// The name as text: exactly the name, where it is UTF-8. git holds a name as bytes and nothing makes
+/// them UTF-8, so a byte that begins no UTF-8 character is read as U+FFFD, as .NET reads the same name
+/// from a directory: a character nothing takes for a separator, so a root or a pattern matched against
+/// the text finds the name where it lies. Such a text names no file.
 /// </param>
 /// <param name="IsUtf8">
 /// Whether the name is UTF-8 throughout, so that <paramref name="Text"/> is the name itself: one a
@@ -17,6 +18,17 @@ namespace RepoHarness.Core.Git;
 /// </param>
 public sealed record GitName(string Text, bool IsUtf8)
 {
+    /// <summary>
+    /// The name for a person, as git's quoting writes it: a byte that begins no UTF-8 character as its
+    /// octal escape (<c>\351</c>), and a backslash doubled, so no escape reads two ways. The text itself
+    /// where the name is UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// For saying which file is meant, never for matching: read as a path, the escape's backslash is a
+    /// separator, and it moved a name into a root or an exclusion it is not in.
+    /// </remarks>
+    public string Quoted { get; init; } = Text;
+
     /// <summary>The name whose bytes <paramref name="bytes"/> carries, one to a character.</summary>
     /// <param name="bytes">What git printed for the name, read as Latin-1.</param>
     internal static GitName FromBytes(string bytes)
@@ -24,33 +36,11 @@ public sealed record GitName(string Text, bool IsUtf8)
         ArgumentNullException.ThrowIfNull(bytes);
 
         var raw = Encoding.Latin1.GetBytes(bytes);
+        var text = Encoding.UTF8.GetString(raw);
 
-        if (Utf8.IsValid(raw))
-        {
-            return new GitName(Encoding.UTF8.GetString(raw), IsUtf8: true);
-        }
-
-        var text = new StringBuilder();
-        ReadOnlySpan<byte> rest = raw;
-
-        while (!rest.IsEmpty)
-        {
-            if (Rune.DecodeFromUtf8(rest, out var character, out var consumed) == OperationStatus.Done)
-            {
-                text.Append(character.ToString());
-            }
-            else
-            {
-                foreach (var stray in rest[..consumed])
-                {
-                    text.Append('\\').Append(Convert.ToString(stray, 8).PadLeft(3, '0'));
-                }
-            }
-
-            rest = rest[consumed..];
-        }
-
-        return new GitName(text.ToString(), IsUtf8: false);
+        return Utf8.IsValid(raw)
+            ? new GitName(text, IsUtf8: true)
+            : new GitName(text, IsUtf8: false) { Quoted = Quote(raw) };
     }
 
     /// <summary>
@@ -61,6 +51,31 @@ public sealed record GitName(string Text, bool IsUtf8)
     public HarnessException Unreadable(string consequence)
         => new(
             HarnessExit.Refused,
-            $"'{Text}' is not named in UTF-8: each \\ooo in it is a byte of the name that is not, as git quotes it. "
+            $"'{Quoted}' is not named in UTF-8: each \\ooo in it is a byte of the name that is not, as git quotes it. "
             + $"This tool opens a file only by a UTF-8 name, so {consequence}. Rename it in UTF-8.");
+
+    /// <summary>A name that is not UTF-8, as git's quoting writes it.</summary>
+    private static string Quote(ReadOnlySpan<byte> raw)
+    {
+        var quoted = new StringBuilder();
+
+        while (!raw.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf8(raw, out var character, out var consumed) == OperationStatus.Done)
+            {
+                quoted.Append(character.Value == '\\' ? @"\\" : character.ToString());
+            }
+            else
+            {
+                foreach (var stray in raw[..consumed])
+                {
+                    quoted.Append('\\').Append(Convert.ToString(stray, 8).PadLeft(3, '0'));
+                }
+            }
+
+            raw = raw[consumed..];
+        }
+
+        return quoted.ToString();
+    }
 }

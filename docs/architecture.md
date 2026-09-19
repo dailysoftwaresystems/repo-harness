@@ -368,8 +368,11 @@ a registry git cannot read is refused rather than reported missing at the base.
 
 git holds a name as bytes, and nothing makes them UTF-8. A file in a root whose name is not
 UTF-8 refuses the check, named as git's quoting writes it (`caf\351.md`): no file opens by such a
-name here, and read as UTF-8 it became another name, which the disk silently did not have. A file
-git lists once for each side of a conflict is scanned once.
+name here, and read as UTF-8 it became another name, which the disk silently did not have. Which
+root a name lies in is decided on the name as .NET reads it, a stray byte as U+FFFD, and never on
+the quoted form, whose backslash reads as a separator and moved `src\351.bak` into `src`. A file
+git lists once for each side of a conflict is scanned once; two names that only read alike are
+two files.
 
 The scanner is the point of the command. The guard it replaces required a word boundary before
 an id, which is right for `FIXED-32-BIT-WORD` — whose tail is anchor-shaped and is correctly

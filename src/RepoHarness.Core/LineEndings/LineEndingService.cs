@@ -271,7 +271,8 @@ public sealed class LineEndingService(
 
     /// <summary>
     /// The files <paramref name="scope"/> covers, each once: git lists a file in conflict once for
-    /// each side of it, and one both staged and changed since in both lists.
+    /// each side of it, and one both staged and changed since in both lists. Compared whole, since two
+    /// names that are not UTF-8 can read alike and still be two files.
     /// </summary>
     private async Task<IReadOnlyList<GitName>> SelectAsync(
         string root,
@@ -283,7 +284,7 @@ public sealed class LineEndingService(
             var tracked = await _gitClient.ListNamesAsync(root, ["ls-files", "-z", "--cached"], cancellationToken)
                 .ConfigureAwait(false);
 
-            return [.. tracked.DistinctBy(name => name.Text, StringComparer.Ordinal)];
+            return [.. tracked.Distinct()];
         }
 
         // Staged and unstaged, and nothing else: an untracked file is in neither, and rewriting one
@@ -293,7 +294,7 @@ public sealed class LineEndingService(
         var staged = await _gitClient.ListNamesAsync(root, ["diff", "--name-only", "-z", "--diff-filter=d", "--cached"], cancellationToken)
             .ConfigureAwait(false);
 
-        return [.. unstaged.Concat(staged).DistinctBy(name => name.Text, StringComparer.Ordinal)];
+        return [.. unstaged.Concat(staged).Distinct()];
     }
 
     /// <summary>

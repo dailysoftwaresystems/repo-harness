@@ -121,9 +121,10 @@ public sealed class AnchorCitationService(
         var scanned = 0;
 
         // Each once: git lists a file in conflict once for each side of it, and scanned that many
-        // times, each of its citations was reported that many times.
+        // times, each of its citations was reported that many times. Compared whole, since two names
+        // that are not UTF-8 can read alike and still be two files.
         var inRoots = selection.Names
-            .DistinctBy(name => name.Text, StringComparer.Ordinal)
+            .Distinct()
             .Where(name => IsInsideARoot(name.Text, roots))
             .ToList();
 

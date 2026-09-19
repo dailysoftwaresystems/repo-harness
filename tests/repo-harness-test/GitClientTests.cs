@@ -422,8 +422,8 @@ public sealed class GitClientTests
 
     /// <summary>
     /// A commit's files are listed from the repository's root whichever directory git is asked from,
-    /// a submodule's entry left out. A name that is not UTF-8 is listed as git's quoting writes it,
-    /// and said to be one.
+    /// a submodule's entry left out. A name that is not UTF-8 is said to be one, and quoted as git
+    /// quotes it.
     /// </summary>
     [Fact]
     public async Task ListFilesAtCommitAsync_ListsTheCommitsFiles_EachNameAsGitHoldsIt()
@@ -444,14 +444,18 @@ public sealed class GitClientTests
         var listed = await harness.GitClient.ListFilesAtCommitAsync(temp.Combine("src"), head, cancellationToken);
 
         Assert.Equal(
-            [new GitName("README.md", true), new GitName(@"src/caf\351.md", false), new GitName("src/naïve name.txt", true)],
+            [
+                new GitName("README.md", true),
+                new GitName("src/caf�.md", false) { Quoted = @"src/caf\351.md" },
+                new GitName("src/naïve name.txt", true),
+            ],
             listed.OrderBy(name => name.Text, StringComparer.Ordinal));
     }
 
     /// <summary>
     /// A listing's names are read as git holds them: one beyond ASCII as its text, and one that is not
-    /// UTF-8 as git's quoting writes it, said to be one. Read as UTF-8, that name became another,
-    /// which named no file.
+    /// UTF-8 said to be one, and quoted as git quotes it. Read as UTF-8 text alone, that name became
+    /// another, which named no file, and nothing said so.
     /// </summary>
     [Fact]
     public async Task ListNamesAsync_ReadsEachNameAsGitHoldsIt_AndThrowsWhenGitFails()
@@ -469,7 +473,11 @@ public sealed class GitClientTests
             cancellationToken);
 
         Assert.Equal(
-            [new GitName("README.md", true), new GitName(@"caf\351.md", false), new GitName("naïve.md", true)],
+            [
+                new GitName("README.md", true),
+                new GitName("caf�.md", false) { Quoted = @"caf\351.md" },
+                new GitName("naïve.md", true),
+            ],
             listed.OrderBy(name => name.Text, StringComparer.Ordinal));
 
         await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ListNamesAsync(
