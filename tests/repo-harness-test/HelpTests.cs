@@ -126,14 +126,35 @@ public sealed partial class HelpTests
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
 
+        // Each command as its list gives it, with what it takes: named in prose alone, one was missing
+        // from the list a reader scans.
         var expected = AnchorStatus.Cells
-            .Concat(["write-anchor", "set-anchor", "read-anchor", "read-anchors", "check-anchor-balance", "--anchor-dry-run"])
+            .Concat(["write-anchor", "set-anchor", "read-anchor", "read-anchors", "check-anchor-balance [--base REF]"])
+            .Concat(["check-anchor-citations --current-commit|--current-tree|--current-pr", "--anchor-dry-run"])
             .Concat([AnchorSettings.DefaultPendingAnchorsPath, AnchorSettings.DefaultDoneAnchorsPath, AnchorRegistryDocument.TableHeader]);
 
         foreach (var text in expected)
         {
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The citation check says what it cannot see - a break inside a segment, with no hyphen on either
+    /// side - both where its command is described and in the topic that lists it.
+    /// </summary>
+    [Theory]
+    [InlineData("help", "anchors")]
+    [InlineData("check-anchor-citations", "--help")]
+    public async Task TheCitationCheck_StatesTheOneWrapItCannotSee(string first, string second)
+    {
+        var result = await CliRunner.RunAsync([first, second], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        // Read as prose: a description is wrapped to the terminal, with its continuation indented.
+        var prose = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("with no hyphen on either side", prose, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -332,7 +332,7 @@ public static class AnchorCitationReports
         IReadOnlyList<string> data = json
             ? [Json(report)]
             : [.. report.Unresolved.Select(citation => citation.Cut
-                ? $"{citation.Path}:{citation.LineNumber}: {citation.Id}- (cut at the end of the line)"
+                ? $"{citation.Path}:{citation.LineNumber}: {citation.Written} (cut at the end of the line)"
                 : $"{citation.Path}:{citation.LineNumber}: {citation.Id}")];
 
         var looked =

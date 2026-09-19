@@ -148,8 +148,8 @@ public sealed class PathBudgetTests
     [Fact]
     public void Check_AllowsAPathThatFitsExactly()
     {
-        // 70 + separator + 6 = 77 characters, and 77 + 163 + 20 = 260.
-        var directory = DirectoryOf(parentLength: 70, nameLength: 6);
+        // 69 + separator + 6 = 76 characters, and 76 + separator + 163 + 20 = 260.
+        var directory = DirectoryOf(parentLength: 69, nameLength: 6);
 
         var result = Budget(Limit).Check(directory, Reserve, Margin);
 
@@ -163,7 +163,7 @@ public sealed class PathBudgetTests
     [Fact]
     public void Check_RefusesAPathOneCharacterOver_AndSaysWhatWouldFit()
     {
-        var directory = DirectoryOf(parentLength: 70, nameLength: 7);
+        var directory = DirectoryOf(parentLength: 69, nameLength: 7);
 
         var result = Budget(Limit).Check(directory, Reserve, Margin);
 
@@ -208,6 +208,45 @@ public sealed class PathBudgetTests
         Assert.Equal(260, tight.Limit);
         Assert.True(relaxed.IsWithinBudget);
         Assert.Equal(4096, relaxed.Limit);
+    }
+
+    /// <summary>
+    /// What the reserve names hangs off the directory after one separator, which the budget counts:
+    /// left to each caller, it was counted by the one whose reserve named a build directory and
+    /// missed wherever that caller added nothing, so a path one character over was taken to fit.
+    /// </summary>
+    [Theory]
+    [InlineData(12, true)]
+    [InlineData(11, false)]
+    public void Check_CountsTheSeparatorBetweenTheDirectoryAndWhatIsReservedBelowIt(int limit, bool fits)
+    {
+        var directory = DirectoryOf(parentLength: 3, nameLength: 2);
+
+        var result = Budget(platformLimit: null).Check(directory, reserve: 5, margin: 0, limit);
+
+        Assert.Equal(fits, result.IsWithinBudget);
+        Assert.Equal(directory.Length + 1 + 5, result.RequiredLength);
+        Assert.Equal(limit - 1 - 5 - 4, result.AvailableNameLength);
+    }
+
+    /// <summary>A directory spelled with a separator at its end is the same directory, counted once.</summary>
+    [Fact]
+    public void Check_CountsATrailingSeparatorOnce()
+    {
+        var directory = DirectoryOf(parentLength: 3, nameLength: 2);
+
+        Assert.Equal(
+            Budget(Limit).Check(directory, Reserve, Margin).RequiredLength,
+            Budget(Limit).Check(directory + Path.DirectorySeparatorChar, Reserve, Margin).RequiredLength);
+    }
+
+    /// <summary>Nothing reserved below the directory needs no separator to reach it.</summary>
+    [Fact]
+    public void Check_AddsNoSeparator_WhenNothingIsReserved()
+    {
+        var directory = DirectoryOf(parentLength: 3, nameLength: 2);
+
+        Assert.True(Budget(platformLimit: null).Check(directory, reserve: 0, margin: 0, limit: directory.Length).IsWithinBudget);
     }
 
     [Fact]

@@ -355,8 +355,15 @@ cut there whatever rows exist - even one named by the part before the cut - beca
 spell the id it was cut from. An id cut at its first or second hyphen is too short to be a
 citation on its own line, so it is one where the next line carries on with the segments that make
 it one: `D-PP-` before a line opening `PRESCAN` is reported cut, and `D-` before `day` - a wrapped
-D-day - is not. The failure says cut citations apart from those no row resolves, since adding a
-row answers only the second.
+D-day - is not. An id cut just before a hyphen is cut too: one that ends its line where the next
+opens - past its indentation and a comment's marker - with the hyphen and the segments that carry
+it on, as `D-LK6-14` before `-INTEGRATION-PAYLOAD`. Read on its own it resolved to the shorter row
+it happens to spell, or to none. A list's `- ` and an option's `--` carry nothing on, while a line
+opening with an option such as `-O2` straight after a citation reads as a cut. What stays out of
+reach is a break inside a segment, with no hyphen on either side: it cannot be told from a line
+that simply ends there, so it reads as the shorter id, reported unresolved unless that shorter id
+is a row of its own. The failure says cut citations apart from those no row resolves, since adding
+a row answers only the second.
 
 `--current-commit` reads every file of the commit through one git process; asked for one at a
 time, each cost two, and 2,385 files took twenty minutes. A file is read as it would be from

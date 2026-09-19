@@ -114,6 +114,29 @@ public sealed class AnchorCitationServiceTests
     }
 
     /// <summary>
+    /// An id cut just before a hyphen - the next line opening with it - is reported as cut, as its line
+    /// holds it, even though what it spells on its own is a row: read that way it resolved to a row it
+    /// never meant, and the one it did mean went unchecked.
+    /// </summary>
+    [Fact]
+    public async Task ACitationCutJustBeforeAHyphen_IsReportedAsCut_ThoughWhatItSpellsIsARow()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, ["src"]);
+        await WriteAnchorAsync(harness, temp, Known);
+        await WriteAnchorAsync(harness, temp, Known + "-DETAIL");
+
+        temp.WriteFile(Path.Combine("src", "thing.cpp"), $"// see {Known}\n// -DETAIL for the rest\n");
+
+        var report = await Service(harness).CheckAsync(temp.Path, AnchorCitationSubject.CurrentTree, cancellationToken);
+
+        var cut = Assert.Single(report.Unresolved);
+        Assert.True(cut.Cut);
+        Assert.Equal($"src/thing.cpp:1: {Known} (cut at the end of the line)", Assert.Single(AnchorCitationReports.Render(report, json: false).Data));
+    }
+
+    /// <summary>
     /// The headline says cut citations apart from those no row resolves, each with its own remedy. An
     /// id cut at its second hyphen is found too, where the next line carries it on.
     /// </summary>

@@ -8,7 +8,11 @@ public interface IPathBudget
 {
     /// <summary>Checks whether <paramref name="directory"/> can host a build tree.</summary>
     /// <param name="directory">Absolute path that would be created.</param>
-    /// <param name="reserve">Longest path a build generates below the tree root.</param>
+    /// <param name="reserve">
+    /// Longest path a build generates below the tree root, relative to it: with no leading separator,
+    /// as a build measures one. The separator between the tree root and that path is this check's to
+    /// count.
+    /// </param>
     /// <param name="margin">Extra headroom kept beyond the reserve.</param>
     /// <param name="limit">
     /// Path length to budget against instead of the platform's own limit, or
@@ -35,8 +39,12 @@ public sealed class PathBudget(IHostPlatform platform) : IPathBudget
 
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(effectiveLimit, nameof(limit));
 
-        var required = directory.Length + reserve + margin;
-        var availableNameLength = effectiveLimit - reserve - margin - GetParentLength(directory);
+        // What the reserve names hangs off the directory after one separator. Left to each caller to
+        // add, it was added by the only caller whose reserve names a build directory, and missing
+        // wherever that caller added nothing: the check then believed it had a character to spare.
+        var below = reserve > 0 ? 1 + reserve : 0;
+        var required = Path.TrimEndingDirectorySeparator(directory).Length + below + margin;
+        var availableNameLength = effectiveLimit - below - margin - GetParentLength(directory);
 
         return required <= effectiveLimit
             ? PathBudgetResult.WithinBudget(required, effectiveLimit, availableNameLength)

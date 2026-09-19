@@ -48,6 +48,28 @@ public sealed class AnchorIdScannerTests
     }
 
     /// <summary>
+    /// An id cut just before a hyphen - the hyphen opening the next line, past its indentation and a
+    /// comment's marker - is cut too: a whole citation that would otherwise resolve to the shorter id
+    /// it spells, and a stub too short to be one. A list's '- ' and an option's '--' carry nothing on,
+    /// and a stub the next line does not make a citation is no id.
+    /// </summary>
+    [Fact]
+    public void AnIdCutJustBeforeAHyphen_IsCut()
+    {
+        var found = Scanner.Scan(
+            "notes.md",
+            "see D-LK6-14\r\n  // -INTEGRATION-PAYLOAD here\nsee D-PP\n-PRESCAN\nsee D\n-PP-PRESCAN\n"
+            + "see D-AREA-TOPIC\n- a list item\nsee D-AREA-TOPIC-TWO\n--flag\nplan D\n-1 point\nsee D-XX\nYY, no hyphen at the break\n"
+            + "see D-AREA-TOPIC-MID here\n-INTEGRATION does not carry a citation the line went on past\nsee D-AREA-TOPIC-END");
+
+        Assert.Equal(
+            [("D-LK6-14", "D-LK6-14", 1, true), ("D-PP", "D-PP", 3, true), ("D", "D", 5, true),
+             ("D-AREA-TOPIC", "D-AREA-TOPIC", 7, false), ("D-AREA-TOPIC-TWO", "D-AREA-TOPIC-TWO", 9, false),
+             ("D-AREA-TOPIC-MID", "D-AREA-TOPIC-MID", 15, false), ("D-AREA-TOPIC-END", "D-AREA-TOPIC-END", 17, false)],
+            found.Select(citation => (citation.Id, citation.Written, citation.LineNumber, citation.Cut)));
+    }
+
+    /// <summary>
     /// A fragment glued to the word before it is no citation, as a whole id glued there is not; and a
     /// citation cut at its end is reported once, not again as the shorter fragment it ends in.
     /// </summary>
