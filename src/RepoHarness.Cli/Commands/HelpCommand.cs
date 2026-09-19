@@ -619,6 +619,13 @@ internal static class HelpCommand
         builder.AppendLine("a missing compiler. Nothing about that needs measuring: a leg says which system it");
         builder.AppendLine("needs, and it only ever runs on a host that provides it.");
         builder.AppendLine();
+        builder.AppendLine("A toolchain also names its compiler - CC or CXX under env, or CMAKE_C_COMPILER or");
+        builder.AppendLine("CMAKE_CXX_COMPILER under cacheVars - and one naming none is refused the same way:");
+        builder.AppendLine("the build system would take whatever compiler it found first. A build directory is");
+        builder.AppendLine("then held to the compiler it was configured with by the file that compiler starts on");
+        builder.AppendLine("the build's own PATH, never by its name alone, so a second gcc earlier on the PATH is");
+        builder.AppendLine("refused rather than mixed into the objects of the first.");
+        builder.AppendLine();
         builder.AppendLine("Selected legs run at once and the command waits for all of them, reporting each");
         builder.AppendLine("live. Legs are chunked by the PHYSICAL machine they run on: this machine and every");
         builder.AppendLine("WSL distribution are one machine, because a distribution runs on it, and each ssh");

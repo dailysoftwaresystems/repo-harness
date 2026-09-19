@@ -109,7 +109,8 @@ public sealed class BuildService(
             Path.Combine(request.TreeRoot, request.Project.Path),
             CompilerValue.For(CompilerValue.C, overlay.CacheVars, environment),
             CompilerValue.For(CompilerValue.Cxx, overlay.CacheVars, environment),
-            adapter.BuildTypeOf(config, request.Variant.Config));
+            adapter.BuildTypeOf(config, request.Variant.Config),
+            CompilerSearch.For(environment, request.ProgramDirectories));
 
         var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
 

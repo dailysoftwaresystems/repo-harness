@@ -35,6 +35,24 @@ public sealed class TempDirectory : IDisposable
         return full;
     }
 
+    /// <summary>
+    /// Writes a program that would start, named <paramref name="name"/> in
+    /// <paramref name="relativeDirectory"/>: with <c>.exe</c> on Windows, where a bare name starts
+    /// nothing, and marked executable elsewhere.
+    /// </summary>
+    /// <returns>The program's whole path.</returns>
+    public string WriteProgram(string relativeDirectory, string name, string contents = "#!/bin/sh\nexit 0\n")
+    {
+        var full = WriteFile(System.IO.Path.Combine(relativeDirectory, OperatingSystem.IsWindows() ? name + ".exe" : name), contents);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(full, File.GetUnixFileMode(full) | UnixFileMode.UserExecute);
+        }
+
+        return full;
+    }
+
     public void Dispose()
     {
         try

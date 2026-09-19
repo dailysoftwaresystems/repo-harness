@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
@@ -21,6 +22,11 @@ public sealed class DefaultConfigFactoryTests
 
         Assert.Equal(["clang", "gcc", "msvc"], config.Toolchains.Keys.Order(StringComparer.Ordinal));
         Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
+
+        // Each names its compiler, as every toolchain must: msvc's is cl, for both languages.
+        Assert.Equal("cl", config.Toolchains["msvc"].Env["CC"]);
+        Assert.Equal("cl", config.Toolchains["msvc"].Env["CXX"]);
+        Assert.All(config.Toolchains.Values, toolchain => Assert.True(CompilerValue.Named(toolchain.CacheVars, toolchain.Env)));
         Assert.Contains("asan", config.Sanitizers.Keys);
 
         var project = Assert.Single(config.Projects);

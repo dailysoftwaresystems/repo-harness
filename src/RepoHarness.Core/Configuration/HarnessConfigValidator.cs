@@ -525,6 +525,19 @@ public static class HarnessConfigValidator
                         + $"expected one of {string.Join(", ", PlatformKeys)}");
                 }
             }
+
+            // A toolchain is the compiler a leg builds with. One naming none leaves the build system
+            // to take whatever compiler it finds first - how a leg named msvc built with MinGW's gcc
+            // on every run until CC was declared - and gives the build directory guard nothing to hold
+            // a later build to.
+            if (!Build.CompilerValue.Named(toolchain.CacheVars, toolchain.Env))
+            {
+                problems.Add(
+                    $"toolchain '{name}' names no compiler: declare CC or CXX under its env, or "
+                    + "CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars. Without one the build "
+                    + "system takes whatever compiler it finds first, and the leg reports on a compiler "
+                    + "nobody chose");
+            }
         }
     }
 

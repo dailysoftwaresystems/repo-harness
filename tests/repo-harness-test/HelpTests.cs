@@ -181,6 +181,19 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The legs topic says a toolchain names its compiler, and that a build directory is held to the
+    /// compiler it was configured with by the file it starts, not by its name.
+    /// </summary>
+    [Fact]
+    public async Task LegsTopic_SaysAToolchainNamesItsCompiler_AndHowABuildDirectoryIsHeldToIt()
+    {
+        var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
+
+        Assert.Contains("A toolchain also names its compiler - CC or CXX under env, or CMAKE_C_COMPILER or", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("then held to the compiler it was configured with by the file that compiler starts on", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
     {

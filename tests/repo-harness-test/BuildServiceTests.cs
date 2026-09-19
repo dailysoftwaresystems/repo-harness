@@ -317,10 +317,49 @@ public sealed class BuildServiceTests
         return (Service(factory, exitCode), factory);
     }
 
+    /// <summary>
+    /// A compiler a survey found off the PATH is the one the build starts, from the directory
+    /// appended to it, so that is the file the directory is held to: one configured with a gcc
+    /// elsewhere is refused, though the names match.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerFoundInAProgramDirectory_IsTheOneTheDirectoryIsHeldTo()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+
+        temp.WriteProgram(ToolchainDirectory, "gcc");
+        var elsewhere = temp.WriteProgram("elsewhere-bin", "gcc");
+        Directory.CreateDirectory(temp.Combine("empty-path"));
+
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "gcc", ["PATH"] = temp.Combine("empty-path") },
+            ProgramDirectories = [temp.Combine(ToolchainDirectory)],
+        };
+
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={elsewhere.Replace('\\', '/')}\n",
+            cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"which starts '{temp.Combine(ToolchainDirectory, OperatingSystem.IsWindows() ? "gcc.exe" : "gcc")}' now", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Where a test puts the compilers its build's PATH names, outside anything the build reads.</summary>
+    private const string ToolchainDirectory = "toolchain-bin";
+
     private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null, IProcessRunner? phases = null)
         => new(
             new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
-            new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
+            new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
@@ -574,13 +613,20 @@ public sealed class BuildServiceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         using var temp = new TempDirectory();
         var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
-        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "ccache clang" } };
+
+        // The ccache the build's PATH starts is the one the directory was configured with, so the
+        // question is only what was recorded after it.
+        var ccache = temp.WriteProgram(ToolchainDirectory, "ccache");
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "ccache clang", ["PATH"] = temp.Combine(ToolchainDirectory) },
+        };
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
 
         Directory.CreateDirectory(buildDirectory);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
-            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/ccache\nCMAKE_C_COMPILER_ARG1:STRING= clang\n",
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={ccache.Replace('\\', '/')}\nCMAKE_C_COMPILER_ARG1:STRING= clang\n",
             cancellationToken);
 
         var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
@@ -599,13 +645,22 @@ public sealed class BuildServiceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         using var temp = new TempDirectory();
         var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
-        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang" } };
+
+        // The gcc the build starts is the one the directory was configured with, found where a survey
+        // found it: off a PATH that holds none, in the directory appended to it.
+        var gcc = temp.WriteProgram(ToolchainDirectory, "gcc");
+        Directory.CreateDirectory(temp.Combine("empty-path"));
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang", ["PATH"] = temp.Combine("empty-path") },
+            ProgramDirectories = [temp.Combine(ToolchainDirectory)],
+        };
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
 
         Directory.CreateDirectory(buildDirectory);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
-            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:STRING=/usr/bin/gcc\n",
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:STRING={gcc.Replace('\\', '/')}\n",
             cancellationToken);
 
         var config = Config();

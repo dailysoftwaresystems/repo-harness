@@ -52,6 +52,7 @@ public static class DefaultConfigFactory
         {
             Platforms = ["windows"],
             Generator = "Ninja",
+            Env = { ["CC"] = "cl", ["CXX"] = "cl" },
         };
 
         config.Toolchains["gcc"] = new ToolchainConfig

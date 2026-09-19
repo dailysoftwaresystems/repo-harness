@@ -117,6 +117,11 @@ at once, with the line it concerns where the parser knows it:
 - References are resolved: a leg naming an undeclared host or emulator, an emulator that
   runs programs for another processor than the leg's, a success pattern that does not
   compile, a commit template placeholder no variable declares.
+- **A toolchain names its compiler**: `CC` or `CXX` under `env`, or `CMAKE_C_COMPILER` or
+  `CMAKE_CXX_COMPILER` under `cacheVars`. One naming none is refused, because the build system then
+  takes whatever compiler it finds first - how a leg named `msvc` built with MinGW's gcc on every
+  run until `CC` was declared - and the build directory guard has nothing to hold a later build to.
+  `init`'s `msvc` toolchain names `cl`.
 - **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
   toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
   about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose
@@ -949,7 +954,13 @@ Seven independent guarantees, each addressing a measured failure mode:
    worktree's build output can never land in the main checkout's.
 3. **Build directory guard.** Before configuring, `CMakeCache.txt` is read and
    the run is refused if `CMAKE_HOME_DIRECTORY` or the recorded compiler
-   disagrees with this leg.
+   disagrees with this leg. The compiler is compared by the file it starts: the name the
+   leg's toolchain gives is resolved on the PATH the build's phases are given - its
+   environment's own, or this process's, with the directories a survey found programs in
+   appended - and held to the whole path CMake cached. A name compared with a name let a
+   directory configured with one gcc be rebuilt with another earlier on the PATH, and the
+   leg reported on objects from both. A name the search finds nowhere cannot start, and is
+   compared by name until the build says so.
 4. **Per-host compiler cache.** `CCACHE_DIR` and `CCACHE_BASEDIR` are set
    explicitly per host rather than inherited, so hosts never share a store.
 5. **Clean run directories, incremental build directories.** Scratch and run

@@ -25,6 +25,26 @@ public sealed record CompilerValue(string Program, IReadOnlyList<string> Argumen
     /// <summary>Both, in the order a build reads them.</summary>
     public static IReadOnlyList<string> Variables { get; } = [C, Cxx];
 
+    /// <summary>The cache variable CMake is given <paramref name="variable"/>'s compiler in.</summary>
+    /// <param name="variable"><see cref="C"/> or <see cref="Cxx"/>.</param>
+    public static string CacheVariable(string variable) => variable == C ? "CMAKE_C_COMPILER" : "CMAKE_CXX_COMPILER";
+
+    /// <summary>
+    /// Whether <paramref name="cacheVariables"/> or <paramref name="environment"/> names a C or C++
+    /// compiler at all, whether or not the value can be read before the build starts it.
+    /// </summary>
+    /// <param name="cacheVariables">What CMake is given with <c>-D</c>.</param>
+    /// <param name="environment">The environment the build starts with.</param>
+    public static bool Named(IReadOnlyDictionary<string, string> cacheVariables, IReadOnlyDictionary<string, string> environment)
+    {
+        ArgumentNullException.ThrowIfNull(cacheVariables);
+        ArgumentNullException.ThrowIfNull(environment);
+
+        return Variables.Any(variable =>
+            !string.IsNullOrWhiteSpace(cacheVariables.GetValueOrDefault(CacheVariable(variable)))
+            || !string.IsNullOrWhiteSpace(environment.GetValueOrDefault(variable)));
+    }
+
     /// <summary>
     /// The compiler a build uses for <paramref name="variable"/>'s language: the cache variable CMake
     /// is given for it, when the variant gives one, and otherwise what the environment names.
@@ -46,9 +66,7 @@ public sealed record CompilerValue(string Program, IReadOnlyList<string> Argumen
         ArgumentNullException.ThrowIfNull(cacheVariables);
         ArgumentNullException.ThrowIfNull(environment);
 
-        var cached = variable == C ? "CMAKE_C_COMPILER" : "CMAKE_CXX_COMPILER";
-
-        if (cacheVariables.TryGetValue(cached, out var named)
+        if (cacheVariables.TryGetValue(CacheVariable(variable), out var named)
             && named.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is [var program, ..])
         {
             return new CompilerValue(program, []);

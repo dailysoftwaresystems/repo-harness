@@ -167,7 +167,7 @@ public sealed class ConfigStoreTests
         // in-memory config and the loaded one must not disagree about that.
         var config = LoadValid($$"""
             {
-              "toolchains": { "msvc": { "generator": "Ninja" } },
+              "toolchains": { "msvc": { "generator": "Ninja", "env": { "CC": "cl" } } },
               "buildConfigs": { "debug": { "cmakeBuildType": "Debug" } },
               "sshItems": ["vps"], "wslDistros": ["Ubuntu"],
               "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
@@ -194,7 +194,7 @@ public sealed class ConfigStoreTests
         // A toolchain declaring one platform must have exactly that platform. If
         // deserialization appended to the default instead of replacing it, a
         // Windows-only toolchain would silently become an everywhere toolchain.
-        var config = LoadValid("""{ "toolchains": { "msvc": { "platforms": ["windows"] } } }""");
+        var config = LoadValid("""{ "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } } } }""");
 
         Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
     }
@@ -1021,7 +1021,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid("""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "msvc": { "platforms": ["windows"] } },
+              "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } } },
               "legs": {
                 "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "msvc" }
               }
@@ -1033,9 +1033,9 @@ public sealed class ConfigStoreTests
     }
 
     [Theory]
-    [InlineData("""{ "platforms": ["linux"] }""")]
-    [InlineData("""{ "platforms": ["all"] }""")]
-    [InlineData("{ }")]
+    [InlineData("""{ "platforms": ["linux"], "env": { "CC": "gcc" } }""")]
+    [InlineData("""{ "platforms": ["all"], "env": { "CC": "gcc" } }""")]
+    [InlineData("""{ "env": { "CC": "gcc" } }""")]
     public void Load_AcceptsALegWhoseToolchainExistsOnItsPlatform(string toolchain)
     {
         var config = LoadValid($$"""
@@ -1064,7 +1064,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid($$"""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "{{key}}": "gcc" } } ],
               "legs": {
                 "win": { "os": "windows", "processor": "x86_64", "config": "debug" }
@@ -1086,7 +1086,7 @@ public sealed class ConfigStoreTests
         var config = LoadValid("""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "all": "gcc" } } ],
               "legs": {
                 "nix": { "os": "linux", "processor": "x86_64", "config": "debug" }
@@ -1210,7 +1210,7 @@ public sealed class ConfigStoreTests
         var tool = Assert.Single(LoadValid($$"""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "emulators": { "qemu-arm64": {{QemuArm64}} },
               "legs": { "arm": { "os": "linux", "processor": "arm64", "config": "debug", "toolchain": "gcc", "emulator": "qemu-arm64" } },
               "legSets": { "gate": ["arm"] },
@@ -1256,7 +1256,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid("""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "msvc": { "platforms": ["windows"] }, "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } }, "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "legs": {
                 "win": { "os": "windows", "processor": "x86_64", "config": "debug", "toolchain": "msvc" },
                 "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "gcc" }
@@ -1269,6 +1269,37 @@ public sealed class ConfigStoreTests
             "tool 'cl' is needed only by legs of platforms linux and toolchains msvc, and no declared leg is one, so it would never be checked anywhere",
             exception.Message,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A toolchain names the compiler it builds with. One naming none left the build system to take
+    /// whatever it found first, which is how a leg named msvc built with MinGW's gcc on every run.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolchainThatNamesNoCompiler()
+    {
+        var exception = LoadInvalid("""{ "toolchains": { "gcc": { "platforms": ["linux"], "generator": "Ninja", "env": { "CFLAGS": "-O2" } } } }""");
+
+        Assert.Contains(
+            "toolchain 'gcc' names no compiler: declare CC or CXX under its env, or CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Any one of the four names a compiler: either language, in its environment or in the cache
+    /// variable CMake is given for it - the one CMake itself reads first.
+    /// </summary>
+    [Theory]
+    [InlineData("\"env\": { \"CC\": \"gcc\" }")]
+    [InlineData("\"env\": { \"CXX\": \"g++\" }")]
+    [InlineData("\"cacheVars\": { \"CMAKE_C_COMPILER\": \"gcc\" }")]
+    [InlineData("\"cacheVars\": { \"CMAKE_CXX_COMPILER\": \"g++\" }")]
+    public void AToolchainNamingOneCompiler_AnyWay_IsAccepted(string names)
+    {
+        var config = LoadValid($$"""{ "toolchains": { "gcc": { "platforms": ["linux"], {{names}} } } }""");
+
+        Assert.True(config.Toolchains.ContainsKey("gcc"));
     }
 
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
