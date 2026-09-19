@@ -247,6 +247,32 @@ public sealed class HostAgentServiceTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Asked about a developer environment, a host says whether it can set it up there, under the name
+    /// it was asked by, compared ignoring case; this one runs Linux, where Visual Studio never does.
+    /// </summary>
+    [Fact]
+    public async Task Info_SaysWhichDeveloperEnvironmentsCanBeSetUpHere()
+    {
+        using var output = new StringWriter();
+
+        var exitCode = await Service().ServeAsync(
+            new StringReader("""{"kind":"info","developerEnvironments":{"VS":{"kind":"visualStudio"}}}"""),
+            output,
+            new StringWriter(),
+            NothingRuns,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, exitCode);
+
+        var info = JsonSerializer.Deserialize<HostAgentInfo>(output.ToString(), HostAgentProtocol.JsonOptions);
+        Assert.NotNull(info);
+
+        var check = info.DeveloperEnvironments["vs"];
+        Assert.False(check.Available);
+        Assert.Equal("Visual Studio is set up on windows, and this host runs linux", check.Reason);
+    }
+
     [Fact]
     public void ARequestAndAnAnswer_ReadBack_CompareEmulatorNamesIgnoringCase()
     {
@@ -284,6 +310,7 @@ public sealed class HostAgentServiceTests
             platform,
             identity,
             new EmulatorProbe(platform, processRunner, fileSystem),
+            new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
     }

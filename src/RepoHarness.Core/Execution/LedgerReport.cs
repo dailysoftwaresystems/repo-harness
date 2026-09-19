@@ -48,6 +48,9 @@ public sealed record LedgerLine(
 
     /// <summary>The compilers CMake configured the leg's build with.</summary>
     public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
+
+    /// <summary>The developer environment the leg's processes started in, where it was set up.</summary>
+    public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
 }
 
 /// <summary>
@@ -235,6 +238,7 @@ public sealed class LedgerReport
                     RunDirectory = entry.RunDirectory,
                     SkippedSteps = entry.SkippedSteps,
                     Compilers = entry.Compilers,
+                    DeveloperEnvironment = entry.DeveloperEnvironment,
                 };
             }),
         ]);
@@ -288,7 +292,7 @@ public sealed class LedgerReport
             line.Leg,
             Verdicts.Display(line.Verdict),
             FormatDuration(line.Duration),
-            Marked(line.Detail, line.TimingNotes, line.Compilers),
+            Marked(line.Detail, line.TimingNotes, line.Compilers, line.DeveloperEnvironment),
             leg,
             verdict,
             duration)));
@@ -431,6 +435,9 @@ public sealed class LedgerReport
                 Compilers = line.Compilers.Count > 0
                     ? line.Compilers.Select(compiler => new { compiler.Language, compiler.Id, compiler.Version })
                     : null,
+
+                // Only where the leg's toolchain names a developer environment and it was set up.
+                line.DeveloperEnvironment,
                 Timings = line.Timings.Select(timing => new
                 {
                     timing.Phase,
@@ -576,17 +583,22 @@ public sealed class LedgerReport
             : entry.Detail;
 
     /// <summary>
-    /// <paramref name="detail"/> with the compilers the leg built with and the timing mark, for a line
-    /// that shows one leg.
+    /// <paramref name="detail"/> with the compilers the leg built with, the developer environment it
+    /// started in and the timing mark, for a line that shows one leg.
     /// </summary>
     /// <param name="detail">What the leg said.</param>
     /// <param name="notes">Why its timings are suspect, if they are.</param>
     /// <param name="compilers">The compilers CMake configured its build with.</param>
+    /// <param name="developerEnvironment">The developer environment its processes started in, if one was set up.</param>
     /// <remarks>
     /// Composed here, from fields that travel beside the detail rather than inside it, so a ledger a
     /// host reported and this machine reports again names each once.
     /// </remarks>
-    internal static string Marked(string detail, IReadOnlyList<string> notes, IReadOnlyList<Build.CompilerFact> compilers)
+    internal static string Marked(
+        string detail,
+        IReadOnlyList<string> notes,
+        IReadOnlyList<Build.CompilerFact> compilers,
+        Hosts.DeveloperEnvironmentFact? developerEnvironment)
     {
         var parts = new List<string>();
 
@@ -598,6 +610,11 @@ public sealed class LedgerReport
         if (Build.CompilerFacts.Describe(compilers) is { } compiler)
         {
             parts.Add(compiler);
+        }
+
+        if (developerEnvironment is not null)
+        {
+            parts.Add(developerEnvironment.Describe());
         }
 
         if (notes.Count > 0)

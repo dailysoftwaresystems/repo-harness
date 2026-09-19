@@ -239,6 +239,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             RunDirectory = ledger?.RunDirectory,
             SkippedSteps = [.. entry.SkippedSteps ?? []],
             Compilers = [.. entry.Compilers ?? []],
+            DeveloperEnvironment = entry.DeveloperEnvironment,
         };
     }
 
@@ -265,5 +266,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         int? TestCount,
         IReadOnlyList<string>? TimingNotes,
         IReadOnlyList<string>? SkippedSteps = null,
-        IReadOnlyList<Build.CompilerFact>? Compilers = null);
+        IReadOnlyList<Build.CompilerFact>? Compilers = null,
+        DeveloperEnvironmentFact? DeveloperEnvironment = null);
 }

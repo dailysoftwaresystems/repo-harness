@@ -133,8 +133,11 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
             // reads it.
             var settings = config.Hosts.SettingsFor(here ?? candidate);
 
-            return MissingPrograms(LegPrograms.For(config, selected.Leg, workload, settings), report) is { } refused
-                ? new LegPlacement(selected, null, at + refused.Reason) { Verdict = refused.Verdict }
+            var refused = MissingDeveloperEnvironment(LegPrograms.DeveloperEnvironmentOf(config, selected.Leg, workload), report)
+                ?? MissingPrograms(LegPrograms.For(config, selected.Leg, workload, settings), report);
+
+            return refused is { } missing
+                ? new LegPlacement(selected, null, at + missing.Reason) { Verdict = missing.Verdict }
                 : new LegPlacement(selected, report, null);
         }
 
@@ -177,6 +180,28 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         }
 
         return check.Available ? null : $"emulator '{leg.Emulator}' cannot run there: {check.Reason}";
+    }
+
+    /// <summary>
+    /// Why the developer environment <paramref name="name"/> cannot be set up on <paramref name="host"/>,
+    /// as a missing tool, or <see langword="null"/> where it can, or the leg needs none.
+    /// </summary>
+    /// <remarks>
+    /// Its own check rather than one of the programs: it is found by Visual Studio's installer, not on
+    /// a PATH, and what it would put on the PATH is exactly what no survey can see beforehand.
+    /// </remarks>
+    private static (string Reason, LegVerdict Verdict)? MissingDeveloperEnvironment(string? name, HostReport host)
+    {
+        if (name is null)
+        {
+            return null;
+        }
+
+        return host.DeveloperEnvironments.TryGetValue(name, out var check)
+            ? check.Available
+                ? null
+                : ($"developer environment '{name}' cannot be set up there: {check.Reason}", LegVerdict.SkippedToolMissing)
+            : ($"developer environment '{name}' was never looked for there", LegVerdict.SkippedToolMissing);
     }
 
     /// <summary>

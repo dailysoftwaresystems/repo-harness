@@ -1325,6 +1325,50 @@ public sealed class ConfigStoreTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A toolchain may name the developer environment its legs start in, declared once under
+    /// developerEnvironments; Visual Studio's asks for the C++ build tools unless it names another
+    /// component.
+    /// </summary>
+    [Fact]
+    public void AToolchain_MayNameTheDeveloperEnvironmentItsLegsStartIn()
+    {
+        var config = LoadValid(
+            """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""");
+
+        Assert.Equal("vs", config.Toolchains["msvc"].DeveloperEnvironment);
+        Assert.Equal(DeveloperEnvironmentKinds.VisualStudio, config.DeveloperEnvironments["VS"].Kind);
+        Assert.Equal(DeveloperEnvironmentConfig.DefaultVisualStudioComponent, config.DeveloperEnvironments["vs"].RequiresComponent);
+    }
+
+    /// <summary>
+    /// A developer environment this build cannot set up is refused when the file is read, and so is a
+    /// toolchain naming one that is not declared, or Visual Studio's on a platform it never exists on:
+    /// a leg there would be turned away on every run for want of it.
+    /// </summary>
+    [Theory]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "xcode" } } }""",
+        "developer environment 'vs' has kind 'xcode'; this build sets up visualStudio")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio", "requiresComponent": " " } } }""",
+        "developer environment 'vs' requiresComponent is blank; leave it out for the C++ build tools")]
+    [InlineData(
+        """{ "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which is not declared under developerEnvironments")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "platforms": ["windows", "linux"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which Visual Studio sets up on windows alone, and declares platforms windows, linux; declare \"platforms\": [\"windows\"] for it")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which Visual Studio sets up on windows alone, and declares platforms all; declare \"platforms\": [\"windows\"] for it")]
+    public void Load_RejectsADeveloperEnvironmentNoLegCouldStartIn(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

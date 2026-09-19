@@ -133,6 +133,25 @@ at once, with the line it concerns where the parser knows it:
   CMake named no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
   answer, and a misspelled language is never answered. `test --no-build` names what its build
   directory was last configured with; a runner that does not build names none.
+- **A toolchain may name a developer environment**, declared once under `developerEnvironments`,
+  and one naming none that is declared is refused, as is a `visualStudio` one on a toolchain whose
+  `platforms` is not `["windows"]`: a leg elsewhere would be turned away on every run for want of it.
+  `init`'s `msvc` toolchain names `visualStudio`. The survey asks every host a leg might land on
+  whether it can set it up - Visual Studio's installer, `vswhere`, naming the newest instance with
+  `requiresComponent` - and a host that cannot turns the leg away as `skipped-tool-missing`, naming
+  why; a copy starts nothing and asks nothing. The host that runs the leg sets it up from the
+  instance its own survey found, never a second look: that instance's `vcvarsall.bat` for the leg's
+  processor (`amd64`, or `amd64_arm64` to cross-compile), run once per environment, instance,
+  architecture and host environment by `cmd.exe` from a batch file the harness writes, reading
+  `set` before and after it in UTF-16 and keeping only what changed. Its exit code, an `[ERROR`
+  line in either encoding it prints, and a `VSCMD_ARG_TGT_ARCH` naming another processor each skip
+  the leg before anything of it starts, and so does an instance removed since the survey. A capture
+  directory that cannot be removed afterwards is a warning and fails nothing. What it set sits over the host's `env` and beneath the
+  variant's, the test invocation's and the runner's own, for every process the leg starts, so `cl`
+  builds from a plain shell; the leg's programs are then the run's to find, as under a `PATH` a
+  host declares. Each leg's line names it - `developer environment: visualStudio (Visual Studio
+  18.0.11205.157, MSVC 14.50.35717, amd64)` - and `--json` carries it as `developerEnvironment`,
+  beside the detail rather than inside it, like the compilers.
 - **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
   toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
   about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose
@@ -800,6 +819,17 @@ tool replaces, where a green result had quietly stopped meaning anything.
   failure `buildOutputs` exists to prevent, and the legs and their operating systems are all known
   then. A suffix added automatically was the alternative and is weaker — it has to guess which
   entries name programs, and cannot express a name differing by more than its suffix.
+- A ninja build's dependency records are read after it, with `ninja -t deps`: an object that
+  recorded no header dependencies is never rebuilt when a header it includes changes, so it fails
+  the leg, and records that cannot be read leave it `unmeasured`. Only an object built under
+  `deps = msvc` - its build line's own, or else its rule's - whose source includes nothing is
+  excused, because `/showIncludes` reports headers and never the source; under `deps = gcc` the
+  source itself is always recorded, so zero is never legitimate there. How each object is built is
+  read the way ninja reads the manifest: across the files `build.ninja` includes, since CMake keeps
+  its rules in `CMakeFiles/rules.ninja`, with ninja's escapes undone, since CMake names each source
+  absolutely and a drive's colon arrives as `$:`. Read from `build.ninja` alone, with the escapes
+  left in, no MSVC object was ever excused, and a translation unit including nothing failed every
+  MSVC build it was in.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
 - The programs a command will start are resolved on the host before a leg starts - each command

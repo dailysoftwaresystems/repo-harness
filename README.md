@@ -33,6 +33,11 @@ Every CMake configure is asked which compilers it resolved, and each leg's line 
 `compiler: MSVC 19.51.36231 (C, CXX)` — so every verdict says which compiler produced it; a
 toolchain's `compilerId` fails a leg CMake configured with another.
 
+`init`'s `msvc` toolchain names the `visualStudio` developer environment, so an MSVC leg builds from
+a plain shell: the host that runs it runs Visual Studio's own `vcvarsall.bat` for the leg's processor
+and starts every process of the leg in what it set, and the leg's line names the instance and tools
+it used. A host without Visual Studio's C++ build tools turns the leg away as a tool missing.
+
 `init` inspects the repository and seeds a configuration that already matches it —
 a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test` — with
 legs for the operating system and processor of the machine it ran on. With no project
@@ -184,6 +189,28 @@ process a leg starts there sees - each build phase, the test runner, each step o
 the lowest layer, beneath the variant's, the test invocation's and the runner's own. A `PATH`
 set there is where that host finds those programs, so none of them is required of it before a
 leg starts: each is the run's to find.
+
+A toolchain can name a developer environment that its legs start in, declared once and set up on
+the host that runs each leg, over that host's `env` and beneath everything more specific:
+
+```json
+{
+  "developerEnvironments": { "visualStudio": { "kind": "visualStudio" } },
+  "toolchains": {
+    "msvc": { "platforms": ["windows"], "generator": "Ninja", "env": { "CC": "cl", "CXX": "cl" }, "developerEnvironment": "visualStudio" }
+  }
+}
+```
+
+Every host a leg might land on is asked, through Visual Studio's installer, whether it has an
+instance with `requiresComponent` - the C++ build tools unless another is named - and one without
+turns the leg away as a tool missing. On the host that runs the leg, the instance its survey found
+has its `vcvarsall.bat` run once for the leg's processor, cross-compiling where the host's differs,
+and what it set is what the leg's build, tests and runner steps start with. A `vcvarsall.bat` that fails, prints an `[ERROR`,
+or sets up another processor skips the leg before anything of it starts. As with a `PATH` a host
+sets, the programs of such a leg are the run's to find. The leg's line names the environment -
+`developer environment: visualStudio (Visual Studio 18.0.11205.157, MSVC 14.50.35717, amd64)` - and
+`--json` carries it as `developerEnvironment`.
 
 An ssh host's connection data lives in its own directory under `.harness-config/sshItems/`,
 which git ignores: an `.env` naming the address, the user and the port, a `.key`, and a

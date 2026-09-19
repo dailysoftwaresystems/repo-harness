@@ -54,6 +54,7 @@ public static partial class HarnessConfigValidator
         ValidateToolchains(config, problems);
         ValidateHosts(config.Hosts, problems);
         ValidateEmulators(config, problems);
+        ValidateDeveloperEnvironments(config, problems);
         ValidateLegs(config, problems);
         ValidateTools(config, problems);
         ValidateToolSearchDirectories(config, problems);
@@ -546,6 +547,26 @@ public static partial class HarnessConfigValidator
                 }
             }
 
+            if (toolchain.DeveloperEnvironment is { } environmentName)
+            {
+                if (!config.DeveloperEnvironments.TryGetValue(environmentName, out var environment))
+                {
+                    problems.Add(
+                        $"toolchain '{name}' names developer environment '{environmentName}', which is not declared "
+                        + "under developerEnvironments");
+                }
+                else if (string.Equals(environment.Kind, DeveloperEnvironmentKinds.VisualStudio, StringComparison.OrdinalIgnoreCase)
+                    && !(toolchain.Platforms is [var only] && string.Equals(only, PlatformNames.Windows, StringComparison.OrdinalIgnoreCase)))
+                {
+                    // Placed on a host of another system the leg would be turned away there, every
+                    // time, for want of an environment that system never has.
+                    problems.Add(
+                        $"toolchain '{name}' names developer environment '{environmentName}', which Visual Studio sets "
+                        + $"up on windows alone, and declares platforms {string.Join(", ", toolchain.Platforms)}; declare "
+                        + "\"platforms\": [\"windows\"] for it");
+                }
+            }
+
             if (!Build.CompilerValue.Named(toolchain.CacheVars, toolchain.Env))
             {
                 problems.Add(
@@ -553,6 +574,24 @@ public static partial class HarnessConfigValidator
                     + "CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars. Without one the build "
                     + "system takes whatever compiler it finds first, and the leg reports on a compiler "
                     + "nobody chose");
+            }
+        }
+    }
+
+    private static void ValidateDeveloperEnvironments(HarnessConfig config, List<string> problems)
+    {
+        foreach (var (name, environment) in config.DeveloperEnvironments)
+        {
+            if (!DeveloperEnvironmentKinds.All.Contains(environment.Kind, StringComparer.OrdinalIgnoreCase))
+            {
+                problems.Add(
+                    $"developer environment '{name}' has kind '{environment.Kind}'; this build sets up "
+                    + $"{string.Join(", ", DeveloperEnvironmentKinds.All)}");
+            }
+
+            if (string.IsNullOrWhiteSpace(environment.RequiresComponent))
+            {
+                problems.Add($"developer environment '{name}' requiresComponent is blank; leave it out for the C++ build tools");
             }
         }
     }

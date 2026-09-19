@@ -27,6 +27,13 @@ public sealed class DefaultConfigFactoryTests
         Assert.Equal("cl", config.Toolchains["msvc"].Env["CC"]);
         Assert.Equal("cl", config.Toolchains["msvc"].Env["CXX"]);
         Assert.All(config.Toolchains.Values, toolchain => Assert.True(CompilerValue.Named(toolchain.CacheVars, toolchain.Env)));
+
+        // cl is reached through the environment Visual Studio sets up where the leg runs, so a clone
+        // builds from a plain shell; no other toolchain needs one.
+        Assert.Equal("visualStudio", config.Toolchains["msvc"].DeveloperEnvironment);
+        Assert.Equal(DeveloperEnvironmentKinds.VisualStudio, Assert.Single(config.DeveloperEnvironments, pair => pair.Key == "visualStudio").Value.Kind);
+        Assert.Null(config.Toolchains["gcc"].DeveloperEnvironment);
+        Assert.Null(config.Toolchains["clang"].DeveloperEnvironment);
         Assert.Contains("asan", config.Sanitizers.Keys);
 
         var project = Assert.Single(config.Projects);

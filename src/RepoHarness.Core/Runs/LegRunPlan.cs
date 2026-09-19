@@ -72,6 +72,25 @@ public sealed record PlacedLeg(
 
     private readonly HostId? _named;
 
+    /// <summary>
+    /// What the developer environment the leg's toolchain names set up for it, on the machine that runs
+    /// it: empty until it is set up there, and for a leg whose toolchain names none.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> DeveloperEnvironment { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// The environment every process the leg starts is given beneath its command's own: what its host
+    /// declares under <c>env</c>, with its <see cref="DeveloperEnvironment"/> over it.
+    /// </summary>
+    /// <remarks>
+    /// Over the host's rather than beneath it, because it was set up under the host's: a PATH it put
+    /// Visual Studio's directories ahead of already holds the one the host declares, and ranked beneath
+    /// it that PATH would lose them.
+    /// </remarks>
+    public IReadOnlyDictionary<string, string> Environment
+        => PhaseEnvironment.Layered(HostSettings.Env, DeveloperEnvironment)
+            .ToDictionary(pair => pair.Key, pair => pair.Value!, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The build this leg runs, with what its host declares for it.</summary>
     /// <param name="config">The whole configuration.</param>
     /// <param name="runDirectory">Where this run's logs go.</param>
@@ -96,7 +115,7 @@ public sealed record PlacedLeg(
             time)
         {
             ProgramDirectories = Host.ProgramDirectories,
-            HostEnvironment = HostSettings.Env,
+            HostEnvironment = Environment,
         };
     }
 

@@ -96,6 +96,46 @@ public sealed class LegsServiceTests
         Assert.Empty(fixture.Inspector.Inspected);
     }
 
+    /// <summary>
+    /// Each host is asked only about the developer environments the selected legs start their work
+    /// in - never one no selected leg names, and none at all for a copy, which starts nothing.
+    /// </summary>
+    [Fact]
+    public async Task EachHost_IsAskedOnlyAboutTheDeveloperEnvironmentsTheSelectedLegsStartIn()
+    {
+        var fixture = Create(
+            new()
+            {
+                ["msvc"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" },
+                ["mingw"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "mingw" },
+            },
+            configure: config =>
+            {
+                config.DeveloperEnvironments["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+                config.DeveloperEnvironments["unused"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+                config.Toolchains["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" };
+                config.Toolchains["mingw"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "gcc" } };
+            });
+
+        await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.NotEmpty(fixture.Inspector.DeveloperEnvironmentsAsked);
+        Assert.All(fixture.Inspector.DeveloperEnvironmentsAsked, asked => Assert.Equal(["vs"], asked.Keys));
+
+        var copying = Create(
+            new() { ["msvc"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" } },
+            configure: config =>
+            {
+                config.DeveloperEnvironments["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+                config.Toolchains["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" };
+            });
+
+        await copying.Service.CheckAsync(Root, null, LegWorkload.Copy, here: null, TestContext.Current.CancellationToken);
+
+        Assert.NotEmpty(copying.Inspector.DeveloperEnvironmentsAsked);
+        Assert.All(copying.Inspector.DeveloperEnvironmentsAsked, Assert.Empty);
+    }
+
     [Fact]
     public async Task EachHost_ChecksOnlyTheEmulatorsTheSelectedLegsUse()
     {

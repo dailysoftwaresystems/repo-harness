@@ -87,6 +87,62 @@ public sealed class LedgerReportTests
         Assert.False(legs[1].TryGetProperty("compilers", out _));
     }
 
+    /// <summary>
+    /// Every leg's line names the developer environment its processes started in, after the compilers
+    /// and whatever the leg said, and the document carries it as data; a leg that needed none names none.
+    /// </summary>
+    [Fact]
+    public void EveryLine_NamesTheDeveloperEnvironmentItStartedIn()
+    {
+        var visualStudio = new RepoHarness.Core.Hosts.DeveloperEnvironmentFact("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64");
+
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Failed, TimeSpan.FromSeconds(1), "3 tests failed") with
+            {
+                Compilers = [new("C", "MSVC", "19.51.36231")],
+                DeveloperEnvironment = visualStudio,
+            },
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+
+        Assert.EndsWith(
+            "3 tests failed; compiler: MSVC 19.51.36231 (C); developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64)",
+            rows[1],
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("developer environment", rows[2], StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+        var environment = legs[0].GetProperty("developerEnvironment");
+
+        Assert.Equal(
+            ["vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64"],
+            new[] { "name", "installationPath", "installationVersion", "toolsVersion", "architecture" }.Select(name => environment.GetProperty(name).GetString()));
+        Assert.False(legs[1].TryGetProperty("developerEnvironment", out _));
+    }
+
+    /// <summary>The line said the moment a leg reaches its verdict names the developer environment too.</summary>
+    [Fact]
+    public void TheVerdictsOwnLine_NamesTheDeveloperEnvironment()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "build");
+
+        ledger.Record(Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with
+        {
+            DeveloperEnvironment = new("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64"),
+        });
+
+        Assert.Contains(
+            "build: win: passed (developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64))",
+            factory.StandardOutput.ToString(),
+            StringComparison.Ordinal);
+    }
+
     /// <summary>The line said the moment a leg reaches its verdict names them too.</summary>
     [Fact]
     public void TheVerdictsOwnLine_NamesTheCompilers()

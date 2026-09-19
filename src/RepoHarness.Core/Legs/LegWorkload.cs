@@ -39,6 +39,12 @@ public sealed record LegWorkload(bool Build, bool Test, IReadOnlyList<string> Pr
     /// </summary>
     public IReadOnlyList<OsScopedStart> OnlyOn { get; init; } = [];
 
+    /// <summary>
+    /// Whether the command starts any program on the leg's host. A copy starts none, so nothing has to
+    /// be set up there for it - not even the developer environment the leg's toolchain names.
+    /// </summary>
+    public bool StartsPrograms => Build || Test || Programs.Count > 0 || UnderOwnPath.Count > 0 || OnlyOn.Count > 0;
+
     /// <summary>Building and testing: what a leg is for, and what <c>legs</c> answers for.</summary>
     public static LegWorkload BuildAndTest { get; } = new(Build: true, Test: true, []);
 

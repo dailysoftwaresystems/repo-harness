@@ -94,6 +94,13 @@ public sealed record LegEntry
     /// </summary>
     public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
 
+    /// <summary>
+    /// The developer environment the leg's processes started in, where its toolchain names one and it
+    /// was set up: which Visual Studio instance and tools, for which processor. Named on its line with
+    /// whatever verdict it reached, as the compilers are.
+    /// </summary>
+    public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }
@@ -165,7 +172,7 @@ public sealed class LegLedger(IHarnessOutput output, string commandName)
             _entries.Add(entry);
         }
 
-        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers);
+        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers, entry.DeveloperEnvironment);
 
         Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (said.Length > 0 ? $" ({said})" : string.Empty));
     }

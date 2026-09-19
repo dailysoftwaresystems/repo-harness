@@ -18,8 +18,9 @@ public sealed record RunnerRunRequest
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 
     /// <summary>
-    /// What the host the leg runs on declares under <c>env</c>, beneath the runner's values, its
-    /// secrets, its own environment and each step's.
+    /// What the host the leg runs on gives it, beneath the runner's values, its secrets, its own
+    /// environment and each step's: what the host declares under <c>env</c>, with the developer
+    /// environment the leg's toolchain names set up over it.
     /// </summary>
     public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
 

@@ -470,6 +470,152 @@ public sealed class LegRunServiceTests
         }
     }
 
+    /// <summary>
+    /// A leg whose toolchain names a developer environment runs in it: every process it starts is
+    /// given what Visual Studio set up, over what the host declares - the host's own PATH kept behind
+    /// Visual Studio's tools, its other variables untouched - and its line names the environment.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseToolchainNamesADeveloperEnvironment_RunsInIt_AndNamesIt()
+    {
+        using var temp = new TempDirectory();
+        using var visualStudio = new ScriptedVisualStudio();
+        var harness = new HarnessFactory();
+        IReadOnlyDictionary<string, string>? given = null;
+        IReadOnlyDictionary<string, string>? built = null;
+
+        var outcome = await OutcomeAsync(
+            temp,
+            harness,
+            MsvcLeg(),
+            WindowsHere(visualStudio),
+            new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.BuildOnly },
+            work: leg =>
+            {
+                given = leg.Leg.Environment;
+                built = leg.Leg.BuildRequestFor(leg.Context.Config, leg.RunDirectory).HostEnvironment;
+                return new LegEntry { Leg = leg.Leg.Name, Verdict = LegVerdict.Passed };
+            },
+            developerEnvironments: visualStudio.Provider());
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.NotNull(given);
+        Assert.Equal(visualStudio.BinFor("x64") + @";D:\tools", given["PATH"]);
+        Assert.Equal(visualStudio.Include, given["INCLUDE"]);
+        Assert.Equal(@"D:\cache", given["CCACHE_DIR"]);
+        Assert.Equal(given, built);
+
+        using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
+        var environment = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("developerEnvironment");
+
+        Assert.Equal("vs", environment.GetProperty("name").GetString());
+        Assert.Equal(visualStudio.InstallationPath, environment.GetProperty("installationPath").GetString());
+        Assert.Equal(ScriptedVisualStudio.ToolsVersion, environment.GetProperty("toolsVersion").GetString());
+        Assert.Equal("amd64", environment.GetProperty("architecture").GetString());
+        Assert.Contains("native: setting up developer environment 'vs'", harness.StandardOutput.ToString(), StringComparison.Ordinal);
+        Assert.Contains(
+            $"native: passed (developer environment: vs (Visual Studio {ScriptedVisualStudio.InstallationVersion}, MSVC {ScriptedVisualStudio.ToolsVersion}, amd64))",
+            harness.StandardOutput.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A developer environment that cannot be set up where the leg runs leaves the leg skipped as a
+    /// tool missing, saying why, before anything of it starts - as the survey would have, had it seen.
+    /// </summary>
+    [Fact]
+    public async Task ADeveloperEnvironmentThatCannotBeSetUp_SkipsItsLeg_BeforeAnythingOfItStarts()
+    {
+        using var temp = new TempDirectory();
+        using var visualStudio = new ScriptedVisualStudio
+        {
+            ExitCode = "1",
+            Log = System.Text.Encoding.Unicode.GetBytes("[ERROR:vcvarsall.bat] Invalid argument found : amd64\r\n"),
+        };
+        var harness = new HarnessFactory();
+        var ran = new List<string>();
+
+        var verdicts = await OutcomeAsync(
+            temp,
+            harness,
+            MsvcLeg(),
+            WindowsHere(visualStudio),
+            new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.BuildOnly },
+            ran: leg => ran.Add(leg.Name),
+            developerEnvironments: visualStudio.Provider());
+
+        using var document = JsonDocument.Parse(Assert.Single(verdicts.Data));
+        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal("skipped-tool-missing", leg.GetProperty("verdict").GetString());
+        Assert.Equal(
+            "developer environment 'vs': vcvarsall.bat amd64 exited 1: [ERROR:vcvarsall.bat] Invalid argument found : amd64",
+            leg.GetProperty("detail").GetString());
+        Assert.Empty(ran);
+    }
+
+    /// <summary>A copy starts nothing on the host, so the leg's developer environment is never set up for it.</summary>
+    [Fact]
+    public async Task ACopy_SetsUpNoDeveloperEnvironment()
+    {
+        using var temp = new TempDirectory();
+        using var visualStudio = new ScriptedVisualStudio();
+        var harness = new HarnessFactory();
+        var inspector = WindowsHere(visualStudio);
+
+        var verdicts = await RunAsync(
+            temp,
+            harness,
+            MsvcLeg(),
+            inspector,
+            new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.Copy },
+            developerEnvironments: visualStudio.Provider());
+
+        Assert.Equal("passed", verdicts["native"].Verdict);
+        Assert.Empty(visualStudio.Probes);
+        Assert.Empty(visualStudio.Captures);
+        Assert.Empty(Assert.Single(inspector.DeveloperEnvironmentsAsked));
+    }
+
+    /// <summary>
+    /// A Windows leg built with msvc, whose toolchain names the Visual Studio environment, on a
+    /// machine whose own env declares a PATH and a compiler cache.
+    /// </summary>
+    private static HarnessConfig MsvcLeg() => new()
+    {
+        BuildConfigs = { ["debug"] = new BuildConfiguration() },
+        Projects = { new ProjectConfig { Name = "app", Type = "cmake", Path = "." } },
+        DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+        Toolchains =
+        {
+            ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" },
+        },
+        Hosts = new HostsConfig { Local = new LocalHostConfig { Env = { ["Path"] = @"D:\tools", ["CCACHE_DIR"] = @"D:\cache" } } },
+        Legs = { ["native"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" } },
+    };
+
+    /// <summary>This machine as a Windows x86_64 one, where the survey finds <paramref name="visualStudio"/>.</summary>
+    private static RecordingInspector WindowsHere(ScriptedVisualStudio visualStudio) => new(host => new HostReport
+    {
+        Host = host,
+        Os = "windows",
+        Processor = "x86_64",
+        DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase) { ["vs"] = visualStudio.Found },
+    });
+
+    /// <summary>
+    /// Developer environments that must never be set up: a test that declares none has no business
+    /// reaching Visual Studio.
+    /// </summary>
+    private static DeveloperEnvironmentProvider NoDeveloperEnvironment(HarnessFactory harness)
+    {
+        var processes = Substitute.For<IProcessRunner>();
+        processes.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("This test declares no developer environment, so none is set up."));
+
+        return new DeveloperEnvironmentProvider(harness.Platform, processes, harness.FileSystem, harness.Output);
+    }
+
     /// <summary>A leg on this machine.</summary>
     private static HarnessConfig OneLeg(HarnessFactory harness) => new()
     {
@@ -538,9 +684,10 @@ public sealed class LegRunServiceTests
         RunLock? runLock = null,
         ISyncService? sync = null,
         Action<PlacedLeg>? ran = null,
-        IProcessRunner? keepAwake = null)
+        IProcessRunner? keepAwake = null,
+        DeveloperEnvironmentProvider? developerEnvironments = null)
     {
-        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync, ran, keepAwake);
+        var outcome = await OutcomeAsync(temp, harness, config, inspector, request, runLock, sync, ran, keepAwake, developerEnvironments: developerEnvironments);
 
         using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
 
@@ -567,7 +714,8 @@ public sealed class LegRunServiceTests
         string? tree = null,
         Func<LegWork, LegEntry>? work = null,
         LogOwnership? logs = null,
-        ScriptedHostCommands? hosts = null)
+        ScriptedHostCommands? hosts = null,
+        DeveloperEnvironmentProvider? developerEnvironments = null)
     {
         var loader = HostDoubles.Loader(config, tree ?? temp.Path, temp.Path);
 
@@ -581,6 +729,7 @@ public sealed class LegRunServiceTests
             Substitute.For<ISyncTransportFactory>(),
             new RemoteLegRunner(hosts ?? new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
             new KeepAwake(keepAwake ?? new HeldProcesses(), harness.Output),
+            developerEnvironments ?? NoDeveloperEnvironment(harness),
             harness.Platform,
             harness.Output);
 

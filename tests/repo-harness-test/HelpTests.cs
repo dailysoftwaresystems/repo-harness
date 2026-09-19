@@ -77,7 +77,7 @@ public sealed partial class HelpTests
     {
         var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
 
-        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer", "hosts", "emulators" })
+        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer", "hosts", "emulators", "developerEnvironments" })
         {
             Assert.Contains(setting, result.StandardOutput, StringComparison.Ordinal);
         }

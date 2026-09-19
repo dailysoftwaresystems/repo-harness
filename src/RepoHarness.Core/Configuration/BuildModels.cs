@@ -51,6 +51,18 @@ public sealed class ToolchainConfig : VariantOverlay
     /// first, and a leg named msvc built with MinGW's gcc on every run until it declared CC.
     /// </remarks>
     public Dictionary<string, string> CompilerId { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The developer environment this toolchain's legs need, as <c>developerEnvironments</c> names it:
+    /// set up on the machine that runs each leg, over what that host declares under <c>env</c> and
+    /// beneath this toolchain's own, before anything of the leg starts there.
+    /// </summary>
+    /// <remarks>
+    /// What makes <c>cl</c> reachable at all: MSVC with Ninja needs Visual Studio's <c>INCLUDE</c>,
+    /// <c>LIB</c>, <c>LIBPATH</c> and a <c>PATH</c> holding cl, link and the Windows SDK, which a
+    /// plain shell has none of. Asked of every host a leg might land on, like a tool.
+    /// </remarks>
+    public string? DeveloperEnvironment { get; init; }
 }
 
 /// <summary>A named build configuration.</summary>

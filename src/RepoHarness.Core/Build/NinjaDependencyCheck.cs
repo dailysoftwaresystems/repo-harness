@@ -54,12 +54,13 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// Whether the record is valid or stale is deliberately not read — a valid record of zero
     /// dependencies is exactly the broken state this looks for.
     /// </summary>
-    [GeneratedRegex(@"^(?<object>\S+):\s+#deps\s+(?<count>\d+)\b", RegexOptions.CultureInvariant)]
+    /// <remarks>
+    /// Read up to the first <c>: #deps</c>, so an object whose path holds a space is still counted;
+    /// a header starts its line, and the dependencies listed beneath it are indented, so none of them
+    /// is ever read as an object.
+    /// </remarks>
+    [GeneratedRegex(@"^(?<object>\S.*?):\s+#deps\s+(?<count>\d+)\b", RegexOptions.CultureInvariant)]
     private static partial Regex DepsHeader { get; }
-
-    /// <summary>An edge in <c>build.ninja</c>: the object it produces, and the first input it takes.</summary>
-    [GeneratedRegex(@"^build\s+(?<object>\S+):\s+(?<rule>\S+)\s+(?<source>\S+)", RegexOptions.CultureInvariant)]
-    private static partial Regex BuildEdge { get; }
 
     /// <summary>A preprocessor include, used to excuse a translation unit that has none.</summary>
     [GeneratedRegex(@"^\s*#\s*include\b", RegexOptions.CultureInvariant | RegexOptions.Multiline)]
@@ -168,7 +169,6 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
                 + "indistinguishable from every object having recorded its headers, so it is never read as one.");
         }
 
-        var manifestText = _fileSystem.ReadAllText(manifest);
         var withoutHeaders = counts.Where(entry => entry.Value == 0).Select(entry => entry.Key).ToList();
 
         if (withoutHeaders.Count == 0)
@@ -176,7 +176,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
             return new NinjaDependencyReport(counts.Count, [], EmptyExcuses, null);
         }
 
-        var (flagged, excused) = Excuse(buildDirectory, manifestText, withoutHeaders);
+        var (flagged, excused) = Excuse(buildDirectory, withoutHeaders);
 
         return new NinjaDependencyReport(counts.Count, flagged, excused, null);
     }
@@ -185,46 +185,33 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// Separates objects that legitimately recorded no headers from those that did not.
     /// </summary>
     /// <remarks>
-    /// Only under <c>deps = msvc</c>, which parses <c>/showIncludes</c> and so reports headers and
-    /// never the source itself: a translation unit that includes nothing legitimately records zero.
-    /// Under <c>deps = gcc</c> the source is always listed, so zero can never be legitimate, and a
-    /// manifest holding both keeps its full strength rather than borrowing the weaker rule. A source
-    /// that cannot be read counts as having includes, so an unreadable file is never excused.
+    /// Only an object built under <c>deps = msvc</c> - its own build line's, or else its rule's -
+    /// which parses <c>/showIncludes</c> and so records headers and never the source itself: a
+    /// translation unit that includes nothing legitimately records zero. Under <c>deps = gcc</c> the
+    /// source is always listed, so zero can never be legitimate, and an object built that way keeps
+    /// the check's full strength whatever else the manifest builds. The manifest is read the way
+    /// ninja reads it, across the files it includes - CMake keeps its rules in one of those - with
+    /// ninja's escapes undone, so the source CMake names absolutely is a file that can be read. An
+    /// object no build line produces, a source that is not there and one that cannot be read all
+    /// count as having includes, so none of them is ever excused.
     /// </remarks>
     private (IReadOnlyList<string> Flagged, IReadOnlyDictionary<string, string> Excused) Excuse(
         string buildDirectory,
-        string manifestText,
         List<string> withoutHeaders)
     {
-        var msvcOnly = manifestText.Contains("deps = msvc", StringComparison.Ordinal)
-            && !manifestText.Contains("deps = gcc", StringComparison.Ordinal);
-
-        if (!msvcOnly)
-        {
-            return (withoutHeaders, EmptyExcuses);
-        }
-
-        var sources = ReadSources(manifestText);
+        var manifest = NinjaManifest.Read(_fileSystem, buildDirectory);
         var flagged = new List<string>();
         var excused = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var obj in withoutHeaders)
         {
-            if (!sources.TryGetValue(Normalize(obj), out var source))
+            if (manifest.EdgeFor(obj) is { Deps: "msvc", Source: { } source } && !HasInclude(Path.Combine(buildDirectory, source)))
             {
-                flagged.Add(obj);
-                continue;
-            }
-
-            var path = Path.Combine(buildDirectory, source.Replace('/', Path.DirectorySeparatorChar));
-
-            if (HasInclude(path))
-            {
-                flagged.Add(obj);
+                excused[obj] = source;
             }
             else
             {
-                excused[obj] = source;
+                flagged.Add(obj);
             }
         }
 
@@ -250,7 +237,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
 
         foreach (var line in output.Split('\n'))
         {
-            var match = DepsHeader.Match(line.Trim());
+            var match = DepsHeader.Match(line.TrimEnd('\r'));
 
             if (match.Success)
             {
@@ -262,30 +249,6 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
 
         return counts;
     }
-
-    private static Dictionary<string, string> ReadSources(string manifestText)
-    {
-        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        foreach (var line in manifestText.Split('\n'))
-        {
-            var match = BuildEdge.Match(line);
-
-            if (match.Success)
-            {
-                sources[Normalize(match.Groups["object"].Value)] = match.Groups["source"].Value;
-            }
-        }
-
-        return sources;
-    }
-
-    /// <summary>
-    /// Puts an object path in one spelling. Measured: <c>ninja -t deps</c> prints forward separators
-    /// on Windows while <c>build.ninja</c> holds backslashes, so keyed raw every lookup missed and
-    /// the excusal silently never fired.
-    /// </summary>
-    private static string Normalize(string path) => path.Replace('\\', '/');
 
     private static readonly Dictionary<string, string> EmptyExcuses = new(StringComparer.Ordinal);
 }

@@ -28,7 +28,10 @@ public sealed record BuildRequest(
     /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
 
-    /// <summary>What the host the leg runs on declares under <c>env</c>, beneath the variant's own environment.</summary>
+    /// <summary>
+    /// What the host the leg runs on gives it, beneath the variant's own environment: what the host
+    /// declares under <c>env</c>, with the developer environment the toolchain names set up over it.
+    /// </summary>
     public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
 }
 

@@ -218,7 +218,7 @@ internal static class TestCommand
                     Product = testProduct,
                     ProductProblem = testProductProblem,
                     HostTestCores = leg.HostSettings.TestCores,
-                    HostEnvironment = leg.HostSettings.Env,
+                    HostEnvironment = leg.Environment,
                     Filter = filter,
                     Excludes = excludes,
                     Emulated = leg.Emulated,

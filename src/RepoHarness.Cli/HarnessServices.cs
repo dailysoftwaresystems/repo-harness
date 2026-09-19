@@ -115,6 +115,8 @@ internal static class HarnessServices
 
         services.AddSingleton<BuildDirectoryGuard>();
         services.AddSingleton<CMakeToolchainReader>();
+        services.AddSingleton<DeveloperEnvironmentProbe>();
+        services.AddSingleton<DeveloperEnvironmentProvider>();
         services.AddSingleton<NinjaDependencyCheck>();
         services.AddSingleton<IBuildService, BuildService>();
 

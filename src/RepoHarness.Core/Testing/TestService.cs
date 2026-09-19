@@ -66,7 +66,11 @@ public sealed record TestRequest
     /// </summary>
     public int? HostTestCores { get; init; }
 
-    /// <summary>What the host the leg runs on declares under <c>env</c>, beneath the test invocation's own environment.</summary>
+    /// <summary>
+    /// What the host the leg runs on gives it, beneath the test invocation's own environment: what the
+    /// host declares under <c>env</c>, with the developer environment the leg's toolchain names set up
+    /// over it.
+    /// </summary>
     public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
 
     /// <summary>A filter the caller asked for, passed through the invocation's <c>filterArg</c>.</summary>

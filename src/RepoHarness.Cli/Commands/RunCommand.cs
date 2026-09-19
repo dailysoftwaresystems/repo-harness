@@ -271,7 +271,7 @@ internal static class RunCommand
         return new RunnerRunRequest
         {
             ProgramDirectories = leg.Host.ProgramDirectories,
-            HostEnvironment = leg.HostSettings.Env,
+            HostEnvironment = leg.Environment,
             RunnerName = runnerName,
             Runner = runner,
             Leg = leg.Name,

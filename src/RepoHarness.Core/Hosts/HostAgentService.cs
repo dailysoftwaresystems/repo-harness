@@ -16,12 +16,14 @@ public sealed class HostAgentService(
     IHostPlatform platform,
     IToolIdentityProvider identity,
     EmulatorProbe emulatorProbe,
+    DeveloperEnvironmentProbe developerEnvironmentProbe,
     IFileSystem fileSystem,
     LocalProgramResolver programs)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
     private readonly EmulatorProbe _emulatorProbe = emulatorProbe;
+    private readonly DeveloperEnvironmentProbe _developerEnvironmentProbe = developerEnvironmentProbe;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly LocalProgramResolver _programs = programs;
 
@@ -97,7 +99,7 @@ public sealed class HostAgentService(
 
         if (request.Kind == HostAgentRequestKind.Info)
         {
-            var info = await DescribeAsync(request.Emulators, request.Programs, request.ToolSearchDirectories, abandoned.Token)
+            var info = await DescribeAsync(request.Emulators, request.DeveloperEnvironments, request.Programs, request.ToolSearchDirectories, abandoned.Token)
                 .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -107,18 +109,24 @@ public sealed class HostAgentService(
         return await RunAsync(request, error, run, abandoned.Token).ConfigureAwait(false);
     }
 
-    /// <summary>Which build this is, what this machine is, and which of <paramref name="emulators"/> work here.</summary>
+    /// <summary>
+    /// Which build this is, what this machine is, which of <paramref name="emulators"/> work here, and
+    /// which of <paramref name="developerEnvironments"/> can be set up here.
+    /// </summary>
     /// <param name="emulators">The emulators to check, by name.</param>
+    /// <param name="developerEnvironments">The developer environments to look for, by name.</param>
     /// <param name="programs">The programs to find, the way a leg here will start them.</param>
     /// <param name="searchDirectories">The repository's <c>toolSearchDirectories</c>, of which this machine takes its own platform's.</param>
     /// <param name="cancellationToken">Stops the checks.</param>
     public async Task<HostAgentInfo> DescribeAsync(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         IReadOnlyDictionary<string, List<string>> searchDirectories,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(emulators);
+        ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
         ArgumentNullException.ThrowIfNull(searchDirectories);
 
@@ -138,6 +146,15 @@ public sealed class HostAgentService(
             checks[name] = await _emulatorProbe.CheckAsync(emulator, found, cancellationToken).ConfigureAwait(false);
         }
 
+        // Looked for, never set up: the survey has to be cheap, and setting one up is the run's work,
+        // on the machine that runs the leg.
+        var environments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (name, environment) in developerEnvironments)
+        {
+            environments[name] = await _developerEnvironmentProbe.CheckAsync(environment, cancellationToken).ConfigureAwait(false);
+        }
+
         var current = _identity.Current;
 
         return new HostAgentInfo
@@ -147,6 +164,7 @@ public sealed class HostAgentService(
             Os = _platform.PlatformKey,
             Processor = _platform.Processor,
             Emulators = checks,
+            DeveloperEnvironments = environments,
             Programs = [.. found.Found.Values],
             ProgramDirectories = [.. found.Directories],
         };

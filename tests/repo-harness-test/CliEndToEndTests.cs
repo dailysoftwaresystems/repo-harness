@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
@@ -938,6 +939,112 @@ public sealed partial class CliEndToEndTests
             Assert.Equal("C", configured.GetProperty("language").GetString());
             Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
             Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// An msvc leg builds from a plain shell: the environment Visual Studio sets up is set up for it
+    /// on this machine, CMake configures it with MSVC - which its toolchain's compilerId holds it to -
+    /// and its line names both. Skipped where this machine has no Visual Studio with the C++ build
+    /// tools, or no CMake or Ninja in the environment it sets up.
+    /// </summary>
+    [Fact]
+    public async Task AnMsvcLeg_BuildsFromAPlainShell_InTheEnvironmentVisualStudioSetsUp()
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+        var visualStudio = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+        var probe = new DeveloperEnvironmentProbe(platform, harness.ProcessRunner);
+
+        var found = await probe.CheckAsync(visualStudio, token);
+
+        Assert.SkipUnless(found.Available, $"This machine has no Visual Studio with the C++ build tools: {found.Reason}");
+
+        var setUp = await new DeveloperEnvironmentProvider(platform, harness.ProcessRunner, harness.FileSystem, harness.Output)
+            .SetUpAsync("visualStudio", found, platform.Processor, new Dictionary<string, string>(), token);
+
+        Assert.Null(setUp.Unavailable);
+
+        var path = setUp.Environment.TryGetValue("PATH", out var set) ? set : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        var reachable = path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+
+        Assert.SkipUnless(
+            new[] { "cmake.exe", "ninja.exe" }.All(program => reachable.Any(directory => File.Exists(Path.Combine(directory, program)))),
+            "This machine has no CMake or no Ninja in the environment Visual Studio sets up.");
+
+        using var temp = new TempDirectory();
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            DeveloperEnvironments = { ["visualStudio"] = visualStudio },
+            Toolchains =
+            {
+                ["msvc"] = new ToolchainConfig
+                {
+                    Platforms = ["windows"],
+                    Generator = "Ninja",
+                    Env = { ["CC"] = "cl" },
+                    CompilerId = { ["C"] = "MSVC" },
+                    DeveloperEnvironment = "visualStudio",
+                },
+            },
+            BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    BuildOutputs = [BuildOutput.Keyed([new("windows", "probe.exe")])],
+
+                    // Passes only where the test starts in what Visual Studio set up.
+                    Test = new TestConfig
+                    {
+                        All = new TestInvocation { Runner = "cmd", Args = ["/d", "/c", "if defined VCToolsVersion echo set up"], SuccessPattern = "^set up" },
+                    },
+                },
+            },
+            Legs = { ["msvc"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "msvc" } },
+            PredefinedRunners =
+            {
+                ["probe"] = new RunnerConfig
+                {
+                    Phases = [new RunnerPhase { Name = "env", Command = ["cmd", "/d", "/c", "if not defined VCToolsVersion exit 1"] }],
+                },
+            },
+        });
+
+        temp.WriteFile("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\n");
+        temp.WriteFile("main.c", "int main(void) { return 0; }\n");
+
+        var build = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
+
+        Assert.True(build.ExitCode == HarnessExit.Success, build.StandardError);
+
+        using var document = JsonDocument.Parse(build.StandardOutput);
+        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+        var environment = leg.GetProperty("developerEnvironment");
+
+        Assert.Equal("passed", leg.GetProperty("verdict").GetString());
+        Assert.Equal("MSVC", Assert.Single(leg.GetProperty("compilers").EnumerateArray()).GetProperty("id").GetString());
+        Assert.Equal("visualStudio", environment.GetProperty("name").GetString());
+        Assert.Equal(found.InstallationPath, environment.GetProperty("installationPath").GetString());
+        Assert.Equal(setUp.Fact!.ToolsVersion, environment.GetProperty("toolsVersion").GetString());
+        Assert.Contains("developer environment: visualStudio (Visual Studio ", build.StandardError, StringComparison.Ordinal);
+
+        foreach (var command in new[] { new[] { "test", "--no-build" }, ["run", "probe"] })
+        {
+            var result = await CliRunner.RunAsync([.. command, "--legs", "msvc", "--json", "-C", temp.Path], token);
+
+            Assert.True(result.ExitCode == HarnessExit.Success, result.StandardError);
+
+            using var answered = JsonDocument.Parse(result.StandardOutput);
+            var line = Assert.Single(answered.RootElement.GetProperty("legs").EnumerateArray());
+
+            Assert.Equal("passed", line.GetProperty("verdict").GetString());
+            Assert.Equal("visualStudio", line.GetProperty("developerEnvironment").GetProperty("name").GetString());
         }
     }
 

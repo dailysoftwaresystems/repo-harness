@@ -555,6 +555,55 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// A leg whose toolchain names a developer environment starts every program under the PATH that
+    /// environment sets up, which no survey can see: it is required to have none of them, each still
+    /// asked about, and the environment is what the host must provide - for every command that starts
+    /// anything there, and for a copy, nothing.
+    /// </summary>
+    [Fact]
+    public void ALegInADeveloperEnvironment_IsRequiredToHaveNoProgram_ButTheEnvironment()
+    {
+        var config = new HarnessConfig
+        {
+            DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+            Toolchains =
+            {
+                ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Generator = "Ninja", Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" },
+                ["mingw"] = new ToolchainConfig { Platforms = ["windows"], Generator = "Ninja", Env = { ["CC"] = "gcc" } },
+            },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed" } },
+                },
+            },
+            Legs =
+            {
+                ["msvc"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" },
+                ["mingw"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "mingw" },
+            },
+        };
+        var msvc = config.Legs["msvc"];
+
+        Assert.Empty(LegPrograms.For(config, msvc, LegWorkload.BuildAndTest, NoSettings));
+        Assert.Equal(["cmake", "ninja", "gcc", "ctest"], LegPrograms.For(config, config.Legs["mingw"], LegWorkload.BuildAndTest, NoSettings));
+        Assert.Contains("cl", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
+
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.BuildOnly));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, new LegWorkload(Build: false, Test: true, [])));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, new LegWorkload(Build: false, Test: false, ["python3"])));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy with { UnderOwnPath = ["python3"] }));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy with { OnlyOn = [new OsScopedStart("python3", false, ["windows"])] }));
+        Assert.Null(LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy));
+        Assert.Null(LegPrograms.DeveloperEnvironmentOf(config, config.Legs["mingw"], LegWorkload.BuildAndTest));
+    }
+
+    /// <summary>
     /// A compiler the host names in its own environment is the one the build starts wherever the
     /// variant names none, so it is required of that host and asked about everywhere - and one the
     /// variant names is still the variant's.
@@ -943,10 +992,12 @@ public sealed class ToolResolutionTests
         var identity = Substitute.For<IToolIdentityProvider>();
         identity.Current.Returns(new ToolIdentity("1.2.3", "abc123"));
 
+        var processRunner = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
         var agent = new HostAgentService(
             platform,
             identity,
-            new EmulatorProbe(platform, new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create()), fileSystem),
+            new EmulatorProbe(platform, processRunner, fileSystem),
+            new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, Permissions(), () => onPath));
 
@@ -965,6 +1016,7 @@ public sealed class ToolResolutionTests
 
         var info = await agent.DescribeAsync(
             emulators,
+            new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
             ["cmake", "ninja", "absent"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { [platform.PlatformKey] = [searched] },
             TestContext.Current.CancellationToken);

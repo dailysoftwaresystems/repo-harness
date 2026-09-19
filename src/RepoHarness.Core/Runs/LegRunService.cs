@@ -79,6 +79,7 @@ public sealed class LegRunService(
     ISyncTransportFactory transportFactory,
     RemoteLegRunner remoteLegs,
     KeepAwake keepAwake,
+    DeveloperEnvironmentProvider developerEnvironments,
     IHostPlatform platform,
     IHarnessOutput output)
 {
@@ -91,6 +92,7 @@ public sealed class LegRunService(
     private readonly ISyncTransportFactory _transportFactory = transportFactory;
     private readonly RemoteLegRunner _remoteLegs = remoteLegs;
     private readonly KeepAwake _keepAwake = keepAwake;
+    private readonly DeveloperEnvironmentProvider _developerEnvironments = developerEnvironments;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
@@ -423,11 +425,59 @@ public sealed class LegRunService(
             // declares - under the section the machine that dispatched the leg knows it by.
             await using var awake = _keepAwake.Hold(commandName, leg.Name, leg.HostSettings, leg.Host.ProgramDirectories, cancellationToken);
 
-            return await work(
-                    new LegWork(leg, context, runId, runDirectory, request.Time),
+            var setUp = await SetUpDeveloperEnvironmentAsync(context.Config, leg, request.Workload, ledger, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (setUp?.Unavailable is { } unavailable)
+            {
+                // Before anything of the leg started, as the survey would have turned it away had it
+                // seen this: a tool the leg needs is not there to be had.
+                return new LegEntry
+                {
+                    Leg = leg.Name,
+                    Verdict = LegVerdict.SkippedToolMissing,
+                    Detail = unavailable,
+                    Duration = Stopwatch.GetElapsedTime(started),
+                    Emulated = leg.Emulated,
+                };
+            }
+
+            var entry = await work(
+                    new LegWork(setUp is null ? leg : leg with { DeveloperEnvironment = setUp.Environment }, context, runId, runDirectory, request.Time),
                     cancellationToken)
                 .ConfigureAwait(false);
+
+            return setUp is null ? entry : entry with { DeveloperEnvironment = setUp.Fact };
         }
+    }
+
+    /// <summary>
+    /// Sets up, on this machine, the developer environment <paramref name="leg"/> starts
+    /// <paramref name="workload"/> in, or returns <see langword="null"/> where it needs none.
+    /// </summary>
+    /// <remarks>
+    /// Here, on the machine that runs the leg, and never on the one that placed it: what Visual
+    /// Studio sets up is that machine's own paths. The survey asked this machine about the same
+    /// environment, through <see cref="LegPrograms.DeveloperEnvironmentOf"/>, and the leg was placed
+    /// here because it found an instance, so that instance is the one set up.
+    /// </remarks>
+    private async Task<DeveloperEnvironmentSetup?> SetUpDeveloperEnvironmentAsync(
+        HarnessConfig config,
+        PlacedLeg leg,
+        LegWorkload workload,
+        LegLedger ledger,
+        CancellationToken cancellationToken)
+    {
+        if (LegPrograms.DeveloperEnvironmentOf(config, leg.Leg, workload) is not { } name)
+        {
+            return null;
+        }
+
+        ledger.Transition(leg.Name, $"setting up developer environment '{name}'");
+
+        return await _developerEnvironments
+            .SetUpAsync(name, leg.Host.DeveloperEnvironments[name], leg.Variant.Processor, leg.HostSettings.Env, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private CommandOutcome Report(

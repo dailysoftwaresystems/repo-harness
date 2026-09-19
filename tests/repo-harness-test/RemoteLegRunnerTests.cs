@@ -141,6 +141,36 @@ public sealed class RemoteLegRunnerTests
         Assert.EndsWith("2 tests failed; compiler: GNU 13.2.0 (C, CXX)", row, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The developer environment a host set up for the leg travels on the leg's line, read from the
+    /// very document the host writes, and is named once on this machine's line.
+    /// </summary>
+    [Fact]
+    public async Task TheDeveloperEnvironmentTheHostSetUp_IsCarried_AndNamedOnce()
+    {
+        var visualStudio = new DeveloperEnvironmentFact("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64");
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, DeveloperEnvironment = visualStudio }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, HarnessExit.Success);
+        });
+
+        var entry = await Runner(hosts).RunAsync("build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(visualStudio, entry.DeveloperEnvironment);
+
+        var row = LedgerReport.From([entry], durationWarningFactor: 0).Render()[1];
+
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(row, "developer environment:"));
+        Assert.EndsWith("developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64)", row, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheVerdictTheHostReached_IsTheVerdictThisRunReports()
     {

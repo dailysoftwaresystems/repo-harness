@@ -48,7 +48,10 @@ public static class LegPrograms
         ArgumentNullException.ThrowIfNull(workload);
         ArgumentNullException.ThrowIfNull(host);
 
-        if (ProcessRunner.SetsPath(host.Env.Keys))
+        // Under either, every program the leg starts is found on a PATH no survey can see: the one the
+        // host's own environment sets, or the one its developer environment sets up when the leg runs.
+        // What the developer environment needs is checked on its own, as missing or not.
+        if (ProcessRunner.SetsPath(host.Env.Keys) || DeveloperEnvironmentOf(config, leg, workload) is not null)
         {
             return [];
         }
@@ -98,6 +101,35 @@ public static class LegPrograms
                 .OfType<string>()
                 .Where(program => Surveyable(program, platformKey: null)))
             .Distinct(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The developer environment <paramref name="leg"/> starts what <paramref name="workload"/> has it
+    /// start in: the one its toolchain names, decided from the leg's own operating system as the build
+    /// decides it, or <see langword="null"/> where it names none or the workload starts nothing.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="leg">The leg.</param>
+    /// <param name="workload">What the command has the leg do.</param>
+    /// <remarks>
+    /// Read by the survey that asks each host whether it can set one up, by the placement that turns a
+    /// leg away where it cannot, and by the run that sets it up - one answer for all three, so a leg is
+    /// never set up with an environment its host was not asked about. Every process of the leg starts
+    /// in it: the build's, the tests' and a runner's steps alike, as they would from a developer prompt
+    /// - a test of an MSVC sanitizer build finds its runtime only on the PATH it sets up. A copy starts
+    /// nothing, and needs none.
+    /// </remarks>
+    public static string? DeveloperEnvironmentOf(HarnessConfig config, LegConfig leg, LegWorkload workload)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(leg);
+        ArgumentNullException.ThrowIfNull(workload);
+
+        return workload.StartsPrograms
+            && config.Toolchains.TryGetValue(VariantKey.For(config, leg, leg.Os).Toolchain, out var toolchain)
+            && toolchain.DeveloperEnvironment is { Length: > 0 } name
+            ? name
+            : null;
     }
 
     /// <summary>What every host declares under <c>env</c>, and the nothing a host with no section declares.</summary>

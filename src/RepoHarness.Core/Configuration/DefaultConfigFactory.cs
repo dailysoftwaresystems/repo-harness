@@ -48,11 +48,16 @@ public static class DefaultConfigFactory
             return;
         }
 
+        // cl is reached through Visual Studio's own environment, set up on the host that builds,
+        // so a Windows clone builds from a plain shell rather than only from a developer prompt.
+        config.DeveloperEnvironments["visualStudio"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+
         config.Toolchains["msvc"] = new ToolchainConfig
         {
             Platforms = ["windows"],
             Generator = "Ninja",
             Env = { ["CC"] = "cl", ["CXX"] = "cl" },
+            DeveloperEnvironment = "visualStudio",
         };
 
         config.Toolchains["gcc"] = new ToolchainConfig
