@@ -56,6 +56,50 @@ public sealed class LedgerReportTests
     }
 
     /// <summary>
+    /// Every leg's line names the compilers CMake configured its build with, beside whatever it
+    /// said - a failure's reason included - and the document carries them as data; a leg that built
+    /// nothing with CMake names none.
+    /// </summary>
+    [Fact]
+    public void EveryLine_NamesTheCompilersItsBuildWasConfiguredWith()
+    {
+        IReadOnlyList<RepoHarness.Core.Build.CompilerFact> msvc = [new("C", "MSVC", "19.51.36231"), new("CXX", "MSVC", "19.51.36231")];
+
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Failed, TimeSpan.FromSeconds(1), "3 tests failed") with { Compilers = msvc },
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+
+        Assert.EndsWith("3 tests failed; compiler: MSVC 19.51.36231 (C, CXX)", rows[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("compiler", rows[2], StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.Equal(
+            ["C MSVC 19.51.36231", "CXX MSVC 19.51.36231"],
+            legs[0].GetProperty("compilers").EnumerateArray().Select(compiler =>
+                $"{compiler.GetProperty("language").GetString()} {compiler.GetProperty("id").GetString()} {compiler.GetProperty("version").GetString()}"));
+        Assert.False(legs[1].TryGetProperty("compilers", out _));
+    }
+
+    /// <summary>The line said the moment a leg reaches its verdict names them too.</summary>
+    [Fact]
+    public void TheVerdictsOwnLine_NamesTheCompilers()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "build");
+
+        ledger.Record(Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { Compilers = [new("C", "GNU", "13.2.0")] });
+
+        Assert.Contains("build: win: passed (compiler: GNU 13.2.0 (C))", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A step a leg's operating system does not run is named on that leg's line, in the order the
     /// file declares it, so it is left out on purpose rather than simply absent; a leg that ran
     /// every step names none.

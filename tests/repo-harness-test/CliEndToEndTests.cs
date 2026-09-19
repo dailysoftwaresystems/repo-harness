@@ -837,6 +837,111 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A leg testing a build it does not make names the compilers that build was configured with,
+    /// read from what CMake answered then: its verdict is about binaries they produced.
+    /// </summary>
+    [Fact]
+    public async Task ATestOfABuildItDoesNotMake_NamesTheCompilersItsDirectoryWasConfiguredWith()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Env = { ["CC"] = "cc" } } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                },
+            },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+        });
+
+        var replies = Path.Combine("build", $"{platform.Processor}-cc-debug", ".cmake", "api", "v1", "reply");
+        temp.WriteFile(Path.Combine(replies, "index-2026-09-19T16-16-05-0385.json"), """{ "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-a.json" } } }""");
+        temp.WriteFile(
+            Path.Combine(replies, "toolchains-v1-a.json"),
+            """{ "toolchains": [ { "language": "C", "compiler": { "id": "GNU", "version": "13.2.0" } } ] }""");
+
+        var result = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var compiler = Assert.Single(Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("compilers").EnumerateArray());
+
+        Assert.Equal("GNU", compiler.GetProperty("id").GetString());
+        Assert.Equal("13.2.0", compiler.GetProperty("version").GetString());
+    }
+
+    /// <summary>
+    /// A real configure, by the CMake on this machine: the compiler it resolved is named on the leg's
+    /// line by build and by a runner that builds, read back from what CMake itself wrote. Skipped
+    /// where this machine has no CMake, no Ninja or no C compiler.
+    /// </summary>
+    [Fact]
+    public async Task ARealConfigure_IsNamedOnTheLegsLine_ByBuildAndByARunnerThatBuilds()
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var compiler = OperatingSystem.IsWindows() ? "gcc" : "cc";
+
+        Assert.SkipUnless(
+            harness.ProcessRunner.FindExecutable("cmake") is not null
+                && harness.ProcessRunner.FindExecutable("ninja") is not null
+                && harness.ProcessRunner.FindExecutable(compiler) is not null,
+            $"This machine lacks cmake, ninja or {compiler}, which a real configure needs.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Generator = "Ninja", Env = { ["CC"] = compiler } } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    BuildOutputs = [BuildOutput.Keyed([new("windows", "probe.exe"), new("all", "probe")])],
+                },
+            },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+            PredefinedRunners = { ["probe"] = new RunnerConfig { Action = "probe/probe.yml", RequireBuild = true } },
+        });
+
+        temp.WriteFile("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\n");
+        temp.WriteFile("main.c", "int main(void) { return 0; }\n");
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"), "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
+
+        var build = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        foreach (var result in new[] { build, run })
+        {
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+            var configured = Assert.Single(leg.GetProperty("compilers").EnumerateArray());
+
+            Assert.Equal("C", configured.GetProperty("language").GetString());
+            Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
+            Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// Each command asks a host only for what it will start there. A leg whose compiler no machine
     /// has is turned away by the survey and by a build, and still tested when the build is skipped;
     /// a runner whose step starts a program nothing has is turned away before it starts, with the

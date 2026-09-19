@@ -238,6 +238,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             // caller is told where, as it is for a leg this machine ran.
             RunDirectory = ledger?.RunDirectory,
             SkippedSteps = [.. entry.SkippedSteps ?? []],
+            Compilers = [.. entry.Compilers ?? []],
         };
     }
 
@@ -263,5 +264,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         double CommandSeconds,
         int? TestCount,
         IReadOnlyList<string>? TimingNotes,
-        IReadOnlyList<string>? SkippedSteps = null);
+        IReadOnlyList<string>? SkippedSteps = null,
+        IReadOnlyList<Build.CompilerFact>? Compilers = null);
 }

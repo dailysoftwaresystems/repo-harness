@@ -40,6 +40,17 @@ public sealed class ToolchainConfig : VariantOverlay
 
     /// <summary>Build system generator to request, such as <c>Ninja</c>.</summary>
     public string? Generator { get; init; }
+
+    /// <summary>
+    /// The compiler CMake must configure this toolchain's builds with, by language, in CMake's own
+    /// ids: <c>{"C": "MSVC", "CXX": "MSVC"}</c>. A build CMake configured with another fails, and one
+    /// CMake named no compiler for is unwitnessed.
+    /// </summary>
+    /// <remarks>
+    /// What CMake resolved, not what the toolchain names: a name reaches whatever answers to it
+    /// first, and a leg named msvc built with MinGW's gcc on every run until it declared CC.
+    /// </remarks>
+    public Dictionary<string, string> CompilerId { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>A named build configuration.</summary>

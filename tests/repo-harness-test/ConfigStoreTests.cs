@@ -1302,6 +1302,29 @@ public sealed class ConfigStoreTests
         Assert.True(config.Toolchains.ContainsKey("gcc"));
     }
 
+    /// <summary>A toolchain may declare the compiler CMake must configure it with, by language.</summary>
+    [Fact]
+    public void AToolchain_MayDeclareTheCompilerCMakeMustConfigureItWith()
+    {
+        var config = LoadValid("""{ "toolchains": { "msvc": { "env": { "CC": "cl" }, "compilerId": { "C": "MSVC", "CXX": "MSVC" } } } }""");
+
+        Assert.Equal("MSVC", config.Toolchains["msvc"].CompilerId["cxx"]);
+    }
+
+    /// <summary>
+    /// A language CMake has no name like, or a language given no id, is refused: read as declared,
+    /// it would never be answered, and every build would be unwitnessed over a typo.
+    /// </summary>
+    [Theory]
+    [InlineData("\"C++\": \"MSVC\"", "toolchain 'msvc' compilerId names language 'C++', which is not a CMake language name such as C or CXX")]
+    [InlineData("\"C\": \" \"", "toolchain 'msvc' compilerId gives 'C' no compiler id")]
+    public void Load_RejectsACompilerIdThatNamesNoLanguageOrNoId(string entry, string expected)
+    {
+        var exception = LoadInvalid($$"""{ "toolchains": { "msvc": { "env": { "CC": "cl" }, "compilerId": { {{entry}} } } } }""");
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)

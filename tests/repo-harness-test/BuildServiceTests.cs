@@ -353,6 +353,139 @@ public sealed class BuildServiceTests
         Assert.Contains($"which starts '{temp.Combine(ToolchainDirectory, OperatingSystem.IsWindows() ? "gcc.exe" : "gcc")}' now", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every configure is asked which compilers it resolved, and the build names what it answered:
+    /// the compilers the leg's verdict came from, whatever that verdict is.
+    /// </summary>
+    [Fact]
+    public async Task TheBuild_AsksCMakeWhichCompilersItResolved_AndNamesThem()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var configure = new ConfiguringRunner("GNU", "13.2.0");
+
+        var result = await Service(factory, exitCode: 0, phases: configure).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.True(configure.Asked, "configure ran without the query that makes CMake answer");
+        Assert.Equal([new CompilerFact("C", "GNU", "13.2.0"), new CompilerFact("CXX", "GNU", "13.2.0")], result.Compilers);
+    }
+
+    /// <summary>
+    /// A compiler CMake configured the build with that contradicts the toolchain's compilerId fails
+    /// the leg before anything is built with it, naming both.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerContradictingTheToolchain_FailsTheLeg_BeforeAnythingIsBuilt()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var configure = new ConfiguringRunner("GNU", "13.2.0");
+
+        var result = await Service(factory, exitCode: 0, phases: configure).BuildAsync(Declaring(("C", "MSVC"), ("CXX", "MSVC")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Failed, result.Verdict.Verdict);
+        Assert.Contains(
+            "CMake configured this build with another compiler than toolchain 'gcc' declares: C with GNU 13.2.0, not MSVC; CXX with GNU 13.2.0, not MSVC",
+            result.Verdict.Detail,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(configure.Started, arguments => arguments.Contains("--build"));
+        Assert.NotEmpty(result.Compilers);
+    }
+
+    /// <summary>
+    /// A declared compiler CMake named nothing for is a fact nothing established, never a pass: the
+    /// leg is unwitnessed, naming the language and why CMake said nothing.
+    /// </summary>
+    [Fact]
+    public async Task ADeclaredCompilerCMakeNamedNothingFor_IsUnwitnessed()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(Declaring(("C", "GNU")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
+        Assert.Contains(
+            "toolchain 'gcc' declares the compiler for C, and CMake named none for it: CMake wrote no file API answer there",
+            result.Verdict.Detail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>The compiler the toolchain declares, as CMake spells it or not, passes the build through.</summary>
+    [Fact]
+    public async Task TheDeclaredCompiler_PassesTheBuildThrough()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var produced = Path.Combine(request.Variant.DirectoryUnder(temp.Path), "bin", "app");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
+        await File.WriteAllTextAsync(produced, "built", cancellationToken);
+
+        var result = await Service(factory, exitCode: 0, phases: new ConfiguringRunner("GNU", "13.2.0"))
+            .BuildAsync(Declaring(("C", "gnu"), ("CXX", "GNU")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>A configuration whose gcc toolchain declares <paramref name="ids"/> as its compilerId.</summary>
+    private static HarnessConfig Declaring(params (string Language, string Id)[] ids)
+    {
+        var config = Config();
+        var toolchain = new ToolchainConfig { Env = { ["CC"] = "gcc" } };
+
+        foreach (var (language, id) in ids)
+        {
+            toolchain.CompilerId[language] = id;
+        }
+
+        config.Toolchains["gcc"] = toolchain;
+
+        return config;
+    }
+
+    /// <summary>
+    /// A CMake that answers the file API query on configure, as CMake 4.3 does, with
+    /// <paramref name="id"/> for C and C++; every other phase starts nothing.
+    /// </summary>
+    private sealed class ConfiguringRunner(string id, string version) : IProcessRunner
+    {
+        private readonly List<IReadOnlyList<string>> _started = [];
+
+        /// <summary>The arguments of every phase started, in order.</summary>
+        public IReadOnlyList<IReadOnlyList<string>> Started => _started;
+
+        /// <summary>Whether configure found the query in its build directory when it ran.</summary>
+        public bool Asked { get; private set; }
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            _started.Add(request.Arguments);
+
+            if (request.Arguments is ["-S", _, "-B", var build, ..])
+            {
+                Asked = File.Exists(Path.Combine(build, ".cmake", "api", "v1", "query", "toolchains-v1"));
+
+                var replies = Path.Combine(build, ".cmake", "api", "v1", "reply");
+                Directory.CreateDirectory(replies);
+                File.WriteAllText(
+                    Path.Combine(replies, "index-2026-09-19T16-16-05-0385.json"),
+                    """{ "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-a.json" } } }""");
+                File.WriteAllText(
+                    Path.Combine(replies, "toolchains-v1-a.json"),
+                    $$"""{ "toolchains": [ { "language": "C", "compiler": { "id": "{{id}}", "version": "{{version}}" } }, { "language": "CXX", "compiler": { "id": "{{id}}", "version": "{{version}}" } } ] }""");
+            }
+
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
     /// <summary>Where a test puts the compilers its build's PATH names, outside anything the build reads.</summary>
     private const string ToolchainDirectory = "toolchain-bin";
 
@@ -360,6 +493,7 @@ public sealed class BuildServiceTests
         => new(
             new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
+            new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),

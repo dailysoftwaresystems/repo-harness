@@ -45,6 +45,9 @@ public sealed record LedgerLine(
 
     /// <summary>The steps the leg's operating system does not run, by name.</summary>
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
+    /// <summary>The compilers CMake configured the leg's build with.</summary>
+    public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
 }
 
 /// <summary>
@@ -231,6 +234,7 @@ public sealed class LedgerReport
                 {
                     RunDirectory = entry.RunDirectory,
                     SkippedSteps = entry.SkippedSteps,
+                    Compilers = entry.Compilers,
                 };
             }),
         ]);
@@ -284,7 +288,7 @@ public sealed class LedgerReport
             line.Leg,
             Verdicts.Display(line.Verdict),
             FormatDuration(line.Duration),
-            Marked(line.Detail, line.TimingNotes),
+            Marked(line.Detail, line.TimingNotes, line.Compilers),
             leg,
             verdict,
             duration)));
@@ -422,6 +426,11 @@ public sealed class LedgerReport
 
                 // Only where a step was left out for the leg's operating system.
                 SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
+
+                // Only where CMake named the compilers it configured the leg's build with.
+                Compilers = line.Compilers.Count > 0
+                    ? line.Compilers.Select(compiler => new { compiler.Language, compiler.Id, compiler.Version })
+                    : null,
                 Timings = line.Timings.Select(timing => new
                 {
                     timing.Phase,
@@ -567,20 +576,36 @@ public sealed class LedgerReport
             : entry.Detail;
 
     /// <summary>
-    /// <paramref name="detail"/> with the timing mark, for the table that shows one line per leg.
+    /// <paramref name="detail"/> with the compilers the leg built with and the timing mark, for a line
+    /// that shows one leg.
     /// </summary>
     /// <param name="detail">What the leg said.</param>
     /// <param name="notes">Why its timings are suspect, if they are.</param>
-    internal static string Marked(string detail, IReadOnlyList<string> notes)
+    /// <param name="compilers">The compilers CMake configured its build with.</param>
+    /// <remarks>
+    /// Composed here, from fields that travel beside the detail rather than inside it, so a ledger a
+    /// host reported and this machine reports again names each once.
+    /// </remarks>
+    internal static string Marked(string detail, IReadOnlyList<string> notes, IReadOnlyList<Build.CompilerFact> compilers)
     {
-        if (notes.Count == 0)
+        var parts = new List<string>();
+
+        if (detail.Length > 0)
         {
-            return detail;
+            parts.Add(detail);
         }
 
-        var mark = "timings suspect: " + string.Join("; ", notes);
+        if (Build.CompilerFacts.Describe(compilers) is { } compiler)
+        {
+            parts.Add(compiler);
+        }
 
-        return detail.Length == 0 ? mark : detail + "; " + mark;
+        if (notes.Count > 0)
+        {
+            parts.Add("timings suspect: " + string.Join("; ", notes));
+        }
+
+        return string.Join("; ", parts);
     }
 
     private static int Width(string heading, IEnumerable<string> values)

@@ -88,6 +88,12 @@ public sealed record LegEntry
     /// </summary>
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
+    /// <summary>
+    /// The compilers CMake configured the leg's build with, as it reported them: named on its line
+    /// with whatever verdict it reached, so every verdict says which compiler produced what it judged.
+    /// </summary>
+    public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }
@@ -159,7 +165,9 @@ public sealed class LegLedger(IHarnessOutput output, string commandName)
             _entries.Add(entry);
         }
 
-        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (entry.Detail.Length > 0 ? $" ({entry.Detail})" : string.Empty));
+        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers);
+
+        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (said.Length > 0 ? $" ({said})" : string.Empty));
     }
 
     /// <summary>

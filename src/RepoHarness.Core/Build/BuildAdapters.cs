@@ -217,6 +217,9 @@ public static class BuildAdapters
 /// <summary>Configures and builds a CMake project.</summary>
 public sealed class CMakeAdapter : IBuildAdapter
 {
+    /// <summary>The phase that configures the build directory, after which CMake can say which compilers it resolved.</summary>
+    public const string ConfigurePhase = "configure";
+
     /// <inheritdoc/>
     public string Type => "cmake";
 
@@ -286,12 +289,12 @@ public sealed class CMakeAdapter : IBuildAdapter
         yield return new PhaseRequest
         {
             Leg = request.Leg,
-            Phase = "configure",
+            Phase = ConfigurePhase,
             FileName = Program,
             Arguments = configure,
             WorkingDirectory = request.TreeRoot,
             Environment = environment,
-            LogFile = BuildAdapters.LogFor(request, "configure"),
+            LogFile = BuildAdapters.LogFor(request, ConfigurePhase),
             AppendToPath = request.ProgramDirectories,
         };
 

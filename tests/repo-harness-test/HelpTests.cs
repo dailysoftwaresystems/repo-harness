@@ -192,6 +192,8 @@ public sealed partial class HelpTests
 
         Assert.Contains("A toolchain also names its compiler - CC or CXX under env, or CMAKE_C_COMPILER or", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("then held to the compiler it was configured with by the file that compiler starts on", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("A build CMake configured with another compiler fails before anything is built with", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -29,6 +29,10 @@ DssHarness legs           # where each leg can run, or why it cannot
 DssHarness help           # reference material: exit codes, config, legs, layout
 ```
 
+Every CMake configure is asked which compilers it resolved, and each leg's line names them —
+`compiler: MSVC 19.51.36231 (C, CXX)` — so every verdict says which compiler produced it; a
+toolchain's `compilerId` fails a leg CMake configured with another.
+
 `init` inspects the repository and seeds a configuration that already matches it —
 a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test` — with
 legs for the operating system and processor of the machine it ran on. With no project

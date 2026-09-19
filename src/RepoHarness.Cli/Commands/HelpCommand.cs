@@ -626,6 +626,16 @@ internal static class HelpCommand
         builder.AppendLine("the build's own PATH, never by its name alone, so a second gcc earlier on the PATH is");
         builder.AppendLine("refused rather than mixed into the objects of the first.");
         builder.AppendLine();
+        builder.AppendLine("Every CMake configure is asked which compilers it resolved - its file API's");
+        builder.AppendLine("toolchains-v1 answer, which CMake 3.20 and later write - and each leg's line names");
+        builder.AppendLine("them, 'compiler: MSVC 19.51.36231 (C, CXX)', whatever its verdict, and as compilers in");
+        builder.AppendLine("--json. A toolchain may hold them to what it means:");
+        builder.AppendLine();
+        builder.AppendLine("  \"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }   CMake's own ids, by language");
+        builder.AppendLine();
+        builder.AppendLine("A build CMake configured with another compiler fails before anything is built with");
+        builder.AppendLine("it; one CMake named no compiler for is unwitnessed, saying why.");
+        builder.AppendLine();
         builder.AppendLine("Selected legs run at once and the command waits for all of them, reporting each");
         builder.AppendLine("live. Legs are chunked by the PHYSICAL machine they run on: this machine and every");
         builder.AppendLine("WSL distribution are one machine, because a distribution runs on it, and each ssh");

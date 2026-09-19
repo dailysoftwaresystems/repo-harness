@@ -109,6 +109,7 @@ internal static class BuildCommand
             TimingNotes = [.. Notes(result)],
             Timings = [.. result.Phases.SelectMany(phase =>
                 phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value)))],
+            Compilers = result.Compilers,
         };
     }
 

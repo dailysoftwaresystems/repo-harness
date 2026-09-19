@@ -122,6 +122,17 @@ at once, with the line it concerns where the parser knows it:
   takes whatever compiler it finds first - how a leg named `msvc` built with MinGW's gcc on every
   run until `CC` was declared - and the build directory guard has nothing to hold a later build to.
   `init`'s `msvc` toolchain names `cl`.
+- **Every CMake configure is asked which compilers it resolved**, through the file API: the build
+  writes the `toolchains-v1` query into its build directory before configuring, and reads the newest
+  reply after. Each leg's line names what CMake answered - `compiler: MSVC 19.51.36231 (C, CXX)`,
+  one entry per compiler with the languages it serves - whatever the verdict, a failure's included,
+  and `--json` carries it as `compilers`. It travels beside the detail rather than inside it, so a
+  leg a host ran is named once on the machine that reports it. A toolchain's `compilerId` -
+  `{"C": "MSVC", "CXX": "MSVC"}`, in CMake's own ids - holds the build to it: a compiler CMake
+  configured that contradicts it fails the leg before anything is built, and a declared language
+  CMake named no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
+  answer, and a misspelled language is never answered. `test --no-build` names what its build
+  directory was last configured with; a runner that does not build names none.
 - **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
   toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
   about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose

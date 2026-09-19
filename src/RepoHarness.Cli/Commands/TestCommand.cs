@@ -102,7 +102,7 @@ internal static class TestCommand
                         // Built first unless told not to, and tested either way.
                         Workload = new LegWorkload(Build: !skipBuild, Test: true, []),
                     },
-                    (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
+                    (work, token) => RunLegAsync(builds, tests, context.Get<CMakeToolchainReader>(), work, filter, excludes, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);
         }, JsonOption));
@@ -157,6 +157,7 @@ internal static class TestCommand
     private static async Task<LegEntry> RunLegAsync(
         IBuildService builds,
         ITestService tests,
+        CMakeToolchainReader toolchains,
         LegWork work,
         string? filter,
         IReadOnlyList<string> excludes,
@@ -167,11 +168,17 @@ internal static class TestCommand
         var config = work.Context.Config;
         var started = Stopwatch.GetTimestamp();
 
+        // The compilers the binaries under test were built with: this build's, or - where the leg
+        // tests a build it does not make - what its directory was last configured with.
+        IReadOnlyList<CompilerFact> compilers;
+
         if (!skipBuild)
         {
             var build = await builds
                 .BuildAsync(config, leg.BuildRequestFor(config, work.RunDirectory), cancellationToken)
                 .ConfigureAwait(false);
+
+            compilers = build.Compilers;
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
             {
@@ -182,8 +189,13 @@ internal static class TestCommand
                     Detail = build.Verdict.Detail,
                     Duration = Stopwatch.GetElapsedTime(started),
                     Emulated = leg.Emulated,
+                    Compilers = compilers,
                 };
             }
+        }
+        else
+        {
+            compilers = toolchains.Configured(leg.Project, leg.BuildDirectory);
         }
 
         // Derived once from the placed leg, the same way the runner derives it.
@@ -217,6 +229,6 @@ internal static class TestCommand
 
         // The leg's whole duration, not the runner's: the build, the fingerprints and the sampling
         // are what the ledger reports as overhead, and leaving them out would hide them.
-        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started) };
+        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started), Compilers = compilers };
     }
 }

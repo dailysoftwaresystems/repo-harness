@@ -110,6 +110,37 @@ public sealed class RemoteLegRunnerTests
         Assert.Equal(skipped, entry.SkippedSteps);
     }
 
+    /// <summary>
+    /// The compilers a host's build was configured with travel on the leg's line, read from the very
+    /// document the host writes, and are named once on this machine's line - not once per machine
+    /// the answer passed through.
+    /// </summary>
+    [Fact]
+    public async Task TheCompilersTheHostBuiltWith_AreCarried_AndNamedOnce()
+    {
+        IReadOnlyList<RepoHarness.Core.Build.CompilerFact> gnu = [new("C", "GNU", "13.2.0"), new("CXX", "GNU", "13.2.0")];
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Failed, Detail = "2 tests failed", Compilers = gnu }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, HarnessExit.CommandFailed);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(gnu, entry.Compilers);
+
+        var row = LedgerReport.From([entry], durationWarningFactor: 0).Render()[1];
+
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(row, "compiler:"));
+        Assert.EndsWith("2 tests failed; compiler: GNU 13.2.0 (C, CXX)", row, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheVerdictTheHostReached_IsTheVerdictThisRunReports()
     {

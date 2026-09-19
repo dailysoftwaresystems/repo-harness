@@ -21,7 +21,7 @@ namespace RepoHarness.Core.Configuration;
 /// of which config line was wrong. Every problem is collected and reported together, because
 /// fixing one error only to be shown the next is a poor way to correct a file.
 /// </remarks>
-public static class HarnessConfigValidator
+public static partial class HarnessConfigValidator
 {
     /// <summary>Schema versions this build understands.</summary>
     private static readonly int[] SupportedVersions = [1];
@@ -530,6 +530,22 @@ public static class HarnessConfigValidator
             // to take whatever compiler it finds first - how a leg named msvc built with MinGW's gcc
             // on every run until CC was declared - and gives the build directory guard nothing to hold
             // a later build to.
+            foreach (var (language, id) in toolchain.CompilerId)
+            {
+                if (!CMakeLanguagePattern().IsMatch(language))
+                {
+                    problems.Add(
+                        $"toolchain '{name}' compilerId names language '{language}', which is not a CMake "
+                        + "language name such as C or CXX");
+                }
+                else if (string.IsNullOrWhiteSpace(id))
+                {
+                    problems.Add(
+                        $"toolchain '{name}' compilerId gives '{language}' no compiler id; CMake's are such "
+                        + "as GNU, Clang, AppleClang and MSVC");
+                }
+            }
+
             if (!Build.CompilerValue.Named(toolchain.CacheVars, toolchain.Env))
             {
                 problems.Add(
@@ -1517,6 +1533,10 @@ public static class HarnessConfigValidator
             }
         }
     }
+
+    /// <summary>A CMake language name, such as <c>C</c>, <c>CXX</c> or <c>Fortran</c>.</summary>
+    [GeneratedRegex("^[A-Za-z][A-Za-z0-9_]*$", RegexOptions.CultureInvariant)]
+    private static partial Regex CMakeLanguagePattern();
 
     /// <summary>Refuses each name in one of a tool's scopes that names nothing declared.</summary>
     private static void RequireDeclared(

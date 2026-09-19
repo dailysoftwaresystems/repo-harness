@@ -182,11 +182,16 @@ internal static class RunCommand
 
         // Built before the runner starts, when the runner says it needs the compiler. Otherwise it
         // calls a program the build produces and runs against whatever was left there last time.
+        // Only a runner that builds names the compilers: one that does not may never touch the build.
+        IReadOnlyList<CompilerFact> compilers = [];
+
         if (runner.RequireBuild)
         {
             var build = await builds
                 .BuildAsync(config, leg.BuildRequestFor(config, work.RunDirectory), cancellationToken)
                 .ConfigureAwait(false);
+
+            compilers = build.Compilers;
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
             {
@@ -197,6 +202,7 @@ internal static class RunCommand
                     Detail = build.Verdict.Detail,
                     Duration = Stopwatch.GetElapsedTime(started),
                     Emulated = leg.Emulated,
+                    Compilers = compilers,
                 };
             }
         }
@@ -219,7 +225,7 @@ internal static class RunCommand
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started) };
+        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started), Compilers = compilers };
     }
 
     /// <summary>
