@@ -82,6 +82,7 @@ public sealed class ActionFileParser(
         "run",
         "workingDirectory",
         "workingDirectoryRoot",
+        "runOn",
         "env",
         "successPattern",
         "stallSeconds",
@@ -388,6 +389,7 @@ public sealed class ActionFileParser(
         YamlNode? workingDirectoryNode = null;
         string? workingDirectoryKey = null;
         var workingDirectoryRoot = Runners.WorkingDirectoryRoot.Tree;
+        var runOn = (IReadOnlyList<string>)[];
         var watchContention = false;
         var requireInputsUnmoved = false;
         string? successPattern = null;
@@ -451,6 +453,10 @@ public sealed class ActionFileParser(
                     workingDirectoryNode ??= valueNode;
                     workingDirectoryKey ??= key;
                     workingDirectoryRoot = ReadWorkingDirectoryRoot(valueNode, problems);
+                    break;
+
+                case "runOn":
+                    runOn = ReadRunOn(valueNode, problems);
                     break;
 
                 case "env":
@@ -521,6 +527,7 @@ public sealed class ActionFileParser(
             Commands = commands,
             WorkingDirectory = workingDirectory,
             WorkingDirectoryRoot = workingDirectoryRoot,
+            RunOn = runOn,
             WatchContention = watchContention,
             RequireInputsUnmoved = requireInputsUnmoved,
             Env = env,
@@ -557,6 +564,53 @@ public sealed class ActionFileParser(
             $"an input named '{name}' is a name this tool already fills in, so a run line naming "
             + $"'{{{name}}}' would get this tool's value while INPUT_{name.ToUpperInvariant()} carried "
             + "the action's. Give the input another name."));
+    }
+
+    /// <summary>
+    /// A step's <c>runOn</c>: the operating systems it runs on, each once. An empty list is refused,
+    /// since a step naming none would never run: leaving the key out is how a step says every one.
+    /// </summary>
+    private static IReadOnlyList<string> ReadRunOn(YamlNode node, List<string> problems)
+    {
+        var available = $"'{string.Join("', '", PlatformNames.OperatingSystems)}'";
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            problems.Add(At(node, $"a step's 'runOn' is a list of the operating systems it runs on: {available}."));
+            return [];
+        }
+
+        if (sequence.Children.Count == 0)
+        {
+            problems.Add(At(
+                node,
+                "a step's 'runOn' names no operating system, so the step would never run. Leave the key "
+                + "out for a step every leg runs."));
+            return [];
+        }
+
+        var systems = new List<string>();
+
+        foreach (var item in sequence.Children)
+        {
+            if (RequireScalar(item, "an operating system in runOn", problems) is not { Length: > 0 } system)
+            {
+                continue;
+            }
+
+            if (!PlatformNames.OperatingSystems.Contains(system, StringComparer.Ordinal))
+            {
+                problems.Add(At(item, $"'{system}' is not an operating system runOn can name. Available: {available}."));
+                continue;
+            }
+
+            if (!systems.Contains(system, StringComparer.Ordinal))
+            {
+                systems.Add(system);
+            }
+        }
+
+        return systems;
     }
 
     /// <summary>

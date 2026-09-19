@@ -572,6 +572,66 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A step for another operating system is left out of a leg - here one starting a program nobody
+    /// declared, which would refuse the whole run where the step runs - and the leg passes on the
+    /// steps it did run, naming the one it left out as it runs and on its line.
+    /// </summary>
+    [Fact]
+    public async Task AStepForAnotherSystem_IsLeftOut_AndNamedOnTheLegsLine()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            $"name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n"
+            + $"  - name: fetch\n    runOn: [{ElsewhereOs}]\n    run: curl https://example.invalid\n");
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains($"native: skipped 'fetch', which runs on {ElsewhereOs} only", result.StandardError, StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal("passed", leg.GetProperty("verdict").GetString());
+        Assert.Equal(["fetch"], leg.GetProperty("skippedSteps").EnumerateArray().Select(step => step.GetString()));
+    }
+
+    /// <summary>
+    /// A leg on whose operating system no step runs would pass having run nothing, so the run is
+    /// refused before a host is measured or a run begins, naming the leg. Left to each leg, one
+    /// that no host can take made the run merely incomplete, and one a host could take passed.
+    /// </summary>
+    [Fact]
+    public async Task ARunWithALegOnWhoseSystemNoStepRuns_IsRefusedBeforeAnythingStarts()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            $"name: probe\nsteps:\n  - name: version\n    runOn: [{new HarnessFactory().Platform.PlatformKey}]\n    run: dotnet --version\n");
+
+        var result = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native,elsewhere", "--json", "-C", temp.Path],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, result.ExitCode);
+        Assert.Contains($"leg 'elsewhere' ({ElsewhereOs})", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("leg 'native'", result.StandardError, StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+
+        Assert.Equal(HarnessExit.Refused, document.RootElement.GetProperty("exitCode").GetInt32());
+        Assert.Empty(document.RootElement.GetProperty("legs").EnumerateArray());
+        Assert.False(document.RootElement.TryGetProperty("runDirectory", out _), "no run began, so none has records");
+    }
+
+    /// <summary>
     /// The document is the whole of standard output from the command's first line: 'run' reads its
     /// action before any leg is surveyed, and under --verbose says so, which went to standard output
     /// in front of the document a script was about to parse.
@@ -934,6 +994,10 @@ public sealed partial class CliEndToEndTests
             "keepAwake was not given the process running the leg");
     }
 
+    /// <summary>The operating system of the leg <see cref="PrepareRunnerAsync"/> declares that no host provides.</summary>
+    private static string ElsewhereOs
+        => new HarnessFactory().Platform.PlatformKey == PlatformNames.Linux ? PlatformNames.MacOs : PlatformNames.Linux;
+
     /// <summary>
     /// A repository with one leg this machine can run and one no host can, and a runner that does
     /// something trivial on whichever of them runs.
@@ -954,7 +1018,7 @@ public sealed partial class CliEndToEndTests
                 // An operating system no declared host provides: this machine is the only host.
                 ["elsewhere"] = new LegConfig
                 {
-                    Os = platform.PlatformKey == PlatformNames.Linux ? PlatformNames.MacOs : PlatformNames.Linux,
+                    Os = ElsewhereOs,
                     Processor = platform.Processor,
                     Config = "debug",
                 },

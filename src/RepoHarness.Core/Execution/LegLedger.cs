@@ -82,6 +82,12 @@ public sealed record LegEntry
     /// </summary>
     public string? RunDirectory { get; init; }
 
+    /// <summary>
+    /// The steps of the runner's action this leg's operating system does not run, by name, in the order
+    /// they are declared: left out on purpose, and said so, rather than simply absent.
+    /// </summary>
+    public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }

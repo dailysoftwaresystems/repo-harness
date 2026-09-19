@@ -437,6 +437,68 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// A step that names runOn starts its program only on a leg of a system it names: that leg's host
+    /// must have it, and a leg of any other system is never turned away for want of it. Every host is
+    /// still asked about it, so the leg that does start it finds the directory it is in - under an
+    /// environment that sets PATH as well as without one.
+    /// </summary>
+    [Fact]
+    public void AStepForSomeSystems_IsRequiredOnlyOfTheirLegs_AndAskedOfEveryHost()
+    {
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs =
+            {
+                ["lin"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" },
+                ["win"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug" },
+                ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug" },
+            },
+        };
+
+        var action = new RepoHarness.Core.Runners.ActionFile(
+            "actions/probe/probe.yml",
+            "probe",
+            null,
+            [],
+            [
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "everywhere",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("tclsh probe.tcl", 4, ["tclsh", "probe.tcl"])],
+                },
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "msvc",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("cl /nologo", 6, ["cl", "/nologo"])],
+                    RunOn = ["windows"],
+                },
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "cross",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("arm-none-eabi-size out.elf", 8, ["arm-none-eabi-size", "out.elf"])],
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/arm/bin" },
+                    RunOn = ["linux", "macos"],
+                },
+            ]);
+
+        var steps = LegWorkload.ForRunner(new RunnerConfig { Action = "probe/probe.yml" }, action);
+
+        Assert.Equal(["tclsh"], LegPrograms.For(config, config.Legs["lin"], steps, NoSettings));
+        Assert.Equal(["tclsh", "cl"], LegPrograms.For(config, config.Legs["win"], steps, NoSettings));
+        Assert.Equal(["tclsh"], LegPrograms.For(config, config.Legs["mac"], steps, NoSettings));
+
+        Assert.Equal(["tclsh"], steps.On("windows").Programs.Take(1));
+        Assert.Equal(["arm-none-eabi-size"], steps.On("linux").UnderOwnPath);
+        Assert.Empty(steps.On("windows").UnderOwnPath);
+
+        var wanted = LegPrograms.Wanted(config, steps);
+
+        Assert.Contains("cl", wanted);
+        Assert.Contains("arm-none-eabi-size", wanted);
+    }
+
+    /// <summary>
     /// A program named by its path is looked for at that path and nowhere else, so the reason it is
     /// missing says that, and sends nobody to toolSearchDirectories, which has nothing to do with it.
     /// </summary>

@@ -430,6 +430,9 @@ public sealed class RunnerRunService(
                 values.Redact(phase.Phase),
                 values.Redact(timing.Text),
                 values.Redact(timing.Value))))],
+
+            // On the leg's own line, so a step this operating system left out is never simply absent.
+            SkippedSteps = steps.SkippedSteps,
         };
 
         return new RunnerLegResult(
@@ -500,14 +503,26 @@ public sealed class RunnerRunService(
         IReadOnlyList<RunnerPhase> phases;
         IReadOnlyList<string> performed = [];
         IReadOnlyDictionary<string, string> inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        IReadOnlyList<string> skipped = [];
         string? actionDirectory = null;
 
         if (runner.Action is { Length: > 0 } action)
         {
-            var file = await _actionFileParser
+            var declared = await _actionFileParser
                 .LoadAsync(request.Layout.RunnerActionsDirectory, action, cancellationToken)
                 .ConfigureAwait(false);
 
+            // The steps this leg's operating system runs, taken before anything else reads the file:
+            // the policy vets, the names are demanded and the phases are made from what will run, so
+            // a step for another system never refuses this leg over a program it never starts.
+            var (file, left) = OnThisLeg(declared, request);
+
+            foreach (var step in left)
+            {
+                _output.Info(CommandName, $"{request.Leg}: skipped '{step.Name}', which runs on {string.Join(", ", step.RunOn)} only");
+            }
+
+            skipped = [.. left.Select(step => step.Name)];
             inputs = ResolveInputs(file, values);
 
             var supplied = Supplied(values, inputs);
@@ -583,7 +598,37 @@ public sealed class RunnerRunService(
             _output.Detail(CommandName, $"{request.Leg}: performed '{name}'");
         }
 
-        return new RunnerSteps(phases, performed, inputs, actionDirectory);
+        return new RunnerSteps(phases, performed, inputs, actionDirectory) { SkippedSteps = skipped };
+    }
+
+    /// <summary>
+    /// <paramref name="file"/> with only the steps this leg's operating system runs, and the steps it
+    /// leaves out, in the order they are declared.
+    /// </summary>
+    /// <exception cref="HarnessException">
+    /// A step names <c>runOn</c>, and this run reaches no leg whose operating system could choose; or
+    /// no step runs on this leg's. <c>run</c> refuses the second before anything starts, and it is
+    /// refused here as well, so no leg reaches a verdict having run nothing.
+    /// </exception>
+    private static (ActionFile File, IReadOnlyList<ActionStep> Skipped) OnThisLeg(ActionFile file, RunnerRunRequest request)
+    {
+        if (file.Steps.All(step => step.RunOn.Count == 0))
+        {
+            return (file, []);
+        }
+
+        var os = request.Identity?.Os ?? throw new HarnessException(
+            HarnessExit.UsageError,
+            $"A step of runner '{request.RunnerName}' names runOn, and this run reaches no leg, so there is no "
+            + "operating system to choose its steps by.");
+
+        file.RequireAStepOn(request.RunnerName, [(request.Leg, os)]);
+
+        var runs = file.StepsOn(os);
+
+        return runs.Count == file.Steps.Count
+            ? (file, [])
+            : (file with { Steps = runs }, [.. file.Steps.Where(step => !step.RunsOn(os))]);
     }
 
     /// <summary>
@@ -1312,7 +1357,11 @@ public sealed class RunnerRunService(
         IReadOnlyList<RunnerPhase> Phases,
         IReadOnlyList<string> PerformedActions,
         IReadOnlyDictionary<string, string> Inputs,
-        string? ActionDirectory);
+        string? ActionDirectory)
+    {
+        /// <summary>The steps this leg's operating system does not run, by name, in declared order.</summary>
+        public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+    }
 
     /// <summary>
     /// The action's working space for this run, or <see langword="null"/> for a runner that declares

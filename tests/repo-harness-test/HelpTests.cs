@@ -108,6 +108,21 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The runners topic says what runOn takes - the systems quoted from the code - where a leg of
+    /// another system says it left a step out, and that a leg left with no step is refused.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhatRunOnTakes_AndWhatALegLeftWithoutAStepGets()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[] { $"runOn: [{string.Join(", ", PlatformNames.OperatingSystems)}]", "skippedSteps", "refused before anything starts" })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
     {

@@ -108,6 +108,13 @@ internal static class RunCommand
             var declared = runner.Legs;
             var selected = named ?? (declared.Count > 0 ? declared : null);
 
+            // A leg whose operating system no step runs on would run nothing and pass. Refused here,
+            // like a mistyped action, before a host is measured and naming every such leg at once,
+            // rather than once per leg after each one's run has begun.
+            file?.RequireAStepOn(
+                runnerName,
+                LegSelection.Resolve(harness.Config, selected).Legs.Select(leg => (leg.Name, leg.Leg.Os)));
+
             return await context.Get<LegRunService>()
                 .RunAsync(
                     Name,

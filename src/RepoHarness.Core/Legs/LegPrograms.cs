@@ -82,7 +82,12 @@ public static class LegPrograms
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(workload);
 
-        var everything = LegWorkload.BuildAndTest with { Programs = workload.Programs, UnderOwnPath = workload.UnderOwnPath };
+        var everything = LegWorkload.BuildAndTest with
+        {
+            Programs = workload.Programs,
+            UnderOwnPath = workload.UnderOwnPath,
+            OnlyOn = workload.OnlyOn,
+        };
 
         return [.. config.Legs.Values
             .SelectMany(leg => HostEnvironments(config).SelectMany(environment => Starts(config, leg, everything, environment)))
@@ -116,6 +121,9 @@ public static class LegPrograms
     {
         var project = VariantKey.ProjectFor(config, leg);
         var starts = new List<(string Program, bool UnderOwnPath)>();
+
+        // What this leg's own operating system runs: a step for another system starts nothing here.
+        workload = workload.On(leg.Os);
 
         if (workload.Build)
         {

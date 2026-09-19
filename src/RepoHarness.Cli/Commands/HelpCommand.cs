@@ -307,6 +307,16 @@ internal static class HelpCommand
         builder.AppendLine("step that builds or tests the repository says nothing and keeps the tree root, as");
         builder.AppendLine("every step written before this did.");
         builder.AppendLine();
+        builder.AppendLine($"  runOn: [{string.Join(", ", PlatformNames.OperatingSystems)}]   the operating systems the step runs on");
+        builder.AppendLine();
+        builder.AppendLine("A step without runOn runs on every leg. A leg of another operating system skips a");
+        builder.AppendLine("step that names runOn, says so as it runs, and lists it as skippedSteps on its line");
+        builder.AppendLine("in --json; nothing about the step is asked of that leg - not its program, which no");
+        builder.AppendLine("host is turned away for, and not the names its lines use. A step that reads what a");
+        builder.AppendLine("skipped step would have made finds nothing there, so give both the same runOn. A");
+        builder.AppendLine("run in which some leg would run no step at all is refused before anything starts,");
+        builder.AppendLine("naming the leg: it would pass having run nothing.");
+        builder.AppendLine();
         builder.AppendLine("Names a run line may use");
         builder.AppendLine();
         builder.AppendLine("A run line is written for this tool, so a name in braces it cannot fill in is");

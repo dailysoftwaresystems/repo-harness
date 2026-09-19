@@ -1155,6 +1155,15 @@ sibling directory whose name merely starts the same way is outside, not inside.
   runs a program it ships says `workingDirectoryRoot: action` and names it `./probe.py`; a step
   that builds or tests the repository says nothing and keeps the root it always had. The roots are
   resolved relative to the leg's own tree, so a leg on a worktree reaches that worktree's copy.
+- **`runOn` picks a step per operating system.** A step naming `runOn: [windows]` runs only on a
+  Windows leg; one without it runs on every leg. A leg of another system drops the step before the
+  file is vetted, its names demanded or its phases made, so nothing about the step is asked of that
+  leg - neither its program, which no survey requires of that leg's host, nor a name its lines use.
+  The leg says so as it runs, and lists the step as `skippedSteps` on its line in `--json`, so a
+  step left out is never simply absent. A step that reads what a skipped step would have made finds
+  nothing there; the two take the same `runOn`. A run in which some leg's system runs no step at
+  all is refused before any host is measured, naming every such leg: it would pass having run
+  nothing.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

@@ -82,6 +82,34 @@ public sealed class RemoteLegRunnerTests
         Assert.Equal(runDirectory, entry.RunDirectory);
     }
 
+    /// <summary>
+    /// The steps the host's operating system left out travel on the leg's line, read from the very
+    /// document a host writes, so the two ends cannot disagree about where they are kept; a host
+    /// that ran every step names none.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheStepsTheHostsSystemLeftOut_AreCarriedOnTheLegsLine(bool leftOut)
+    {
+        IReadOnlyList<string> skipped = leftOut ? ["msvc", "sign"] : [];
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, SkippedSteps = skipped }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("run", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(skipped, entry.SkippedSteps);
+    }
+
     [Fact]
     public async Task TheVerdictTheHostReached_IsTheVerdictThisRunReports()
     {

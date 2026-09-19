@@ -1072,6 +1072,128 @@ public sealed class RunnerRunServiceTests
         Assert.Contains(result.Outcome.Output!, result.Outcome.Texts);
     }
 
+    /// <summary>
+    /// A step naming runOn runs on a leg of a system it names, and on no other. Left out, it is left
+    /// out before anything reads it - here a program nobody declared, which the policy refuses the
+    /// whole file over where the step runs - and the leg says so as it runs and on its line.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AStepNamingRunOn_RunsOnlyOnTheSystemsItNames(bool onThisSystem)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: everywhere
+                run: |
+                  dotnet --version
+              - name: fetch
+                runOn: [windows, macos]
+                run: |
+                  curl https://example.invalid
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var request = Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with
+        {
+            Identity = Identity(onThisSystem ? "windows" : "linux"),
+        };
+
+        if (onThisSystem)
+        {
+            var refusal = await Assert.ThrowsAsync<HarnessException>(
+                () => Service(factory).RunAsync(config, request, TestContext.Current.CancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains("curl", refusal.Message, StringComparison.Ordinal);
+
+            return;
+        }
+
+        var result = await Service(factory).RunAsync(config, request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(["fetch"], result.Entry.SkippedSteps);
+        Assert.Contains(
+            $"run: {Leg}: skipped 'fetch', which runs on windows, macos only",
+            factory.StandardOutput.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A leg on whose system no step runs would pass having run nothing, so it is refused with
+    /// nothing run, naming the leg and its system. <c>run</c> refuses it before any host is
+    /// measured; this is the same refusal where a leg reaches the runner anyway.
+    /// </summary>
+    [Fact]
+    public async Task ALegOnWhoseSystemNoStepRuns_IsRefused_NotPassed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: msvc
+                runOn: [windows]
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with { Identity = Identity("linux") },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"leg '{Leg}' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("would run nothing and pass", refusal.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(temp.Combine(".harness-config", "runs", RunId)));
+    }
+
+    /// <summary>
+    /// A step naming runOn needs a leg's operating system to be chosen by, and a run reaching no leg
+    /// has none: refused rather than guessed, as a step asking for contention is.
+    /// </summary>
+    [Fact]
+    public async Task AStepNamingRunOn_IsRefused_WhereTheRunReachesNoLeg()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: measure
+                runOn: [linux]
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Contains("names runOn", refusal.Message, StringComparison.Ordinal);
+    }
+
+    private static LegIdentity Identity(string os)
+        => new(Leg, os, "x86_64", "gcc", "release", "gcc-release", "local", RunId);
+
     private static RunnerRunService Service(HarnessFactory factory)
         => new(
             new PhaseRunner(factory.ProcessRunner, factory.FileSystem, factory.Output),

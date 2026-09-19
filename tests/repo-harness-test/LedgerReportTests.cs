@@ -55,6 +55,28 @@ public sealed class LedgerReportTests
         Assert.Equal("/home/pi/repo/.harness-config/runs/r2", legs[1].GetProperty("runDirectory").GetString());
     }
 
+    /// <summary>
+    /// A step a leg's operating system does not run is named on that leg's line, in the order the
+    /// file declares it, so it is left out on purpose rather than simply absent; a leg that ran
+    /// every step names none.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesTheStepsALegsSystemLeftOut()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { SkippedSteps = ["msvc", "sign"] },
+        ],
+        durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("skippedSteps", out _));
+        Assert.Equal(["msvc", "sign"], legs[1].GetProperty("skippedSteps").EnumerateArray().Select(step => step.GetString()));
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

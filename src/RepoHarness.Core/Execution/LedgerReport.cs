@@ -42,6 +42,9 @@ public sealed record LedgerLine(
     /// in this run's own directory.
     /// </summary>
     public string? RunDirectory { get; init; }
+
+    /// <summary>The steps the leg's operating system does not run, by name.</summary>
+    public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 }
 
 /// <summary>
@@ -227,6 +230,7 @@ public sealed class LedgerReport
                     entry.Timings)
                 {
                     RunDirectory = entry.RunDirectory,
+                    SkippedSteps = entry.SkippedSteps,
                 };
             }),
         ]);
@@ -415,6 +419,9 @@ public sealed class LedgerReport
 
                 // Only for a leg another host ran, whose records are in that host's own run.
                 line.RunDirectory,
+
+                // Only where a step was left out for the leg's operating system.
+                SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
                 Timings = line.Timings.Select(timing => new
                 {
                     timing.Phase,
