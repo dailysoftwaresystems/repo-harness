@@ -47,6 +47,17 @@ public sealed record ActionStep
     /// </summary>
     public WorkingDirectoryRoot WorkingDirectoryRoot { get; init; }
 
+    /// <summary>
+    /// The operating systems this step runs on, from <c>runOn</c>; empty, it runs on every leg. A leg
+    /// of any other operating system skips it and says so, and nothing about it is asked of that
+    /// leg: not its programs, not the names its lines use.
+    /// </summary>
+    public IReadOnlyList<string> RunOn { get; init; } = [];
+
+    /// <summary>Whether a leg of <paramref name="os"/> runs this step.</summary>
+    /// <param name="os">The leg's operating system.</param>
+    public bool RunsOn(string os) => RunOn.Count == 0 || RunOn.Contains(os, StringComparer.Ordinal);
+
     /// <summary>Environment for this step, applied over the runner's own.</summary>
     public IReadOnlyDictionary<string, string> Env { get; init; }
         = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -665,6 +665,110 @@ public sealed class ToolProvisionServiceTests
     }
 
     /// <summary>
+    /// Two legs on one host share what is installed there and differ in what they need: each is told
+    /// only about the tools it needs, whichever scope narrows them, and each tool is asked about
+    /// there once. Scoped to the platform alone, a compiler one leg needs was reported missing on
+    /// every other leg of that operating system.
+    /// </summary>
+    [Fact]
+    public async Task LegsSharingAHost_AreEachToldOnlyWhatTheyNeed_AndEachToolIsAskedOnce()
+    {
+        using var fixture = new Fixture(
+            tools:
+            [
+                Apt("ninja"),
+                Apt("gcc", toolchains: ["gcc"]),
+                Apt("cross", processors: ["arm64"]),
+                Apt("qemu", emulators: ["qemu-arm64"]),
+                Apt("probe", legs: ["on-distro"]),
+            ],
+            present: new() { ["ninja"] = "1.12.0", ["gcc"] = "13.2.0", ["cross"] = "2.0.0", ["qemu"] = "8.2.0", ["probe"] = "1.0.0" },
+            configure: config => config.Legs["arm-gcc"] = new LegConfig
+            {
+                Os = "linux",
+                Processor = "arm64",
+                Config = "debug",
+                Toolchain = "gcc",
+                Emulator = "qemu-arm64",
+                Wsl = Distro,
+            });
+
+        var report = await fixture.ProvisionAsync();
+
+        IReadOnlyList<string> Declared(string leg)
+            => [.. Assert.Single(report.Legs, entry => entry.Leg == leg).Tools.Select(tool => tool.Tool).Where(tool => tool != "dotnet")];
+
+        Assert.Equal(["ninja", "probe"], Declared("on-distro"));
+        Assert.Equal(["ninja", "gcc", "cross", "qemu"], Declared("arm-gcc"));
+        Assert.True(report.Passed);
+
+        foreach (var tool in new[] { "ninja", "gcc", "cross", "qemu", "probe" })
+        {
+            Assert.Single(fixture.Host.Calls, call => Path.GetFileName(call.Program) == tool && call.Arguments is ["--version"]);
+        }
+    }
+
+    /// <summary>
+    /// A tool no selected leg on a host needs is never asked about there: scoped to a leg --legs left
+    /// out, it is neither probed nor installed.
+    /// </summary>
+    [Fact]
+    public async Task AToolNoSelectedLegNeeds_IsNeverAskedAbout()
+    {
+        using var fixture = new Fixture(tools: [Apt("ninja"), Apt("probe", legs: ["only-local"])], present: new() { ["ninja"] = "1.12.0" }, twoLegs: true);
+
+        var report = await fixture.ProvisionAsync(["on-distro"]);
+
+        Assert.DoesNotContain(Assert.Single(report.Legs).Tools, tool => tool.Tool == "probe");
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Arguments.Any(argument => argument.Contains("probe", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// A dry run reaches the host and asks it what a run asks, and installs nothing there: each tool
+    /// it would install or update names the command that would, sudo and all, and nobody is asked for
+    /// a password - or whether one is needed.
+    /// </summary>
+    [Fact]
+    public async Task ADryRun_NamesWhatItWouldInstall_AndRunsNothingThere()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("ninja"), Apt("cmake", minVersion: "3.20.0")],
+            present: new() { ["cmake"] = "3.16.0" },
+            prompting: PromptAvailability.Available,
+            typed: _ => Credential);
+
+        var report = await fixture.ProvisionAsync(dryRun: true);
+        var tools = Assert.Single(report.Legs).Tools;
+
+        Assert.Equal(ToolState.WouldInstall, Assert.Single(tools, tool => tool.Tool == "dotnet").State);
+
+        var ninja = Assert.Single(tools, tool => tool.Tool == "ninja");
+        Assert.Equal(ToolState.WouldInstall, ninja.State);
+        Assert.Equal("would run 'sudo apt-get install -y ninja-build'", ninja.Detail);
+
+        var cmake = Assert.Single(tools, tool => tool.Tool == "cmake");
+        Assert.Equal(ToolState.WouldUpdate, cmake.State);
+        Assert.Equal("3.16.0", cmake.Version);
+
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "sudo" || (call.Program == "sh" && call.Arguments.Count == 0));
+        Assert.Empty(fixture.Prompt.Asked);
+        Assert.False(fixture.Host.Has(HostId.Wsl(Distro), "ninja"));
+
+        Assert.True(report.DryRun);
+        Assert.False(report.Passed);
+
+        var table = ToolProvisionReports.Render(report, json: false);
+        var document = ToolProvisionReports.Render(report, json: true);
+
+        Assert.Equal(ToolsExit.NotProvisioned, table.ExitCode);
+        Assert.EndsWith("--dry-run installed nothing", table.Message, StringComparison.Ordinal);
+        Assert.Contains(table.Details!, line => line.EndsWith("ninja would install: would run 'sudo apt-get install -y ninja-build'", StringComparison.Ordinal));
+
+        using var parsed = System.Text.Json.JsonDocument.Parse(Assert.Single(document.Data!));
+        Assert.True(parsed.RootElement.GetProperty("dryRun").GetBoolean());
+    }
+
+    /// <summary>
     /// dotnet-install.sh uses bash features that dash does not have, and dash is /bin/sh on Debian
     /// and Ubuntu. Handed to sh it fails with "Illegal option -o pipefail", which says nothing about
     /// a shell and sends the reader after the SDK instead.
@@ -776,12 +880,20 @@ public sealed class ToolProvisionServiceTests
         string name,
         string? minVersion = null,
         string regex = @"(\d+\.\d+\.\d+)",
-        List<string>? platforms = null) => new()
+        List<string>? platforms = null,
+        List<string>? toolchains = null,
+        List<string>? legs = null,
+        List<string>? processors = null,
+        List<string>? emulators = null) => new()
     {
         Name = name,
         Probe = new ToolProbe { Args = ["--version"], Regex = regex },
         MinVersion = minVersion,
         Platforms = platforms ?? [],
+        Toolchains = toolchains ?? [],
+        Legs = legs ?? [],
+        Processors = processors ?? [],
+        Emulators = emulators ?? [],
         Install = { ["linux"] = new ToolInstall { Manager = "apt", Id = name + "-build" } },
     };
 
@@ -956,7 +1068,8 @@ public sealed class ToolProvisionServiceTests
             Dictionary<string, List<string>>? searchDirectories = null,
             bool homeUnreadable = false,
             bool ssh = false,
-            Func<HostId, HostCommand, bool>? transportStops = null)
+            Func<HostId, HostCommand, bool>? transportStops = null,
+            Action<HarnessConfig>? configure = null)
         {
             var declared = tools ?? [];
 
@@ -1032,6 +1145,8 @@ public sealed class ToolProvisionServiceTests
                 };
             }
 
+            configure?.Invoke(config);
+
             var platform = HostDoubles.Platform(localPlatform);
 
             var processRunner = Substitute.For<IProcessRunner>();
@@ -1078,8 +1193,8 @@ public sealed class ToolProvisionServiceTests
 
         public StringWriter Error { get; } = new();
 
-        public Task<ToolProvisionReport> ProvisionAsync(IReadOnlyList<string>? legs = null)
-            => _service.ProvisionAsync(_repository.Path, legs, TestContext.Current.CancellationToken);
+        public Task<ToolProvisionReport> ProvisionAsync(IReadOnlyList<string>? legs = null, bool dryRun = false)
+            => _service.ProvisionAsync(_repository.Path, legs, dryRun, TestContext.Current.CancellationToken);
 
         public void Dispose() => _repository.Dispose();
 

@@ -1,5 +1,6 @@
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -89,7 +90,7 @@ public sealed class BuildVariantTests
         var buildDirectory = WriteCache(temp, "CMAKE_HOME_DIRECTORY:INTERNAL=/repo/other");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => guard.Check(buildDirectory, "/repo/mine", expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: null));
+            () => guard.Check(buildDirectory, "/repo/mine", expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: null, Nowhere));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("/repo/other", refusal.Message, StringComparison.Ordinal);
@@ -104,7 +105,7 @@ public sealed class BuildVariantTests
         var buildDirectory = WriteCache(temp, $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_BUILD_TYPE:STRING=Debug");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: "Release"));
+            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: null, expectedCxxCompiler: null, expectedBuildType: "Release", Nowhere));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains("fixed once per directory", refusal.Message, StringComparison.Ordinal);
@@ -119,7 +120,7 @@ public sealed class BuildVariantTests
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
         var refusal = Assert.Throws<HarnessException>(
-            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: "clang", expectedCxxCompiler: null, expectedBuildType: null));
+            () => Guard().Check(buildDirectory, temp.Path, expectedCompiler: CompilerValue.Read("clang"), expectedCxxCompiler: null, expectedBuildType: null, Nowhere));
 
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
     }
@@ -130,11 +131,123 @@ public sealed class BuildVariantTests
         // A cache records an absolute path and a leg names a program. Comparing them literally
         // would refuse every directory the harness itself configured.
         using var temp = new TempDirectory();
+        var gcc = temp.WriteProgram("toolchain", "gcc");
+        var buildDirectory = WriteCache(
+            temp,
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={gcc.Replace('\\', '/')}");
+
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, OnPath(temp.Combine("toolchain")));
+    }
+
+    /// <summary>
+    /// A second compiler of the same name, earlier on the PATH the build is given, is another
+    /// compiler: a name compared with a name let a directory configured with one gcc be rebuilt with
+    /// another, and the leg reported on objects from both. Refused, naming the file it starts now.
+    /// </summary>
+    [Fact]
+    public void ASecondCompilerOfTheSameName_EarlierOnThePath_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        var configured = temp.WriteProgram("old", "gcc");
+        var shadowing = temp.WriteProgram("new", "gcc");
+        var buildDirectory = WriteCache(
+            temp,
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={configured.Replace('\\', '/')}");
+
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, OnPath(temp.Combine("old"), temp.Combine("new")));
+
+        var refusal = Assert.Throws<HarnessException>(() => Guard().Check(
+            buildDirectory,
+            temp.Path,
+            CompilerValue.Read("gcc"),
+            null,
+            null,
+            OnPath(temp.Combine("new"), temp.Combine("old"))));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"this leg builds with 'gcc', which starts '{shadowing}' now", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A compiler a survey found off the PATH starts from the directory appended to it, so that is
+    /// where it is resolved: the same file as the cache's passes, and another is refused.
+    /// </summary>
+    [Fact]
+    public void ACompilerFoundOffThePath_IsResolvedWhereTheBuildWillStartIt()
+    {
+        using var temp = new TempDirectory();
+        var configured = temp.WriteProgram("found", "gcc");
+        temp.WriteProgram("other", "gcc");
+        var buildDirectory = WriteCache(
+            temp,
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={configured.Replace('\\', '/')}");
+
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, new CompilerSearch(null, [temp.Combine("found")]));
+
+        Assert.Throws<HarnessException>(() => Guard().Check(
+            buildDirectory,
+            temp.Path,
+            CompilerValue.Read("gcc"),
+            null,
+            null,
+            new CompilerSearch(null, [temp.Combine("other")])));
+    }
+
+    /// <summary>
+    /// A compiler the search finds nowhere cannot start, and the build says so when it tries; until
+    /// then only its name can be compared, and the same name is not a refusal.
+    /// </summary>
+    [Fact]
+    public void ACompilerFoundNowhere_IsComparedByName()
+    {
+        using var temp = new TempDirectory();
         var buildDirectory = WriteCache(
             temp,
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc");
 
-        Guard().Check(buildDirectory, temp.Path, expectedCompiler: "gcc", expectedCxxCompiler: null, expectedBuildType: null);
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, OnPath(temp.Combine("empty")));
+
+        Assert.Throws<HarnessException>(
+            () => Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("clang"), null, null, OnPath(temp.Combine("empty"))));
+    }
+
+    /// <summary>
+    /// The PATH a build's phases are given is the one their environment sets, whatever its spelling,
+    /// and this process's own where it sets none.
+    /// </summary>
+    [Fact]
+    public void TheSearch_IsThePathTheBuildsEnvironmentSets_OrThisProcesss()
+    {
+        var declared = CompilerSearch.For(
+            new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase) { ["Path"] = "/opt/arm/bin" },
+            ["/opt/found"]);
+
+        Assert.Equal("/opt/arm/bin", declared.Path);
+        Assert.Equal(["/opt/found"], declared.ProgramDirectories);
+        Assert.Equal(Environment.GetEnvironmentVariable("PATH"), CompilerSearch.For(new Dictionary<string, string?>(), []).Path);
+    }
+
+    /// <summary>
+    /// A compiler value that carries words after its program is compared as CMake recorded it: the
+    /// program as CMAKE_C_COMPILER, the words as CMAKE_C_COMPILER_ARG1. The same value rebuilds, and a
+    /// change in the words alone - ccache over clang, then over gcc - is refused, which CMake itself
+    /// never notices.
+    /// </summary>
+    [Fact]
+    public void ACompilerWithWordsAfterIt_IsComparedAsCMakeRecordedIt()
+    {
+        using var temp = new TempDirectory();
+        var buildDirectory = WriteCache(
+            temp,
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/ccache\nCMAKE_C_COMPILER_ARG1:STRING= clang");
+
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("ccache clang"), null, null, Nowhere);
+
+        var refusal = Assert.Throws<HarnessException>(
+            () => Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("ccache gcc"), null, null, Nowhere));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("configured with '/usr/bin/ccache clang', and this leg builds with 'ccache gcc'", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -144,7 +257,7 @@ public sealed class BuildVariantTests
         // impossible to build.
         using var temp = new TempDirectory();
 
-        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, "gcc", "g++", "Debug");
+        Guard().Check(Path.Combine(temp.Path, "build", "x86_64-gcc-debug"), temp.Path, CompilerValue.Read("gcc"), CompilerValue.Read("g++"), "Debug", Nowhere);
     }
 
     /// <summary>
@@ -161,7 +274,13 @@ public sealed class BuildVariantTests
     }
 
     private static BuildDirectoryGuard Guard()
-        => new(new HarnessFactory().FileSystem, new HostPlatform());
+        => new(new HarnessFactory().FileSystem, new HostPlatform(), FilePermissionsFactory.Create());
+
+    /// <summary>A search that finds no program at all, so only names can be compared.</summary>
+    private static CompilerSearch Nowhere => new(null, []);
+
+    /// <summary>A search whose PATH is <paramref name="directories"/>, in order, and nothing else.</summary>
+    private static CompilerSearch OnPath(params string[] directories) => new(string.Join(Path.PathSeparator, directories), []);
 
     private static string WriteCache(TempDirectory temp, string contents)
     {

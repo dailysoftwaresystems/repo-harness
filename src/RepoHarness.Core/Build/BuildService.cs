@@ -27,6 +27,12 @@ public sealed record BuildRequest(
 {
     /// <inheritdoc cref="Hosts.HostReport.ProgramDirectories"/>
     public IReadOnlyList<string> ProgramDirectories { get; init; } = [];
+
+    /// <summary>
+    /// What the host the leg runs on gives it, beneath the variant's own environment: what the host
+    /// declares under <c>env</c>, with the developer environment the toolchain names set up over it.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
 }
 
 /// <summary>What one leg's build did.</summary>
@@ -40,7 +46,14 @@ public sealed record BuildResult(
     string BuildDirectory,
     IReadOnlyList<PhaseResult> Phases,
     string? RebuiltFromClean,
-    NinjaDependencyReport? Dependencies);
+    NinjaDependencyReport? Dependencies)
+{
+    /// <summary>
+    /// The compilers CMake configured the build with, by language, as it reported them after
+    /// configuring; none for a build CMake does not configure, or where it reported nothing.
+    /// </summary>
+    public IReadOnlyList<CompilerFact> Compilers { get; init; } = [];
+}
 
 /// <summary>Building one leg.</summary>
 public interface IBuildService
@@ -59,6 +72,7 @@ public interface IBuildService
 public sealed class BuildService(
     PhaseRunner phaseRunner,
     BuildDirectoryGuard buildDirectoryGuard,
+    CMakeToolchainReader toolchainReader,
     NinjaDependencyCheck dependencyCheck,
     InputFingerprint fingerprints,
     ProcessSampler processSampler,
@@ -71,6 +85,7 @@ public sealed class BuildService(
 
     private readonly PhaseRunner _phaseRunner = phaseRunner;
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
+    private readonly CMakeToolchainReader _toolchainReader = toolchainReader;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
     private readonly InputFingerprint _fingerprints = fingerprints;
     private readonly ProcessSampler _processSampler = processSampler;
@@ -91,6 +106,12 @@ public sealed class BuildService(
         var buildDirectory = request.Variant.DirectoryUnder(request.TreeRoot);
         var overlay = request.Variant.Overlay(config, request.Project);
 
+        // Made once, and read by everything that asks which compiler this build uses: the guard, every
+        // phase and the dependency check. A compiler the host's env names is the one the build starts
+        // wherever the variant names none, and a guard reading the variant alone let a directory CMake
+        // had configured with another be reused, the leg passing on a compiler nobody chose.
+        var environment = BuildAdapters.EnvironmentFor(overlay, request);
+
         // Before configuring, not after: a directory configured from another worktree watches that
         // tree's sources, which produced both a false refusal and a silent wrong answer. Compared
         // against the directory the build is actually configured from, which is the project's own
@@ -98,9 +119,10 @@ public sealed class BuildService(
         _buildDirectoryGuard.Check(
             buildDirectory,
             Path.Combine(request.TreeRoot, request.Project.Path),
-            overlay.Env.GetValueOrDefault("CC"),
-            overlay.Env.GetValueOrDefault("CXX"),
-            adapter.BuildTypeOf(config, request.Variant.Config));
+            CompilerValue.For(CompilerValue.C, overlay.CacheVars, environment),
+            CompilerValue.For(CompilerValue.Cxx, overlay.CacheVars, environment),
+            adapter.BuildTypeOf(config, request.Variant.Config),
+            CompilerSearch.For(environment, request.ProgramDirectories));
 
         var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
 
@@ -111,6 +133,16 @@ public sealed class BuildService(
         }
 
         _fileSystem.CreateDirectory(buildDirectory);
+
+        // Asked of every configure, so the compilers a verdict names are the ones this build's
+        // configure resolved, never the ones an earlier one did.
+        var configured = adapter is CMakeAdapter;
+        IReadOnlyList<CompilerFact> compilers = [];
+
+        if (configured)
+        {
+            _toolchainReader.Ask(buildDirectory);
+        }
 
         var phases = new List<PhaseResult>();
 
@@ -142,7 +174,7 @@ public sealed class BuildService(
                 cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay))
+        foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay, environment))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -158,6 +190,20 @@ public sealed class BuildService(
                 .ConfigureAwait(false);
 
             phases.Add(result);
+
+            if (configured && string.Equals(phase.Phase, CMakeAdapter.ConfigurePhase, StringComparison.Ordinal))
+            {
+                // Read whether or not configure passed: a compiler it resolved is worth naming on a
+                // leg whose configure then failed for another reason. Held to the toolchain before
+                // anything is built with it, so no object comes from a compiler nobody chose.
+                var reading = _toolchainReader.Read(buildDirectory);
+                compilers = reading.Compilers;
+
+                if (result.Passed && CompilerIdentity(config, request.Variant.Toolchain, reading) is { } contradicted)
+                {
+                    return await FinishAsync(contradicted, null).ConfigureAwait(false);
+                }
+            }
 
             if (!result.Passed)
             {
@@ -221,7 +267,7 @@ public sealed class BuildService(
                 .ConfigureAwait(false);
         }
 
-        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, cancellationToken)
+        var (dependencies, unreadable) = await ReadDependenciesAsync(request, buildDirectory, environment, cancellationToken)
             .ConfigureAwait(false);
 
         if (unreadable is not null)
@@ -283,8 +329,65 @@ public sealed class BuildService(
                     .ConfigureAwait(false);
             }
 
-            return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies);
+            return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies) { Compilers = compilers };
         }
+    }
+
+    /// <summary>
+    /// What a build whose configure resolved <paramref name="reading"/> has to answer for against
+    /// the compilerId its toolchain declares, or <see langword="null"/> where it answers for nothing.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="toolchainName">The leg's toolchain.</param>
+    /// <param name="reading">What CMake reported after configuring.</param>
+    /// <remarks>
+    /// A compiler CMake configured the build with that is not the one declared fails the leg: the
+    /// build would compile with it, and every verdict after that describes a compiler nobody chose.
+    /// A language CMake named no compiler for is not a pass: the declaration asked for a fact
+    /// nothing established - an older CMake writes no answer, and a misspelled language is never
+    /// answered - so the leg is unwitnessed, naming why.
+    /// </remarks>
+    private static ReachedVerdict? CompilerIdentity(HarnessConfig config, string toolchainName, CompilerReading reading)
+    {
+        if (!config.Toolchains.TryGetValue(toolchainName, out var toolchain) || toolchain.CompilerId.Count == 0)
+        {
+            return null;
+        }
+
+        var contradicted = new List<string>();
+        var unanswered = new List<string>();
+
+        foreach (var (language, id) in toolchain.CompilerId)
+        {
+            var found = reading.Compilers.FirstOrDefault(compiler => string.Equals(compiler.Language, language, StringComparison.OrdinalIgnoreCase));
+
+            if (found is null)
+            {
+                unanswered.Add(language);
+            }
+            else if (!string.Equals(found.Id, id, StringComparison.OrdinalIgnoreCase))
+            {
+                contradicted.Add($"{language} with {found.Id}{(found.Version.Length > 0 ? " " + found.Version : string.Empty)}, not {id}");
+            }
+        }
+
+        if (contradicted.Count > 0)
+        {
+            return ReachedVerdict.Of(
+                LegVerdict.Failed,
+                $"CMake configured this build with another compiler than toolchain '{toolchainName}' declares: "
+                + $"{string.Join("; ", contradicted)}. Name the compiler the toolchain means under its env or "
+                + "cacheVars, where the host starts that one");
+        }
+
+        return unanswered.Count > 0
+            ? ReachedVerdict.Of(
+                LegVerdict.Unwitnessed,
+                $"toolchain '{toolchainName}' declares the compiler for {string.Join(", ", unanswered)}, and CMake named "
+                + $"none for {(unanswered.Count == 1 ? "it" : "them")}"
+                + (reading.Unread is { } why ? $": {why}" : string.Empty)
+                + "; nothing established which compiler this build used")
+            : null;
     }
 
     /// <summary>
@@ -708,6 +811,7 @@ public sealed class BuildService(
     private async Task<(NinjaDependencyReport? Report, string? Unreadable)> ReadDependenciesAsync(
         BuildRequest request,
         string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
         CancellationToken cancellationToken)
     {
         if (!string.Equals(request.Project.Type, "cmake", StringComparison.OrdinalIgnoreCase))
@@ -717,10 +821,12 @@ public sealed class BuildService(
 
         try
         {
-            // The ninja the build itself ran, which only its own environment may have found.
+            // The ninja the build itself ran, which only its own environment may have found - and
+            // started in that environment, so one looked up by name is found on the PATH the build's
+            // phases had, a host's own among them.
             var recorded = _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram;
 
-            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, cancellationToken).ConfigureAwait(false), null);
+            return (await _dependencyCheck.CheckAsync(buildDirectory, request.ProgramDirectories, recorded, environment, cancellationToken).ConfigureAwait(false), null);
         }
         catch (HarnessException ex)
         {

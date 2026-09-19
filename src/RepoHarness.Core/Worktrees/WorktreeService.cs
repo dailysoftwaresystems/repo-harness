@@ -556,7 +556,7 @@ public sealed class WorktreeService(
     }
 
     /// <summary>
-    /// How many characters <c>/build/&lt;variant&gt;/</c> adds below a worktree, for the longest
+    /// How many characters <c>build/&lt;variant&gt;/</c> adds below a worktree, for the longest
     /// variant among the legs this machine builds; zero when it builds none.
     /// </summary>
     /// <param name="config">The whole configuration.</param>
@@ -577,8 +577,9 @@ public sealed class WorktreeService(
             .DefaultIfEmpty(-1)
             .Max();
 
-        // A separator before 'build', one between it and the variant, and one after the variant.
-        return longest < 0 ? 0 : Build.VariantKey.BuildRootName.Length + longest + 3;
+        // A separator between 'build' and the variant, and one after the variant. The one before
+        // 'build' joins the worktree to what is reserved below it, which the budget counts itself.
+        return longest < 0 ? 0 : Build.VariantKey.BuildRootName.Length + longest + 2;
     }
 
     private static WorktreeOutcome Usage(string message)

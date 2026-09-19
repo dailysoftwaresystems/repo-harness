@@ -17,18 +17,21 @@ namespace RepoHarness.Core.Runs;
 /// reproduced over a transport: the host's own DssHarness runs the same command in the copy sync put
 /// there, and hands its ledger back as JSON. Both ends are already the same build, which the host
 /// inspection established before anything started.
-/// The request carries <c>--here</c>, so the host runs the leg on itself and never dispatches it
-/// onward. One hop, always, whatever its configuration says about other machines.
+/// The request carries <c>--here</c> with the host's own name, so the host runs the leg on itself,
+/// never dispatches it onward, and runs it with the settings this machine's configuration gives that
+/// host. One hop, always, whatever its configuration says about other machines.
 /// </remarks>
 public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOutput output)
 {
     /// <summary>
-    /// The option that tells a DssHarness to run every selected leg on the machine it is running on.
+    /// The option that tells a DssHarness to run every selected leg on the machine it is running on,
+    /// as the host it names.
     /// </summary>
     /// <remarks>
     /// Hidden, because nobody types it: it exists so the host that was asked to run a leg cannot
     /// decide to ask a third machine, which would place the verdict one further hop from the reader
-    /// and could not terminate by construction.
+    /// and could not terminate by construction. It names the host as this machine knows it, because
+    /// to itself the host is 'local', and 'local' in the configuration the two share is this machine.
     /// </remarks>
     public const string HereOption = "--here";
 
@@ -76,7 +79,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             {
                 Kind = HostAgentRequestKind.Run,
                 Directory = repositoryPath,
-                Arguments = [commandName, "--legs", leg.Name, "--json", HereOption, .. arguments],
+                Arguments = [commandName, "--legs", leg.Name, "--json", HereOption, leg.Host.Host.ToString(), .. arguments],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
@@ -230,6 +233,13 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             Emulated = leg.Emulated,
             TestCount = entry.TestCount,
             TimingNotes = [.. entry.TimingNotes ?? []],
+
+            // The host ran the leg under a run of its own, whose records are there: named so the
+            // caller is told where, as it is for a leg this machine ran.
+            RunDirectory = ledger?.RunDirectory,
+            SkippedSteps = [.. entry.SkippedSteps ?? []],
+            Compilers = [.. entry.Compilers ?? []],
+            DeveloperEnvironment = entry.DeveloperEnvironment,
         };
     }
 
@@ -241,8 +251,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     }
 
     /// <summary>The shape a host's ledger arrives in, read back by name rather than by position.</summary>
+    /// <param name="Legs">Each leg's line.</param>
+    /// <param name="RunDirectory">Where the host's own run keeps its records, when it got that far.</param>
     private sealed record RemoteLedger(
-        [property: JsonPropertyName("legs")] IReadOnlyList<RemoteLedgerLeg>? Legs);
+        [property: JsonPropertyName("legs")] IReadOnlyList<RemoteLedgerLeg>? Legs,
+        [property: JsonPropertyName("runDirectory")] string? RunDirectory = null);
 
     /// <summary>One leg's line of a host's ledger.</summary>
     private sealed record RemoteLedgerLeg(
@@ -251,5 +264,8 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         double DurationSeconds,
         double CommandSeconds,
         int? TestCount,
-        IReadOnlyList<string>? TimingNotes);
+        IReadOnlyList<string>? TimingNotes,
+        IReadOnlyList<string>? SkippedSteps = null,
+        IReadOnlyList<Build.CompilerFact>? Compilers = null,
+        DeveloperEnvironmentFact? DeveloperEnvironment = null);
 }

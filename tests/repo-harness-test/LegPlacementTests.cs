@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Results;
@@ -129,6 +130,55 @@ public sealed class LegPlacementTests
             StringComparison.Ordinal);
 
         Assert.Equal(HostId.Wsl("Ubuntu"), Place(leg, Windows, working).Host?.Host);
+    }
+
+    /// <summary>
+    /// A leg whose toolchain names a developer environment is turned away, as a tool missing, from a
+    /// host that cannot set it up or was never asked - and placed where it can. A copy starts nothing
+    /// there, and needs none.
+    /// </summary>
+    [Fact]
+    public void Place_TurnsALegAway_WhereItsDeveloperEnvironmentCannotBeSetUp()
+    {
+        var config = new HarnessConfig
+        {
+            DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+            Toolchains = { ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" } },
+        };
+        var leg = new SelectedLeg("win", new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" });
+        var without = Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["vs"] = DeveloperEnvironmentCheck.Unavailable("no Visual Studio instance there has the component 'X'"),
+            },
+        };
+        var with = Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["vs"] = new(true, null, @"C:\VS", "18.0.1"),
+            },
+        };
+
+        LegPlacement Placed(LegWorkload workload, HostReport host)
+            => LegPlacement.Place(config, leg, workload, new Dictionary<HostId, HostReport> { [host.Host] = host });
+
+        var turnedAway = Placed(LegWorkload.BuildOnly, without);
+
+        Assert.False(turnedAway.Runnable);
+        Assert.Equal(LegVerdict.SkippedToolMissing, turnedAway.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: developer environment 'vs' cannot be set up there: no Visual Studio instance there has the component 'X'",
+            turnedAway.Reason);
+
+        var neverAsked = Placed(new LegWorkload(Build: false, Test: true, []), Windows);
+
+        Assert.Equal(LegVerdict.SkippedToolMissing, neverAsked.Verdict);
+        Assert.Equal($"{HostId.Local}: developer environment 'vs' was never looked for there", neverAsked.Reason);
+
+        Assert.True(Placed(LegWorkload.BuildOnly, with).Runnable);
+        Assert.True(Placed(LegWorkload.Copy, without).Runnable);
     }
 
     [Fact]

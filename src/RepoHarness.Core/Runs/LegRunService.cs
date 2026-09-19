@@ -21,9 +21,11 @@ namespace RepoHarness.Core.Runs;
 /// <param name="UseStaged">Whether to act on what is already staged on a host, without syncing again.</param>
 /// <param name="Time">Whether to report the profile timing.</param>
 /// <param name="Here">
-/// Whether every selected leg runs on this machine rather than on the host it was placed on. What a
-/// host is asked when the machine that reached it dispatches a leg there: without it the host would
-/// be free to dispatch the leg onward, putting the verdict one further hop from the reader.
+/// The host this machine is to the machine that dispatched the legs here, which runs every selected
+/// leg on this machine, under that host's settings; <see langword="null"/> where this machine places
+/// them itself. Without it the host would be free to dispatch the leg onward, putting the verdict
+/// one further hop from the reader, and would read its settings as 'local' - which, in the
+/// configuration the two machines share, is the one that dispatched it.
 /// </param>
 /// <param name="RemoteArguments">
 /// The command's own options, passed on to a host running a leg for this run so that it runs the
@@ -36,7 +38,7 @@ public sealed record LegRunRequest(
     bool Json = false,
     bool UseStaged = false,
     bool Time = false,
-    bool Here = false,
+    HostId? Here = null,
     IReadOnlyList<string>? RemoteArguments = null)
 {
     /// <summary>
@@ -76,6 +78,8 @@ public sealed class LegRunService(
     ISyncService syncService,
     ISyncTransportFactory transportFactory,
     RemoteLegRunner remoteLegs,
+    KeepAwake keepAwake,
+    DeveloperEnvironmentProvider developerEnvironments,
     IHostPlatform platform,
     IHarnessOutput output)
 {
@@ -87,6 +91,8 @@ public sealed class LegRunService(
     private readonly ISyncService _syncService = syncService;
     private readonly ISyncTransportFactory _transportFactory = transportFactory;
     private readonly RemoteLegRunner _remoteLegs = remoteLegs;
+    private readonly KeepAwake _keepAwake = keepAwake;
+    private readonly DeveloperEnvironmentProvider _developerEnvironments = developerEnvironments;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
@@ -124,7 +130,8 @@ public sealed class LegRunService(
         {
             var nothing = LegRunPlan.NothingRuns(skipped);
 
-            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? []);
+            // Before any run exists: there is no directory to name.
+            return Stopped(request, nothing.ExitCode, nothing.Message, skipped, factor, nothing.Details ?? [], runDirectory: null);
         }
 
         var runId = RunId.New();
@@ -151,7 +158,8 @@ public sealed class LegRunService(
                 held,
                 [.. skipped, .. placed.Select(leg => new LegEntry { Leg = leg.Name, Verdict = LegVerdict.LogHeld, Detail = held, Emulated = leg.Emulated })],
                 factor,
-                []);
+                [$"logs: {runDirectory}"],
+                runDirectory);
         }
 
         // Trees another run holds, by tree: a verdict for the legs that need one, as a variant
@@ -196,10 +204,17 @@ public sealed class LegRunService(
                 // already knew. The exit code is still the refusal's own.
                 var reached = ledger.Build(factor);
 
-                return Stopped(request, ex.ExitCode, ex.Message, ledger.Entries, factor, [.. reached.Render(), $"logs: {runDirectory}"]);
+                return Stopped(
+                    request,
+                    ex.ExitCode,
+                    ex.Message,
+                    ledger.Entries,
+                    factor,
+                    [.. reached.Render(), .. Logs(runDirectory, reached, placed)],
+                    runDirectory);
             }
 
-            return Report(commandName, context, ledger, execution, runDirectory, request.Json);
+            return Report(commandName, context, ledger, execution, runDirectory, placed, request.Json);
         }
         finally
         {
@@ -283,6 +298,9 @@ public sealed class LegRunService(
     /// <param name="entries">The legs' lines so far.</param>
     /// <param name="factor">The duration warning factor the ledger is built with.</param>
     /// <param name="details">What the table form says beneath the line.</param>
+    /// <param name="runDirectory">
+    /// Where the run keeps its records, once it has a directory; <see langword="null"/> before.
+    /// </param>
     /// <remarks>
     /// Asked for data, the ledger is the whole of standard output whatever ended the run: the document,
     /// with the code and the line the process ends on. Written as text instead - a table, a list of
@@ -295,10 +313,29 @@ public sealed class LegRunService(
         string message,
         IReadOnlyList<LegEntry> entries,
         double factor,
-        IReadOnlyList<string> details)
+        IReadOnlyList<string> details,
+        string? runDirectory)
         => request.Json
-            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message)] }
+            ? new CommandOutcome(exitCode, message) { Data = [LedgerReport.From(entries, factor).ToJson(exitCode, message, runDirectory)] }
             : CommandOutcome.Failed(exitCode, message, details);
+
+    /// <summary>
+    /// Where a run's records are, as its text form says it: this run's directory, then the one each
+    /// leg another host ran keeps there, since a host runs a leg under a run of its own.
+    /// </summary>
+    private static IEnumerable<string> Logs(string runDirectory, LedgerReport report, IReadOnlyList<PlacedLeg> placed)
+    {
+        yield return $"logs: {runDirectory}";
+
+        foreach (var line in report.Lines.Where(line => line.RunDirectory is { Length: > 0 }))
+        {
+            var host = placed.FirstOrDefault(leg => leg.Name == line.Leg)?.Host.Host.ToString();
+
+            yield return host is null
+                ? $"logs of {line.Leg}: {line.RunDirectory}"
+                : $"logs of {line.Leg} on {host}: {line.RunDirectory}";
+        }
+    }
 
     private async Task<LegEntry?> RunLegAsync(
         HarnessContext context,
@@ -372,7 +409,7 @@ public sealed class LegRunService(
             // would produce a verdict about the machine that typed the command, under the name of
             // the leg that was supposed to check a different one — which is the whole failure a
             // harness exists to prevent, wearing a green colour.
-            if (leg.Host.Host.Kind != HostKind.Local && !request.Here)
+            if (leg.Host.Host.Kind != HostKind.Local && request.Here is null)
             {
                 return await _remoteLegs
                     .RunAsync(
@@ -384,11 +421,63 @@ public sealed class LegRunService(
                     .ConfigureAwait(false);
             }
 
-            return await work(
-                    new LegWork(leg, context, runId, runDirectory, request.Time),
+            // Held awake for as long as the leg's own work runs here, by the command this machine
+            // declares - under the section the machine that dispatched the leg knows it by.
+            await using var awake = _keepAwake.Hold(commandName, leg.Name, leg.HostSettings, leg.Host.ProgramDirectories, cancellationToken);
+
+            var setUp = await SetUpDeveloperEnvironmentAsync(context.Config, leg, request.Workload, ledger, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (setUp?.Unavailable is { } unavailable)
+            {
+                // Before anything of the leg started, as the survey would have turned it away had it
+                // seen this: a tool the leg needs is not there to be had.
+                return new LegEntry
+                {
+                    Leg = leg.Name,
+                    Verdict = LegVerdict.SkippedToolMissing,
+                    Detail = unavailable,
+                    Duration = Stopwatch.GetElapsedTime(started),
+                    Emulated = leg.Emulated,
+                };
+            }
+
+            var entry = await work(
+                    new LegWork(setUp is null ? leg : leg with { DeveloperEnvironment = setUp.Environment }, context, runId, runDirectory, request.Time),
                     cancellationToken)
                 .ConfigureAwait(false);
+
+            return setUp is null ? entry : entry with { DeveloperEnvironment = setUp.Fact };
         }
+    }
+
+    /// <summary>
+    /// Sets up, on this machine, the developer environment <paramref name="leg"/> starts
+    /// <paramref name="workload"/> in, or returns <see langword="null"/> where it needs none.
+    /// </summary>
+    /// <remarks>
+    /// Here, on the machine that runs the leg, and never on the one that placed it: what Visual
+    /// Studio sets up is that machine's own paths. The survey asked this machine about the same
+    /// environment, through <see cref="LegPrograms.DeveloperEnvironmentOf"/>, and the leg was placed
+    /// here because it found an instance, so that instance is the one set up.
+    /// </remarks>
+    private async Task<DeveloperEnvironmentSetup?> SetUpDeveloperEnvironmentAsync(
+        HarnessConfig config,
+        PlacedLeg leg,
+        LegWorkload workload,
+        LegLedger ledger,
+        CancellationToken cancellationToken)
+    {
+        if (LegPrograms.DeveloperEnvironmentOf(config, leg.Leg, workload) is not { } name)
+        {
+            return null;
+        }
+
+        ledger.Transition(leg.Name, $"setting up developer environment '{name}'");
+
+        return await _developerEnvironments
+            .SetUpAsync(name, leg.Host.DeveloperEnvironments[name], leg.Variant.Processor, leg.HostSettings.Env, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private CommandOutcome Report(
@@ -397,6 +486,7 @@ public sealed class LegRunService(
         LegLedger ledger,
         LegExecution execution,
         string runDirectory,
+        IReadOnlyList<PlacedLeg> placed,
         bool json)
     {
         var report = ledger.Build(context.Config.Defaults.DurationWarningFactor);
@@ -411,12 +501,13 @@ public sealed class LegRunService(
         {
             return new CommandOutcome(exitCode, message)
             {
-                Data = [report.ToJson(execution.Cancelled, execution.Unfinished)],
+                Data = [report.ToJson(execution.Cancelled, execution.Unfinished, runDirectory)],
                 Quiet = true,
             };
         }
 
-        var details = new List<string>(report.Render()) { $"logs: {runDirectory}" };
+        var details = new List<string>(report.Render());
+        details.AddRange(Logs(runDirectory, report, placed));
 
         if (execution.Unfinished.Count > 0)
         {

@@ -24,6 +24,36 @@ public sealed class ToolConfig
     /// </remarks>
     public List<string> Platforms { get; init; } = [];
 
+    /// <summary>
+    /// Toolchains this tool is needed for: only a leg whose variant builds with one of them needs it.
+    /// Left out, every toolchain.
+    /// </summary>
+    /// <remarks>
+    /// The narrower axis two legs of one operating system differ on. <c>cl</c> scoped to Windows alone
+    /// was reported missing on a MinGW leg, because that leg is Windows too.
+    /// </remarks>
+    public List<string> Toolchains { get; init; } = [];
+
+    /// <summary>Legs or leg sets this tool is needed for, by name. Left out, every leg.</summary>
+    public List<string> Legs { get; init; } = [];
+
+    /// <summary>
+    /// Processors this tool is needed for: the processor a leg is built for, which under an emulator
+    /// is not the host's. Left out, every processor.
+    /// </summary>
+    /// <remarks>
+    /// The leg's, because that is the one every leg declares: an arm64 leg on an x86_64 host is still
+    /// an arm64 leg. So this reaches a native arm64 host as surely as an emulated leg - scope a tool
+    /// the emulating host needs, such as the emulator itself, with <see cref="Emulators"/> instead.
+    /// </remarks>
+    public List<string> Processors { get; init; } = [];
+
+    /// <summary>
+    /// Emulators this tool is needed for: only a leg run under one of them needs it. Left out, every
+    /// leg, emulated or not.
+    /// </summary>
+    public List<string> Emulators { get; init; } = [];
+
     /// <summary>How to install or update it, keyed by platform or <c>all</c>.</summary>
     public Dictionary<string, ToolInstall> Install { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 

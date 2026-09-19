@@ -22,6 +22,13 @@ public sealed class JsonConfigStore(IFileSystem fileSystem) : IConfigStore
 
         var json = _fileSystem.ReadAllText(path);
 
+        // Before the serializer, which would call a key this tool retired merely unknown: this
+        // says what took its place.
+        if (RetiredKeys.In(json) is [_, ..] retired)
+        {
+            throw new ConfigException($"'{path}' could not be read: {string.Join(" ", retired)}");
+        }
+
         HarnessConfig? config;
         try
         {

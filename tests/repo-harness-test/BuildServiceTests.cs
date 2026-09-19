@@ -317,10 +317,183 @@ public sealed class BuildServiceTests
         return (Service(factory, exitCode), factory);
     }
 
-    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null)
+    /// <summary>
+    /// A compiler a survey found off the PATH is the one the build starts, from the directory
+    /// appended to it, so that is the file the directory is held to: one configured with a gcc
+    /// elsewhere is refused, though the names match.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerFoundInAProgramDirectory_IsTheOneTheDirectoryIsHeldTo()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+
+        temp.WriteProgram(ToolchainDirectory, "gcc");
+        var elsewhere = temp.WriteProgram("elsewhere-bin", "gcc");
+        Directory.CreateDirectory(temp.Combine("empty-path"));
+
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "gcc", ["PATH"] = temp.Combine("empty-path") },
+            ProgramDirectories = [temp.Combine(ToolchainDirectory)],
+        };
+
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={elsewhere.Replace('\\', '/')}\n",
+            cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"which starts '{temp.Combine(ToolchainDirectory, OperatingSystem.IsWindows() ? "gcc.exe" : "gcc")}' now", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every configure is asked which compilers it resolved, and the build names what it answered:
+    /// the compilers the leg's verdict came from, whatever that verdict is.
+    /// </summary>
+    [Fact]
+    public async Task TheBuild_AsksCMakeWhichCompilersItResolved_AndNamesThem()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var configure = new ConfiguringRunner("GNU", "13.2.0");
+
+        var result = await Service(factory, exitCode: 0, phases: configure).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.True(configure.Asked, "configure ran without the query that makes CMake answer");
+        Assert.Equal([new CompilerFact("C", "GNU", "13.2.0"), new CompilerFact("CXX", "GNU", "13.2.0")], result.Compilers);
+    }
+
+    /// <summary>
+    /// A compiler CMake configured the build with that contradicts the toolchain's compilerId fails
+    /// the leg before anything is built with it, naming both.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerContradictingTheToolchain_FailsTheLeg_BeforeAnythingIsBuilt()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var configure = new ConfiguringRunner("GNU", "13.2.0");
+
+        var result = await Service(factory, exitCode: 0, phases: configure).BuildAsync(Declaring(("C", "MSVC"), ("CXX", "MSVC")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Failed, result.Verdict.Verdict);
+        Assert.Contains(
+            "CMake configured this build with another compiler than toolchain 'gcc' declares: C with GNU 13.2.0, not MSVC; CXX with GNU 13.2.0, not MSVC",
+            result.Verdict.Detail,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(configure.Started, arguments => arguments.Contains("--build"));
+        Assert.NotEmpty(result.Compilers);
+    }
+
+    /// <summary>
+    /// A declared compiler CMake named nothing for is a fact nothing established, never a pass: the
+    /// leg is unwitnessed, naming the language and why CMake said nothing.
+    /// </summary>
+    [Fact]
+    public async Task ADeclaredCompilerCMakeNamedNothingFor_IsUnwitnessed()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(Declaring(("C", "GNU")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
+        Assert.Contains(
+            "toolchain 'gcc' declares the compiler for C, and CMake named none for it: CMake wrote no file API answer there",
+            result.Verdict.Detail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>The compiler the toolchain declares, as CMake spells it or not, passes the build through.</summary>
+    [Fact]
+    public async Task TheDeclaredCompiler_PassesTheBuildThrough()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+        var produced = Path.Combine(request.Variant.DirectoryUnder(temp.Path), "bin", "app");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
+        await File.WriteAllTextAsync(produced, "built", cancellationToken);
+
+        var result = await Service(factory, exitCode: 0, phases: new ConfiguringRunner("GNU", "13.2.0"))
+            .BuildAsync(Declaring(("C", "gnu"), ("CXX", "GNU")), request, cancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>A configuration whose gcc toolchain declares <paramref name="ids"/> as its compilerId.</summary>
+    private static HarnessConfig Declaring(params (string Language, string Id)[] ids)
+    {
+        var config = Config();
+        var toolchain = new ToolchainConfig { Env = { ["CC"] = "gcc" } };
+
+        foreach (var (language, id) in ids)
+        {
+            toolchain.CompilerId[language] = id;
+        }
+
+        config.Toolchains["gcc"] = toolchain;
+
+        return config;
+    }
+
+    /// <summary>
+    /// A CMake that answers the file API query on configure, as CMake 4.3 does, with
+    /// <paramref name="id"/> for C and C++; every other phase starts nothing.
+    /// </summary>
+    private sealed class ConfiguringRunner(string id, string version) : IProcessRunner
+    {
+        private readonly List<IReadOnlyList<string>> _started = [];
+
+        /// <summary>The arguments of every phase started, in order.</summary>
+        public IReadOnlyList<IReadOnlyList<string>> Started => _started;
+
+        /// <summary>Whether configure found the query in its build directory when it ran.</summary>
+        public bool Asked { get; private set; }
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            _started.Add(request.Arguments);
+
+            if (request.Arguments is ["-S", _, "-B", var build, ..])
+            {
+                Asked = File.Exists(Path.Combine(build, ".cmake", "api", "v1", "query", "toolchains-v1"));
+
+                var replies = Path.Combine(build, ".cmake", "api", "v1", "reply");
+                Directory.CreateDirectory(replies);
+                File.WriteAllText(
+                    Path.Combine(replies, "index-2026-09-19T16-16-05-0385.json"),
+                    """{ "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-a.json" } } }""");
+                File.WriteAllText(
+                    Path.Combine(replies, "toolchains-v1-a.json"),
+                    $$"""{ "toolchains": [ { "language": "C", "compiler": { "id": "{{id}}", "version": "{{version}}" } }, { "language": "CXX", "compiler": { "id": "{{id}}", "version": "{{version}}" } } ] }""");
+            }
+
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
+    /// <summary>Where a test puts the compilers its build's PATH names, outside anything the build reads.</summary>
+    private const string ToolchainDirectory = "toolchain-bin";
+
+    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null, IProcessRunner? phases = null)
         => new(
-            new PhaseRunner(new QuietRunner(exitCode), factory.FileSystem, factory.Output),
-            new BuildDirectoryGuard(factory.FileSystem, factory.Platform),
+            new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
+            new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
+            new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
@@ -491,6 +664,148 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A host's own environment reaches every phase of the build and the ninja that reads its
+    /// records, beneath the variant's: a name only the host sets is the host's, one the toolchain
+    /// sets too is the toolchain's, and a compiler cache the host declares is keyed against the leg's
+    /// own tree.
+    /// </summary>
+    [Fact]
+    public async Task TheHostsEnvironment_ReachesEveryPhaseAndTheCheck_BeneathTheVariants()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string>
+            {
+                ["RH_HOST"] = "host",
+                ["RH_BOTH"] = "host",
+                ["CCACHE_DIR"] = temp.Combine("cache"),
+            },
+        };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
+
+        var config = Config();
+        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], Env = { ["RH_BOTH"] = "variant" } };
+
+        var phases = new RecordingRunner(string.Empty);
+        var dependencies = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
+
+        _ = await Service(factory, exitCode: 0, dependencies, phases).BuildAsync(config, request, cancellationToken);
+
+        Assert.NotEmpty(phases.Started);
+        Assert.Single(dependencies.Started);
+
+        foreach (var started in phases.Started.Concat(dependencies.Started))
+        {
+            Assert.Equal("host", started.Environment["RH_HOST"]);
+            Assert.Equal("variant", started.Environment["RH_BOTH"]);
+            Assert.Equal(temp.Path, started.Environment["CCACHE_BASEDIR"]);
+        }
+    }
+
+    /// <summary>
+    /// A compiler the host's env names is the one the build uses wherever the variant names none, so
+    /// a directory CMake configured with another is refused, as it is for a variant's compiler -
+    /// never reused with the compiler CMake cached, the leg passing on a compiler nobody chose.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryConfiguredWithAnotherCompilerThanTheHostNames_IsRefused()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+        var request = tracked with { HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang-17" } };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc\n",
+            cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("clang-17", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A compiler the host names with words after it rebuilds the directory it configured: CMake
+    /// cached ccache as the compiler and clang as its argument, and the guard reads the value the
+    /// same way. Compared whole, 'ccache clang' against '/usr/bin/ccache' refused every rebuild, and
+    /// the refusal ended the whole run.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerTheHostNamesWithWordsAfterIt_RebuildsTheDirectoryItConfigured()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+
+        // The ccache the build's PATH starts is the one the directory was configured with, so the
+        // question is only what was recorded after it.
+        var ccache = temp.WriteProgram(ToolchainDirectory, "ccache");
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "ccache clang", ["PATH"] = temp.Combine(ToolchainDirectory) },
+        };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={ccache.Replace('\\', '/')}\nCMAKE_C_COMPILER_ARG1:STRING= clang\n",
+            cancellationToken);
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
+
+        Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// A toolchain that gives CMake its compiler as a cache variable builds with that one, whatever
+    /// the host's env names, so its directory rebuilds: compared with the host's CC, which CMake never
+    /// used, every rebuild was refused.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerGivenAsACacheVariable_RebuildsTheDirectoryItConfigured_WhateverTheHostNames()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, tracked) = await TrackedTreeAsync(temp, cancellationToken);
+
+        // The gcc the build starts is the one the directory was configured with, found where a survey
+        // found it: off a PATH that holds none, in the directory appended to it.
+        var gcc = temp.WriteProgram(ToolchainDirectory, "gcc");
+        Directory.CreateDirectory(temp.Combine("empty-path"));
+        var request = tracked with
+        {
+            HostEnvironment = new Dictionary<string, string> { ["CC"] = "clang", ["PATH"] = temp.Combine("empty-path") },
+            ProgramDirectories = [temp.Combine(ToolchainDirectory)],
+        };
+        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(buildDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
+            $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:STRING={gcc.Replace('\\', '/')}\n",
+            cancellationToken);
+
+        var config = Config();
+        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], CacheVars = { ["CMAKE_C_COMPILER"] = "gcc" } };
+
+        var result = await Service(factory, exitCode: 0).BuildAsync(config, request, cancellationToken);
+
+        Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+    }
+
+    /// <summary>
     /// A relative program the build recorded is read from the build directory, where the check starts,
     /// never from wherever this process began.
     /// </summary>
@@ -505,7 +820,7 @@ public sealed class BuildServiceTests
         var runner = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
 
         _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
-            .CheckAsync(buildDirectory, [], "tools/ninja", TestContext.Current.CancellationToken);
+            .CheckAsync(buildDirectory, [], "tools/ninja", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(Path.Combine(buildDirectory, "tools", "ninja"), Assert.Single(runner.Started).FileName);
     }
@@ -527,7 +842,7 @@ public sealed class BuildServiceTests
             .ThrowsAsync(new ProgramStartException("/opt/arm/bin/ninja", "'/opt/arm/bin/ninja' could not be started: Text file busy"));
 
         var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
-            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", TestContext.Current.CancellationToken));
+            .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.CommandFailed, failure.ExitCode);
         Assert.Contains("could not be started", failure.Message, StringComparison.Ordinal);

@@ -293,7 +293,7 @@ public sealed class SyncService(
         // A copy starts no program on a host, so a host is given one whatever it has installed: a host
         // without cmake is still where a runner that builds nothing runs, and where its artifacts go.
         var report = await _legsService
-            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: false, cancellationToken)
+            .CheckAsync(directory, legNames, Legs.LegWorkload.Copy, here: null, cancellationToken)
             .ConfigureAwait(false);
 
         var hosts = report.Placements
@@ -672,9 +672,12 @@ public sealed class SyncService(
                 + $"local to this machine: {result.FailureMessage}");
         }
 
+        // Each name as git gives it, less the slash that marks a directory. Trimmed as well, a name
+        // beginning or ending with a space became one no file has, and the ignored file under it was
+        // copied to the host.
         return [.. result.StandardOutput
             .Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Select(path => path.Trim().TrimEnd('/'))
+            .Select(path => path.TrimEnd('/'))
             .Where(path => path.Length > 0)];
     }
 

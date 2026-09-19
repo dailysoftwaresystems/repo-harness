@@ -167,7 +167,7 @@ public sealed class ConfigStoreTests
         // in-memory config and the loaded one must not disagree about that.
         var config = LoadValid($$"""
             {
-              "toolchains": { "msvc": { "generator": "Ninja" } },
+              "toolchains": { "msvc": { "generator": "Ninja", "env": { "CC": "cl" } } },
               "buildConfigs": { "debug": { "cmakeBuildType": "Debug" } },
               "sshItems": ["vps"], "wslDistros": ["Ubuntu"],
               "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "/home/dev/repo" } }, "ssh": { "vps": { "repositoryPath": "/srv/repo" } } },
@@ -194,7 +194,7 @@ public sealed class ConfigStoreTests
         // A toolchain declaring one platform must have exactly that platform. If
         // deserialization appended to the default instead of replacing it, a
         // Windows-only toolchain would silently become an everywhere toolchain.
-        var config = LoadValid("""{ "toolchains": { "msvc": { "platforms": ["windows"] } } }""");
+        var config = LoadValid("""{ "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } } } }""");
 
         Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
     }
@@ -685,6 +685,8 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "defaults": { "processSampleSeconds": 0 } }""", "defaults.processSampleSeconds")]
     [InlineData("""{ "contention": { "buildTools": ["ninja", " "] } }""", "contention.buildTools contains a blank name")]
     [InlineData("""{ "hosts": { "local": { "keepAwake": [] } } }""", "keepAwake has an empty command")]
+    [InlineData("""{ "hosts": { "local": { "keepAwake": ["caffeinate", "-w", "{leg}"] } } }""", "keepAwake names '{leg}', which nothing fills in: it can hold only {pid}")]
+    [InlineData("""{ "hosts": { "local": { "keepAwake": ["./awake.sh"] } } }""", "keepAwake './awake.sh' must be a program name")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "connectTimeoutSeconds": 0 } } } }""", "connectTimeoutSeconds")]
     [InlineData("""{ "hosts": { "ssh": { "vps": { "repositoryPath": "/r", "keepAliveSeconds": 0 } } } }""", "keepAliveSeconds")]
     [InlineData("""{ "projects": [ { "name": "main", "type": "cmake", "buildOutputs": ["../other/bin"] } ] }""", "buildOutputs entry '../other/bin'")]
@@ -1019,7 +1021,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid("""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "msvc": { "platforms": ["windows"] } },
+              "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } } },
               "legs": {
                 "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "msvc" }
               }
@@ -1031,9 +1033,9 @@ public sealed class ConfigStoreTests
     }
 
     [Theory]
-    [InlineData("""{ "platforms": ["linux"] }""")]
-    [InlineData("""{ "platforms": ["all"] }""")]
-    [InlineData("{ }")]
+    [InlineData("""{ "platforms": ["linux"], "env": { "CC": "gcc" } }""")]
+    [InlineData("""{ "platforms": ["all"], "env": { "CC": "gcc" } }""")]
+    [InlineData("""{ "env": { "CC": "gcc" } }""")]
     public void Load_AcceptsALegWhoseToolchainExistsOnItsPlatform(string toolchain)
     {
         var config = LoadValid($$"""
@@ -1062,7 +1064,7 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid($$"""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "{{key}}": "gcc" } } ],
               "legs": {
                 "win": { "os": "windows", "processor": "x86_64", "config": "debug" }
@@ -1084,7 +1086,7 @@ public sealed class ConfigStoreTests
         var config = LoadValid("""
             {
               "buildConfigs": { "debug": {} },
-              "toolchains": { "gcc": { "platforms": ["linux"] } },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
               "projects": [ { "name": "app", "type": "cmake", "defaultToolchain": { "all": "gcc" } } ],
               "legs": {
                 "nix": { "os": "linux", "processor": "x86_64", "config": "debug" }
@@ -1198,12 +1200,208 @@ public sealed class ConfigStoreTests
         Assert.Contains("never be checked anywhere", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A tool may be scoped narrower than an operating system: to toolchains, legs or leg sets,
+    /// processors and emulators, each read as written.
+    /// </summary>
+    [Fact]
+    public void ATool_MayNameTheToolchainsLegsProcessorsAndEmulatorsItIsNeededFor()
+    {
+        var tool = Assert.Single(LoadValid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
+              "emulators": { "qemu-arm64": {{QemuArm64}} },
+              "legs": { "arm": { "os": "linux", "processor": "arm64", "config": "debug", "toolchain": "gcc", "emulator": "qemu-arm64" } },
+              "legSets": { "gate": ["arm"] },
+              "tools": [ { "name": "qemu-aarch64", "toolchains": ["gcc"], "legs": ["gate"], "processors": ["arm64"], "emulators": ["qemu-arm64"] } ]
+            }
+            """).Tools);
+
+        Assert.Equal(["gcc"], tool.Toolchains);
+        Assert.Equal(["gate"], tool.Legs);
+        Assert.Equal(["arm64"], tool.Processors);
+        Assert.Equal(["qemu-arm64"], tool.Emulators);
+    }
+
+    /// <summary>
+    /// A scope naming nothing declared is refused naming it: read as no scope, the tool would be
+    /// needed everywhere, and read as an empty one, nowhere.
+    /// </summary>
+    [Theory]
+    [InlineData("\"toolchains\": [\"msvcc\"]", "tool 'cl' names toolchain 'msvcc', which is not declared under toolchains")]
+    [InlineData("\"legs\": [\"wn\"]", "tool 'cl' names leg 'wn', which is neither a leg nor a leg set")]
+    [InlineData("\"emulators\": [\"qemu\"]", "tool 'cl' names emulator 'qemu', which is not declared under emulators")]
+    [InlineData("\"processors\": [\"aarch64\"]", "tool 'cl' names processor 'aarch64', which is not a processor; expected one of")]
+    public void Load_RejectsAToolScopeThatNamesNothingDeclared(string scope, string expected)
+    {
+        var exception = LoadInvalid($$"""
+            {
+              "buildConfigs": { "debug": {} },
+              "legs": { "win": { "os": "windows", "processor": "x86_64", "config": "debug" } },
+              "tools": [ { "name": "cl", {{scope}} } ]
+            }
+            """);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every scope must hold at once, so two that no one leg satisfies together cover nothing: the
+    /// tool would never be checked anywhere, which reads exactly like never having declared it.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolWhoseScopesTogetherCoverNoLeg()
+    {
+        var exception = LoadInvalid("""
+            {
+              "buildConfigs": { "debug": {} },
+              "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" } }, "gcc": { "platforms": ["linux"], "env": { "CC": "gcc" } } },
+              "legs": {
+                "win": { "os": "windows", "processor": "x86_64", "config": "debug", "toolchain": "msvc" },
+                "nix": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "gcc" }
+              },
+              "tools": [ { "name": "cl", "platforms": ["linux"], "toolchains": ["msvc"] } ]
+            }
+            """);
+
+        Assert.Contains(
+            "tool 'cl' is needed only by legs of platforms linux and toolchains msvc, and no declared leg is one, so it would never be checked anywhere",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A toolchain names the compiler it builds with. One naming none left the build system to take
+    /// whatever it found first, which is how a leg named msvc built with MinGW's gcc on every run.
+    /// </summary>
+    [Fact]
+    public void Load_RejectsAToolchainThatNamesNoCompiler()
+    {
+        var exception = LoadInvalid("""{ "toolchains": { "gcc": { "platforms": ["linux"], "generator": "Ninja", "env": { "CFLAGS": "-O2" } } } }""");
+
+        Assert.Contains(
+            "toolchain 'gcc' names no compiler: declare CC or CXX under its env, or CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Any one of the four names a compiler: either language, in its environment or in the cache
+    /// variable CMake is given for it - the one CMake itself reads first.
+    /// </summary>
+    [Theory]
+    [InlineData("\"env\": { \"CC\": \"gcc\" }")]
+    [InlineData("\"env\": { \"CXX\": \"g++\" }")]
+    [InlineData("\"cacheVars\": { \"CMAKE_C_COMPILER\": \"gcc\" }")]
+    [InlineData("\"cacheVars\": { \"CMAKE_CXX_COMPILER\": \"g++\" }")]
+    public void AToolchainNamingOneCompiler_AnyWay_IsAccepted(string names)
+    {
+        var config = LoadValid($$"""{ "toolchains": { "gcc": { "platforms": ["linux"], {{names}} } } }""");
+
+        Assert.True(config.Toolchains.ContainsKey("gcc"));
+    }
+
+    /// <summary>A toolchain may declare the compiler CMake must configure it with, by language.</summary>
+    [Fact]
+    public void AToolchain_MayDeclareTheCompilerCMakeMustConfigureItWith()
+    {
+        var config = LoadValid("""{ "toolchains": { "msvc": { "env": { "CC": "cl" }, "compilerId": { "C": "MSVC", "CXX": "MSVC" } } } }""");
+
+        Assert.Equal("MSVC", config.Toolchains["msvc"].CompilerId["cxx"]);
+    }
+
+    /// <summary>
+    /// A language CMake has no name like, or a language given no id, is refused: read as declared,
+    /// it would never be answered, and every build would be unwitnessed over a typo.
+    /// </summary>
+    [Theory]
+    [InlineData("\"C++\": \"MSVC\"", "toolchain 'msvc' compilerId names language 'C++', which is not a CMake language name such as C or CXX")]
+    [InlineData("\"C\": \" \"", "toolchain 'msvc' compilerId gives 'C' no compiler id")]
+    public void Load_RejectsACompilerIdThatNamesNoLanguageOrNoId(string entry, string expected)
+    {
+        var exception = LoadInvalid($$"""{ "toolchains": { "msvc": { "env": { "CC": "cl" }, "compilerId": { {{entry}} } } } }""");
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A toolchain may name the developer environment its legs start in, declared once under
+    /// developerEnvironments; Visual Studio's asks for the C++ build tools unless it names another
+    /// component.
+    /// </summary>
+    [Fact]
+    public void AToolchain_MayNameTheDeveloperEnvironmentItsLegsStartIn()
+    {
+        var config = LoadValid(
+            """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""");
+
+        Assert.Equal("vs", config.Toolchains["msvc"].DeveloperEnvironment);
+        Assert.Equal(DeveloperEnvironmentKinds.VisualStudio, config.DeveloperEnvironments["VS"].Kind);
+        Assert.Equal(DeveloperEnvironmentConfig.DefaultVisualStudioComponent, config.DeveloperEnvironments["vs"].RequiresComponent);
+    }
+
+    /// <summary>
+    /// A developer environment this build cannot set up is refused when the file is read, and so is a
+    /// toolchain naming one that is not declared, or Visual Studio's on a platform it never exists on:
+    /// a leg there would be turned away on every run for want of it.
+    /// </summary>
+    [Theory]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "xcode" } } }""",
+        "developer environment 'vs' has kind 'xcode'; this build sets up visualStudio")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio", "requiresComponent": " " } } }""",
+        "developer environment 'vs' requiresComponent is blank; leave it out for the C++ build tools")]
+    [InlineData(
+        """{ "toolchains": { "msvc": { "platforms": ["windows"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which is not declared under developerEnvironments")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "platforms": ["windows", "linux"], "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which Visual Studio sets up on windows alone, and declares platforms windows, linux; declare \"platforms\": [\"windows\"] for it")]
+    [InlineData(
+        """{ "developerEnvironments": { "vs": { "kind": "visualStudio" } }, "toolchains": { "msvc": { "env": { "CC": "cl" }, "developerEnvironment": "vs" } } }""",
+        "toolchain 'msvc' names developer environment 'vs', which Visual Studio sets up on windows alone, and declares platforms all; declare \"platforms\": [\"windows\"] for it")]
+    public void Load_RejectsADeveloperEnvironmentNoLegCouldStartIn(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
     private static JsonConfigStore CreateStore() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
 
     private static HarnessConfig LoadValid(string json)
     {
         using var temp = new TempDirectory();
         return CreateStore().Load(temp.WriteFile("config.json", json));
+    }
+
+    /// <summary>
+    /// A key this tool retired is refused like any unknown one, saying what took its place: told only
+    /// that compilerCacheDirectory is unknown, a reader deletes the line and loses the per-host store
+    /// it was there for.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "hosts": { "local": { "compilerCacheDirectory": "/cache" } } }""", "hosts.local compilerCacheDirectory")]
+    [InlineData("""{ "hosts": { "ssh": { "mac.mini": { "repositoryPath": "/r", "CompilerCacheDirectory": "/cache" } } } }""", "hosts.ssh 'mac.mini' compilerCacheDirectory")]
+    [InlineData("""{ "hosts": { "wsl": { "Ubuntu": { "repositoryPath": "~/r", "compilerCacheDirectory": "/cache" } } } }""", "hosts.wsl 'Ubuntu' compilerCacheDirectory")]
+    public void ARetiredKey_IsRefused_SayingWhatTookItsPlace(string json, string where)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains($"{where} is no longer read", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("\"CCACHE_DIR\"", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An unknown key that was never read is refused as unknown, with nothing said to take its place.</summary>
+    [Fact]
+    public void AnUnknownKey_IsNotMistakenForARetiredOne()
+    {
+        var exception = LoadInvalid("""{ "hosts": { "local": { "compilerCache": "/cache" } } }""");
+
+        Assert.Contains("compilerCache", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer read", exception.Message, StringComparison.Ordinal);
     }
 
     private static ConfigException LoadInvalid(string json)

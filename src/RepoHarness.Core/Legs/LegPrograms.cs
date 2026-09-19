@@ -1,5 +1,6 @@
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Testing;
@@ -19,7 +20,8 @@ namespace RepoHarness.Core.Legs;
 /// <para>
 /// Derived from the configuration the build and the test themselves read, through the same names:
 /// the adapter's own program, ninja when the toolchain asks for the Ninja generator, which cmake starts
-/// to build, the compilers the variant's <c>CC</c> and <c>CXX</c> name, and the test settings' runner.
+/// to build, the compilers <c>CC</c> and <c>CXX</c> name - the variant's, or the host's where the
+/// variant names none - and the test settings' runner.
 /// A leg only ever runs on a
 /// host whose operating system is its own, so all of it is decided from the leg's <c>os</c>, before
 /// any host has been asked anything.
@@ -27,25 +29,34 @@ namespace RepoHarness.Core.Legs;
 /// </remarks>
 public static class LegPrograms
 {
-    /// <summary>The variables a variant names its compilers in.</summary>
-    private static readonly string[] CompilerVariables = ["CC", "CXX"];
-
     /// <summary>The programs <paramref name="leg"/> starts for <paramref name="workload"/> that its host must have.</summary>
     /// <param name="config">The whole configuration.</param>
     /// <param name="leg">The leg.</param>
     /// <param name="workload">What the command has the leg do.</param>
+    /// <param name="host">What the host the leg is placed on declares for itself.</param>
     /// <remarks>
     /// Not one started under an environment that sets PATH: that one is found on that PATH, which no
     /// survey can see, and demanded beforehand a compiler only that PATH holds would turn away a leg
-    /// that builds. It is the run's to find - and still asked about, see <see cref="Wanted"/>.
+    /// that builds. It is the run's to find - and still asked about, see <see cref="Wanted"/>. A host
+    /// whose own environment sets PATH starts every one of them under it, so it is required to have
+    /// none of them.
     /// </remarks>
-    public static IReadOnlyList<string> For(HarnessConfig config, LegConfig leg, LegWorkload workload)
+    public static IReadOnlyList<string> For(HarnessConfig config, LegConfig leg, LegWorkload workload, HostSettings host)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(leg);
         ArgumentNullException.ThrowIfNull(workload);
+        ArgumentNullException.ThrowIfNull(host);
 
-        return [.. Starts(config, leg, workload)
+        // Under either, every program the leg starts is found on a PATH no survey can see: the one the
+        // host's own environment sets, or the one its developer environment sets up when the leg runs.
+        // What the developer environment needs is checked on its own, as missing or not.
+        if (ProcessRunner.SetsPath(host.Env.Keys) || DeveloperEnvironmentOf(config, leg, workload) is not null)
+        {
+            return [];
+        }
+
+        return [.. Starts(config, leg, workload, host.Env)
             .Where(start => !start.UnderOwnPath)
             .Select(start => start.Program)
             .Distinct(StringComparer.Ordinal)];
@@ -64,33 +75,91 @@ public static class LegPrograms
     /// tclsh in /opt/homebrew/bin, run by a corpus's own script. Built from what each leg starts, as
     /// <see cref="For"/> is, so a program a leg needs is never one its host was not asked about. One
     /// started under an environment that sets PATH is asked about too, though no leg is turned away
-    /// for it: the directory the survey finds it in is appended to that PATH like any other.
+    /// for it: the directory the survey finds it in is appended to that PATH like any other. So is a
+    /// compiler any host names in its own environment, wherever a leg might land, and the command a
+    /// host's <c>keepAwake</c> starts - which no leg is turned away for either: a host it cannot hold
+    /// awake still runs its legs, and a sleep there still marks their timings suspect.
     /// </remarks>
     public static IReadOnlyList<string> Wanted(HarnessConfig config, LegWorkload workload)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(workload);
 
-        var everything = LegWorkload.BuildAndTest with { Programs = workload.Programs, UnderOwnPath = workload.UnderOwnPath };
+        var everything = LegWorkload.BuildAndTest with
+        {
+            Programs = workload.Programs,
+            UnderOwnPath = workload.UnderOwnPath,
+            OnlyOn = workload.OnlyOn,
+        };
 
         return [.. config.Legs.Values
-            .SelectMany(leg => Starts(config, leg, everything).Select(start => start.Program))
+            .SelectMany(leg => HostEnvironments(config).SelectMany(environment => Starts(config, leg, everything, environment)))
+            .Select(start => start.Program)
             .Concat(config.Tools.Select(tool => tool.Name).Where(name => Surveyable(name, platformKey: null)))
+            .Concat(DeclaredHosts(config)
+                .Select(host => host.KeepAwake is [var program, ..] ? program : null)
+                .OfType<string>()
+                .Where(program => Surveyable(program, platformKey: null)))
             .Distinct(StringComparer.Ordinal)];
     }
 
     /// <summary>
-    /// Every program <paramref name="leg"/> starts for <paramref name="workload"/> that a survey can
-    /// look for, and whether it starts under an environment that sets PATH.
+    /// The developer environment <paramref name="leg"/> starts what <paramref name="workload"/> has it
+    /// start in: the one its toolchain names, decided from the leg's own operating system as the build
+    /// decides it, or <see langword="null"/> where it names none or the workload starts nothing.
     /// </summary>
-    private static IEnumerable<(string Program, bool UnderOwnPath)> Starts(HarnessConfig config, LegConfig leg, LegWorkload workload)
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="leg">The leg.</param>
+    /// <param name="workload">What the command has the leg do.</param>
+    /// <remarks>
+    /// Read by the survey that asks each host whether it can set one up, by the placement that turns a
+    /// leg away where it cannot, and by the run that sets it up - one answer for all three, so a leg is
+    /// never set up with an environment its host was not asked about. Every process of the leg starts
+    /// in it: the build's, the tests' and a runner's steps alike, as they would from a developer prompt
+    /// - a test of an MSVC sanitizer build finds its runtime only on the PATH it sets up. A copy starts
+    /// nothing, and needs none.
+    /// </remarks>
+    public static string? DeveloperEnvironmentOf(HarnessConfig config, LegConfig leg, LegWorkload workload)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(leg);
+        ArgumentNullException.ThrowIfNull(workload);
+
+        return workload.StartsPrograms
+            && config.Toolchains.TryGetValue(VariantKey.For(config, leg, leg.Os).Toolchain, out var toolchain)
+            && toolchain.DeveloperEnvironment is { Length: > 0 } name
+            ? name
+            : null;
+    }
+
+    /// <summary>What every host declares under <c>env</c>, and the nothing a host with no section declares.</summary>
+    private static IEnumerable<IReadOnlyDictionary<string, string>> HostEnvironments(HarnessConfig config)
+        => [new Dictionary<string, string>(), .. DeclaredHosts(config).Select(host => host.Env)];
+
+    /// <summary>Every host section the configuration declares.</summary>
+    private static IEnumerable<HostSettings> DeclaredHosts(HarnessConfig config)
+        => [config.Hosts.Local, .. config.Hosts.Wsl.Values, .. config.Hosts.Ssh.Values];
+
+    /// <summary>
+    /// Every program <paramref name="leg"/> starts for <paramref name="workload"/> that a survey can
+    /// look for, on a host declaring <paramref name="hostEnvironment"/>, and whether it starts under
+    /// an environment that sets PATH.
+    /// </summary>
+    private static IEnumerable<(string Program, bool UnderOwnPath)> Starts(
+        HarnessConfig config,
+        LegConfig leg,
+        LegWorkload workload,
+        IReadOnlyDictionary<string, string> hostEnvironment)
     {
         var project = VariantKey.ProjectFor(config, leg);
         var starts = new List<(string Program, bool UnderOwnPath)>();
 
+        // What this leg's own operating system runs: a step for another system starts nothing here.
+        workload = workload.On(leg.Os);
+
         if (workload.Build)
         {
-            starts.AddRange(BuildPrograms(config, leg, project));
+            starts.AddRange(BuildPrograms(config, leg, project, hostEnvironment));
         }
 
         if (workload.Test
@@ -113,9 +182,15 @@ public static class LegPrograms
     /// <remarks>
     /// All of it starts under the build's environment - cmake, the compilers and the ninja cmake
     /// starts - so where that environment sets PATH, all of it is looked for on that PATH, and where
-    /// each is found is that environment's to say.
+    /// each is found is that environment's to say. That environment is the host's with the variant's
+    /// over it, so a compiler the host names is the one the build starts wherever the variant names
+    /// none.
     /// </remarks>
-    private static IEnumerable<(string Program, bool UnderOwnPath)> BuildPrograms(HarnessConfig config, LegConfig leg, ProjectConfig? project)
+    private static IEnumerable<(string Program, bool UnderOwnPath)> BuildPrograms(
+        HarnessConfig config,
+        LegConfig leg,
+        ProjectConfig? project,
+        IReadOnlyDictionary<string, string> hostEnvironment)
     {
         var variant = VariantKey.For(config, leg, leg.Os);
 
@@ -136,36 +211,15 @@ public static class LegPrograms
             yield return (NinjaDependencyCheck.Program, ownPath);
         }
 
-        foreach (var variable in CompilerVariables)
+        var environment = PhaseEnvironment.Layered(hostEnvironment, overlay.Env);
+
+        foreach (var variable in CompilerValue.Variables)
         {
-            if (overlay.Env.TryGetValue(variable, out var compiler) && CompilerProgram(compiler) is { } program)
+            if (CompilerValue.For(variable, overlay.CacheVars, environment) is { } compiler)
             {
-                yield return (program, ownPath);
+                yield return (compiler.Program, ownPath);
             }
         }
-    }
-
-    /// <summary>
-    /// The program a compiler variable starts, where that can be read from the value alone: the whole
-    /// value when it holds no space, and its first word when that is a name.
-    /// </summary>
-    /// <remarks>
-    /// CMake reads the whole value as the compiler when it names a file, and splits off its first
-    /// word otherwise, so <c>gcc -m32</c> and <c>ccache gcc</c> start <c>gcc</c> and <c>ccache</c>.
-    /// A value with a space whose first word is a path is the one it cannot be read from: in
-    /// <c>C:\Program Files\LLVM\bin\clang-cl.exe</c> that word is half a file name, and only the host
-    /// knows whether the whole value is a file. Left to CMake rather than reported missing.
-    /// </remarks>
-    private static string? CompilerProgram(string? value)
-    {
-        var words = value?.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries) ?? [];
-
-        return words switch
-        {
-            [var whole] => whole,
-            [var first, _] when !ProcessRunner.IsPath(first) => first,
-            _ => null,
-        };
     }
 
     /// <summary>

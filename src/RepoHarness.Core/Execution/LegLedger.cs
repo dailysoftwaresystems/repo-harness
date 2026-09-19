@@ -70,10 +70,36 @@ public sealed record LegEntry
     public IReadOnlyList<TimingMark> Timings { get; init; } = [];
 
     /// <summary>
-    /// Anything already known to make this leg's timings meaningless, such as a host that can sleep
-    /// with no <c>keepAwake</c> holding it open.
+    /// Anything already known to make this leg's timings meaningless, such as a phase that spanned a
+    /// clock step or a host sleep.
     /// </summary>
     public IReadOnlyList<string> TimingNotes { get; init; } = [];
+
+    /// <summary>
+    /// Where this leg's records are when another host ran it: that host's own run directory, since a
+    /// host runs a leg under a run of its own. Null for a leg this machine ran, whose records are in
+    /// this run's directory.
+    /// </summary>
+    public string? RunDirectory { get; init; }
+
+    /// <summary>
+    /// The steps of the runner's action this leg's operating system does not run, by name, in the order
+    /// they are declared: left out on purpose, and said so, rather than simply absent.
+    /// </summary>
+    public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
+    /// <summary>
+    /// The compilers CMake configured the leg's build with, as it reported them: named on its line
+    /// with whatever verdict it reached, so every verdict says which compiler produced what it judged.
+    /// </summary>
+    public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
+
+    /// <summary>
+    /// The developer environment the leg's processes started in, where its toolchain names one and it
+    /// was set up: which Visual Studio instance and tools, for which processor. Named on its line with
+    /// whatever verdict it reached, as the compilers are.
+    /// </summary>
+    public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
 
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
@@ -146,7 +172,9 @@ public sealed class LegLedger(IHarnessOutput output, string commandName)
             _entries.Add(entry);
         }
 
-        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (entry.Detail.Length > 0 ? $" ({entry.Detail})" : string.Empty));
+        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers, entry.DeveloperEnvironment);
+
+        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (said.Length > 0 ? $" ({said})" : string.Empty));
     }
 
     /// <summary>

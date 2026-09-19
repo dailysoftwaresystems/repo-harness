@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>How a host is reached.</summary>
@@ -57,6 +59,17 @@ public sealed class HostId : IEquatable<HostId>
 
     public override int GetHashCode() => HashCode.Combine(Kind, StringComparer.OrdinalIgnoreCase.GetHashCode(Name));
 
+    /// <summary>Whether two hosts are one host, as <see cref="Equals(HostId?)"/> says - never whether they are one object.</summary>
+    /// <remarks>
+    /// Without it, <c>==</c> compared references: two ids made for one distribution were two hosts
+    /// to it and one host to every dictionary, and a leg sharing a host with another was provisioned
+    /// as though it stood on a host of its own.
+    /// </remarks>
+    public static bool operator ==(HostId? left, HostId? right) => left is null ? right is null : left.Equals(right);
+
+    /// <summary>Whether two hosts are different hosts.</summary>
+    public static bool operator !=(HostId? left, HostId? right) => !(left == right);
+
     /// <summary>
     /// The physical machine this host runs on, which two hosts share when they contend for one
     /// machine's processors, memory and disk.
@@ -78,4 +91,23 @@ public sealed class HostId : IEquatable<HostId>
         HostKind.Wsl => $"wsl {Name}",
         _ => $"ssh {Name}",
     };
+
+    /// <summary>
+    /// Reads a host as <see cref="ToString"/> spells it, which is how a machine that dispatches a leg
+    /// tells the host it sends it to which host that is.
+    /// </summary>
+    /// <param name="text">The host as it was spelled.</param>
+    /// <param name="host">The host, when <paramref name="text"/> names one.</param>
+    public static bool TryParse(string? text, [NotNullWhen(true)] out HostId? host)
+    {
+        host = (text?.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? []) switch
+        {
+            ["local"] => Local,
+            ["wsl", var distribution] => Wsl(distribution),
+            ["ssh", var name] => Ssh(name),
+            _ => null,
+        };
+
+        return host is not null;
+    }
 }

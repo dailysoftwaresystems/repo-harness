@@ -44,7 +44,9 @@ public sealed class WorktreeSettings
     /// <c>build/&lt;variant&gt;</c>, used to budget against the Windows path limit. The build
     /// directory's own name is added by the check itself, sized to the longest variant this machine
     /// builds, because the harness knows it and a number that had to include it went stale the day
-    /// build directories were keyed by variant. The default is measured against CMake and Ninja,
+    /// build directories were keyed by variant. It is a relative path's length, with no leading
+    /// separator, as a build measures one: the check counts every separator between the worktree,
+    /// the build directory and this path itself. The default is measured against CMake and Ninja,
     /// whose generated dependency files are the longest paths they produce there.
     /// </summary>
     /// <remarks>

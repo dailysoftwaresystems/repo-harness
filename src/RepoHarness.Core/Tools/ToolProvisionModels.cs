@@ -37,6 +37,12 @@ public enum ToolState
 
     /// <summary>Installing or updating it was attempted and did not work.</summary>
     Failed,
+
+    /// <summary>It is not there, and a dry run did not install it: the command that would have is named.</summary>
+    WouldInstall,
+
+    /// <summary>It is below the version required, and a dry run did not update it: the command that would have is named.</summary>
+    WouldUpdate,
 }
 
 /// <summary>What provisioning did about one tool on one host.</summary>
@@ -61,6 +67,8 @@ public sealed record ToolOutcome(string Tool, ToolState State, string? Version =
         ToolState.Missing => "missing",
         ToolState.Outdated => "outdated",
         ToolState.Failed => "failed",
+        ToolState.WouldInstall => "would install",
+        ToolState.WouldUpdate => "would update",
         _ => "unknown",
     };
 }
@@ -92,6 +100,9 @@ public sealed record LegProvision
 /// <param name="Legs">One entry per selected leg, in selection order.</param>
 public sealed record ToolProvisionReport(IReadOnlyList<LegProvision> Legs)
 {
+    /// <summary>Whether this was a dry run, which installed nothing and said what it would have.</summary>
+    public bool DryRun { get; init; }
+
     /// <summary>Whether every selected leg has every tool it needs.</summary>
     public bool Passed => Legs.All(leg => leg.Provisioned);
 

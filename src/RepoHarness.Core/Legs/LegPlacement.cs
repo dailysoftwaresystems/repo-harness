@@ -76,7 +76,11 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// <param name="selected">The leg being placed.</param>
     /// <param name="workload">What the command has the leg do, which says what its host must have.</param>
     /// <param name="reports">What measurement found, by host.</param>
-    /// <param name="here">Whether this machine is the only candidate, whatever the leg names.</param>
+    /// <param name="here">
+    /// The host this machine is to the machine that dispatched the leg here, which makes this machine
+    /// the only candidate and names the settings it is judged by; <see langword="null"/> where this
+    /// machine places the leg itself.
+    /// </param>
     /// <remarks>
     /// A program never chooses the host. Chosen by what each command starts, a leg went to one machine
     /// for its build and another for its tests, and a run on what a sync had staged went to a host the
@@ -100,7 +104,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         SelectedLeg selected,
         LegWorkload workload,
         IReadOnlyDictionary<HostId, HostReport> reports,
-        bool here = false)
+        HostId? here = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(selected);
@@ -109,14 +113,14 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
         var reasons = new List<string>();
 
-        foreach (var candidate in Candidates(config, selected.Leg, here))
+        foreach (var candidate in Candidates(config, selected.Leg, here is not null))
         {
             if (!reports.TryGetValue(candidate, out var report))
             {
                 continue;
             }
 
-            var at = here ? string.Empty : $"{candidate}: ";
+            var at = here is null ? $"{candidate}: " : string.Empty;
 
             if (PlatformObstacle(selected.Leg, report) is { } passedOver)
             {
@@ -124,8 +128,16 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 continue;
             }
 
-            return MissingPrograms(LegPrograms.For(config, selected.Leg, workload), report) is { } refused
-                ? new LegPlacement(selected, null, at + refused.Reason) { Verdict = refused.Verdict }
+            // What the host declares for itself says what it must have - a PATH it sets is where the
+            // leg's programs are found - read under the name the reader knows the host by, as the run
+            // reads it.
+            var settings = config.Hosts.SettingsFor(here ?? candidate);
+
+            var refused = MissingDeveloperEnvironment(LegPrograms.DeveloperEnvironmentOf(config, selected.Leg, workload), report)
+                ?? MissingPrograms(LegPrograms.For(config, selected.Leg, workload, settings), report);
+
+            return refused is { } missing
+                ? new LegPlacement(selected, null, at + missing.Reason) { Verdict = missing.Verdict }
                 : new LegPlacement(selected, report, null);
         }
 
@@ -168,6 +180,28 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         }
 
         return check.Available ? null : $"emulator '{leg.Emulator}' cannot run there: {check.Reason}";
+    }
+
+    /// <summary>
+    /// Why the developer environment <paramref name="name"/> cannot be set up on <paramref name="host"/>,
+    /// as a missing tool, or <see langword="null"/> where it can, or the leg needs none.
+    /// </summary>
+    /// <remarks>
+    /// Its own check rather than one of the programs: it is found by Visual Studio's installer, not on
+    /// a PATH, and what it would put on the PATH is exactly what no survey can see beforehand.
+    /// </remarks>
+    private static (string Reason, LegVerdict Verdict)? MissingDeveloperEnvironment(string? name, HostReport host)
+    {
+        if (name is null)
+        {
+            return null;
+        }
+
+        return host.DeveloperEnvironments.TryGetValue(name, out var check)
+            ? check.Available
+                ? null
+                : ($"developer environment '{name}' cannot be set up there: {check.Reason}", LegVerdict.SkippedToolMissing)
+            : ($"developer environment '{name}' was never looked for there", LegVerdict.SkippedToolMissing);
     }
 
     /// <summary>

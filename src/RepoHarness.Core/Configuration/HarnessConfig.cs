@@ -39,6 +39,12 @@ public sealed class HarnessConfig
     /// <summary>Ways to run programs built for another processor, keyed by name.</summary>
     public Dictionary<string, EmulatorConfig> Emulators { get; init; } = Map<EmulatorConfig>();
 
+    /// <summary>
+    /// Environments a toolchain's builds need set up on the host that runs them, such as Visual
+    /// Studio's, keyed by name and named by each toolchain that needs one.
+    /// </summary>
+    public Dictionary<string, DeveloperEnvironmentConfig> DeveloperEnvironments { get; init; } = Map<DeveloperEnvironmentConfig>();
+
     /// <summary>Units of work that each receive exactly one verdict, keyed by name.</summary>
     public Dictionary<string, LegConfig> Legs { get; init; } = Map<LegConfig>();
 

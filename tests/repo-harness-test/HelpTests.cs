@@ -77,7 +77,7 @@ public sealed partial class HelpTests
     {
         var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
 
-        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer", "hosts", "emulators" })
+        foreach (var setting in new[] { "buildCores", "testCores", "maxParallelLegs", "sanitizer", "hosts", "emulators", "developerEnvironments" })
         {
             Assert.Contains(setting, result.StandardOutput, StringComparison.Ordinal);
         }
@@ -108,6 +108,94 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The runners topic says what runOn takes - the systems quoted from the code - where a leg of
+    /// another system says it left a step out, and that a leg left with no step is refused.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhatRunOnTakes_AndWhatALegLeftWithoutAStepGets()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[] { $"runOn: [{string.Join(", ", PlatformNames.OperatingSystems)}]", "skippedSteps", "refused before anything starts" })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The runners topic says where an input's value comes from, in which order, what --input
+    /// refuses, and that a secret does not go there.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhereAnInputsValueComesFrom()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "resolved from 'run --input <name>=<value>' first, the",
+            "runner value directories second and each input's own 'default' last",
+            "--input takes one name=value each time it is given",
+            "an empty value and a name given twice",
+            "a secret stays in",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The tools topic says what --dry-run does, that init installs only when asked, and how a tool
+    /// narrows the legs that need it; the layout topic says init writes the tree it runs in and names
+    /// a rule by git's own answer.
+    /// </summary>
+    [Fact]
+    public async Task ToolsAndLayoutTopics_SayWhatInitAndInstallMissingToolsDo()
+    {
+        var tools = await CliRunner.RunAsync(["help", "tools"], TestContext.Current.CancellationToken);
+        var layout = await CliRunner.RunAsync(["help", "layout"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "--install-tools' runs it too; plain init installs nothing and says how.",
+            "--dry-run reaches and asks every host as a run does, and installs nothing",
+            "\"toolchains\": [\"msvc\"]",
+            "\"legs\": [\"win-arm\", \"gate\"]",
+            "\"processors\": [\"arm64\"]",
+            "\"emulators\": [\"qemu-arm64\"]",
+            "scope naming nothing declared, or one covering no declared leg, is refused.",
+        })
+        {
+            Assert.Contains(text, tools.StandardOutput, StringComparison.Ordinal);
+        }
+
+        foreach (var text in new[]
+        {
+            "block on later runs and leaving every other rule untouched. It then asks git which",
+            "overrules does nothing there.",
+            "init writes the tree it runs in, a worktree's own included",
+        })
+        {
+            Assert.Contains(text, layout.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The legs topic says a toolchain names its compiler, and that a build directory is held to the
+    /// compiler it was configured with by the file it starts, not by its name.
+    /// </summary>
+    [Fact]
+    public async Task LegsTopic_SaysAToolchainNamesItsCompiler_AndHowABuildDirectoryIsHeldToIt()
+    {
+        var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
+
+        Assert.Contains("A toolchain also names its compiler - CC or CXX under env, or CMAKE_C_COMPILER or", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("then held to the compiler it was configured with by the file that compiler starts on", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("\"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("A build CMake configured with another compiler fails before anything is built with", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task WorktreesTopic_SaysWhenDeleteWorktreeRefuses_AndHowToForceIt()
     {
@@ -126,14 +214,35 @@ public sealed partial class HelpTests
 
         Assert.Equal(HarnessExit.Success, result.ExitCode);
 
+        // Each command as its list gives it, with what it takes: named in prose alone, one was missing
+        // from the list a reader scans.
         var expected = AnchorStatus.Cells
-            .Concat(["write-anchor", "set-anchor", "read-anchor", "read-anchors", "check-anchor-balance", "--anchor-dry-run"])
+            .Concat(["write-anchor", "set-anchor", "read-anchor", "read-anchors", "check-anchor-balance [--base REF]"])
+            .Concat(["check-anchor-citations --current-commit|--current-tree|--current-pr", "--anchor-dry-run"])
             .Concat([AnchorSettings.DefaultPendingAnchorsPath, AnchorSettings.DefaultDoneAnchorsPath, AnchorRegistryDocument.TableHeader]);
 
         foreach (var text in expected)
         {
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// The citation check says what it cannot see - a break inside a segment, with no hyphen on either
+    /// side - both where its command is described and in the topic that lists it.
+    /// </summary>
+    [Theory]
+    [InlineData("help", "anchors")]
+    [InlineData("check-anchor-citations", "--help")]
+    public async Task TheCitationCheck_StatesTheOneWrapItCannotSee(string first, string second)
+    {
+        var result = await CliRunner.RunAsync([first, second], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        // Read as prose: a description is wrapped to the terminal, with its continuation indented.
+        var prose = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("with no hyphen on either side", prose, StringComparison.Ordinal);
     }
 
     [Fact]

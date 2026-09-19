@@ -258,8 +258,7 @@ public sealed class AnchorRegistryService(
             .Distinct(StringComparer.Ordinal)
             .Select(id =>
             {
-                // Exact and case-sensitive: an id is a name, and a near miss is a different anchor.
-                var matches = inScope.Where(entry => string.Equals(entry.Row.Id, id, StringComparison.Ordinal)).ToList();
+                var matches = inScope.Where(entry => AnchorIdMatch.Comparer.Equals(entry.Row.Id, id)).ToList();
                 var hint = matches.Count == 0 ? SameNamespace(id, entries) : [];
                 return new AnchorLookupResult(id, matches, hint);
             })

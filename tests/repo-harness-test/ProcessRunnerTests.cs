@@ -270,6 +270,63 @@ public sealed class ProcessRunnerTests
             TestContext.Current.CancellationToken));
     }
 
+    /// <summary>
+    /// A name is one variable whatever case it is spelled in, as the configuration's rule says. On
+    /// Linux and macOS, where the system tells spellings apart, a request that sets 'Path' sets the
+    /// PATH this machine already has, rather than a second variable beside it that no program reads.
+    /// </summary>
+    [Fact]
+    public async Task ANameSpelledInAnotherCase_SetsTheVariableThisMachineAlreadyHas()
+    {
+        // Ahead of the PATH this process has, so the child can still be started by name.
+        var configured = Path.Combine(Path.GetTempPath(), "rh-configured-bin") + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
+        var child = TestHost.ChildRequest("print-env", "PATH");
+        var request = child with
+        {
+            Environment = new Dictionary<string, string?>(child.Environment, StringComparer.Ordinal) { ["Path"] = configured },
+        };
+
+        var result = await CreateRunner().RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(configured, result.StandardOutput.Trim());
+    }
+
+    /// <summary>
+    /// A value reaches every spelling of its name this machine has, and the one written: on Linux
+    /// and macOS programs differ in which they read - curl reads http_proxy, others HTTP_PROXY - so
+    /// folded into one, the other lost it. A name removed is removed in every spelling.
+    /// </summary>
+    [Fact]
+    public async Task AValue_ReachesEverySpellingOfItsName_AndARemovedNameGoesFromAll()
+    {
+        var inherited = "RH_SPELLING_" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+        var written = inherited.ToLowerInvariant();
+
+        Environment.SetEnvironmentVariable(inherited, "inherited");
+
+        try
+        {
+            async Task<string> SeenAs(string name, string? value)
+            {
+                var child = TestHost.ChildRequest("print-env", name);
+                var request = child with
+                {
+                    Environment = new Dictionary<string, string?>(child.Environment, StringComparer.Ordinal) { [written] = value },
+                };
+
+                return (await CreateRunner().RunAsync(request, TestContext.Current.CancellationToken)).StandardOutput.Trim();
+            }
+
+            Assert.Equal("configured", await SeenAs(inherited, "configured"));
+            Assert.Equal("configured", await SeenAs(written, "configured"));
+            Assert.Equal("<unset>", await SeenAs(inherited, null));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(inherited, null);
+        }
+    }
+
     [Fact]
     public async Task RunAsync_ReportsAMissingWorkingDirectory_AsThat_RatherThanAsAMissingExecutable()
     {

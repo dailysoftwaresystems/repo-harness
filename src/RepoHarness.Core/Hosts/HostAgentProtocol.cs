@@ -31,7 +31,7 @@ public static class HostAgentProtocol
     /// and its own version. With the number left as it was, the same host refuses the request over
     /// whichever field it happens not to know, which says nothing about why.
     /// </remarks>
-    public const int Version = 2;
+    public const int Version = 3;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -110,6 +110,9 @@ public sealed class HostAgentRequest
     /// <summary>The emulators to check, by name. Info only.</summary>
     public Dictionary<string, EmulatorConfig> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The developer environments to look for, by name. Info only.</summary>
+    public Dictionary<string, DeveloperEnvironmentConfig> DeveloperEnvironments { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// The programs to find there, the way a leg on that host will start them. Info only.
     /// </summary>
@@ -155,6 +158,9 @@ public sealed class HostAgentInfo
 
     /// <summary>What checking each requested emulator found.</summary>
     public Dictionary<string, EmulatorCheck> Emulators { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What looking for each requested developer environment found.</summary>
+    public Dictionary<string, DeveloperEnvironmentCheck> DeveloperEnvironments { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Where each requested program is there, each carrying the name it was asked for.</summary>
     /// <remarks>

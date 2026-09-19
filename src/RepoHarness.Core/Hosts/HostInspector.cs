@@ -50,6 +50,10 @@ public sealed record HostReport
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>What looking for each developer environment found there, by name.</summary>
+    public IReadOnlyDictionary<string, DeveloperEnvironmentCheck> DeveloperEnvironments { get; init; }
+        = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Where each program the survey asked about is there, found by the host itself the way a leg
     /// there will start it.
@@ -85,22 +89,26 @@ public interface IHostInspector
     /// <param name="context">The repository and its configuration.</param>
     /// <param name="host">The host to measure.</param>
     /// <param name="emulators">The emulators to check there, by name.</param>
+    /// <param name="developerEnvironments">The developer environments to look for there, by name.</param>
     /// <param name="programs">The programs to find there, the way a leg there will start them.</param>
     /// <param name="cancellationToken">Stops the measuring.</param>
     Task<HostReport> InspectAsync(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default);
 }
 
 /// <summary>What a host is asked when it is measured.</summary>
 /// <param name="Emulators">The emulators to check, by name.</param>
+/// <param name="DeveloperEnvironments">The developer environments to look for, by name.</param>
 /// <param name="Programs">The programs to find.</param>
 /// <param name="SearchDirectories">The repository's <c>toolSearchDirectories</c>.</param>
 internal sealed record HostQuestions(
     IReadOnlyDictionary<string, EmulatorConfig> Emulators,
+    IReadOnlyDictionary<string, DeveloperEnvironmentConfig> DeveloperEnvironments,
     IReadOnlyList<string> Programs,
     IReadOnlyDictionary<string, List<string>> SearchDirectories);
 
@@ -129,15 +137,17 @@ public sealed class HostInspector(
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(emulators);
+        ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
 
-        var questions = new HostQuestions(emulators, programs, context.Config.ToolSearchDirectories);
+        var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories);
 
         return host.Kind == HostKind.Local
             ? InspectLocalAsync(questions, cancellationToken)
@@ -148,7 +158,7 @@ public sealed class HostInspector(
     private async Task<HostReport> InspectLocalAsync(HostQuestions questions, CancellationToken cancellationToken)
     {
         var info = await _agent
-            .DescribeAsync(questions.Emulators, questions.Programs, questions.SearchDirectories, cancellationToken)
+            .DescribeAsync(questions.Emulators, questions.DeveloperEnvironments, questions.Programs, questions.SearchDirectories, cancellationToken)
             .ConfigureAwait(false);
 
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
@@ -334,6 +344,7 @@ public sealed class HostInspector(
             {
                 Kind = HostAgentRequestKind.Info,
                 Emulators = new Dictionary<string, EmulatorConfig>(emulators, StringComparer.OrdinalIgnoreCase),
+                DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentConfig>(questions.DeveloperEnvironments, StringComparer.OrdinalIgnoreCase),
                 Programs = [.. questions.Programs],
                 ToolSearchDirectories = new Dictionary<string, List<string>>(
                     questions.SearchDirectories,
@@ -341,7 +352,9 @@ public sealed class HostInspector(
             },
             HostAgentProtocol.JsonOptions);
 
-        var budget = ProbeBudget + (EmulatorProbe.WitnessBudget * emulators.Count);
+        var budget = ProbeBudget
+            + (EmulatorProbe.WitnessBudget * emulators.Count)
+            + (DeveloperEnvironmentProbe.ProbeBudget * questions.DeveloperEnvironments.Count);
 
         // One line, held open until the host has answered: a budget that runs out stops ssh or wsl.exe here,
         // which ends the input there and stops any witness still running.
@@ -488,6 +501,7 @@ public sealed class HostInspector(
         ToolVersion = info.Version,
         ToolPath = session?.ToolPath,
         Emulators = info.Emulators,
+        DeveloperEnvironments = info.DeveloperEnvironments,
 
         // By each program's own name, compared exactly: cmake and CMake are two files on Linux. A
         // program answered twice is the same answer twice, and the later one stands.

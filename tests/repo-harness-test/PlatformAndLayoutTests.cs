@@ -115,10 +115,25 @@ public sealed class HarnessLayoutTests
         Assert.Equal(Path.Combine(mainHarness, "worktrees"), layout.WorktreesDirectory);
         Assert.Equal(Path.Combine(mainHarness, "sshItems"), layout.SshItemsDirectory);
         Assert.Equal(Path.Combine(mainHarness, "wslDistros"), layout.WslDistrosDirectory);
-        Assert.Equal(Path.Combine(mainHarness, "runs"), layout.RunsDirectory);
         Assert.Equal(Path.Combine(mainHarness, "runner", ".env"), layout.RunnerEnvDirectory);
         Assert.Equal(Path.Combine(mainHarness, "runner", ".secrets"), layout.RunnerSecretsDirectory);
         Assert.Equal(Path.Combine(mainHarness, "lock.json"), layout.LockFile);
+    }
+
+    /// <summary>
+    /// A run's records belong to the tree that ran it, so a lane reads what it judged without leaving
+    /// its worktree - while the lock two runs contend over stays in the main checkout.
+    /// </summary>
+    [Fact]
+    public void RunRecords_ResolveAgainstTheTreeThatRan_WhileTheLockStaysInTheMainCheckout()
+    {
+        var worktree = new HarnessLayout(Worktree, Main);
+        var main = new HarnessLayout(Main, Main);
+
+        Assert.Equal(Path.Combine(Worktree, ".harness-config", "runs"), worktree.RunsDirectory);
+        Assert.Equal(Path.Combine(Worktree, ".harness-config", "runs", "r1"), worktree.RunDirectory("r1"));
+        Assert.Equal(Path.Combine(Main, ".harness-config", "runs"), main.RunsDirectory);
+        Assert.Equal(Path.Combine(Main, ".harness-config", "lock.json"), worktree.LockFile);
     }
 
     [Fact]

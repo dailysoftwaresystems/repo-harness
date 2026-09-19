@@ -1735,6 +1735,38 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// An ignored file whose name begins with a space stays on this machine. Its name was trimmed on
+    /// the way in, withholding a file of the trimmed name that did not exist, and the ignored one
+    /// itself was copied to the host.
+    /// </summary>
+    [Fact]
+    public async Task AnIgnoredFileWhoseNameBeginsWithASpace_StaysOnThisMachine()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        await File.AppendAllTextAsync(Path.Combine(temp.Path, ".gitignore"), "*.env\n", cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "ignore env", cancellationToken);
+
+        // At the root, where the space begins the whole path git lists.
+        temp.WriteFile(" local.env", "SECRET=1\n");
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.True(File.Exists(Path.Combine(copy, "src", "a.c")), "the tree itself was copied");
+            Assert.False(File.Exists(Path.Combine(copy, " local.env")));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
     /// A worktree's legs on a host run with the worktree's configuration. The configuration placed
     /// on a host was read from the main checkout whatever tree was synced, so a lane's remote legs
     /// ran a configuration the lane did not have - the defect round three fixed for commands run

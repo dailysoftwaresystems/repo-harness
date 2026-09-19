@@ -20,6 +20,21 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
+    /// <summary>
+    /// Writes <paramref name="output"/> where a host writes what a command it ran said: standard
+    /// output. Standard error carries the protocol's completion line, so an answer written there would
+    /// be read as a transport message.
+    /// </summary>
+    /// <param name="command">The command being answered.</param>
+    /// <param name="output">What it says, line by line.</param>
+    public static void Answer(HostCommand command, string output)
+    {
+        foreach (var line in output.Split('\n'))
+        {
+            command.OnOutputLine?.Invoke(line.TrimEnd('\r'));
+        }
+    }
+
     /// <summary>What the ssh shell probe raises instead of answering, when set: ssh that would not start.</summary>
     public Exception? ShellProbeRaises { get; set; }
 
@@ -82,7 +97,7 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
 /// <summary>Reports a fixed measurement for each host, and records which hosts were measured, and for which emulators.</summary>
 internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHostInspector
 {
-    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyList<string> Programs)> _inspected = [];
+    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyDictionary<string, DeveloperEnvironmentConfig> Environments, IReadOnlyList<string> Programs)> _inspected = [];
 
     /// <summary>Every host measured, in order.</summary>
     public IReadOnlyList<HostId> Inspected
@@ -108,6 +123,18 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
         }
     }
 
+    /// <summary>The developer environments each measurement was asked to look for, in the order the hosts were measured.</summary>
+    public IReadOnlyList<IReadOnlyDictionary<string, DeveloperEnvironmentConfig>> DeveloperEnvironmentsAsked
+    {
+        get
+        {
+            lock (_inspected)
+            {
+                return [.. _inspected.Select(entry => entry.Environments)];
+            }
+        }
+    }
+
     /// <summary>The programs each measurement was asked to find, in the order the hosts were measured.</summary>
     public IReadOnlyList<IReadOnlyList<string>> ProgramsAsked
     {
@@ -124,15 +151,29 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
         HarnessContext context,
         HostId host,
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
+        IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         CancellationToken cancellationToken = default)
     {
         lock (_inspected)
         {
-            _inspected.Add((host, emulators, programs));
+            _inspected.Add((host, emulators, developerEnvironments, programs));
         }
 
         var answer = report(host);
+
+        // Likewise a host that says nothing about developer environments can set up every one it was
+        // asked about; a test about one missing scripts it.
+        if (answer.Available && answer.DeveloperEnvironments.Count == 0 && developerEnvironments.Count > 0)
+        {
+            answer = answer with
+            {
+                DeveloperEnvironments = developerEnvironments.Keys.ToDictionary(
+                    name => name,
+                    _ => new DeveloperEnvironmentCheck(true, null, @"C:\Program Files\Microsoft Visual Studio\18\Enterprise", "18.10.12210.168"),
+                    StringComparer.OrdinalIgnoreCase),
+            };
+        }
 
         // A scripted host that says nothing about programs has every one it was asked about, as a
         // real one answering the same question would say of a machine with everything installed. A
@@ -251,12 +292,15 @@ internal static class HostDoubles
         return platform;
     }
 
-    /// <summary>A loader that hands every command <paramref name="config"/>, for a repository at <paramref name="root"/>.</summary>
-    public static IHarnessContextLoader Loader(HarnessConfig config, string root)
+    /// <summary>
+    /// A loader that hands every command <paramref name="config"/>, for a tree at <paramref name="root"/>:
+    /// a worktree of the main checkout at <paramref name="mainCheckoutRoot"/> when one is given.
+    /// </summary>
+    public static IHarnessContextLoader Loader(HarnessConfig config, string root, string? mainCheckoutRoot = null)
     {
         var loader = Substitute.For<IHarnessContextLoader>();
         loader.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, root), config)));
+            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, mainCheckoutRoot ?? root), config)));
         return loader;
     }
 

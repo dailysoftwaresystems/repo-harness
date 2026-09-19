@@ -154,6 +154,26 @@ public sealed class AnchorBalanceServiceTests
         Assert.True(report.Passed);
     }
 
+    /// <summary>
+    /// A registry the base lists that git cannot read refuses the check, naming it. Read as absent, it
+    /// was reported missing at the base, and every anchor open in it counted as newly opened.
+    /// </summary>
+    [Fact]
+    public async Task ARegistryTheBaseListsButGitCannotRead_IsRefused_NotReportedMissing()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareCommittedAsync(temp, One);
+        await harness.LoseObjectAsync(temp.Path, $"HEAD:{AnchorSettings.DefaultPendingAnchorsPath}", cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => harness.AnchorBalanceService.CheckAsync(temp.Path, null, cancellationToken));
+
+        Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+        Assert.Contains($"'{AnchorSettings.DefaultPendingAnchorsPath}'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("git fsck", refusal.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task HeadGivenExplicitly_BehavesExactlyLikeNoBase()
     {

@@ -122,6 +122,24 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     public const string GitKeepFileName = ".gitkeep";
 
     /// <summary>
+    /// The directories under <see cref="DirectoryName"/> that carry a <see cref="GitKeepFileName"/>,
+    /// relative to it: the two connection-data slots, the actions, and the two value slots.
+    /// </summary>
+    /// <remarks>
+    /// Every tree tracks them, a worktree's included, so a clone of any branch arrives with each
+    /// directory in place. What the ignored ones hold is read from the main checkout whichever tree
+    /// asks: <see cref="SshItemsDirectory"/> and the others resolve there.
+    /// </remarks>
+    public static IReadOnlyList<string> PlaceholderDirectories { get; } =
+    [
+        SshItemsDirectoryName,
+        WslDistrosDirectoryName,
+        Path.Combine(RunnerDirectoryName, RunnerActionsDirectoryName),
+        Path.Combine(RunnerDirectoryName, RunnerEnvDirectoryName),
+        Path.Combine(RunnerDirectoryName, RunnerSecretsDirectoryName),
+    ];
+
+    /// <summary>
     /// Whether the command is running inside a linked worktree.
     /// </summary>
     /// <param name="platform">
@@ -145,9 +163,9 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// Configuration file of the tree being acted on. Tracked by git.
     /// </summary>
     /// <remarks>
-    /// Services deliberately load configuration from <see cref="MainHarnessDirectory"/>
-    /// instead: a worktree's checked-out copy is not the one the harness maintains.
-    /// Do not substitute this for that.
+    /// The one every command reads, a worktree's included: a branch may change its own
+    /// configuration, and a lane runs what its tree says. Only a worktree whose branch has none
+    /// falls back to the main checkout's, and is warned that it does.
     /// </remarks>
     public string ConfigFile => Path.Combine(HarnessDirectory, ConfigFileName);
 
@@ -246,10 +264,18 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
         => Path.Combine(MainHarnessDirectory, RunnerDirectoryName, RunnerSecretsDirectoryName);
 
     /// <summary>
-    /// Where a run's logs live, resolved against the main checkout so that two runs started from
-    /// different trees of one repository cannot write the same file without seeing each other.
+    /// Where a run's records live: in the tree that ran it, a worktree's own included, so a lane
+    /// reads what it judged without leaving its tree.
     /// </summary>
-    public string RunsDirectory => Path.Combine(MainHarnessDirectory, RunsDirectoryName);
+    /// <remarks>
+    /// Resolved against the main checkout instead, a worktree's runs landed beside the main
+    /// checkout's, where a caller confined to the worktree could not reach them. Nothing is shared
+    /// across runs here: each writes only a directory named by its own id, which no other run can
+    /// hold. What two runs from different trees do contend over is the lock, which stays in the main
+    /// checkout (<see cref="LockFile"/>). Ignored like the rest of the harness's state, so no sync
+    /// carries it, and deleting a worktree deletes its records with it.
+    /// </remarks>
+    public string RunsDirectory => Path.Combine(HarnessDirectory, RunsDirectoryName);
 
     /// <summary>One run's directory, named by its id.</summary>
     /// <param name="runId">The run's id.</param>

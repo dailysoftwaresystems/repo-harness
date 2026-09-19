@@ -1,3 +1,4 @@
+using System.Text;
 using NSubstitute;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Output;
@@ -289,6 +290,263 @@ public sealed class GitClientTests
         Assert.Null(await harness.GitClient.ReadFileAtCommitAsync(temp.Path, head!, "docs/absent.md", cancellationToken));
     }
 
+    /// <summary>
+    /// Every file of a commit is read by one git process, as it was committed: its line breaks, its
+    /// characters beyond ASCII, a byte order mark dropped as reading the file on its own drops it, and
+    /// bytes that are not text as the replacement they decode to.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_ReadsEveryFile_ThroughOneProcess()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "notes.md"), "committed ✅\r\nline two\n");
+        temp.WriteFile(Path.Combine("src", "naïve name.txt"), "日本語\n");
+        await File.WriteAllBytesAsync(temp.Combine("bom.txt"), [0xEF, 0xBB, 0xBF, (byte)'b', (byte)'o', (byte)'m'], cancellationToken);
+        await File.WriteAllBytesAsync(temp.Combine("data.bin"), [0x00, 0xFF, 0x0A, 0x41], cancellationToken);
+        await File.WriteAllBytesAsync(temp.Combine("wide.txt"), [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes("wide ✅\n")], cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "files", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+        var processes = new CountingProcesses(harness.ProcessRunner);
+
+        var read = await new GitClient(processes, harness.Output).ReadFilesAtCommitAsync(
+            temp.Path,
+            head!,
+            ["docs/notes.md", "src/naïve name.txt", "bom.txt", "data.bin", "wide.txt"],
+            cancellationToken);
+
+        Assert.Equal("committed ✅\r\nline two\n", read["docs/notes.md"]);
+        Assert.Equal("日本語\n", read["src/naïve name.txt"]);
+        Assert.Equal("bom", read["bom.txt"]);
+        Assert.Equal("\0\uFFFD\nA", read["data.bin"]);
+        Assert.Equal("wide ✅\n", read["wide.txt"]);
+        Assert.Equal(["cat-file"], processes.Started.Select(request => request.Arguments[0]));
+    }
+
+    /// <summary>
+    /// A path that names no file at the commit is answered null: one never there, a directory, a
+    /// submodule's entry. Only the commit's listing tells such a path from a file git cannot read, so
+    /// it costs that one listing more - and a read of files that are all there costs nothing more.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_AnswersNull_ForAPathThatNamesNoFileThere()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "notes.md"), "notes\n");
+        await harness.CommitAllAsync(temp.Path, "notes", cancellationToken);
+
+        var first = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        await harness.RunGitAsync(temp.Path, ["update-index", "--add", "--cacheinfo", $"160000,{first},sub"], cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "submodule"], cancellationToken);
+
+        var head = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        var processes = new CountingProcesses(harness.ProcessRunner);
+
+        var read = await new GitClient(processes, harness.Output).ReadFilesAtCommitAsync(
+            temp.Path,
+            head,
+            ["docs/notes.md", "docs/absent.md", "docs", "sub"],
+            cancellationToken);
+
+        Assert.Equal("notes\n", read["docs/notes.md"]);
+        Assert.Null(read["docs/absent.md"]);
+        Assert.Null(read["docs"]);
+        Assert.Null(read["sub"]);
+        Assert.Equal(["cat-file", "ls-tree"], processes.Started.Select(request => request.Arguments[0]));
+    }
+
+    /// <summary>
+    /// A file the commit lists that git cannot read throws, naming it, read among others or alone. git
+    /// answers "missing" for it as for a path that names nothing, and passed off as absent, a registry
+    /// nobody could read was reported missing at the base.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_Throws_ForAFileTheCommitListsButGitCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "lost.md"), "lost\n");
+        await harness.CommitAllAsync(temp.Path, "lost", cancellationToken);
+        await harness.LoseObjectAsync(temp.Path, "HEAD:docs/lost.md", cancellationToken);
+
+        var head = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+
+        var among = await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ReadFilesAtCommitAsync(
+            temp.Path, head, ["README.md", "docs/lost.md"], cancellationToken));
+        var alone = await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ReadFileAtCommitAsync(
+            temp.Path, head, "docs/lost.md", cancellationToken));
+
+        foreach (var refusal in new[] { among, alone })
+        {
+            Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+            Assert.Contains("'docs/lost.md'", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains("git fsck", refusal.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A path holding a line break - which git allows, and no line of the batch can carry - is read by
+    /// the object the commit's listing gives it, and is null where the commit lists no such file.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_ReadsAPathHoldingALineBreak()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "git for Windows refuses a name holding a line break.");
+
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        await harness.StageAsync(temp.Path, "\"docs/line\\nbreak.md\"", "wrapped\n", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "line break"], cancellationToken);
+
+        var head = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        var read = await harness.GitClient.ReadFilesAtCommitAsync(
+            temp.Path,
+            head,
+            ["docs/line\nbreak.md", "docs/other\nbreak.md", "README.md"],
+            cancellationToken);
+
+        Assert.Equal("wrapped\n", read["docs/line\nbreak.md"]);
+        Assert.Null(read["docs/other\nbreak.md"]);
+        Assert.Equal("test repository", read["README.md"]);
+    }
+
+    /// <summary>
+    /// A commit's files are listed from the repository's root whichever directory git is asked from,
+    /// a submodule's entry left out. A name that is not UTF-8 is said to be one, and quoted as git
+    /// quotes it.
+    /// </summary>
+    [Fact]
+    public async Task ListFilesAtCommitAsync_ListsTheCommitsFiles_EachNameAsGitHoldsIt()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("src", "naïve name.txt"), "text\n");
+        await harness.CommitAllAsync(temp.Path, "files", cancellationToken);
+
+        var first = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        await harness.StageAsync(temp.Path, "\"src/caf\\351.md\"", "bytes\n", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["update-index", "--add", "--cacheinfo", $"160000,{first},sub"], cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "names"], cancellationToken);
+
+        var head = (await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken))!;
+        var listed = await harness.GitClient.ListFilesAtCommitAsync(temp.Combine("src"), head, cancellationToken);
+
+        Assert.Equal(
+            [
+                new GitName("README.md", true),
+                new GitName("src/caf�.md", false) { Quoted = @"src/caf\351.md" },
+                new GitName("src/naïve name.txt", true),
+            ],
+            listed.OrderBy(name => name.Text, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// A listing's names are read as git holds them: one beyond ASCII as its text, and one that is not
+    /// UTF-8 said to be one, and quoted as git quotes it. Read as UTF-8 text alone, that name became
+    /// another, which named no file, and nothing said so.
+    /// </summary>
+    [Fact]
+    public async Task ListNamesAsync_ReadsEachNameAsGitHoldsIt_AndThrowsWhenGitFails()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile("naïve.md", "text\n");
+        await harness.StageAsync(temp.Path, "\"caf\\351.md\"", "bytes\n", cancellationToken);
+
+        var listed = await harness.GitClient.ListNamesAsync(
+            temp.Path,
+            ["ls-files", "-z", "--cached", "--others"],
+            cancellationToken);
+
+        Assert.Equal(
+            [
+                new GitName("README.md", true),
+                new GitName("caf�.md", false) { Quoted = @"caf\351.md" },
+                new GitName("naïve.md", true),
+            ],
+            listed.OrderBy(name => name.Text, StringComparer.Ordinal));
+
+        await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ListNamesAsync(
+            temp.Path,
+            ["ls-files", "-z", "--no-such-option"],
+            cancellationToken));
+    }
+
+    /// <summary>
+    /// One path this machine spelled has this machine's separator turned into git's: on Windows,
+    /// 'docs\notes.md' is the file git calls 'docs/notes.md'.
+    /// </summary>
+    [Fact]
+    public async Task ReadFileAtCommitAsync_ReadsAPathThisMachineSpelled()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows separates a path with a backslash.");
+
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        temp.WriteFile(Path.Combine("docs", "notes.md"), "notes\n");
+        await harness.CommitAllAsync(temp.Path, "notes", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+
+        Assert.Equal("notes\n", await harness.GitClient.ReadFileAtCommitAsync(temp.Path, head!, @"docs\notes.md", cancellationToken));
+    }
+
+    /// <summary>
+    /// A path is read as git spells it. A backslash is an ordinary character in a name on Linux and
+    /// macOS; rewritten as a separator, the name read another file, and its answer was filed under a
+    /// key nobody had asked for.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_ReadsAPathAsGitSpellsIt()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows cannot hold a backslash in a file name.");
+
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, @"odd\name.txt"), "odd\n", cancellationToken);
+        await harness.CommitAllAsync(temp.Path, "odd", cancellationToken);
+
+        var head = await harness.GitClient.ResolveCommitAsync(temp.Path, "HEAD", cancellationToken);
+        var read = await harness.GitClient.ReadFilesAtCommitAsync(temp.Path, head!, [@"odd\name.txt"], cancellationToken);
+
+        Assert.Equal("odd\n", read[@"odd\name.txt"]);
+    }
+
+    /// <summary>
+    /// A commit git cannot read is refused when many files are read from it as when one is: git
+    /// answers 'missing' for it as it does for an absent file, and read that way it passed off a
+    /// commit nobody could read as files that were not there.
+    /// </summary>
+    [Fact]
+    public async Task ReadFilesAtCommitAsync_Throws_ForACommitGitCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
+
+        await Assert.ThrowsAsync<HarnessException>(() => harness.GitClient.ReadFilesAtCommitAsync(
+            temp.Path, new string('0', 40), ["README.md", "docs/notes.md"], cancellationToken));
+    }
+
     [Fact]
     public async Task ReadFileAtCommitAsync_Throws_ForACommitGitCannotRead()
     {
@@ -311,6 +569,53 @@ public sealed class GitClientTests
 
         await Assert.ThrowsAsync<HarnessException>(() =>
             new HarnessFactory().GitClient.IsIgnoredAsync(temp.Path, ".secret", TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// git names the rule deciding each path, in the order asked, whether or not the path exists: one
+    /// that ignores, a re-include, a directory above the path - which no re-include below it reaches -
+    /// and none at all.
+    /// </summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_NamesTheRuleDecidingEachPath_InTheOrderAsked()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, token);
+        temp.WriteFile(".gitignore", "*.log\n!keep.log\nout/\n!out/kept.txt\n");
+
+        var decisions = await harness.GitClient.ExplainIgnoredAsync(
+            temp.Path,
+            ["a.log", "keep.log", "out/kept.txt", "src/main.c"],
+            token);
+
+        Assert.Equal(
+            [
+                new IgnoreDecision("a.log", ".gitignore", 1, "*.log"),
+                new IgnoreDecision("keep.log", ".gitignore", 2, "!keep.log"),
+                new IgnoreDecision("out/kept.txt", ".gitignore", 3, "out/"),
+                new IgnoreDecision("src/main.c", null, 0, null),
+            ],
+            decisions);
+        Assert.Equal([true, false, true, false], decisions.Select(decision => decision.Ignored));
+    }
+
+    /// <summary>
+    /// A question git could not answer is refused, never read as "no rule": every managed path would
+    /// then read as ruled by nothing.
+    /// </summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_Throws_WhenGitCannotAnswer()
+    {
+        using var temp = new TempDirectory();
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() =>
+            new HarnessFactory().GitClient.ExplainIgnoredAsync(temp.Path, [".secret"], TestContext.Current.CancellationToken));
+
+        // Refused for git's own failure, naming it - never for an answer read in a form it was not.
+        Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+        Assert.StartsWith("Could not ask git which rules decide 1 path(s)", refusal.Message, StringComparison.Ordinal);
     }
 }
 
@@ -544,4 +849,34 @@ public sealed class GitCommandResultTests
 
         Assert.Equal(["one", "two"], result.OutputLines);
     }
+}
+
+/// <summary>Runs every program through <paramref name="inner"/>, and keeps what each was asked to start.</summary>
+internal sealed class CountingProcesses(IProcessRunner inner) : IProcessRunner
+{
+    private readonly List<ProcessRequest> _started = [];
+
+    /// <summary>Every program started, in order.</summary>
+    public IReadOnlyList<ProcessRequest> Started
+    {
+        get
+        {
+            lock (_started)
+            {
+                return [.. _started];
+            }
+        }
+    }
+
+    public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+    {
+        lock (_started)
+        {
+            _started.Add(request);
+        }
+
+        return inner.RunAsync(request, cancellationToken);
+    }
+
+    public string? FindExecutable(string command) => inner.FindExecutable(command);
 }

@@ -1,3 +1,5 @@
+using RepoHarness.Core.Hosts;
+
 namespace RepoHarness.Core.Configuration;
 
 /// <summary>
@@ -11,7 +13,11 @@ namespace RepoHarness.Core.Configuration;
 /// </remarks>
 public sealed class HostsConfig
 {
-    /// <summary>Settings for the machine running the harness.</summary>
+    /// <summary>
+    /// Settings for the machine the command was typed on. A host running a leg another machine
+    /// dispatched to it reads the section that machine names it by instead: to itself it is this
+    /// machine, and this section describes the one that dispatched it.
+    /// </summary>
     public LocalHostConfig Local { get; init; } = new();
 
     /// <summary>WSL distributions, keyed by the distribution's name as WSL lists it.</summary>
@@ -23,6 +29,26 @@ public sealed class HostsConfig
     /// with the private key in its <c>.key</c>. Nothing here names any of them: this file is tracked.
     /// </summary>
     public Dictionary<string, SshHostConfig> Ssh { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What <paramref name="host"/> declares for itself.</summary>
+    /// <param name="host">The host, named as this configuration names it.</param>
+    /// <remarks>
+    /// A host with no section declares nothing, which is what the local section means when it is
+    /// left out too: every setting falls back to its default.
+    /// </remarks>
+    public HostSettings SettingsFor(HostId host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+
+        HostSettings? declared = host.Kind switch
+        {
+            HostKind.Local => Local,
+            HostKind.Wsl => Wsl.GetValueOrDefault(host.Name),
+            _ => Ssh.GetValueOrDefault(host.Name),
+        };
+
+        return declared ?? new LocalHostConfig();
+    }
 }
 
 /// <summary>Settings every kind of host accepts.</summary>
@@ -38,24 +64,34 @@ public abstract class HostSettings
     public int? TestCores { get; init; }
 
     /// <summary>
-    /// Command that keeps this machine awake while a leg runs on it, with <c>{pid}</c> replaced
-    /// by the process it should outlive, such as <c>["caffeinate", "-dimsu", "-w", "{pid}"]</c> on
-    /// macOS. A host that sleeps mid-leg charges the sleep to whatever was running, which once
-    /// reported a 4 ms test at 729 s. Without it, the leg's timings are marked suspect.
+    /// Command that keeps this machine awake while a leg's own work runs on it, such as
+    /// <c>["caffeinate", "-dimsu", "-w", "{pid}"]</c> on macOS. Started on this machine when the
+    /// leg's work starts, with <c>{pid}</c> - the one name it is filled in with - replaced by the
+    /// DssHarness process running the leg, and stopped when that work ends.
     /// </summary>
+    /// <remarks>
+    /// A host that sleeps mid-leg charges the sleep to whatever was running, which once reported a
+    /// 4 ms test at 729 s. A command that cannot start, or ends early, is said and fails nothing: a
+    /// sleep it did not prevent is still seen, as wall time outrunning the monotonic clock, and marks
+    /// the phase it interrupted suspect - as it does on a machine that declares no command at all.
+    /// A compiler cache, which once had a key of its own here, is its own variable under
+    /// <see cref="Env"/>: <c>CCACHE_DIR</c> for ccache.
+    /// </remarks>
     public List<string>? KeepAwake { get; init; }
 
     /// <summary>
-    /// Compiler cache directory on this machine, set explicitly so that two hosts never share
-    /// one store. A shared store lets one host's objects satisfy another host's build, which is
-    /// a contamination this prevents by construction.
+    /// Environment for every process a leg starts on this machine: each phase of its build and the
+    /// ninja that reads the build's dependency records, its test runner, and each step of a runner.
+    /// Beneath every environment more specific than a machine's own, each of which can still say
+    /// otherwise: the variant's - its toolchain's, build config's, sanitizer's and project's - the test
+    /// invocation's, and a runner's values, its secrets, its own environment and each step's. Names
+    /// compare ignoring case on every platform, as they do on Windows.
     /// </summary>
-    public string? CompilerCacheDirectory { get; init; }
-
-    /// <summary>
-    /// Environment applied to every phase run on this machine. Names compare ignoring case on
-    /// every platform, as they do on Windows.
-    /// </summary>
+    /// <remarks>
+    /// A PATH set here is where every one of those programs is found on this machine, and no survey
+    /// can see it: none of them is required of the machine before a leg starts, and each is the run's
+    /// to find, as under any environment that sets PATH.
+    /// </remarks>
     public Dictionary<string, string> Env { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
@@ -21,6 +22,18 @@ public sealed class DefaultConfigFactoryTests
 
         Assert.Equal(["clang", "gcc", "msvc"], config.Toolchains.Keys.Order(StringComparer.Ordinal));
         Assert.Equal(["windows"], config.Toolchains["msvc"].Platforms);
+
+        // Each names its compiler, as every toolchain must: msvc's is cl, for both languages.
+        Assert.Equal("cl", config.Toolchains["msvc"].Env["CC"]);
+        Assert.Equal("cl", config.Toolchains["msvc"].Env["CXX"]);
+        Assert.All(config.Toolchains.Values, toolchain => Assert.True(CompilerValue.Named(toolchain.CacheVars, toolchain.Env)));
+
+        // cl is reached through the environment Visual Studio sets up where the leg runs, so a clone
+        // builds from a plain shell; no other toolchain needs one.
+        Assert.Equal("visualStudio", config.Toolchains["msvc"].DeveloperEnvironment);
+        Assert.Equal(DeveloperEnvironmentKinds.VisualStudio, Assert.Single(config.DeveloperEnvironments, pair => pair.Key == "visualStudio").Value.Kind);
+        Assert.Null(config.Toolchains["gcc"].DeveloperEnvironment);
+        Assert.Null(config.Toolchains["clang"].DeveloperEnvironment);
         Assert.Contains("asan", config.Sanitizers.Keys);
 
         var project = Assert.Single(config.Projects);

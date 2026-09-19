@@ -37,6 +37,7 @@ public static class ToolProvisionReports
         {
             var document = new
             {
+                report.DryRun,
                 Legs = report.Legs.Select(leg => new
                 {
                     leg.Leg,
@@ -100,14 +101,15 @@ public static class ToolProvisionReports
 
         var ready = report.Legs.Count(leg => leg.Provisioned);
         var counted = $"{ready} of {report.Legs.Count} leg(s) have every tool they need";
+        var dryRun = report.DryRun ? "; --dry-run installed nothing" : string.Empty;
 
         if (report.Passed)
         {
-            return counted;
+            return counted + dryRun;
         }
 
         return report.AnyUnreachable
-            ? $"{counted}: a host could not be reached"
-            : $"{counted}: a tool is missing, out of date, or could not be installed";
+            ? $"{counted}: a host could not be reached{dryRun}"
+            : $"{counted}: a tool is missing, out of date, or could not be installed{dryRun}";
     }
 }

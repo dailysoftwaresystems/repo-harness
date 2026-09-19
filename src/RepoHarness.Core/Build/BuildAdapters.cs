@@ -54,11 +54,16 @@ public interface IBuildAdapter
     /// <param name="request">The leg's build.</param>
     /// <param name="buildDirectory">Where this variant builds.</param>
     /// <param name="overlay">The environment and cache variables this variant builds with.</param>
+    /// <param name="environment">
+    /// The environment every phase starts with - the host's, then the variant's - made once for the
+    /// whole build, so every phase and every check of it agrees on which compiler it uses.
+    /// </param>
     IEnumerable<PhaseRequest> Phases(
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay);
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment);
 }
 
 /// <summary>
@@ -185,26 +190,21 @@ public static class BuildAdapters
     }
 
     /// <summary>
-    /// The environment a phase runs with: the variant's own, plus the compiler cache directories a
-    /// host declares, which are set explicitly so two hosts never share one store.
+    /// The environment every phase of a build runs with: the host's own, the variant's over it, and a
+    /// compiler cache keyed against the leg's own tree.
     /// </summary>
     /// <param name="overlay">The variant's environment.</param>
-    /// <param name="treeRoot">The leg's tree, which the cache is keyed against.</param>
-    internal static Dictionary<string, string?> EnvironmentFor(VariantOverlay overlay, string treeRoot)
+    /// <param name="request">The leg's build, whose host environment and tree the rest comes from.</param>
+    internal static Dictionary<string, string?> EnvironmentFor(VariantOverlay overlay, BuildRequest request)
     {
-        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (name, value) in overlay.Env)
-        {
-            environment[name] = value;
-        }
+        var environment = PhaseEnvironment.Layered(request.HostEnvironment, overlay.Env);
 
         // Set from the leg's own tree rather than inherited. A shared base directory lets one tree's
         // objects satisfy another tree's build, which is a contamination this prevents by
         // construction rather than by hoping the caches disagree.
         if (environment.ContainsKey("CCACHE_DIR"))
         {
-            environment["CCACHE_BASEDIR"] = treeRoot;
+            environment["CCACHE_BASEDIR"] = request.TreeRoot;
         }
 
         return environment;
@@ -217,6 +217,9 @@ public static class BuildAdapters
 /// <summary>Configures and builds a CMake project.</summary>
 public sealed class CMakeAdapter : IBuildAdapter
 {
+    /// <summary>The phase that configures the build directory, after which CMake can say which compilers it resolved.</summary>
+    public const string ConfigurePhase = "configure";
+
     /// <inheritdoc/>
     public string Type => "cmake";
 
@@ -256,13 +259,13 @@ public sealed class CMakeAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(overlay);
 
-        var environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot);
         var source = Path.Combine(request.TreeRoot, request.Project.Path);
         var configure = new List<string> { "-S", source, "-B", buildDirectory };
 
@@ -286,12 +289,12 @@ public sealed class CMakeAdapter : IBuildAdapter
         yield return new PhaseRequest
         {
             Leg = request.Leg,
-            Phase = "configure",
+            Phase = ConfigurePhase,
             FileName = Program,
             Arguments = configure,
             WorkingDirectory = request.TreeRoot,
             Environment = environment,
-            LogFile = BuildAdapters.LogFor(request, "configure"),
+            LogFile = BuildAdapters.LogFor(request, ConfigurePhase),
             AppendToPath = request.ProgramDirectories,
         };
 
@@ -357,7 +360,8 @@ public sealed class DotnetAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
@@ -391,7 +395,7 @@ public sealed class DotnetAdapter : IBuildAdapter
             FileName = Program,
             Arguments = arguments,
             WorkingDirectory = request.TreeRoot,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "build"),
             AppendToPath = request.ProgramDirectories,
         };
@@ -428,7 +432,8 @@ public sealed class DartAdapter : IBuildAdapter
         HarnessConfig config,
         BuildRequest request,
         string buildDirectory,
-        VariantOverlay overlay)
+        VariantOverlay overlay,
+        IReadOnlyDictionary<string, string?> environment)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
@@ -443,7 +448,7 @@ public sealed class DartAdapter : IBuildAdapter
             FileName = Program,
             Arguments = ["pub", "get"],
             WorkingDirectory = project,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "pub-get"),
             AppendToPath = request.ProgramDirectories,
         };
@@ -470,7 +475,7 @@ public sealed class DartAdapter : IBuildAdapter
             FileName = Program,
             Arguments = arguments,
             WorkingDirectory = project,
-            Environment = BuildAdapters.EnvironmentFor(overlay, request.TreeRoot),
+            Environment = environment,
             LogFile = BuildAdapters.LogFor(request, "build"),
             AppendToPath = request.ProgramDirectories,
         };

@@ -27,6 +27,156 @@ public sealed class LedgerReportTests
         Assert.Empty(refused.RootElement.GetProperty("legs").EnumerateArray());
     }
 
+    /// <summary>
+    /// The document names where the run keeps its records, and a leg another host ran names that
+    /// host's own; a run that kept none, and a leg this machine ran, name nothing.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesWhereTheRecordsAre()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("here", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("there", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { RunDirectory = "/home/pi/repo/.harness-config/runs/r2" },
+        ],
+        durationWarningFactor: 0);
+
+        using var ran = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: [], runDirectory: "/repo/.harness-config/runs/r1"));
+        using var stopped = JsonDocument.Parse(report.ToJson(HarnessExit.Refused, "refused", runDirectory: "/repo/.harness-config/runs/r1"));
+        using var none = JsonDocument.Parse(LedgerReport.Stopped(HarnessExit.Refused, "refused"));
+
+        Assert.Equal("/repo/.harness-config/runs/r1", ran.RootElement.GetProperty("runDirectory").GetString());
+        Assert.Equal("/repo/.harness-config/runs/r1", stopped.RootElement.GetProperty("runDirectory").GetString());
+        Assert.False(none.RootElement.TryGetProperty("runDirectory", out _));
+
+        var legs = ran.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("runDirectory", out _));
+        Assert.Equal("/home/pi/repo/.harness-config/runs/r2", legs[1].GetProperty("runDirectory").GetString());
+    }
+
+    /// <summary>
+    /// Every leg's line names the compilers CMake configured its build with, beside whatever it
+    /// said - a failure's reason included - and the document carries them as data; a leg that built
+    /// nothing with CMake names none.
+    /// </summary>
+    [Fact]
+    public void EveryLine_NamesTheCompilersItsBuildWasConfiguredWith()
+    {
+        IReadOnlyList<RepoHarness.Core.Build.CompilerFact> msvc = [new("C", "MSVC", "19.51.36231"), new("CXX", "MSVC", "19.51.36231")];
+
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Failed, TimeSpan.FromSeconds(1), "3 tests failed") with { Compilers = msvc },
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+
+        Assert.EndsWith("3 tests failed; compiler: MSVC 19.51.36231 (C, CXX)", rows[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("compiler", rows[2], StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.Equal(
+            ["C MSVC 19.51.36231", "CXX MSVC 19.51.36231"],
+            legs[0].GetProperty("compilers").EnumerateArray().Select(compiler =>
+                $"{compiler.GetProperty("language").GetString()} {compiler.GetProperty("id").GetString()} {compiler.GetProperty("version").GetString()}"));
+        Assert.False(legs[1].TryGetProperty("compilers", out _));
+    }
+
+    /// <summary>
+    /// Every leg's line names the developer environment its processes started in, after the compilers
+    /// and whatever the leg said, and the document carries it as data; a leg that needed none names none.
+    /// </summary>
+    [Fact]
+    public void EveryLine_NamesTheDeveloperEnvironmentItStartedIn()
+    {
+        var visualStudio = new RepoHarness.Core.Hosts.DeveloperEnvironmentFact("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64");
+
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Failed, TimeSpan.FromSeconds(1), "3 tests failed") with
+            {
+                Compilers = [new("C", "MSVC", "19.51.36231")],
+                DeveloperEnvironment = visualStudio,
+            },
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+
+        Assert.EndsWith(
+            "3 tests failed; compiler: MSVC 19.51.36231 (C); developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64)",
+            rows[1],
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("developer environment", rows[2], StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+        var environment = legs[0].GetProperty("developerEnvironment");
+
+        Assert.Equal(
+            ["vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64"],
+            new[] { "name", "installationPath", "installationVersion", "toolsVersion", "architecture" }.Select(name => environment.GetProperty(name).GetString()));
+        Assert.False(legs[1].TryGetProperty("developerEnvironment", out _));
+    }
+
+    /// <summary>The line said the moment a leg reaches its verdict names the developer environment too.</summary>
+    [Fact]
+    public void TheVerdictsOwnLine_NamesTheDeveloperEnvironment()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "build");
+
+        ledger.Record(Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with
+        {
+            DeveloperEnvironment = new("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64"),
+        });
+
+        Assert.Contains(
+            "build: win: passed (developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64))",
+            factory.StandardOutput.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>The line said the moment a leg reaches its verdict names them too.</summary>
+    [Fact]
+    public void TheVerdictsOwnLine_NamesTheCompilers()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "build");
+
+        ledger.Record(Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { Compilers = [new("C", "GNU", "13.2.0")] });
+
+        Assert.Contains("build: win: passed (compiler: GNU 13.2.0 (C))", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A step a leg's operating system does not run is named on that leg's line, in the order the
+    /// file declares it, so it is left out on purpose rather than simply absent; a leg that ran
+    /// every step names none.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesTheStepsALegsSystemLeftOut()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { SkippedSteps = ["msvc", "sign"] },
+        ],
+        durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("skippedSteps", out _));
+        Assert.Equal(["msvc", "sign"], legs[1].GetProperty("skippedSteps").EnumerateArray().Select(step => step.GetString()));
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

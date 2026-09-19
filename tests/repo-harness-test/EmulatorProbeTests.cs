@@ -112,7 +112,7 @@ public sealed class EmulatorProbeTests
     {
         // Homebrew's qemu over ssh on macOS: in a searched directory, and on no PATH a command there sees.
         using var temp = new TempDirectory();
-        MakeExecutable(temp.WriteFile(Path.Combine("searched", OperatingSystem.IsWindows() ? "qemu-probe.exe" : "qemu-probe"), "#!/bin/sh\nexit 0\n"));
+        temp.WriteProgram("searched", "qemu-probe");
         var searched = temp.Combine("searched");
 
         var emulator = Emulator(prints: "aarch64", pattern: @"^\[aarch64\]$", requires: ["qemu-probe"]);
@@ -267,14 +267,6 @@ public sealed class EmulatorProbeTests
 
     /// <summary>The search a leg on this machine uses: its own PATH, then the directories given.</summary>
     private static LocalProgramResolver Resolver() => new(new HostPlatform(), FilePermissionsFactory.Create());
-
-    private static void MakeExecutable(string path)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserExecute);
-        }
-    }
 
     private static EmulatorProbe Probe()
         => new(Platform("linux", "x86_64"), new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create()), FileSystem());
