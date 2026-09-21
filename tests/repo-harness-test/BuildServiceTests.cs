@@ -530,7 +530,7 @@ public sealed class BuildServiceTests
             new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new CMakeToolchainReader(factory.FileSystem),
-            new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem, factory.Platform),
+            new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
             new InputFingerprint(factory.FileSystem, factory.Platform),
             new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
             factory.GitClient,
@@ -855,7 +855,7 @@ public sealed class BuildServiceTests
 
         var runner = new RecordingRunner("app.o: #deps 1, deps mtime 1 (VALID)\n    app.h\n");
 
-        _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem, new HostPlatform())
+        _ = await new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
             .CheckAsync(buildDirectory, [], "tools/ninja", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(Path.Combine(buildDirectory, "tools", "ninja"), Assert.Single(runner.Started).FileName);
@@ -877,7 +877,7 @@ public sealed class BuildServiceTests
         runner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new ProgramStartException("/opt/arm/bin/ninja", "'/opt/arm/bin/ninja' could not be started: Text file busy"));
 
-        var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem, new HostPlatform())
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => new NinjaDependencyCheck(runner, new HarnessFactory().FileSystem)
             .CheckAsync(buildDirectory, [], "/opt/arm/bin/ninja", cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.CommandFailed, failure.ExitCode);

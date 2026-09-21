@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.FileSystem;
-using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
@@ -34,7 +33,7 @@ public sealed record NinjaDependencyReport(
 /// to be, it leaves every other leg unchecked, and the leg most likely to be misconfigured is the
 /// one nobody is sitting at.
 /// </remarks>
-public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, IFileSystem fileSystem, IHostPlatform platform)
+public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, IFileSystem fileSystem)
 {
     /// <summary>The file a ninja build directory describes itself in.</summary>
     public const string ManifestFileName = "build.ninja";
@@ -96,7 +95,6 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
 
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IFileSystem _fileSystem = fileSystem;
-    private readonly IHostPlatform _platform = platform;
 
     /// <summary>Checks one build directory.</summary>
     /// <param name="buildDirectory">The directory to read.</param>
@@ -269,7 +267,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
             NinjaManifest.Read(_fileSystem, buildDirectory),
             records,
             _fileSystem,
-            StringComparer.FromComparison(_platform.PathComparison));
+            PathCase.In(_fileSystem, buildDirectory));
         var flagged = new List<string>();
         var excused = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -724,7 +722,9 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// <summary>
     /// A build directory's objects as ninja rebuilds them: what each one's compile surely includes,
     /// and every file a change to which rebuilds it. Every path is held as the build directory
-    /// resolves it, and compared as this machine compares paths.
+    /// resolves it, and compared as the file system holding the build compares names: a header a
+    /// unit names in another case is, where that file system finds it by either, the one its
+    /// precompiled header's object recorded.
     /// </summary>
     private sealed class RebuildGraph(
         string buildDirectory,

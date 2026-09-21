@@ -117,11 +117,12 @@ public sealed class NinjaDependencyCheckTests
     /// compiling it and every unit built from it force-include it, and that object records every
     /// header it holds; each unit names the <c>.pch</c>, a phony whose only input is that object. A
     /// unit that includes nothing, or a header the precompiled header holds and guards - which cl never
-    /// opens again, here named in another case, as Windows finds it - is rebuilt through that object,
-    /// and excused; one that includes a header it does not hold is not. For C++ the header holds its
-    /// includes under <c>#ifdef __cplusplus</c>, which a C++ compile surely compiles. Once that object
-    /// records nothing - a compiler cache replaying it without cl's includes - nothing rebuilds
-    /// anything for a held header, and neither it nor any unit built from it is excused.
+    /// opens again, here named in another case: a file system that folds case finds it, and one that
+    /// does not, nothing - is rebuilt through that object, and excused; one that includes a header it
+    /// does not hold is not. For C++ the header holds its includes under <c>#ifdef __cplusplus</c>,
+    /// which a C++ compile surely compiles. Once that object records nothing - a compiler cache
+    /// replaying it without cl's includes - nothing rebuilds anything for a held header, and neither
+    /// it nor any unit built from it is excused.
     /// </summary>
     [Theory]
     [InlineData("c")]
@@ -624,7 +625,7 @@ public sealed class NinjaDependencyCheckTests
 
     /// <summary>Checks <paramref name="build"/>, whose ninja answers <c>-t deps</c> with <paramref name="answer"/>.</summary>
     private static Task<NinjaDependencyReport> CheckAnswered(string build, string answer)
-        => new NinjaDependencyCheck(new DepsAnswer(answer), FileSystem(), new HostPlatform())
+        => new NinjaDependencyCheck(new DepsAnswer(answer), FileSystem())
             .CheckAsync(build, [], cancellationToken: TestContext.Current.CancellationToken);
 
     private static PhysicalFileSystem FileSystem() => new(FilePermissionsFactory.Create());
