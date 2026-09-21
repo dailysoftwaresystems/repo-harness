@@ -294,6 +294,11 @@ public sealed class TestService(
             CommandTime = phase.Duration,
             Emulated = request.Emulated,
             TestCount = CountFrom(counter, phase.Output),
+
+            // What the count belongs to, decided here with the invocation that made it: the report
+            // compares it only with the other legs of the same project and test set.
+            Project = request.Project?.Name,
+            TestSet = invocation.TestSet,
             Phases = [new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped)],
             TimingNotes = TimingNotes(phase),
             Timings = [.. phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value))],
@@ -337,9 +342,9 @@ public sealed class TestService(
     /// </summary>
     /// <remarks>
     /// The named group <c>total</c> where the pattern declares one, its first capturing group where
-    /// it does not, and the whole match otherwise. Legs running the same tests are compared by this
-    /// number, and one reporting a different count is flagged: a platform that quietly skips a group
-    /// of tests passes on less evidence than its siblings and looks exactly as green.
+    /// it does not, and the whole match otherwise. Legs of the same project and test set are compared
+    /// by this number, and one reporting a different count is marked on its line: a platform that
+    /// quietly skips a group of tests passes on less evidence than its siblings and looks exactly as green.
     /// </remarks>
     /// <param name="countPattern">The compiled pattern, or null when the invocation declares none.</param>
     /// <param name="output">The runner's own output, never anything the harness wrote.</param>

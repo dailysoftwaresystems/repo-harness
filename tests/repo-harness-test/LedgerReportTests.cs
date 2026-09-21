@@ -696,41 +696,134 @@ public sealed class LedgerReportTests
         Assert.Contains("\"1.5\"", json, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Legs running the same suite are meant to run the same tests. A leg reporting three where its
+    /// siblings report 412 is green on both the exit code and the success pattern; the count is the
+    /// only thing in the ledger that can see the difference, and it is marked as that - never as a
+    /// timing, since a count says nothing about the clock.
+    /// </summary>
     [Fact]
-    public void ALegRunningFewerTestsThanItsSiblings_IsMarked()
+    public void ALegRunningFewerTestsThanItsSiblings_IsMarked_AsItsOwnNote_NeverATimingOne()
     {
-        // Legs running the same suite are meant to run the same tests. A leg reporting three where
-        // its siblings report 412 is green on both the exit code and the success pattern; the count
-        // is the only thing in the ledger that can see the difference.
         var report = LedgerReport.From(
         [
-            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(10), string.Empty) with { TestCount = 412 },
-            Entry("linux-gcc-release", LegVerdict.Passed, TimeSpan.FromSeconds(11), string.Empty) with { TestCount = 412 },
-            Entry("wsl-clang-asan", LegVerdict.Passed, TimeSpan.FromSeconds(9), string.Empty) with { TestCount = 3 },
+            Counted("win-msvc-release", 412),
+            Counted("linux-gcc-release", 412),
+            Counted("wsl-clang-asan", 3),
         ],
         durationWarningFactor: 0);
 
         var marked = report.Lines.Single(line => line.Leg == "wsl-clang-asan");
 
-        Assert.True(marked.TimingsSuspect);
-        Assert.Contains(marked.TimingNotes, note => note.Contains("ran 3 test(s)", StringComparison.Ordinal));
-        Assert.All(
-            report.Lines.Where(line => line.Leg != "wsl-clang-asan"),
-            line => Assert.False(line.TimingsSuspect));
+        Assert.True(marked.TestCountDiffers);
+        Assert.Equal("it ran 3 test(s), where 2 other leg(s) ran 412", marked.TestCountNote);
+        Assert.False(marked.TimingsSuspect);
+        Assert.Empty(marked.TimingNotes);
+        Assert.All(report.Lines.Where(line => line.Leg != "wsl-clang-asan"), line => Assert.False(line.TestCountDiffers));
     }
 
+    /// <summary>With two, "which one is wrong" has no answer, and marking both says nothing anyone can act on.</summary>
     [Fact]
     public void TwoLegsDisagreeingAboutTheirCount_AreNotMarked()
     {
-        // With two, "which one is wrong" has no answer, and marking both says nothing anyone can
-        // act on.
+        var report = LedgerReport.From([Counted("win-msvc-release", 412), Counted("wsl-clang-asan", 3)], durationWarningFactor: 0);
+
+        Assert.All(report.Lines, line => Assert.False(line.TestCountDiffers));
+    }
+
+    /// <summary>
+    /// A leg of another project runs another suite, so its count is never held against this one's:
+    /// pooled with them, a monorepo's small tool project was marked beside a large application.
+    /// </summary>
+    [Fact]
+    public void LegsOfDifferentProjects_AreNeverComparedByTheirCounts()
+    {
         var report = LedgerReport.From(
         [
-            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(10), string.Empty) with { TestCount = 412 },
-            Entry("wsl-clang-asan", LegVerdict.Passed, TimeSpan.FromSeconds(9), string.Empty) with { TestCount = 3 },
+            Counted("app-debug", 2237),
+            Counted("app-release", 2237),
+            Counted("app-asan", 2237),
+            Counted("tools-debug", 5, project: "tools"),
         ],
         durationWarningFactor: 0);
 
-        Assert.All(report.Lines, line => Assert.False(line.TimingsSuspect));
+        Assert.All(report.Lines, line => Assert.False(line.TestCountDiffers));
     }
+
+    /// <summary>
+    /// A leg whose test settings name a set of their own - a platform's own tests - is compared only
+    /// with the legs naming that set, and the rest only with the project's shared set: a Windows-only
+    /// test marks nothing, and a Windows leg that dropped tests from the Windows set still is. Names
+    /// compare ignoring case, as configuration keys do.
+    /// </summary>
+    [Fact]
+    public void ALegNamingItsOwnTestSet_IsComparedOnlyWithTheLegsNamingIt()
+    {
+        var report = LedgerReport.From(
+        [
+            Counted("linux-debug", 2237),
+            Counted("linux-release", 2237),
+            Counted("macos-debug", 2237, project: "App"),
+            Counted("windows-debug", 2238, testSet: "windows"),
+            Counted("windows-release", 2238, testSet: "Windows"),
+            Counted("windows-asan", 5, testSet: "windows"),
+        ],
+        durationWarningFactor: 0);
+
+        var marked = Assert.Single(report.Lines, line => line.TestCountDiffers);
+
+        Assert.Equal("windows-asan", marked.Leg);
+        Assert.Equal("it ran 5 test(s), where 2 other leg(s) ran 2238", marked.TestCountNote);
+    }
+
+    /// <summary>A count whose leg resolves no project belongs to no suite, and is compared with nothing.</summary>
+    [Fact]
+    public void ALegWithNoProject_IsComparedWithNothing()
+    {
+        var report = LedgerReport.From(
+            [Counted("a", 412, project: null), Counted("b", 412, project: null), Counted("c", 3, project: null)],
+            durationWarningFactor: 0);
+
+        Assert.All(report.Lines, line => Assert.False(line.TestCountDiffers));
+    }
+
+    /// <summary>
+    /// A count that stands apart is its own part of the leg's line, labelled as that, beside a timing
+    /// mark rather than under it; and its own fields in --json, with what it belongs to, so a script
+    /// never has to pick it out of the timing notes.
+    /// </summary>
+    [Fact]
+    public void ACountThatStandsApart_IsItsOwnPartOfTheLine_AndItsOwnFieldsInJson()
+    {
+        var report = LedgerReport.From(
+        [
+            Counted("win-msvc-release", 412) with { Phases = [Phase("test", 10)] },
+            Counted("linux-gcc-release", 412) with { Phases = [Phase("test", 10)] },
+            Counted("wsl-clang-asan", 3, testSet: null) with { Phases = [Phase("test", 100)] },
+        ],
+        durationWarningFactor: 3.0);
+
+        var row = Assert.Single(report.Render(), line => line.StartsWith("wsl-clang-asan", StringComparison.Ordinal));
+
+        Assert.EndsWith(
+            "3 tests; test count differs: it ran 3 test(s), where 2 other leg(s) ran 412; timings suspect: test took 1m40s against 10s on sibling legs",
+            row,
+            StringComparison.Ordinal);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToDictionary(leg => leg.GetProperty("leg").GetString()!);
+        var marked = legs["wsl-clang-asan"];
+
+        Assert.True(marked.GetProperty("testCountDiffers").GetBoolean());
+        Assert.Equal("it ran 3 test(s), where 2 other leg(s) ran 412", marked.GetProperty("testCountNote").GetString());
+        Assert.Equal("app", marked.GetProperty("project").GetString());
+        Assert.False(marked.TryGetProperty("testSet", out _));
+        Assert.Equal(["test took 1m40s against 10s on sibling legs"], marked.GetProperty("timingNotes").EnumerateArray().Select(note => note.GetString()));
+        Assert.False(legs["win-msvc-release"].GetProperty("testCountDiffers").GetBoolean());
+        Assert.False(legs["win-msvc-release"].TryGetProperty("testCountNote", out _));
+    }
+
+    /// <summary>A passing leg of <paramref name="project"/> that ran <paramref name="count"/> tests of <paramref name="testSet"/>.</summary>
+    private static LegEntry Counted(string leg, int count, string? project = "app", string? testSet = null)
+        => Entry(leg, LegVerdict.Passed, TimeSpan.FromSeconds(10), string.Empty) with { TestCount = count, Project = project, TestSet = testSet };
 }

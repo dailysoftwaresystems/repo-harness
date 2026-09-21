@@ -1417,6 +1417,13 @@ public static partial class HarnessConfigValidator
             CheckPattern(invocation.SuccessPattern, $"{setting}.successPattern", problems);
             CheckCountPattern(invocation.CountPattern, $"{setting}.countPattern", problems);
 
+            // Blank would read as a set of its own that nothing else names, splitting its legs from
+            // the rest of the project without a name anybody chose.
+            if (invocation.TestSet is { } testSet && string.IsNullOrWhiteSpace(testSet))
+            {
+                problems.Add($"{setting}.testSet is blank; leave it out for the project's shared test set");
+            }
+
             if (invocation.CoresArgs is { Count: > 0 } coresArgs
                 && !coresArgs.Any(argument => argument.Contains(CoreCounts.Placeholder, StringComparison.Ordinal)))
             {

@@ -751,6 +751,7 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "countPattern": "(" }""", "countPattern is not a valid regular expression")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresArgs": ["-j", "8"] }""", "never uses {cores}")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresEnv": [""] }""", "coresEnv contains a blank variable name")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "testSet": " " }""", "testSet is blank; leave it out for the project's shared test set")]
     public void Load_RejectsATestInvocationThatCannotWork(string invocation, string expected)
     {
         var exception = LoadInvalid(

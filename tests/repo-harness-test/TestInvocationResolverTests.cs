@@ -87,6 +87,31 @@ public sealed class TestInvocationResolverTests
         Assert.Equal(["-L", "smoke"], TestInvocationResolver.Resolve(settings, PlatformNames.Linux).Args);
     }
 
+    /// <summary>
+    /// A test set is merged per platform like every other setting: a platform's own names its set,
+    /// and one naming none runs the set <c>all</c> names, or the project's shared one.
+    /// </summary>
+    [Fact]
+    public void ATestSet_IsMergedPerPlatform_LikeEveryOtherSetting()
+    {
+        var settings = new TestConfig
+        {
+            All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed" },
+            Windows = new TestInvocation { TestSet = "windows" },
+        };
+
+        var named = new TestConfig
+        {
+            All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed", TestSet = "sanitized" },
+            Windows = new TestInvocation { TestSet = "windows" },
+        };
+
+        Assert.Equal("windows", TestInvocationResolver.Resolve(settings, PlatformNames.Windows).TestSet);
+        Assert.Null(TestInvocationResolver.Resolve(settings, PlatformNames.Linux).TestSet);
+        Assert.Equal("sanitized", TestInvocationResolver.Resolve(named, PlatformNames.Linux).TestSet);
+        Assert.Equal("windows", TestInvocationResolver.Resolve(named, PlatformNames.Windows).TestSet);
+    }
+
     [Fact]
     public void AProjectsTestSettings_ApplyWhenTheLegDeclaresNone()
     {

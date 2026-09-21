@@ -60,6 +60,27 @@ public sealed record LegEntry
     /// <summary>How many tests the leg reported running, where a count pattern extracted one.</summary>
     public int? TestCount { get; init; }
 
+    /// <summary>
+    /// The project whose tests <see cref="TestCount"/> counts, by name: recorded with the count by a
+    /// test that reached its runner, and <see langword="null"/> on every other leg - a build, a run, a
+    /// test stopped before its runner - and where the leg resolves no project. A count is compared only
+    /// with the others of the same project and <see cref="TestSet"/>, and one with no project with nothing.
+    /// </summary>
+    /// <remarks>
+    /// Recorded where the count is made, on the host that ran the leg, rather than looked up again
+    /// wherever a report is built, as <see cref="Emulated"/> is for the duration comparison: a report
+    /// composed from another host's <c>--json</c> has only the entries that arrived, and a host running
+    /// what it has staged may have run another test set than this machine's configuration now names.
+    /// </remarks>
+    public string? Project { get; init; }
+
+    /// <summary>
+    /// Which of <see cref="Project"/>'s test sets <see cref="TestCount"/> belongs to, as the test
+    /// invocation that produced it names it with <c>testSet</c>; <see langword="null"/> for the
+    /// project's own shared set.
+    /// </summary>
+    public string? TestSet { get; init; }
+
     /// <summary>Each phase, for the comparison that marks a slow one suspect.</summary>
     public IReadOnlyList<PhaseRecord> Phases { get; init; } = [];
 
@@ -172,7 +193,7 @@ public sealed class LegLedger(IHarnessOutput output, string commandName)
             _entries.Add(entry);
         }
 
-        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers, entry.DeveloperEnvironment);
+        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers, entry.DeveloperEnvironment, testCountNote: null);
 
         Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (said.Length > 0 ? $" ({said})" : string.Empty));
     }

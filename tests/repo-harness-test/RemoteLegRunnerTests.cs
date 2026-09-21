@@ -111,6 +111,32 @@ public sealed class RemoteLegRunnerTests
     }
 
     /// <summary>
+    /// The project and test set a host's count belongs to travel with the count, read from the very
+    /// document the host writes: the host ran what it had, and this machine compares the count with
+    /// its siblings as it was counted there, never as its own configuration would name it now.
+    /// </summary>
+    [Fact]
+    public async Task TheProjectAndTestSetAHostCountedFor_AreCarriedWithTheCount()
+    {
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, TestCount = 2238, Project = "app", TestSet = "windows" }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(2238, entry.TestCount);
+        Assert.Equal("app", entry.Project);
+        Assert.Equal("windows", entry.TestSet);
+    }
+
+    /// <summary>
     /// The compilers a host's build was configured with travel on the leg's line, read from the very
     /// document the host writes, and are named once on this machine's line - not once per machine
     /// the answer passed through.

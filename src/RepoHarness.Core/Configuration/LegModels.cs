@@ -162,8 +162,17 @@ public sealed class TestInvocation
 
     /// <summary>
     /// Pattern whose named group <c>total</c> captures how many tests ran. Legs running the same
-    /// tests are compared, and one that ran a different number is flagged: a platform that
-    /// quietly skips a group of tests passes on less evidence than its siblings.
+    /// tests - the same project, and the same <see cref="TestSet"/> - are compared, and one that ran
+    /// a different number is marked on its line: a platform that quietly skips a group of tests
+    /// passes on less evidence than its siblings.
     /// </summary>
     public string? CountPattern { get; init; }
+
+    /// <summary>
+    /// Which of the project's test sets this invocation runs, where its tests differ from the rest
+    /// on purpose - a platform's own tests, a sanitizer leg's subset. A leg's test count is compared
+    /// only with the other legs of its project naming the same set; left out, the leg runs the
+    /// project's shared set.
+    /// </summary>
+    public string? TestSet { get; init; }
 }

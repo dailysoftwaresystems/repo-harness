@@ -232,6 +232,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             CommandTime = TimeSpan.FromSeconds(entry.CommandSeconds),
             Emulated = leg.Emulated,
             TestCount = entry.TestCount,
+
+            // What the count belongs to, as the host counted it: the host ran what it had, which
+            // under --use-staged may name another test set than this machine's configuration now does.
+            Project = entry.Project,
+            TestSet = entry.TestSet,
             TimingNotes = [.. entry.TimingNotes ?? []],
 
             // The host ran the leg under a run of its own, whose records are there: named so the
@@ -267,5 +272,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         IReadOnlyList<string>? TimingNotes,
         IReadOnlyList<string>? SkippedSteps = null,
         IReadOnlyList<Build.CompilerFact>? Compilers = null,
-        DeveloperEnvironmentFact? DeveloperEnvironment = null);
+        DeveloperEnvironmentFact? DeveloperEnvironment = null,
+        string? Project = null,
+        string? TestSet = null);
 }

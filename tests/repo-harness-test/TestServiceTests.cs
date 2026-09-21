@@ -43,6 +43,34 @@ public sealed class TestServiceTests
         Assert.Equal(HarnessExit.Success, Verdicts.ExitCodeFor(result.Verdict.Verdict));
     }
 
+    /// <summary>
+    /// The count is recorded with what it belongs to - the leg's project, and the test set the
+    /// invocation that ran names for this platform - decided where the count was made, so the report
+    /// compares it only with the legs of the same suite.
+    /// </summary>
+    [Fact]
+    public async Task ACountIsRecordedWithItsProject_AndTheTestSetItsPlatformNames()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var request = Request(
+            temp,
+            Child("All 42 tests passed"),
+            countPattern: @"All (?<total>\d+) tests passed",
+            windows: new TestInvocation { TestSet = "windows" }) with
+        {
+            Project = new ProjectConfig { Name = "app", Type = "cmake" },
+        };
+
+        var result = await Service(factory).RunAsync(Config(), request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(42, result.Entry.TestCount);
+        Assert.Equal("app", result.Entry.Project);
+        Assert.Equal("windows", result.Entry.TestSet);
+    }
+
     [Fact]
     public async Task ASuiteThatExitedZeroWithNoMatch_IsUnwitnessed()
     {
@@ -364,7 +392,8 @@ public sealed class TestServiceTests
         string? successPattern = null,
         string? countPattern = null,
         string? filterArg = null,
-        string? excludeArg = null)
+        string? excludeArg = null,
+        TestInvocation? windows = null)
     {
         var all = new TestInvocation
         {
@@ -389,7 +418,7 @@ public sealed class TestServiceTests
                 Os = PlatformNames.Windows,
                 Processor = PlatformNames.X64,
                 Config = "release",
-                Test = new TestConfig { All = all },
+                Test = new TestConfig { All = all, Windows = windows },
             },
             PlatformKey = PlatformNames.Windows,
             Inputs = [Fixture],
