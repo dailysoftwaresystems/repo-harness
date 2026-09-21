@@ -55,12 +55,6 @@ internal static class TestCommand
         Description = "Test what is already built, without building first.",
     };
 
-    private static readonly Option<bool> HereOption = new(RemoteLegRunner.HereOption)
-    {
-        Description = "Run every selected leg on this machine rather than on the host it was placed on.",
-        Hidden = true,
-    };
-
     internal static Command Create()
     {
         var command = new Command(
@@ -75,7 +69,7 @@ internal static class TestCommand
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
         command.Options.Add(SkipBuildOption);
-        command.Options.Add(HereOption);
+        command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -102,13 +96,13 @@ internal static class TestCommand
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
-                        arguments.GetValue(HereOption),
+                        arguments.GetValue(DispatchOptions.Here),
                         RemoteArguments(arguments))
                     {
                         // Built first unless told not to, and tested either way.
                         Workload = new LegWorkload(Build: !skipBuild, Test: true, []),
                     },
-                    (work, token) => RunLegAsync(builds, tests, work, filter, excludes, skipBuild, token),
+                    (work, token) => RunLegAsync(builds, tests, context.Get<CMakeToolchainReader>(), work, filter, excludes, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);
         }, JsonOption));
@@ -163,6 +157,7 @@ internal static class TestCommand
     private static async Task<LegEntry> RunLegAsync(
         IBuildService builds,
         ITestService tests,
+        CMakeToolchainReader toolchains,
         LegWork work,
         string? filter,
         IReadOnlyList<string> excludes,
@@ -173,24 +168,17 @@ internal static class TestCommand
         var config = work.Context.Config;
         var started = Stopwatch.GetTimestamp();
 
+        // The compilers the binaries under test were built with: this build's, or - where the leg
+        // tests a build it does not make - what its directory was last configured with.
+        IReadOnlyList<CompilerFact> compilers;
+
         if (!skipBuild)
         {
             var build = await builds
-                .BuildAsync(
-                    config,
-                    new BuildRequest(
-                        leg.Name,
-                        leg.TreeRoot,
-                        leg.BuildableProject(),
-                        leg.Variant,
-                        leg.Host.Os ?? string.Empty,
-                        CoreCounts.Resolve(null, leg.HostSettings.BuildCores, config.Defaults.BuildCores).Value,
-                        work.RunDirectory)
-                    {
-                        ProgramDirectories = leg.Host.ProgramDirectories,
-                    },
-                    cancellationToken)
+                .BuildAsync(config, leg.BuildRequestFor(config, work.RunDirectory), cancellationToken)
                 .ConfigureAwait(false);
+
+            compilers = build.Compilers;
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
             {
@@ -201,6 +189,28 @@ internal static class TestCommand
                     Detail = build.Verdict.Detail,
                     Duration = Stopwatch.GetElapsedTime(started),
                     Emulated = leg.Emulated,
+                    Compilers = compilers,
+                };
+            }
+        }
+        else
+        {
+            // Held to the toolchain as the build that made the directory is: binaries a compiler nobody
+            // chose produced are no more tested than they would have been built, and a declared compiler
+            // nothing established is unwitnessed here as there.
+            var reading = toolchains.Configured(leg.Project, leg.BuildDirectory);
+            compilers = reading?.Compilers ?? [];
+
+            if (reading is not null && CompilerFacts.HeldTo(config, leg.Variant.Toolchain, reading) is { } held)
+            {
+                return new LegEntry
+                {
+                    Leg = leg.Name,
+                    Verdict = held.Verdict,
+                    Detail = held.Detail,
+                    Duration = Stopwatch.GetElapsedTime(started),
+                    Emulated = leg.Emulated,
+                    Compilers = compilers,
                 };
             }
         }
@@ -225,6 +235,7 @@ internal static class TestCommand
                     Product = testProduct,
                     ProductProblem = testProductProblem,
                     HostTestCores = leg.HostSettings.TestCores,
+                    HostEnvironment = leg.Environment,
                     Filter = filter,
                     Excludes = excludes,
                     Emulated = leg.Emulated,
@@ -235,6 +246,6 @@ internal static class TestCommand
 
         // The leg's whole duration, not the runner's: the build, the fingerprints and the sampling
         // are what the ledger reports as overhead, and leaving them out would hide them.
-        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started) };
+        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started), Compilers = compilers };
     }
 }

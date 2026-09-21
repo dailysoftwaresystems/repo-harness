@@ -24,10 +24,19 @@ configuration, that is a defect.
 
 ```bash
 DssHarness verify-git     # is git installed, and is this a repository?
-DssHarness init           # create .harness-config and seed config.json
+DssHarness init           # create .harness-config in this tree and seed config.json
 DssHarness legs           # where each leg can run, or why it cannot
 DssHarness help           # reference material: exit codes, config, legs, layout
 ```
+
+Every CMake configure is asked which compilers it resolved, and each leg's line names them —
+`compiler: MSVC 19.51.36231 (C, CXX)` — so every verdict says which compiler produced it; a
+toolchain's `compilerId` fails a leg CMake configured with another.
+
+`init`'s `msvc` toolchain names the `visualStudio` developer environment, so an MSVC leg builds from
+a plain shell: the host that runs it runs Visual Studio's own `vcvarsall.bat` for the leg's processor
+and starts every process of the leg in what it set, and the leg's line names the instance and tools
+it used. A host without Visual Studio's C++ build tools turns the leg away as a tool missing.
 
 `init` inspects the repository and seeds a configuration that already matches it —
 a CMake project gets toolchains and `ctest`, a .NET solution gets `dotnet test` — with
@@ -38,7 +47,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 
 | Command | Does |
 |---|---|
-| `init` | Create `.harness-config`, seed `config.json`, add ignore rules |
+| `init [--install-tools]` | Create `.harness-config` in the tree it runs in, a worktree's included, seed `config.json`, add ignore rules; installs tools only when asked |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
 | `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
@@ -53,11 +62,11 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `fix-line-endings [--all \| --changed]` | Apply the line-ending policy `.gitattributes` declares; `--check` refuses instead |
 | `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
-| `install-missing-tools [--legs a,b]` | Install or update what each configured leg's host is missing |
+| `install-missing-tools [--legs a,b] [--dry-run]` | Install or update what each configured leg's host is missing; `--dry-run` names each command and runs none |
 | `sync` | Put a host's copy of the repository in step with this tree, deletions included |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
 | `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
-| `run <runner> [--legs a,b] [--time]` | Run a predefined runner across the legs it declares |
+| `run <runner> [--legs a,b] [--time] [--input name=value]` | Run a predefined runner across the legs it declares, giving its action's inputs values for this run |
 | `host-exec --ssh <name> \| --wsl [<distro>] -- <command>` | Run a DssHarness command on an ssh host or in a WSL distribution |
 | `help [topic]` | Explain exit codes, configuration, legs, worktrees, anchors, layout, secrets, runners |
 
@@ -107,6 +116,11 @@ both x86_64 and arm64.
 enough that the code alone is not evidence. An entry is a path, or a mapping of platform to path
 where the platforms disagree about what the same target is called (`app` against `app.exe`), and
 an entry naming no path for a platform some leg builds on is refused when `config.json` is read.
+A test passes only where its runner printed its `successPattern`, and `countPattern` reads how
+many tests ran: a leg that ran a different number than the other legs of its project and
+`testSet` is marked on its own line, never as a timing and never changing its verdict. A set
+that differs on purpose, such as a platform's own tests, is named with `testSet` on that
+platform's test invocation.
 
 **Refuse early, with the arithmetic.** `create-worktree` will not create a worktree
 whose build paths cannot fit inside Windows' path limit, because that failure
@@ -153,7 +167,7 @@ its emulator - and is turned away there when that host lacks a program its comma
 {
   "hosts": {
     "wsl": { "Ubuntu": { "repositoryPath": "~/src/app" } },
-    "ssh": { "mac-mini": { "repositoryPath": "/Users/dev/src/app" } }
+    "ssh": { "mac-mini": { "repositoryPath": "/Users/dev/src/app", "env": { "CCACHE_DIR": "/Users/dev/.cache/app-ccache" } } }
   },
   "emulators": {
     "rosetta": {
@@ -175,6 +189,38 @@ DssHarness legs --legs linux-release,mac-x64-release
 DssHarness host-exec --ssh mac-mini -- verify-git
 ```
 
+A host's section can also give its own `buildCores` and `testCores`, and an `env` that every
+process a leg starts there sees - each build phase, the test runner, each step of a runner - as
+the lowest layer, beneath the variant's, the test invocation's and the runner's own. A `PATH`
+set there is where that host finds those programs, so none of them is required of it before a
+leg starts: each is the run's to find - except in a developer environment, whose `PATH`, built
+over the host's, is looked in before the leg starts.
+
+A toolchain can name a developer environment that its legs start in, declared once and set up on
+the host that runs each leg, over that host's `env` and beneath everything more specific:
+
+```json
+{
+  "developerEnvironments": { "visualStudio": { "kind": "visualStudio" } },
+  "toolchains": {
+    "msvc": { "platforms": ["windows"], "generator": "Ninja", "env": { "CC": "cl", "CXX": "cl" }, "developerEnvironment": "visualStudio" }
+  }
+}
+```
+
+Every host a leg might land on is asked, through Visual Studio's installer, whether it has an
+instance with `requiresComponent` - the C++ build tools unless another is named - and one without
+turns the leg away as a tool missing; one that could not look leaves it unavailable. On the host
+that runs the leg, the instance its survey found has its `vcvarsall.bat` run once for the leg's
+processor, cross-compiling where the host's differs, and what it set is what the leg's build, tests
+and runner steps start with. A `vcvarsall.bat` that fails, prints an `[ERROR`, or sets up another
+processor fails the leg before anything of it starts. The programs the leg starts are then looked
+for on the `PATH` it set up - Visual Studio carries `cl` and `link`, and CMake and Ninja with its
+CMake component - and one missing there skips the leg as a tool missing, named, before anything of
+it starts. The leg's line names the environment -
+`developer environment: visualStudio (Visual Studio 18.0.11205.157, MSVC 14.50.35717, amd64)` - and
+`--json` carries it as `developerEnvironment`.
+
 An ssh host's connection data lives in its own directory under `.harness-config/sshItems/`,
 which git ignores: an `.env` naming the address, the user and the port, a `.key`, and a
 `known_hosts`. `config.json` declares only the directory names, under `sshItems`, so the
@@ -195,7 +241,16 @@ written anywhere. A run with no terminal, a run answering with `--json`, and a r
 `--no-prompt` all refuse instead, naming what would fix it; running the harness as root needs no
 password at all, which is usually the answer in CI. An entry may name the platforms it
 is needed on — `"platforms": ["windows"]` — and a host whose platform it does not name is never
-asked about it, so a repository can declare both a Windows compiler and a POSIX one. `sync` creates the host's copy
+asked about it, so a repository can declare both a Windows compiler and a POSIX one. It may
+narrow that further, to `toolchains`, `legs`, `processors` and `emulators`, so `cl` scoped to
+`msvc` is never reported missing on a MinGW leg of the same machine. Each leg is told about a tool
+as it will find it: a leg whose toolchain names a developer environment, on the `PATH` that
+environment sets up for its processor - set up here for the look, so `cl` is found where Visual
+Studio keeps it - and every other leg on its host's own `PATH`. An install runs once on a host,
+whichever of its legs asked first, and each leg is then told what it finds. On another host, a
+tool its own `PATH` lacks is unknown for a leg in a developer environment, since this command
+sets one up only on the machine it runs on, and nothing is installed for it. `--dry-run` asks
+every host and installs nothing, naming each command that would run. `sync` creates the host's copy
 of the repository at its `repositoryPath` and keeps it in step, deletions included. An
 emulator counts only once its witness proves it runs programs for its processor.
 

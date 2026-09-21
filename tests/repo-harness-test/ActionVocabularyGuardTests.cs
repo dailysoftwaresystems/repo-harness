@@ -12,6 +12,24 @@ namespace RepoHarness.Tests;
 public sealed class ActionVocabularyGuardTests
 {
     /// <summary>
+    /// A setting that owns its own names is filled in by the same grammar as every other: a doubled
+    /// brace is a literal one, a shell's own ${...} is left alone, and a name it does not own - a
+    /// leg's among them - is refused rather than reaching the program as its own text.
+    /// </summary>
+    [Fact]
+    public void ASettingsOwnNames_AreFilledByTheOneGrammar_AndNothingElseIs()
+    {
+        var names = new Dictionary<string, string> { ["pid"] = "42" };
+
+        Assert.Equal("-w 42 {pid} ${HOME}", LegPathNames.Fill("-w {pid} {{pid}} ${HOME}", names, "keepAwake"));
+
+        var refusal = Assert.Throws<HarnessException>(() => LegPathNames.Fill("{buildDir}", names, "keepAwake"));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("keepAwake names '{buildDir}', which nothing fills in: it can hold only {pid}", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every action already owns a 'build' and an 'artifacts' directory, at whatever depth it is
     /// grouped. A directory of either name under 'actions' would be one of those and an action at
     /// once, and the two rules written for the names would both then be wrong about it: the walk

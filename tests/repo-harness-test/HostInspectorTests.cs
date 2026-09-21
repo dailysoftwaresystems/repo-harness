@@ -41,6 +41,26 @@ public sealed class HostInspectorTests
         Assert.Empty(fixture.Commands.Calls);
     }
 
+    /// <summary>
+    /// This machine is asked about developer environments in process too, and says whether it can set
+    /// each one up: this one runs Linux, where Visual Studio never does.
+    /// </summary>
+    [Fact]
+    public async Task Local_SaysWhichDeveloperEnvironmentsItCanSetUp()
+    {
+        using var fixture = new Fixture(PlatformId.Linux);
+
+        var report = await fixture.InspectAsync(
+            HostId.Local,
+            environments: new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["vs"] = new() { Kind = DeveloperEnvironmentKinds.VisualStudio },
+            });
+
+        Assert.Equal("Visual Studio is set up on windows, and this host runs linux", report.DeveloperEnvironments["VS"].Reason);
+        Assert.Empty(fixture.Commands.Calls);
+    }
+
     [Fact]
     public async Task Wsl_IsUnavailable_OnAMachineThatIsNotWindows()
     {
@@ -468,6 +488,44 @@ public sealed class HostInspectorTests
         Assert.True(report.Emulators["QEMU-ARM64"].Available);
     }
 
+    /// <summary>
+    /// The developer environments a host is asked about travel to it, what it found comes back under
+    /// the names they were asked by, and each one gives the host the time vswhere may take to answer.
+    /// </summary>
+    [Fact]
+    public async Task DeveloperEnvironmentsTravelToTheHost_AndWhatItFoundComesBack()
+    {
+        var environments = new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["vs"] = new() { Kind = DeveloperEnvironmentKinds.VisualStudio, RequiresComponent = "Microsoft.VisualStudio.Component.VC.Tools.ARM64" },
+        };
+        var budgets = new List<TimeSpan?>();
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        {
+            var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
+            budgets.Add(command.Timeout);
+
+            var checks = request!.DeveloperEnvironments.ToDictionary(
+                pair => pair.Key,
+                pair => DeveloperEnvironmentCheck.Nowhere($"no Visual Studio instance there has the component '{pair.Value.RequiresComponent}'"),
+                StringComparer.OrdinalIgnoreCase);
+
+            return HostResults.Ok(JsonSerializer.Serialize(
+                new HostAgentInfo { Version = Root.Version, AssemblySha256 = Root.AssemblySha256, Os = "linux", Processor = "x86_64", DeveloperEnvironments = checks },
+                HostAgentProtocol.JsonOptions));
+        }));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro), environments: environments);
+        await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(
+            "no Visual Studio instance there has the component 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'",
+            report.DeveloperEnvironments["VS"].Reason);
+        Assert.Equal(DeveloperEnvironmentProbe.ProbeBudget, budgets[0] - budgets[1]);
+    }
+
     [Fact]
     public async Task AnInstallThatFails_SaysAHostRunsOnlyPublishedVersions()
     {
@@ -768,6 +826,7 @@ public sealed class HostInspectorTests
                 platform,
                 identity,
                 new EmulatorProbe(platform, processRunner, fileSystem),
+                new DeveloperEnvironmentProbe(platform, processRunner),
                 fileSystem,
                 new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
@@ -787,11 +846,13 @@ public sealed class HostInspectorTests
         public Task<HostReport> InspectAsync(
             HostId host,
             IReadOnlyDictionary<string, EmulatorConfig>? emulators = null,
-            IReadOnlyList<string>? programs = null)
+            IReadOnlyList<string>? programs = null,
+            IReadOnlyDictionary<string, DeveloperEnvironmentConfig>? environments = null)
             => _inspector.InspectAsync(
                 _context,
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
+                environments ?? new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
                 programs ?? [],
                 TestContext.Current.CancellationToken);
 

@@ -585,54 +585,18 @@ public sealed class AnchorRegistryServiceTests
         => AnchorRegistryDocument.Parse(File.ReadAllText(path), new AnchorIdRules("D", 3)).Rows;
 
     /// <summary>A file system that fails one atomic write, as a crash between the two writes of a move would.</summary>
-    private sealed class FailingWriteFileSystem(IFileSystem inner, int failOnWrite) : IFileSystem
+    private sealed class FailingWriteFileSystem(IFileSystem inner, int failOnWrite) : PassThroughFileSystem(inner)
     {
         private int _writes;
 
-        public bool FileExists(string path) => inner.FileExists(path);
-
-        public bool DirectoryExists(string path) => inner.DirectoryExists(path);
-
-        public void CreateDirectory(string path) => inner.CreateDirectory(path);
-
-        public void DeleteFile(string path) => inner.DeleteFile(path);
-
-        public string ResolveLinks(string path) => inner.ResolveLinks(path);
-
-
-        public Stream OpenRead(string path) => inner.OpenRead(path);
-
-        public DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
-
-
-        public Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
-
-            => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
-
-        public string CopyToTemporaryFile(string path) => inner.CopyToTemporaryFile(path);
-        public void CopyFile(string source, string destination, bool overwrite = false)
-            => inner.CopyFile(source, destination, overwrite);
-
-        public void DeleteDirectory(string path) => inner.DeleteDirectory(path);
-
-        public IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
-
-        public IEnumerable<string> EnumerateDirectoryLinks(string path) => inner.EnumerateDirectoryLinks(path);
-
-        public IEnumerable<string> EnumerateDirectories(string path) => inner.EnumerateDirectories(path);
-
-        public string ReadAllText(string path) => inner.ReadAllText(path);
-
-        public void ProtectSecretFile(string path) => inner.ProtectSecretFile(path);
-
-        public void WriteAllTextAtomic(string path, string contents)
+        public override void WriteAllTextAtomic(string path, string contents)
         {
             if (Interlocked.Increment(ref _writes) == failOnWrite)
             {
                 throw new IOException("Simulated failure on the second write of a move.");
             }
 
-            inner.WriteAllTextAtomic(path, contents);
+            base.WriteAllTextAtomic(path, contents);
         }
     }
 }

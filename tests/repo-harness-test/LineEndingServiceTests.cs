@@ -126,6 +126,93 @@ public sealed class LineEndingServiceTests
         Assert.Equal("three\nfour\n", Read(temp, "declared.txt"));
     }
 
+    /// <summary>
+    /// A file the policy reaches whose name is not UTF-8 refuses the run, naming it: read as UTF-8, its
+    /// name became another, which the disk did not have, and the file was passed over without a word.
+    /// Excluded, it is no concern of the run - but 'generated' then a stray byte is not under
+    /// 'generated', where a quoted escape's backslash put it, excluding it unread.
+    /// </summary>
+    [Fact]
+    public async Task ANameThatIsNotUtf8_IsRefused_UnlessExcluded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, new LineEndingSettings { Exclude = ["generated"] });
+        var check = new LineEndingRequest(LineEndingScope.All, CheckOnly: true);
+
+        await harness.StageAsync(temp.Path, "\"generated/caf\\351.txt\"", "one\r\ntwo\r\n", cancellationToken);
+
+        Assert.Equal(
+            ["declared.txt", "declared.win"],
+            (await Service(harness).ApplyAsync(temp.Path, check, cancellationToken)).Changed.Select(change => change.Path).Order(StringComparer.Ordinal));
+
+        await harness.StageAsync(temp.Path, "\"generated\\240old/caf.txt\"", "one\r\ntwo\r\n", cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(harness).ApplyAsync(temp.Path, check, cancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains(@"'generated\240old/caf.txt' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two names that read alike are two files: one holding U+FFFD of its own, and one whose stray
+    /// byte reads as U+FFFD. Taken for one, the second - listed after the first - went unchecked and
+    /// unrefused.
+    /// </summary>
+    [Theory]
+    [InlineData(LineEndingScope.All)]
+    [InlineData(LineEndingScope.Changed)]
+    public async Task TwoNamesThatReadAlike_AreTwoFiles(LineEndingScope scope)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+
+        await harness.StageAsync(temp.Path, "\"caf\\357\\277\\275.txt\"", "one\r\ntwo\r\n", cancellationToken);
+        await harness.StageAsync(temp.Path, "\"caf\\377.txt\"", "one\r\ntwo\r\n", cancellationToken);
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(harness).ApplyAsync(
+            temp.Path,
+            new LineEndingRequest(scope, CheckOnly: true),
+            cancellationToken));
+
+        Assert.Contains(@"'caf\377.txt' is not named in UTF-8", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A file in conflict is one file: git lists it once for each side of the conflict, and each
+    /// listing was checked, and reported, as a file of its own.
+    /// </summary>
+    [Fact]
+    public async Task AFileInConflict_IsOneFile()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.CommitAllAsync(temp.Path, "fixtures", cancellationToken);
+
+        await harness.RunGitAsync(temp.Path, ["checkout", "--quiet", "-b", "side"], cancellationToken);
+        Write(temp, "declared.txt", "side\n");
+        await harness.CommitAllAsync(temp.Path, "side", cancellationToken);
+        await harness.RunGitAsync(temp.Path, ["checkout", "--quiet", "-"], cancellationToken);
+        Write(temp, "declared.txt", "main\n");
+        await harness.CommitAllAsync(temp.Path, "main", cancellationToken);
+
+        var merge = await harness.GitClient.RunAsync(temp.Path, ["merge", "--quiet", "side"], cancellationToken: cancellationToken);
+        Assert.False(merge.Succeeded, "the merge was to leave declared.txt in conflict");
+
+        // Resolved in the editor with the wrong line endings, and not yet added.
+        Write(temp, "declared.txt", "main\r\nside\r\n");
+
+        var report = await Service(harness).ApplyAsync(
+            temp.Path,
+            new LineEndingRequest(LineEndingScope.All, CheckOnly: true),
+            cancellationToken);
+
+        Assert.Equal("declared.txt", Assert.Single(report.Changed, change => change.Path == "declared.txt").Path);
+    }
+
     private static LineEndingService Service(HarnessFactory harness)
         => new(harness.ContextLoader, harness.GitClient, harness.FileSystem);
 

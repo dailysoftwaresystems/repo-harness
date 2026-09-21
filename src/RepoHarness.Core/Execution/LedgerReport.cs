@@ -35,7 +35,42 @@ public sealed record LedgerLine(
     TimeSpan CommandTime,
     TimeSpan Overhead,
     int? TestCount,
-    IReadOnlyList<TimingMark> Timings);
+    IReadOnlyList<TimingMark> Timings)
+{
+    /// <summary>
+    /// Where the leg's records are when another host ran it, or <see langword="null"/> when they are
+    /// in this run's own directory.
+    /// </summary>
+    public string? RunDirectory { get; init; }
+
+    /// <summary>The steps the leg's operating system does not run, by name.</summary>
+    public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
+    /// <summary>The compilers CMake configured the leg's build with.</summary>
+    public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
+
+    /// <summary>The developer environment the leg's processes started in, where it was set up.</summary>
+    public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
+
+    /// <summary>
+    /// The project whose tests the leg counted, as the test that reached its runner recorded it;
+    /// <see langword="null"/> where no test counted any, or the leg resolves no project.
+    /// </summary>
+    public string? Project { get; init; }
+
+    /// <summary>Which of <see cref="Project"/>'s test sets the count belongs to; <see langword="null"/> for its shared set.</summary>
+    public string? TestSet { get; init; }
+
+    /// <summary>
+    /// Why the leg's test count stands apart from the others of its project and test set - how many it
+    /// ran, and how many the rest ran - or <see langword="null"/> where it does not. Never part of the
+    /// verdict, and never a timing mark: a count says nothing about the clock.
+    /// </summary>
+    public string? TestCountNote { get; init; }
+
+    /// <summary>Whether the leg's test count stands apart from the others of its project and test set.</summary>
+    public bool TestCountDiffers => TestCountNote is not null;
+}
 
 /// <summary>
 /// The per-leg ledger a run ends with: the table a reader sees, and the same facts as data.
@@ -179,13 +214,14 @@ public sealed class LedgerReport
     /// fail" are separate questions, and folding them into one boolean made a run where all eight
     /// legs ran and two failed report as incomplete — which reads as a run that did not finish,
     /// when it finished and found bugs. Interruption is not visible from the rows at all, so the
-    /// caller that can see it supplies it to <see cref="ExitCodeGiven"/> and <see cref="ToJson(bool, IReadOnlyList{string})"/>.
+    /// caller that can see it supplies it to <see cref="ExitCodeGiven"/> and <see cref="ToJson(bool, IReadOnlyList{string}, string)"/>.
     /// </remarks>
     public bool Complete => WithoutVerdict.Count == 0;
 
     /// <summary>
     /// Builds the report, marking a phase that took more than
-    /// <paramref name="durationWarningFactor"/> times what its siblings took.
+    /// <paramref name="durationWarningFactor"/> times what its siblings took, and a test count that
+    /// stands apart from its siblings'.
     /// </summary>
     /// <param name="entries">Each leg's line.</param>
     /// <param name="durationWarningFactor">The factor; zero or less disables the mark.</param>
@@ -200,10 +236,11 @@ public sealed class LedgerReport
         [
             .. entries.Select(entry =>
             {
+                // A count that stands apart is its own note, never a timing one: a Windows-only test
+                // made a Windows leg's timings read as suspect, which says nothing about its clock.
                 var notes = entry.TimingNotes
                     .Concat(entry.Phases.Where(phase => phase.ClockStepped).Select(phase => $"the clock stepped during {phase.Phase}"))
                     .Concat(suspect.TryGetValue(entry.Leg, out var slow) ? slow : [])
-                    .Concat(counts.TryGetValue(entry.Leg, out var counted) ? [counted] : Array.Empty<string>())
                     .Distinct(StringComparer.Ordinal)
                     .ToList();
 
@@ -217,7 +254,16 @@ public sealed class LedgerReport
                     entry.CommandTime,
                     entry.Overhead,
                     entry.TestCount,
-                    entry.Timings);
+                    entry.Timings)
+                {
+                    RunDirectory = entry.RunDirectory,
+                    SkippedSteps = entry.SkippedSteps,
+                    Compilers = entry.Compilers,
+                    DeveloperEnvironment = entry.DeveloperEnvironment,
+                    Project = entry.Project,
+                    TestSet = entry.TestSet,
+                    TestCountNote = counts.GetValueOrDefault(entry.Leg),
+                };
             }),
         ]);
     }
@@ -270,7 +316,7 @@ public sealed class LedgerReport
             line.Leg,
             Verdicts.Display(line.Verdict),
             FormatDuration(line.Duration),
-            Marked(line.Detail, line.TimingNotes),
+            Marked(line.Detail, line.TimingNotes, line.Compilers, line.DeveloperEnvironment, line.TestCountNote),
             leg,
             verdict,
             duration)));
@@ -325,8 +371,12 @@ public sealed class LedgerReport
     /// </remarks>
     /// <param name="cancelled">Whether the run was interrupted before it finished.</param>
     /// <param name="unfinished">The legs that were still running when it stopped.</param>
-    public string ToJson(bool cancelled, IReadOnlyList<string> unfinished)
-        => Json(ExitCodeGiven(cancelled, unfinished), Summarize(cancelled, unfinished), cancelled, unfinished, stopped: false);
+    /// <param name="runDirectory">
+    /// Where this run keeps its records, so a caller reading the document never has to work it out;
+    /// <see langword="null"/> for a command that keeps none.
+    /// </param>
+    public string ToJson(bool cancelled, IReadOnlyList<string> unfinished, string? runDirectory = null)
+        => Json(ExitCodeGiven(cancelled, unfinished), Summarize(cancelled, unfinished), cancelled, unfinished, stopped: false, runDirectory);
 
     /// <summary>
     /// The ledger as data for a run something other than its legs ended - a refusal of the whole run,
@@ -335,6 +385,10 @@ public sealed class LedgerReport
     /// </summary>
     /// <param name="exitCode">What the process exits with.</param>
     /// <param name="stoppedBecause">The line the command ends on.</param>
+    /// <param name="runDirectory">
+    /// Where the run keeps its records, when it got as far as having a directory; otherwise
+    /// <see langword="null"/>.
+    /// </param>
     /// <remarks>
     /// Whatever ended the run, a reader who asked for data is answered with data: the machine that
     /// dispatched a leg reads a host's standard output as this document, and text there - a table, a
@@ -343,11 +397,11 @@ public sealed class LedgerReport
     /// the run itself: it neither passed nor completed, and reached no verdict of its own. An
     /// interruption is said as one, from the code it ends with, so a script never reads it as red.
     /// </remarks>
-    public string ToJson(int exitCode, string stoppedBecause)
+    public string ToJson(int exitCode, string stoppedBecause, string? runDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(stoppedBecause);
 
-        return Json(exitCode, stoppedBecause, cancelled: exitCode == HarnessExit.Cancelled, [], stopped: true);
+        return Json(exitCode, stoppedBecause, cancelled: exitCode == HarnessExit.Cancelled, [], stopped: true, runDirectory);
     }
 
     /// <summary>
@@ -360,7 +414,7 @@ public sealed class LedgerReport
     public static string Stopped(int exitCode, string stoppedBecause)
         => From([], new HarnessDefaults().DurationWarningFactor).ToJson(exitCode, stoppedBecause);
 
-    private string Json(int exitCode, string summary, bool cancelled, IReadOnlyList<string> unfinished, bool stopped) => JsonSerializer.Serialize(
+    private string Json(int exitCode, string summary, bool cancelled, IReadOnlyList<string> unfinished, bool stopped, string? runDirectory) => JsonSerializer.Serialize(
         new
         {
             Verdict = stopped ? null : Verdicts.Display(Verdict),
@@ -369,6 +423,10 @@ public sealed class LedgerReport
             // The line the command ends on, beside the code it exits with, so a script reading the
             // document has what a reader of the terminal has.
             Summary = summary,
+
+            // Where the records are, as the text form's 'logs:' line says: a caller is told rather
+            // than left to work out which tree a run wrote into.
+            RunDirectory = runDirectory,
             Passed = !stopped && !cancelled && Passed,
             Cancelled = cancelled,
             Unfinished = unfinished,
@@ -390,6 +448,27 @@ public sealed class LedgerReport
                 line.TimingsSuspect,
                 TimingNotes = line.TimingNotes,
                 line.TestCount,
+
+                // What the count belongs to, carried from where it was made, so a ledger read back
+                // from another host groups it as it was counted; and whether it stands apart.
+                line.Project,
+                line.TestSet,
+                line.TestCountDiffers,
+                line.TestCountNote,
+
+                // Only for a leg another host ran, whose records are in that host's own run.
+                line.RunDirectory,
+
+                // Only where a step was left out for the leg's operating system.
+                SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
+
+                // Only where CMake named the compilers it configured the leg's build with.
+                Compilers = line.Compilers.Count > 0
+                    ? line.Compilers.Select(compiler => new { compiler.Language, compiler.Id, compiler.Version })
+                    : null,
+
+                // Only where the leg's toolchain names a developer environment and it was set up.
+                line.DeveloperEnvironment,
                 Timings = line.Timings.Select(timing => new
                 {
                     timing.Phase,
@@ -401,7 +480,8 @@ public sealed class LedgerReport
         JsonOptions);
 
     /// <summary>
-    /// Which legs ran a different number of tests from the rest, and what the rest ran.
+    /// Which legs ran a different number of tests from the rest of their project and test set, and
+    /// what the rest ran.
     /// </summary>
     /// <remarks>
     /// Legs running the same suite are meant to run the same tests. A leg that reports three where
@@ -409,36 +489,49 @@ public sealed class LedgerReport
     /// neither of those can see the difference — a filter that matched almost nothing, a discovery
     /// step that failed quietly, a test project excluded by a stale glob. The count is the only
     /// thing in the ledger that can, so a leg disagreeing with the others is marked.
-    /// Compared only where at least three legs reported a count: with two, "which one is wrong" has
-    /// no answer, and marking both says nothing a reader can act on. Emulated legs are compared with
-    /// the rest here, because a count does not depend on how fast the machine is.
+    /// <para>
+    /// The same suite is the same project and the same test set: a leg testing another project runs
+    /// another suite, and so does one whose test settings name a set of its own - a platform's own
+    /// tests, a sanitizer leg's subset - where a count that differs is expected. A leg that resolves no
+    /// project is compared with nothing. Within one, compared only where at least three legs reported a
+    /// count: with two, "which one is wrong" has no answer, and marking both says nothing a reader can
+    /// act on. Emulated legs are compared with the rest here, because a count does not depend on how
+    /// fast the machine is.
+    /// </para>
     /// </remarks>
     private static Dictionary<string, string> CompareCounts(IReadOnlyList<LegEntry> entries)
     {
         var marks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        var counted = entries
-            .Where(entry => entry.TestCount is not null && !Verdicts.IsFailure(entry.Verdict))
-            .ToList();
+        // One project at a time, and one test set within it, each named as configuration keys are.
+        var suites = entries
+            .Where(entry => entry.TestCount is not null && entry.Project is not null && !Verdicts.IsFailure(entry.Verdict))
+            .GroupBy(entry => entry.Project, StringComparer.OrdinalIgnoreCase)
+            .SelectMany(project => project.GroupBy(entry => entry.TestSet, StringComparer.OrdinalIgnoreCase));
 
-        if (counted.Count < 3)
+        foreach (var suite in suites)
         {
-            return marks;
-        }
+            var counted = suite.ToList();
 
-        var agreed = counted
-            .GroupBy(entry => entry.TestCount!.Value)
-            .OrderByDescending(group => group.Count())
-            .First();
+            if (counted.Count < 3)
+            {
+                continue;
+            }
 
-        if (agreed.Count() == counted.Count)
-        {
-            return marks;
-        }
+            var agreed = counted
+                .GroupBy(entry => entry.TestCount!.Value)
+                .OrderByDescending(group => group.Count())
+                .First();
 
-        foreach (var entry in counted.Where(entry => entry.TestCount != agreed.Key))
-        {
-            marks[entry.Leg] = $"it ran {entry.TestCount} test(s), where {agreed.Count()} other leg(s) ran {agreed.Key}";
+            if (agreed.Count() == counted.Count)
+            {
+                continue;
+            }
+
+            foreach (var entry in counted.Where(entry => entry.TestCount != agreed.Key))
+            {
+                marks[entry.Leg] = $"it ran {entry.TestCount} test(s), where {agreed.Count()} other leg(s) ran {agreed.Key}";
+            }
         }
 
         return marks;
@@ -458,9 +551,11 @@ public sealed class LedgerReport
             return marks;
         }
 
+        // One kind at a time, and one phase within it, named as configuration keys are.
         var groups = entries
             .SelectMany(entry => entry.Phases.Select(phase => (entry.Leg, entry.Emulated, Phase: phase)))
-            .GroupBy(item => (item.Phase.Phase, item.Emulated), StringTuple);
+            .GroupBy(item => item.Emulated)
+            .SelectMany(kind => kind.GroupBy(item => item.Phase.Phase, StringComparer.OrdinalIgnoreCase));
 
         foreach (var group in groups)
         {
@@ -535,20 +630,53 @@ public sealed class LedgerReport
             : entry.Detail;
 
     /// <summary>
-    /// <paramref name="detail"/> with the timing mark, for the table that shows one line per leg.
+    /// <paramref name="detail"/> with the compilers the leg built with, the developer environment it
+    /// started in, a test count that stands apart and the timing mark, for a line that shows one leg.
     /// </summary>
     /// <param name="detail">What the leg said.</param>
     /// <param name="notes">Why its timings are suspect, if they are.</param>
-    internal static string Marked(string detail, IReadOnlyList<string> notes)
+    /// <param name="compilers">The compilers CMake configured its build with.</param>
+    /// <param name="developerEnvironment">The developer environment its processes started in, if one was set up.</param>
+    /// <param name="testCountNote">Why its test count stands apart from its siblings', if it does.</param>
+    /// <remarks>
+    /// Composed here, from fields that travel beside the detail rather than inside it, so a ledger a
+    /// host reported and this machine reports again names each once.
+    /// </remarks>
+    internal static string Marked(
+        string detail,
+        IReadOnlyList<string> notes,
+        IReadOnlyList<Build.CompilerFact> compilers,
+        Hosts.DeveloperEnvironmentFact? developerEnvironment,
+        string? testCountNote)
     {
-        if (notes.Count == 0)
+        var parts = new List<string>();
+
+        if (detail.Length > 0)
         {
-            return detail;
+            parts.Add(detail);
         }
 
-        var mark = "timings suspect: " + string.Join("; ", notes);
+        if (Build.CompilerFacts.Describe(compilers) is { } compiler)
+        {
+            parts.Add(compiler);
+        }
 
-        return detail.Length == 0 ? mark : detail + "; " + mark;
+        if (developerEnvironment is not null)
+        {
+            parts.Add(developerEnvironment.Describe());
+        }
+
+        if (testCountNote is { Length: > 0 })
+        {
+            parts.Add("test count differs: " + testCountNote);
+        }
+
+        if (notes.Count > 0)
+        {
+            parts.Add("timings suspect: " + string.Join("; ", notes));
+        }
+
+        return string.Join("; ", parts);
     }
 
     private static int Width(string heading, IEnumerable<string> values)
@@ -558,17 +686,4 @@ public sealed class LedgerReport
         => (leg.PadRight(legWidth) + "  " + verdict.PadRight(verdictWidth) + "  " + duration.PadLeft(durationWidth) + "  " + detail).TrimEnd();
 
     private static double Seconds(TimeSpan duration) => Math.Round(duration.TotalSeconds, 3);
-
-    /// <summary>Groups phases by name and kind, comparing the name as configuration keys compare.</summary>
-    private static IEqualityComparer<(string Phase, bool Emulated)> StringTuple { get; } = new PhaseKindComparer();
-
-    private sealed class PhaseKindComparer : IEqualityComparer<(string Phase, bool Emulated)>
-    {
-        public bool Equals((string Phase, bool Emulated) first, (string Phase, bool Emulated) second)
-            => first.Emulated == second.Emulated
-                && string.Equals(first.Phase, second.Phase, StringComparison.OrdinalIgnoreCase);
-
-        public int GetHashCode((string Phase, bool Emulated) value)
-            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(value.Phase), value.Emulated);
-    }
 }

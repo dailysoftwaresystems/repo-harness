@@ -76,7 +76,11 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// <param name="selected">The leg being placed.</param>
     /// <param name="workload">What the command has the leg do, which says what its host must have.</param>
     /// <param name="reports">What measurement found, by host.</param>
-    /// <param name="here">Whether this machine is the only candidate, whatever the leg names.</param>
+    /// <param name="here">
+    /// The host this machine is to the machine that dispatched the leg here, which makes this machine
+    /// the only candidate and names the settings it is judged by; <see langword="null"/> where this
+    /// machine places the leg itself.
+    /// </param>
     /// <remarks>
     /// A program never chooses the host. Chosen by what each command starts, a leg went to one machine
     /// for its build and another for its tests, and a run on what a sync had staged went to a host the
@@ -100,7 +104,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         SelectedLeg selected,
         LegWorkload workload,
         IReadOnlyDictionary<HostId, HostReport> reports,
-        bool here = false)
+        HostId? here = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(selected);
@@ -109,14 +113,14 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
 
         var reasons = new List<string>();
 
-        foreach (var candidate in Candidates(config, selected.Leg, here))
+        foreach (var candidate in Candidates(config, selected.Leg, here is not null))
         {
             if (!reports.TryGetValue(candidate, out var report))
             {
                 continue;
             }
 
-            var at = here ? string.Empty : $"{candidate}: ";
+            var at = here is null ? $"{candidate}: " : string.Empty;
 
             if (PlatformObstacle(selected.Leg, report) is { } passedOver)
             {
@@ -124,8 +128,16 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 continue;
             }
 
-            return MissingPrograms(LegPrograms.For(config, selected.Leg, workload), report) is { } refused
-                ? new LegPlacement(selected, null, at + refused.Reason) { Verdict = refused.Verdict }
+            // What the host declares for itself says what it must have - a PATH it sets is where the
+            // leg's programs are found - read under the name the reader knows the host by, as the run
+            // reads it.
+            var settings = config.Hosts.SettingsFor(here ?? candidate);
+
+            var refused = MissingDeveloperEnvironment(LegPrograms.DeveloperEnvironmentOf(config, selected.Leg, workload), report)
+                ?? MissingPrograms(LegPrograms.For(config, selected.Leg, workload, settings), report);
+
+            return refused is { } missing
+                ? new LegPlacement(selected, null, at + missing.Reason) { Verdict = missing.Verdict }
                 : new LegPlacement(selected, report, null);
         }
 
@@ -171,6 +183,43 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     }
 
     /// <summary>
+    /// Why the developer environment <paramref name="name"/> cannot be set up on <paramref name="host"/>,
+    /// said as one reason with what a run records for it, or <see langword="null"/> where it can, or the
+    /// leg needs none.
+    /// </summary>
+    /// <remarks>
+    /// Its own check rather than one of the programs: it is found by Visual Studio's installer, not on
+    /// a PATH, and what it would put on the PATH is exactly what no survey can see beforehand. The three
+    /// facts a program's check keeps apart are kept apart here: not there is a tool missing; not known,
+    /// the host having failed to look, is no claim that it is missing; and never asked is a defect in
+    /// this tool, since a host is asked about every environment a leg it might run starts in.
+    /// </remarks>
+    private static (string Reason, LegVerdict Verdict)? MissingDeveloperEnvironment(string? name, HostReport host)
+    {
+        if (name is null)
+        {
+            return null;
+        }
+
+        if (!host.DeveloperEnvironments.TryGetValue(name, out var check))
+        {
+            return (
+                $"whether developer environment '{name}' can be set up there was never asked, which is a defect in this "
+                + "tool: a host is asked about every developer environment a leg starts in",
+                LegVerdict.Poisoned);
+        }
+
+        if (check.CanSetUp)
+        {
+            return null;
+        }
+
+        return check.Found == DeveloperEnvironmentFound.Nowhere
+            ? ($"developer environment '{name}' cannot be set up there: {check.Reason}", LegVerdict.SkippedToolMissing)
+            : ($"whether developer environment '{name}' can be set up there could not be established: {check.Reason ?? "the host named no instance"}", LegVerdict.SkippedUnavailable);
+    }
+
+    /// <summary>
     /// The programs of <paramref name="programs"/> that <paramref name="host"/> is not known to have,
     /// said as one reason with what a run records for it, or <see langword="null"/> when it has them all.
     /// </summary>
@@ -183,15 +232,35 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
     /// and found nothing, nor as one that found it.
     /// </remarks>
     private static (string Reason, LegVerdict Verdict)? MissingPrograms(IReadOnlyList<string> programs, HostReport host)
+        => MissingPrograms(programs, program => host.Programs.GetValueOrDefault(program), "the PATH a command run there sees");
+
+    /// <summary>
+    /// The programs of <paramref name="programs"/> that <paramref name="located"/> does not find, said
+    /// as one reason with what a run records for it, or <see langword="null"/> when it finds them all.
+    /// </summary>
+    /// <param name="programs">The programs to find.</param>
+    /// <param name="located">Where each program is, or <see langword="null"/> where nothing was ever asked about it.</param>
+    /// <param name="path">The PATH they were looked for on, as a refusal names it.</param>
+    /// <remarks>
+    /// One reading for every look: a host's survey, and a leg checking the PATH its developer
+    /// environment set up before anything of it starts. See the overload above for the three facts it
+    /// keeps apart.
+    /// </remarks>
+    internal static (string Reason, LegVerdict Verdict)? MissingPrograms(
+        IReadOnlyList<string> programs,
+        Func<string, ProgramLocation?> located,
+        string path)
     {
         var absent = new List<string>();
         var nothingAt = new List<string>();
-        var unknown = new List<string>();
+        var unknown = new List<ProgramLocation>();
         var unasked = new List<string>();
 
         foreach (var program in programs)
         {
-            switch (host.Programs.GetValueOrDefault(program)?.Found)
+            var location = located(program);
+
+            switch (location?.Found)
             {
                 case ProgramFound.OnPath or ProgramFound.OffPath:
                     break;
@@ -199,7 +268,7 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                     (ProcessRunner.IsPath(program) ? nothingAt : absent).Add(program);
                     break;
                 case ProgramFound.Unreadable:
-                    unknown.Add(program);
+                    unknown.Add(location);
                     break;
                 default:
                     unasked.Add(program);
@@ -212,8 +281,8 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
         if (absent.Count > 0)
         {
             said.Add(
-                $"{Quoted(absent)} {(absent.Count == 1 ? "is" : "are")} not installed there: neither on the PATH a "
-                + "command run there sees nor in any directory searched for programs; install "
+                $"{Quoted(absent)} {(absent.Count == 1 ? "is" : "are")} not installed there: neither on {path} "
+                + "nor in any directory searched for programs; install "
                 + $"{(absent.Count == 1 ? "it" : "them")}, or name the directory under toolSearchDirectories");
         }
 
@@ -226,9 +295,9 @@ public sealed record LegPlacement(SelectedLeg Leg, HostReport? Host, string? Rea
                 + "at that path, or name the program where it is");
         }
 
-        foreach (var program in unknown)
+        foreach (var location in unknown)
         {
-            said.Add(host.Programs[program].Unestablished());
+            said.Add(location.Unestablished());
         }
 
         if (unasked.Count > 0)

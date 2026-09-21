@@ -17,6 +17,9 @@ namespace RepoHarness.Tests;
 /// </summary>
 public sealed class ToolResolutionTests
 {
+    /// <summary>What a host with no section of its own declares: nothing.</summary>
+    private static readonly HostSettings NoSettings = new LocalHostConfig();
+
     /// <summary>
     /// A platform's own list replaces the built-in one, and only when it has something in it.
     /// Declared but empty would otherwise mean "search nowhere", which turns every program off the
@@ -249,12 +252,12 @@ public sealed class ToolResolutionTests
     {
         var config = Configured(generator: "Ninja", cc: "gcc -m32", cxx: "g++");
 
-        Assert.Equal(["cmake", "ninja", "gcc", "g++", "ctest"], LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.Equal(["cmake", "ninja", "gcc", "g++", "ctest"], LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
 
         // A declared tool is asked about everywhere, so a leg starting it from a step finds it, but
         // it makes no leg unrunnable.
         Assert.Contains("tclsh", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
-        Assert.DoesNotContain("tclsh", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.DoesNotContain("tclsh", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
     }
 
     /// <summary>Another generator starts another build tool, which is cmake's to find and to report.</summary>
@@ -263,7 +266,7 @@ public sealed class ToolResolutionTests
     {
         var config = Configured(generator: "Unix Makefiles");
 
-        Assert.DoesNotContain("ninja", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.DoesNotContain("ninja", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
     }
 
     /// <summary>
@@ -277,11 +280,11 @@ public sealed class ToolResolutionTests
         var config = Configured(generator: "Ninja", cc: "gcc");
         var leg = config.Legs["lin"];
 
-        Assert.Equal(["cmake", "ninja", "gcc"], LegPrograms.For(config, leg, LegWorkload.BuildOnly));
-        Assert.Equal(["ctest"], LegPrograms.For(config, leg, new LegWorkload(Build: false, Test: true, [])));
-        Assert.Empty(LegPrograms.For(config, leg, LegWorkload.Copy));
-        Assert.Equal(["python3"], LegPrograms.For(config, leg, new LegWorkload(Build: false, Test: false, ["python3"])));
-        Assert.Equal(["cmake", "ninja", "gcc", "python3"], LegPrograms.For(config, leg, new LegWorkload(Build: true, Test: false, ["python3"])));
+        Assert.Equal(["cmake", "ninja", "gcc"], LegPrograms.For(config, leg, LegWorkload.BuildOnly, NoSettings));
+        Assert.Equal(["ctest"], LegPrograms.For(config, leg, new LegWorkload(Build: false, Test: true, []), NoSettings));
+        Assert.Empty(LegPrograms.For(config, leg, LegWorkload.Copy, NoSettings));
+        Assert.Equal(["python3"], LegPrograms.For(config, leg, new LegWorkload(Build: false, Test: false, ["python3"]), NoSettings));
+        Assert.Equal(["cmake", "ninja", "gcc", "python3"], LegPrograms.For(config, leg, new LegWorkload(Build: true, Test: false, ["python3"]), NoSettings));
     }
 
     /// <summary>
@@ -295,15 +298,15 @@ public sealed class ToolResolutionTests
     {
         var relativeRunner = Configured(generator: "Ninja", cc: @"C:\Program Files\LLVM\bin\clang-cl.exe", cxx: "ccache g++", runner: "scripts/test.sh");
 
-        Assert.Equal(["cmake", "ninja", "ccache"], LegPrograms.For(relativeRunner, relativeRunner.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.Equal(["cmake", "ninja", "ccache"], LegPrograms.For(relativeRunner, relativeRunner.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
 
         var builtRunner = Configured(generator: null, runner: "{buildDir}/tests");
 
-        Assert.Equal(["cmake"], LegPrograms.For(builtRunner, builtRunner.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.Equal(["cmake"], LegPrograms.For(builtRunner, builtRunner.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
 
         Assert.Equal(
             ["python3"],
-            LegPrograms.For(builtRunner, builtRunner.Legs["lin"], new LegWorkload(Build: false, Test: false, ["python3", "./bench.sh", "{tool}", " "])));
+            LegPrograms.For(builtRunner, builtRunner.Legs["lin"], new LegWorkload(Build: false, Test: false, ["python3", "./bench.sh", "{tool}", " "]), NoSettings));
     }
 
     /// <summary>
@@ -316,11 +319,11 @@ public sealed class ToolResolutionTests
     {
         var absolute = Configured(generator: null, cc: "/usr/bin/gcc-13", runner: "/opt/tools/ctest");
 
-        Assert.Equal(["cmake", "/usr/bin/gcc-13", "/opt/tools/ctest"], LegPrograms.For(absolute, absolute.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.Equal(["cmake", "/usr/bin/gcc-13", "/opt/tools/ctest"], LegPrograms.For(absolute, absolute.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
 
         var windowsPath = Configured(generator: null, runner: @"C:\tools\ctest.exe");
 
-        Assert.Equal(["cmake"], LegPrograms.For(windowsPath, windowsPath.Legs["lin"], LegWorkload.BuildAndTest));
+        Assert.Equal(["cmake"], LegPrograms.For(windowsPath, windowsPath.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
     }
 
     /// <summary>
@@ -338,7 +341,7 @@ public sealed class ToolResolutionTests
     {
         var config = Configured(generator: null, cc: value);
 
-        var programs = LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildOnly);
+        var programs = LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildOnly, NoSettings);
 
         Assert.Equal(program is null ? ["cmake"] : ["cmake", program], programs);
     }
@@ -355,7 +358,7 @@ public sealed class ToolResolutionTests
         var build = Configured(generator: "Ninja", cc: "arm-none-eabi-gcc");
         build.Toolchains["gcc"].Env["Path"] = "/opt/arm/bin:/usr/bin:/bin";
 
-        Assert.Empty(LegPrograms.For(build, build.Legs["lin"], LegWorkload.BuildOnly));
+        Assert.Empty(LegPrograms.For(build, build.Legs["lin"], LegWorkload.BuildOnly, NoSettings));
         Assert.Contains("arm-none-eabi-gcc", LegPrograms.Wanted(build, LegWorkload.BuildOnly));
         Assert.Contains("ninja", LegPrograms.Wanted(build, LegWorkload.BuildOnly));
 
@@ -376,7 +379,7 @@ public sealed class ToolResolutionTests
             },
         };
 
-        Assert.Empty(LegPrograms.For(test, test.Legs["lin"], new LegWorkload(Build: false, Test: true, [])));
+        Assert.Empty(LegPrograms.For(test, test.Legs["lin"], new LegWorkload(Build: false, Test: true, []), NoSettings));
         Assert.Contains("ctest", LegPrograms.Wanted(test, LegWorkload.BuildAndTest));
 
         var phases = new RunnerConfig
@@ -430,7 +433,73 @@ public sealed class ToolResolutionTests
         Assert.Equal(["tclsh"], steps.Programs);
         Assert.Equal(["arm-none-eabi-size"], steps.UnderOwnPath);
         Assert.Contains("arm-none-eabi-size", LegPrograms.Wanted(build, steps));
-        Assert.DoesNotContain("arm-none-eabi-size", LegPrograms.For(build, build.Legs["lin"], steps));
+        Assert.DoesNotContain("arm-none-eabi-size", LegPrograms.For(build, build.Legs["lin"], steps, NoSettings));
+    }
+
+    /// <summary>
+    /// A step that names runOn starts its program only on a leg of a system it names: that leg's host
+    /// must have it, and a leg of any other system is never turned away for want of it. Every host is
+    /// still asked about it, so the leg that does start it finds the directory it is in - under an
+    /// environment that sets PATH as well as without one.
+    /// </summary>
+    [Fact]
+    public void AStepForSomeSystems_IsRequiredOnlyOfTheirLegs_AndAskedOfEveryHost()
+    {
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs =
+            {
+                ["lin"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" },
+                ["win"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug" },
+                ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug" },
+            },
+        };
+
+        var action = new RepoHarness.Core.Runners.ActionFile(
+            "actions/probe/probe.yml",
+            "probe",
+            null,
+            [],
+            [
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "everywhere",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("tclsh probe.tcl", 4, ["tclsh", "probe.tcl"])],
+                },
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "msvc",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("cl /nologo", 6, ["cl", "/nologo"])],
+                    RunOn = ["windows"],
+                },
+                new RepoHarness.Core.Runners.ActionStep
+                {
+                    Name = "cross",
+                    Commands = [new RepoHarness.Core.Runners.ActionCommand("arm-none-eabi-size out.elf", 8, ["arm-none-eabi-size", "out.elf"])],
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PATH"] = "/opt/arm/bin" },
+                    RunOn = ["linux", "macos"],
+                },
+            ]);
+
+        var steps = LegWorkload.ForRunner(new RunnerConfig { Action = "probe/probe.yml" }, action);
+
+        Assert.Equal(["tclsh"], LegPrograms.For(config, config.Legs["lin"], steps, NoSettings));
+        Assert.Equal(["tclsh", "cl"], LegPrograms.For(config, config.Legs["win"], steps, NoSettings));
+        Assert.Equal(["tclsh"], LegPrograms.For(config, config.Legs["mac"], steps, NoSettings));
+
+        Assert.Equal(["tclsh"], steps.On("windows").Programs.Take(1));
+        Assert.Equal(["arm-none-eabi-size"], steps.On("linux").UnderOwnPath);
+        Assert.Empty(steps.On("windows").UnderOwnPath);
+
+        // A leg's os is read ignoring case, as everywhere else.
+        Assert.Equal(["arm-none-eabi-size"], steps.On("Linux").UnderOwnPath);
+        Assert.Contains("cl", steps.On("WINDOWS").Programs);
+
+        var wanted = LegPrograms.Wanted(config, steps);
+
+        Assert.Contains("cl", wanted);
+        Assert.Contains("arm-none-eabi-size", wanted);
     }
 
     /// <summary>
@@ -466,6 +535,153 @@ public sealed class ToolResolutionTests
     }
 
     /// <summary>
+    /// A host whose own environment sets PATH starts every program of a leg under that PATH, which no
+    /// survey can see: it is required to have none of them - each is the run's to find - and each is
+    /// still asked about, so the directory it is found in reaches that PATH like any other.
+    /// </summary>
+    [Fact]
+    public void AHostWhoseEnvironmentSetsPath_IsRequiredToHaveNothing_AndStillAskedAboutEverything()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Hosts.Local.Env["PATH"] = "/opt/tools/bin";
+
+        Assert.Empty(LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, config.Hosts.Local));
+        Assert.Contains("cmake", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, NoSettings));
+        Assert.Contains("cmake", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
+
+        var placement = LegPlacement.Place(
+            config,
+            new SelectedLeg("lin", config.Legs["lin"]),
+            LegWorkload.BuildAndTest,
+            new Dictionary<HostId, HostReport> { [HostId.Local] = Host(HostId.Local, config, ("cmake", ProgramFound.Nowhere)) });
+
+        Assert.True(placement.Runnable);
+    }
+
+    /// <summary>
+    /// A leg whose toolchain names a developer environment starts every program under the PATH that
+    /// environment sets up, which no survey can see: it is required to have none of them, each still
+    /// asked about, and the environment is what the host must provide - for every command that starts
+    /// anything there, and for a copy, nothing.
+    /// </summary>
+    [Fact]
+    public void ALegInADeveloperEnvironment_IsRequiredToHaveNoProgram_ButTheEnvironment()
+    {
+        var config = new HarnessConfig
+        {
+            DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+            Toolchains =
+            {
+                ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Generator = "Ninja", Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" },
+                ["mingw"] = new ToolchainConfig { Platforms = ["windows"], Generator = "Ninja", Env = { ["CC"] = "gcc" } },
+            },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    Test = new TestConfig { All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed" } },
+                },
+            },
+            Legs =
+            {
+                ["msvc"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" },
+                ["mingw"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "mingw" },
+            },
+        };
+        var msvc = config.Legs["msvc"];
+
+        Assert.Empty(LegPrograms.For(config, msvc, LegWorkload.BuildAndTest, NoSettings));
+        Assert.Equal(["cmake", "ninja", "gcc", "ctest"], LegPrograms.For(config, config.Legs["mingw"], LegWorkload.BuildAndTest, NoSettings));
+        Assert.Contains("cl", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
+
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.BuildOnly));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, new LegWorkload(Build: false, Test: true, [])));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, new LegWorkload(Build: false, Test: false, ["python3"])));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy with { UnderOwnPath = ["python3"] }));
+        Assert.Equal("vs", LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy with { OnlyOn = [new OsScopedStart("python3", false, ["windows"])] }));
+        Assert.Null(LegPrograms.DeveloperEnvironmentOf(config, msvc, LegWorkload.Copy));
+        Assert.Null(LegPrograms.DeveloperEnvironmentOf(config, config.Legs["mingw"], LegWorkload.BuildAndTest));
+    }
+
+    /// <summary>
+    /// A compiler the host names in its own environment is the one the build starts wherever the
+    /// variant names none, so it is required of that host and asked about everywhere - and one the
+    /// variant names is still the variant's.
+    /// </summary>
+    [Fact]
+    public void ACompilerTheHostNames_IsTheOneRequired_WhereTheVariantNamesNone()
+    {
+        var hostOnly = Configured(generator: "Ninja");
+        hostOnly.Hosts.Local.Env["CC"] = "clang-17";
+
+        Assert.Contains("clang-17", LegPrograms.For(hostOnly, hostOnly.Legs["lin"], LegWorkload.BuildOnly, hostOnly.Hosts.Local));
+        Assert.DoesNotContain("clang-17", LegPrograms.For(hostOnly, hostOnly.Legs["lin"], LegWorkload.BuildOnly, NoSettings));
+        Assert.Contains("clang-17", LegPrograms.Wanted(hostOnly, LegWorkload.BuildOnly));
+
+        var both = Configured(generator: "Ninja", cc: "gcc-13");
+        both.Hosts.Local.Env["CC"] = "clang-17";
+
+        var programs = LegPrograms.For(both, both.Legs["lin"], LegWorkload.BuildOnly, both.Hosts.Local);
+
+        Assert.Contains("gcc-13", programs);
+        Assert.DoesNotContain("clang-17", programs);
+    }
+
+    /// <summary>
+    /// The command a host's keepAwake starts is asked about, so a directory the survey finds it in
+    /// reaches that host's PATH, and it is required of no host: one it cannot hold awake still runs
+    /// its legs, and a sleep there still marks their timings suspect.
+    /// </summary>
+    [Fact]
+    public void AKeepAwakeCommand_IsAskedAbout_AndRequiredOfNoHost()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Hosts.Ssh["pi"] = new SshHostConfig { RepositoryPath = "~/repo", KeepAwake = ["rh-awake", "-w", "{pid}"] };
+
+        Assert.Contains("rh-awake", LegPrograms.Wanted(config, LegWorkload.BuildAndTest));
+        Assert.DoesNotContain("rh-awake", LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildAndTest, config.Hosts.Ssh["pi"]));
+    }
+
+    /// <summary>
+    /// A compiler the variant gives CMake as a cache variable is the one the survey requires, whatever
+    /// the host's env names: it is the one the build starts.
+    /// </summary>
+    [Fact]
+    public void ACompilerGivenAsACacheVariable_IsTheOneRequired()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Toolchains["gcc"].CacheVars["CMAKE_C_COMPILER"] = "gcc-13";
+        config.Hosts.Local.Env["CC"] = "clang-17";
+
+        var programs = LegPrograms.For(config, config.Legs["lin"], LegWorkload.BuildOnly, config.Hosts.Local);
+
+        Assert.Contains("gcc-13", programs);
+        Assert.DoesNotContain("clang-17", programs);
+    }
+
+    /// <summary>
+    /// A host running a leg another machine dispatched to it judges the leg by the section that
+    /// machine's configuration gives it, not by 'local' - which, in the configuration the two share,
+    /// is the machine that dispatched it.
+    /// </summary>
+    [Fact]
+    public void AHostRunningALegItWasSent_IsJudgedByItsOwnSection_NotByLocal()
+    {
+        var config = Configured(generator: "Ninja");
+        config.Hosts.Ssh["pi"] = new SshHostConfig { RepositoryPath = "~/repo", Env = { ["PATH"] = "/opt/pi/bin" } };
+
+        var reports = new Dictionary<HostId, HostReport> { [HostId.Local] = Host(HostId.Local, config, ("cmake", ProgramFound.Nowhere)) };
+        var selected = new SelectedLeg("lin", config.Legs["lin"]);
+
+        Assert.True(LegPlacement.Place(config, selected, LegWorkload.BuildAndTest, reports, here: HostId.Ssh("pi")).Runnable);
+        Assert.False(LegPlacement.Place(config, selected, LegWorkload.BuildAndTest, reports, here: HostId.Wsl("other")).Runnable);
+    }
+
+    /// <summary>
     /// A host running a leg for the machine that dispatched it names no candidate in why it cannot:
     /// it is the only one, and its name for itself - "local" - would send the reader to the machine
     /// that asked.
@@ -481,7 +697,7 @@ public sealed class ToolResolutionTests
             new SelectedLeg("lin", config.Legs["lin"]),
             LegWorkload.BuildAndTest,
             new Dictionary<HostId, HostReport> { [HostId.Local] = here },
-            here: true);
+            here: HostId.Ssh("pi"));
 
         Assert.StartsWith("'cmake' is not installed there", placement.Reason, StringComparison.Ordinal);
     }
@@ -535,7 +751,7 @@ public sealed class ToolResolutionTests
         {
             var wanted = LegPrograms.Wanted(config, workload);
 
-            Assert.All(LegPrograms.For(config, config.Legs["lin"], workload), program => Assert.Contains(program, wanted));
+            Assert.All(LegPrograms.For(config, config.Legs["lin"], workload, NoSettings), program => Assert.Contains(program, wanted));
         }
     }
 
@@ -780,10 +996,12 @@ public sealed class ToolResolutionTests
         var identity = Substitute.For<IToolIdentityProvider>();
         identity.Current.Returns(new ToolIdentity("1.2.3", "abc123"));
 
+        var processRunner = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
         var agent = new HostAgentService(
             platform,
             identity,
-            new EmulatorProbe(platform, new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create()), fileSystem),
+            new EmulatorProbe(platform, processRunner, fileSystem),
+            new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, Permissions(), () => onPath));
 
@@ -802,6 +1020,7 @@ public sealed class ToolResolutionTests
 
         var info = await agent.DescribeAsync(
             emulators,
+            new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
             ["cmake", "ninja", "absent"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { [platform.PlatformKey] = [searched] },
             TestContext.Current.CancellationToken);

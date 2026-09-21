@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -363,6 +364,120 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         };
     }
 
+    public async Task<IReadOnlyList<IgnoreDecision>> ExplainIgnoredAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        if (paths.Count == 0)
+        {
+            return [];
+        }
+
+        var result = await CheckIgnoreAsync(directory, paths, cancellationToken).ConfigureAwait(false);
+
+        if (Answered(result))
+        {
+            return ReadDecisions(result.StandardOutput, paths);
+        }
+
+        // One path git will not answer about - one beyond a symbolic link, which git never looks past -
+        // ends the whole question. Asked one at a time, every other path is still answered, and that one
+        // says why it was not; where none is, git cannot answer at all.
+        if (paths.Count > 1 && !result.TimedOut)
+        {
+            var decisions = new List<IgnoreDecision>(paths.Count);
+
+            foreach (var path in paths)
+            {
+                var alone = await CheckIgnoreAsync(directory, [path], cancellationToken).ConfigureAwait(false);
+
+                decisions.Add(Answered(alone)
+                    ? ReadDecisions(alone.StandardOutput, [path])[0]
+                    : new IgnoreDecision(path, null, 0, null) { Unanswered = alone.FailureMessage });
+            }
+
+            if (decisions.Any(decision => decision.Unanswered is null))
+            {
+                return decisions;
+            }
+        }
+
+        throw new HarnessException(
+            HarnessExit.CommandFailed,
+            $"Could not ask git which rules decide {paths.Count} path(s) in '{directory}': {result.FailureMessage}");
+    }
+
+    /// <summary>Asks git which rule decides each of <paramref name="paths"/>, as <c>check-ignore</c> answers.</summary>
+    /// <remarks>
+    /// NUL-separated both ways, so a path or a rule may hold anything a line can; and every path
+    /// answered, matched or not, so the answer lines up with the question.
+    /// </remarks>
+    private Task<GitCommandResult> CheckIgnoreAsync(string directory, IReadOnlyList<string> paths, CancellationToken cancellationToken)
+        => RunForBytesAsync(
+            directory,
+            ["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"],
+            cancellationToken,
+            string.Join('\0', paths) + '\0');
+
+    /// <summary>
+    /// Whether <c>check-ignore</c> answered: 0 when some path matched a rule and 1 when none did.
+    /// Anything else is git unable to answer, and folded into "nothing matched" it would report every
+    /// path asked about as unruled.
+    /// </summary>
+    private static bool Answered(GitCommandResult result) => !result.TimedOut && result.ExitCode is 0 or 1;
+
+    /// <summary>What <c>check-ignore -v -n -z</c> printed, one decision per path of <paramref name="paths"/>, in order.</summary>
+    /// <exception cref="HarnessException">git answered in another form, or about other paths.</exception>
+    internal static IReadOnlyList<IgnoreDecision> ReadDecisions(string output, IReadOnlyList<string> paths)
+    {
+        // Four fields to a path - source, line, pattern, path - and nothing after the last NUL.
+        var fields = output.Split('\0');
+
+        if (fields.Length != (paths.Count * 4) + 1)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"git answered which rules decide {paths.Count} path(s) in a form this build cannot read.");
+        }
+
+        var decisions = new List<IgnoreDecision>(paths.Count);
+
+        for (var index = 0; index < paths.Count; index++)
+        {
+            var source = GitName.FromBytes(fields[index * 4]).Quoted;
+            var pattern = GitName.FromBytes(fields[(index * 4) + 2]).Quoted;
+            var path = GitName.FromBytes(fields[(index * 4) + 3]).Text;
+
+            if (!string.Equals(path, paths[index], StringComparison.Ordinal))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git answered about '{path}' where it was asked about '{paths[index]}'.");
+            }
+
+            if (source.Length == 0)
+            {
+                decisions.Add(new IgnoreDecision(path, null, 0, null));
+                continue;
+            }
+
+            if (!int.TryParse(fields[(index * 4) + 1], NumberStyles.None, CultureInfo.InvariantCulture, out var line))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git answered which rule decides '{path}' in a form this build cannot read: "
+                    + $"'{fields[(index * 4) + 1]}' is not a line number.");
+            }
+
+            decisions.Add(new IgnoreDecision(path, source, line, pattern));
+        }
+
+        return decisions;
+    }
+
     public async Task<string?> ResolveCommitAsync(
         string directory,
         string reference,
@@ -400,33 +515,268 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         string relativePath,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
         ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
 
-        var path = relativePath.Replace('\\', '/');
+        // Spelled by this machine, so its own separator is turned into git's; nothing else is, as a
+        // backslash is an ordinary character in a name on Linux.
+        var path = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+        var read = await ReadFilesAtCommitAsync(directory, commit, [path], cancellationToken).ConfigureAwait(false);
 
-        // Whether the file exists at the commit is asked separately, of a command whose exit code does
-        // not depend on the answer. Reading the error text of a failed `git show` instead would mistake
-        // a commit git cannot read for a file that was simply not there yet.
-        var listing = await RunAsync(
-            directory,
-            ["ls-tree", "--name-only", "-z", commit, "--", path],
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return read[path];
+    }
 
-        Ensure(listing, $"look for '{path}' at {commit}");
+    public async Task<IReadOnlyDictionary<string, string?>> ReadFilesAtCommitAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> relativePaths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
+        ArgumentNullException.ThrowIfNull(relativePaths);
 
-        if (listing.StandardOutput.Length == 0)
+        // As git spells them, and keyed as given: rewritten, a name holding a backslash - an ordinary
+        // character on Linux - named another file, and its answer was filed under a key the caller
+        // never asked for.
+        var paths = relativePaths.Distinct(StringComparer.Ordinal).ToList();
+        var read = paths.ToDictionary(path => path, _ => (string?)null, StringComparer.Ordinal);
+
+        // Each named to git one to a line, as '<commit>:<path>'; a path holding a line break - which
+        // git allows and no line can carry - by the object the commit's listing gives it instead.
+        var files = paths.Any(HoldsLineBreak)
+            ? await FilesAtCommitAsync(directory, commit, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        var asked = paths.Where(path => !HoldsLineBreak(path) || files!.ContainsKey(path)).ToList();
+
+        if (asked.Count > 0)
         {
-            return null;
+            var objects = asked.Select(path => HoldsLineBreak(path) ? files![path] : $"{commit}:{path}").ToList();
+            var answers = await ReadObjectsAsync(directory, commit, objects, cancellationToken).ConfigureAwait(false);
+
+            foreach (var (path, content) in asked.Zip(answers))
+            {
+                read[path] = content;
+            }
         }
 
-        var content = await RunAsync(
-            directory,
-            ["show", $"{commit}:{path}"],
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        // git answers "missing" for a file whose object it cannot read exactly as it does for a path
+        // that names no file, and only the commit's listing tells the two apart. Passed off as absent,
+        // a file nobody could read passed a check that read nothing in it.
+        var unanswered = asked.Where(path => read[path] is null).ToList();
 
-        Ensure(content, $"read '{path}' at {commit}");
-        return content.StandardOutput;
+        if (unanswered.Count > 0)
+        {
+            files ??= await FilesAtCommitAsync(directory, commit, cancellationToken).ConfigureAwait(false);
+
+            if (unanswered.FirstOrDefault(files.ContainsKey) is { } unread)
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git lists '{unread}' at {commit} but could not read it. Check the repository with 'git fsck'.");
+            }
+        }
+
+        return read;
+    }
+
+    public async Task<IReadOnlyList<GitName>> ListFilesAtCommitAsync(
+        string directory,
+        string commit,
+        CancellationToken cancellationToken = default)
+        => [.. (await ListTreeAsync(directory, commit, cancellationToken).ConfigureAwait(false))
+            .Where(entry => entry.IsFile)
+            .Select(entry => entry.Name)];
+
+    public async Task<IReadOnlyList<GitName>> ListNamesAsync(
+        string directory,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunForBytesAsync(directory, arguments, cancellationToken).ConfigureAwait(false);
+
+        Ensure(result, $"run git {string.Join(' ', arguments)}");
+
+        return [.. Records(result.StandardOutput).Select(GitName.FromBytes)];
+    }
+
+    /// <summary>
+    /// Every entry of <paramref name="commit"/>'s tree, from the repository's root, as
+    /// <c>git ls-tree -r</c> lists it.
+    /// </summary>
+    private async Task<IReadOnlyList<TreeEntry>> ListTreeAsync(
+        string directory,
+        string commit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
+
+        var result = await RunForBytesAsync(directory, ["ls-tree", "-r", "-z", "--full-tree", commit], cancellationToken)
+            .ConfigureAwait(false);
+
+        Ensure(result, $"list the files at {commit}");
+
+        // '<mode> <type> <object>TAB<name>': the name is everything after the first tab, so one
+        // holding a tab keeps it.
+        return [.. Records(result.StandardOutput).Select(entry =>
+            entry.IndexOf('\t', StringComparison.Ordinal) is var tab and > 0
+                && entry[..tab].Split(' ') is [_, var type, var objectId]
+                ? new TreeEntry(type, objectId, GitName.FromBytes(entry[(tab + 1)..]))
+                : throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git listed a tree entry in a form this build cannot read: '{GitName.FromBytes(entry).Quoted}'"))];
+    }
+
+    /// <summary>
+    /// Each file at <paramref name="commit"/> whose name is UTF-8 - so one a caller can ask for - with
+    /// the object git holds its bytes in.
+    /// </summary>
+    private async Task<Dictionary<string, string>> FilesAtCommitAsync(
+        string directory,
+        string commit,
+        CancellationToken cancellationToken)
+        => (await ListTreeAsync(directory, commit, cancellationToken).ConfigureAwait(false))
+            .Where(entry => entry.IsFile && entry.Name.IsUtf8)
+            .ToDictionary(entry => entry.Name.Text, entry => entry.ObjectId, StringComparer.Ordinal);
+
+    private static bool HoldsLineBreak(string path) => path.IndexOfAny(['\n', '\r']) >= 0;
+
+    /// <summary>What git separated with NUL - its <c>-z</c> form - one record to an element.</summary>
+    private static string[] Records(string output) => output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>
+    /// Runs git with its output read as Latin-1, which carries each byte as one character: for an
+    /// answer that is not all text, or whose names are not all UTF-8.
+    /// </summary>
+    private Task<GitCommandResult> RunForBytesAsync(
+        string directory,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken,
+        string? standardInput = null)
+        => RunCoreAsync(
+            directory,
+            arguments,
+            echoOutput: false,
+            untranslated: false,
+            indexFile: null,
+            standardInput,
+            cancellationToken,
+            Encoding.Latin1);
+
+    /// <summary>
+    /// The objects <paramref name="objects"/> names, in order, read by one <c>git cat-file --batch</c>:
+    /// each file's text, or <see langword="null"/> for a name that is not a file git could read.
+    /// </summary>
+    /// <remarks>
+    /// The commit is asked about first, in the same process: git answers "missing" for a commit it
+    /// cannot read exactly as it does for a file that was not there, and an unreadable commit passed
+    /// off as absent files would pass a check that read nothing. Read as bytes, so the answer is cut
+    /// by the byte counts git gives, and each file is then decoded as its own text.
+    /// </remarks>
+    private async Task<IReadOnlyList<string?>> ReadObjectsAsync(
+        string directory,
+        string commit,
+        IReadOnlyList<string> objects,
+        CancellationToken cancellationToken)
+    {
+        var input = new StringBuilder().Append(commit).Append("^{commit}\n");
+
+        foreach (var name in objects)
+        {
+            input.Append(name).Append('\n');
+        }
+
+        var result = await RunForBytesAsync(directory, ["cat-file", "--batch"], cancellationToken, input.ToString())
+            .ConfigureAwait(false);
+
+        Ensure(result, $"read {objects.Count} file(s) at {commit}");
+
+        var answers = new BatchAnswers(result.StandardOutput);
+
+        if (answers.Next() is not { Type: "commit" })
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"Could not read {objects.Count} file(s) at {commit}: git cannot read that commit.");
+        }
+
+        return [.. objects.Select(_ => answers.Next() is { Type: "blob" } blob ? Decoded(blob.Content) : null)];
+    }
+
+    /// <summary>A file's bytes, carried one to a character, as the text they are.</summary>
+    /// <remarks>
+    /// Read as a file on disk is read: a byte order mark says which encoding the rest is in - UTF-16,
+    /// as a Windows PowerShell 5.1 redirect writes it - and is not part of the text, and UTF-8 is
+    /// assumed where there is none. Read as UTF-8 regardless, a UTF-16 file became every other
+    /// character a NUL, was taken for binary and skipped, and the commit passed a check that the
+    /// same file on disk failed.
+    /// </remarks>
+    private static string Decoded(string bytes)
+    {
+        using var reader = new StreamReader(
+            new MemoryStream(Encoding.Latin1.GetBytes(bytes)),
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true);
+
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Reads git's batch answers in order: for each object asked about, its header, then as many
+    /// bytes as the header names, then a line break; or one line saying it names nothing.
+    /// </summary>
+    private sealed class BatchAnswers(string output)
+    {
+        private int _position;
+
+        /// <summary>The next object's type and bytes, or <see langword="null"/> when it names nothing.</summary>
+        /// <exception cref="HarnessException">git answered for fewer objects, or with fewer bytes, than it said.</exception>
+        public (string Type, string Content)? Next()
+        {
+            var end = output.IndexOf('\n', _position);
+
+            if (end < 0)
+            {
+                throw Short();
+            }
+
+            var header = output[_position..end].Split(' ');
+            _position = end + 1;
+
+            // '<object id> <type> <size>'; anything else - '<name> missing', '<name> ambiguous' -
+            // names nothing, and has no content after it.
+            if (header is not [var id, var type, var bytes]
+                || !id.All(char.IsAsciiHexDigit)
+                || !int.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var size))
+            {
+                return null;
+            }
+
+            if (_position + size >= output.Length)
+            {
+                throw Short();
+            }
+
+            var content = output.Substring(_position, size);
+            _position += size + 1;
+
+            return (type, content);
+        }
+
+        private static HarnessException Short()
+            => new(HarnessExit.CommandFailed, "git cat-file answered with less than it said it would.");
+    }
+
+    /// <summary>One entry of a commit's tree, as <c>git ls-tree</c> lists it.</summary>
+    /// <param name="Type">What the entry is: <c>blob</c>, <c>tree</c>, or <c>commit</c> for a submodule's.</param>
+    /// <param name="ObjectId">The object git holds the entry in.</param>
+    /// <param name="Name">The entry's path, from the repository's root.</param>
+    private sealed record TreeEntry(string Type, string ObjectId, GitName Name)
+    {
+        /// <summary>
+        /// Whether the entry is a file - a symbolic link is one, its text the path it points at -
+        /// rather than a directory, or a submodule's entry, which names a commit in another repository.
+        /// </summary>
+        public bool IsFile => Type == "blob";
     }
 
     public Task<GitCommandResult> RunAsync(
@@ -480,7 +830,8 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         bool untranslated,
         string? indexFile,
         string? standardInput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Encoding? outputEncoding = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
 
@@ -521,6 +872,7 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             OnErrorLine = echoOutput ? _output.RawError : null,
             Environment = environment,
             StandardInput = standardInput,
+            StandardOutputEncoding = outputEncoding,
         };
 
         var result = await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false);

@@ -58,6 +58,7 @@ internal static class HarnessServices
         services.AddSingleton<IRepositoryLocator, RepositoryLocator>();
         services.AddSingleton<IConfigStore, JsonConfigStore>();
         services.AddSingleton<IGitIgnoreManager, GitIgnoreManager>();
+        services.AddSingleton<ManagedIgnoreCheck>();
         services.AddSingleton<IProjectDetector, ProjectDetector>();
         services.AddSingleton<IPathBudget, PathBudget>();
         services.AddSingleton<IHarnessContextLoader, HarnessContextLoader>();
@@ -109,9 +110,13 @@ internal static class HarnessServices
         services.AddSingleton<InputFingerprint>();
         services.AddSingleton<ProcessSampler>();
         services.AddSingleton<RemoteLegRunner>();
+        services.AddSingleton<KeepAwake>();
         services.AddSingleton<LegRunService>();
 
         services.AddSingleton<BuildDirectoryGuard>();
+        services.AddSingleton<CMakeToolchainReader>();
+        services.AddSingleton<DeveloperEnvironmentProbe>();
+        services.AddSingleton<DeveloperEnvironmentProvider>();
         services.AddSingleton<NinjaDependencyCheck>();
         services.AddSingleton<IBuildService, BuildService>();
 

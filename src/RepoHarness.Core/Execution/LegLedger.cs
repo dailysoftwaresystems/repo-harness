@@ -60,6 +60,27 @@ public sealed record LegEntry
     /// <summary>How many tests the leg reported running, where a count pattern extracted one.</summary>
     public int? TestCount { get; init; }
 
+    /// <summary>
+    /// The project whose tests <see cref="TestCount"/> counts, by name: recorded with the count by a
+    /// test that reached its runner, and <see langword="null"/> on every other leg - a build, a run, a
+    /// test stopped before its runner - and where the leg resolves no project. A count is compared only
+    /// with the others of the same project and <see cref="TestSet"/>, and one with no project with nothing.
+    /// </summary>
+    /// <remarks>
+    /// Recorded where the count is made, on the host that ran the leg, rather than looked up again
+    /// wherever a report is built, as <see cref="Emulated"/> is for the duration comparison: a report
+    /// composed from another host's <c>--json</c> has only the entries that arrived, and a host running
+    /// what it has staged may have run another test set than this machine's configuration now names.
+    /// </remarks>
+    public string? Project { get; init; }
+
+    /// <summary>
+    /// Which of <see cref="Project"/>'s test sets <see cref="TestCount"/> belongs to, as the test
+    /// invocation that produced it names it with <c>testSet</c>; <see langword="null"/> for the
+    /// project's own shared set.
+    /// </summary>
+    public string? TestSet { get; init; }
+
     /// <summary>Each phase, for the comparison that marks a slow one suspect.</summary>
     public IReadOnlyList<PhaseRecord> Phases { get; init; } = [];
 
@@ -70,10 +91,36 @@ public sealed record LegEntry
     public IReadOnlyList<TimingMark> Timings { get; init; } = [];
 
     /// <summary>
-    /// Anything already known to make this leg's timings meaningless, such as a host that can sleep
-    /// with no <c>keepAwake</c> holding it open.
+    /// Anything already known to make this leg's timings meaningless, such as a phase that spanned a
+    /// clock step or a host sleep.
     /// </summary>
     public IReadOnlyList<string> TimingNotes { get; init; } = [];
+
+    /// <summary>
+    /// Where this leg's records are when another host ran it: that host's own run directory, since a
+    /// host runs a leg under a run of its own. Null for a leg this machine ran, whose records are in
+    /// this run's directory.
+    /// </summary>
+    public string? RunDirectory { get; init; }
+
+    /// <summary>
+    /// The steps of the runner's action this leg's operating system does not run, by name, in the order
+    /// they are declared: left out on purpose, and said so, rather than simply absent.
+    /// </summary>
+    public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
+    /// <summary>
+    /// The compilers CMake configured the leg's build with, as it reported them: named on its line
+    /// with whatever verdict it reached, so every verdict says which compiler produced what it judged.
+    /// </summary>
+    public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
+
+    /// <summary>
+    /// The developer environment the leg's processes started in, where its toolchain names one and it
+    /// was set up: which Visual Studio instance and tools, for which processor. Named on its line with
+    /// whatever verdict it reached, as the compilers are.
+    /// </summary>
+    public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
 
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
@@ -146,7 +193,9 @@ public sealed class LegLedger(IHarnessOutput output, string commandName)
             _entries.Add(entry);
         }
 
-        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (entry.Detail.Length > 0 ? $" ({entry.Detail})" : string.Empty));
+        var said = LedgerReport.Marked(entry.Detail, [], entry.Compilers, entry.DeveloperEnvironment, testCountNote: null);
+
+        Transition(entry.Leg, Verdicts.Display(entry.Verdict) + (said.Length > 0 ? $" ({said})" : string.Empty));
     }
 
     /// <summary>

@@ -34,9 +34,10 @@ public interface IHostPlatform
     StringComparison PathComparison { get; }
 
     /// <summary>
-    /// Maximum usable path length, or <see langword="null"/> where the platform imposes no
-    /// practical limit. Windows returns 260: exceeding it surfaces as compile errors in
-    /// files a build never touched, so callers budget against it before creating trees.
+    /// The length every path must stay under, or <see langword="null"/> where the platform imposes
+    /// no practical limit. Windows returns 260, its MAX_PATH, which counts the NUL that ends a path,
+    /// so the longest path it takes is 259 characters: reaching the limit surfaces as compile errors
+    /// in files a build never touched, so callers budget against it before creating trees.
     /// </summary>
     int? MaxPathLength { get; }
 

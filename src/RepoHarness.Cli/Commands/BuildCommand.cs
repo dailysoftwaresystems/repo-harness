@@ -38,12 +38,6 @@ internal static class BuildCommand
         Description = "Build what is already staged on each host, without syncing again.",
     };
 
-    private static readonly Option<bool> HereOption = new(RemoteLegRunner.HereOption)
-    {
-        Description = "Run every selected leg on this machine rather than on the host it was placed on.",
-        Hidden = true,
-    };
-
     internal static Command Create()
     {
         var command = new Command(
@@ -55,7 +49,7 @@ internal static class BuildCommand
         command.Options.Add(TimeOption);
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
-        command.Options.Add(HereOption);
+        command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -78,7 +72,7 @@ internal static class BuildCommand
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
-                        arguments.GetValue(HereOption),
+                        arguments.GetValue(DispatchOptions.Here),
                         RemoteArguments(arguments))
                     {
                         Workload = LegWorkload.BuildOnly,
@@ -100,21 +94,7 @@ internal static class BuildCommand
         var leg = work.Leg;
 
         var result = await builds
-            .BuildAsync(
-                work.Context.Config,
-                new BuildRequest(
-                    leg.Name,
-                    leg.TreeRoot,
-                    leg.BuildableProject(),
-                    leg.Variant,
-                    leg.Host.Os ?? string.Empty,
-                    CoreCounts.Resolve(null, leg.HostSettings.BuildCores, work.Context.Config.Defaults.BuildCores).Value,
-                    work.RunDirectory,
-                    work.Time)
-                {
-                    ProgramDirectories = leg.Host.ProgramDirectories,
-                },
-                cancellationToken)
+            .BuildAsync(work.Context.Config, leg.BuildRequestFor(work.Context.Config, work.RunDirectory, work.Time), cancellationToken)
             .ConfigureAwait(false);
 
         return new LegEntry
@@ -129,6 +109,7 @@ internal static class BuildCommand
             TimingNotes = [.. Notes(result)],
             Timings = [.. result.Phases.SelectMany(phase =>
                 phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value)))],
+            Compilers = result.Compilers,
         };
     }
 

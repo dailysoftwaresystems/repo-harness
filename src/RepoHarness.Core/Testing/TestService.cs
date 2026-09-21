@@ -66,6 +66,13 @@ public sealed record TestRequest
     /// </summary>
     public int? HostTestCores { get; init; }
 
+    /// <summary>
+    /// What the host the leg runs on gives it, beneath the test invocation's own environment: what the
+    /// host declares under <c>env</c>, with the developer environment the leg's toolchain names set up
+    /// over it.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> HostEnvironment { get; init; } = new Dictionary<string, string>();
+
     /// <summary>A filter the caller asked for, passed through the invocation's <c>filterArg</c>.</summary>
     public string? Filter { get; init; }
 
@@ -262,7 +269,7 @@ public sealed class TestService(
                     LogFile = logFile,
                     AppendToPath = request.ProgramDirectories,
                     WorkingDirectory = working,
-                    Environment = Environment(command),
+                    Environment = PhaseEnvironment.Layered(request.HostEnvironment, command.Environment),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
                     TimingPatterns = request.Time ? config.TestTimingRegex : [],
@@ -287,6 +294,11 @@ public sealed class TestService(
             CommandTime = phase.Duration,
             Emulated = request.Emulated,
             TestCount = CountFrom(counter, phase.Output),
+
+            // What the count belongs to, decided here with the invocation that made it: the report
+            // compares it only with the other legs of the same project and test set.
+            Project = request.Project?.Name,
+            TestSet = invocation.TestSet,
             Phases = [new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped)],
             TimingNotes = TimingNotes(phase),
             Timings = [.. phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value))],
@@ -330,9 +342,9 @@ public sealed class TestService(
     /// </summary>
     /// <remarks>
     /// The named group <c>total</c> where the pattern declares one, its first capturing group where
-    /// it does not, and the whole match otherwise. Legs running the same tests are compared by this
-    /// number, and one reporting a different count is flagged: a platform that quietly skips a group
-    /// of tests passes on less evidence than its siblings and looks exactly as green.
+    /// it does not, and the whole match otherwise. Legs of the same project and test set are compared
+    /// by this number, and one reporting a different count is marked on its line: a platform that
+    /// quietly skips a group of tests passes on less evidence than its siblings and looks exactly as green.
     /// </remarks>
     /// <param name="countPattern">The compiled pattern, or null when the invocation declares none.</param>
     /// <param name="output">The runner's own output, never anything the harness wrote.</param>
@@ -467,20 +479,4 @@ public sealed class TestService(
             ? [$"'{phase.Phase}' spanned a clock step or a host sleep (wall and monotonic time "
                 + $"disagreed by {phase.ClockDrift}), so its duration and every mtime it stamped are suspect"]
             : [];
-
-    /// <summary>
-    /// The invocation's environment as a phase takes it. A <see langword="null"/> value removes a
-    /// variable, and a test invocation never asks for that, so every value survives the widening.
-    /// </summary>
-    private static IReadOnlyDictionary<string, string?> Environment(TestCommand command)
-    {
-        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (name, value) in command.Environment)
-        {
-            environment[name] = value;
-        }
-
-        return environment;
-    }
 }

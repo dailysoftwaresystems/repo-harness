@@ -51,12 +51,12 @@ public sealed class HarnessFactory
         AnchorRegistryService = new AnchorRegistryService(ContextLoader, AnchorRegistryLocator, AnchorRegistryLock, FileSystem);
         AnchorBalanceService = new AnchorBalanceService(ContextLoader, AnchorRegistryLocator, GitClient, FileSystem);
 
-        // A double rather than the real service: init calls it for every declared leg, and the real
-        // one reaches hosts. A test that declared a leg would otherwise try to install a .NET SDK
-        // somewhere, which is not what any of these tests are about.
+        // A double rather than the real service: init --install-tools calls it for every declared leg,
+        // and the real one reaches hosts. A test that declared a leg would otherwise try to install a
+        // .NET SDK somewhere, which is not what any of these tests are about.
         ToolProvisionService = Substitute.For<IToolProvisionService>();
         ToolProvisionService
-            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new ToolProvisionReport([])));
 
         InitService = new InitService(
@@ -68,6 +68,7 @@ public sealed class HarnessFactory
             VerifyGitService,
             AnchorRegistryLocator,
             ToolProvisionService,
+            new ManagedIgnoreCheck(GitClient, FileSystem, Platform, Output),
             Platform);
     }
 
@@ -191,5 +192,58 @@ public sealed class HarnessFactory
             $"git {string.Join(' ', arguments)} failed ({result.ExitCode}): {result.FailureMessage}");
 
         return result;
+    }
+
+    /// <summary>
+    /// Deletes the object <paramref name="revision"/> names from the repository's store, as a damaged
+    /// repository - or a partial clone that cannot fetch it - lacks one: git still lists the file, and
+    /// cannot read it.
+    /// </summary>
+    public async Task LoseObjectAsync(string repository, string revision, CancellationToken cancellationToken)
+    {
+        var objectId = (await RunGitAsync(repository, ["rev-parse", revision], cancellationToken)).StandardOutput.Trim();
+        var loose = Path.Combine(repository, ".git", "objects", objectId[..2], objectId[2..]);
+
+        // git writes its objects read-only.
+        File.SetAttributes(loose, FileAttributes.Normal);
+        File.Delete(loose);
+    }
+
+    /// <summary>
+    /// Stores <paramref name="content"/> and stages it under <paramref name="quotedName"/>, a name as
+    /// git's C-style quoting spells it: so a test can hold a name no file system here can, such as
+    /// bytes that are not UTF-8 (<c>"caf\351.md"</c>) or a line break.
+    /// </summary>
+    /// <param name="repository">The repository's root.</param>
+    /// <param name="quotedName">The name, in double quotes, with git's escapes.</param>
+    /// <param name="content">What the file holds.</param>
+    /// <param name="cancellationToken">Cancels git.</param>
+    public async Task StageAsync(string repository, string quotedName, string content, CancellationToken cancellationToken)
+    {
+        var stored = await RunGitWithInputAsync(repository, ["hash-object", "-w", "--stdin"], content, cancellationToken);
+
+        await RunGitWithInputAsync(
+            repository,
+            ["update-index", "--index-info"],
+            $"100644 {stored.Trim()} 0\t{quotedName}\n",
+            cancellationToken);
+    }
+
+    /// <summary>Runs git with <paramref name="input"/> on its standard input, failing the test when git fails.</summary>
+    private async Task<string> RunGitWithInputAsync(
+        string directory,
+        string[] arguments,
+        string input,
+        CancellationToken cancellationToken)
+    {
+        var result = await ProcessRunner.RunAsync(
+            new ProcessRequest { FileName = "git", Arguments = arguments, WorkingDirectory = directory, StandardInput = input },
+            cancellationToken);
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"git {string.Join(' ', arguments)} failed ({result.ExitCode}): {result.StandardError}");
+
+        return result.StandardOutput;
     }
 }

@@ -56,7 +56,7 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
             WorkingDirectory = request.WorkingDirectory ?? string.Empty,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = Utf8NoBom,
+            StandardOutputEncoding = request.StandardOutputEncoding ?? Utf8NoBom,
             StandardErrorEncoding = Utf8NoBom,
 
             // Every child gets an input of its own, never this process's. A tool that reads its input would
@@ -76,23 +76,37 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
 
         foreach (var (key, value) in request.Environment)
         {
-            if (value is null)
+            // A name is one variable whatever case the configuration spelled it in, as on Windows,
+            // where that rule comes from. On Linux and macOS the system tells spellings apart, and
+            // programs differ in which they read - curl reads http_proxy, others HTTP_PROXY, all of
+            // them PATH - so the value reaches every spelling this machine has, and the one written;
+            // and a name removed is removed in every spelling. Written under only one, 'Path' set
+            // beside 'PATH' changed nothing, and 'http_proxy' folded into 'HTTP_PROXY' hid the proxy
+            // from curl.
+            foreach (var name in Spellings(startInfo.Environment, key))
             {
-                startInfo.Environment.Remove(key);
-            }
-            else
-            {
-                startInfo.Environment[key] = value;
+                if (value is null)
+                {
+                    startInfo.Environment.Remove(name);
+                }
+                else
+                {
+                    startInfo.Environment[name] = value;
+                }
             }
         }
 
         if (request.AppendToPath.Count > 0)
         {
             var current = startInfo.Environment.TryGetValue(PathVariable, out var inherited) ? inherited : null;
-
-            startInfo.Environment[PathVariable] = string.Join(
+            var appended = string.Join(
                 Path.PathSeparator,
                 new[] { current }.Concat(request.AppendToPath).Where(part => !string.IsNullOrEmpty(part)));
+
+            foreach (var name in Spellings(startInfo.Environment, PathVariable))
+            {
+                startInfo.Environment[name] = appended;
+            }
         }
 
         // Looked up on the PATH the child is given, not on this process's own. The two used to differ
@@ -253,6 +267,25 @@ public sealed class ProcessRunner(IHostPlatform platform, IFilePermissions fileP
         return IsPath(program) && !Path.IsPathFullyQualified(program)
             ? Path.GetFullPath(program, directory)
             : program;
+    }
+
+    /// <summary>
+    /// Every spelling a value named <paramref name="name"/> is written under: each one
+    /// <paramref name="environment"/> already has, ignoring case, the name as written, and PATH as
+    /// every program spells it where the name is that one.
+    /// </summary>
+    private static List<string> Spellings(IDictionary<string, string?> environment, string name)
+    {
+        var spellings = environment.Keys
+            .Where(existing => string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
+            .Append(name);
+
+        if (string.Equals(name, PathVariable, StringComparison.OrdinalIgnoreCase))
+        {
+            spellings = spellings.Append(PathVariable);
+        }
+
+        return [.. spellings.Distinct(StringComparer.Ordinal)];
     }
 
     /// <summary>

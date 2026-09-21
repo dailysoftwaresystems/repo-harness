@@ -33,7 +33,9 @@ internal static class CheckAnchorCitationsCommand
     {
         var command = new Command(
             Name,
-            "Fail when an anchor id cited in a scanned root resolves to no row in either registry. The roots come from anchors.citationRoots; nothing outside one is read.");
+            "Fail when an anchor id cited in a scanned root resolves to no row in either registry, or is cut where a line wraps at a hyphen. "
+            + "The roots come from anchors.citationRoots; nothing outside one is read. A break inside a segment, with no hyphen on either side, "
+            + "reads as the shorter id: keep every id whole on one line.");
 
         command.Options.Add(CurrentCommitOption);
         command.Options.Add(CurrentTreeOption);

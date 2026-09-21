@@ -43,7 +43,7 @@ public sealed class RemoteLegRunnerTests
         // the host told to run it on itself: a host free to dispatch onward would put the verdict one
         // further hop from the reader, and could not terminate by construction.
         Assert.Equal(
-            ["test", "--legs", "wsl-debug", "--json", RemoteLegRunner.HereOption, "--filter", "auth"],
+            ["test", "--legs", "wsl-debug", "--json", RemoteLegRunner.HereOption, "wsl Example-Linux", "--filter", "auth"],
             request.Arguments);
 
         Assert.Equal(LegVerdict.Passed, entry.Verdict);
@@ -51,6 +51,150 @@ public sealed class RemoteLegRunnerTests
         Assert.Equal(412, entry.TestCount);
         Assert.Equal(TimeSpan.FromSeconds(2.5), entry.Duration);
         Assert.Equal(TimeSpan.FromSeconds(2.1), entry.CommandTime);
+    }
+
+    /// <summary>
+    /// A host runs the leg under a run of its own, and says where that run keeps its records: the
+    /// leg's line carries it, so the caller is told where its records are as for a leg run here. A
+    /// host that says nothing about it names nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("/home/dev/repo/.harness-config/runs/20260919-101500-0a1b2c3d")]
+    [InlineData(null)]
+    public async Task TheHostsOwnRunDirectory_IsCarriedOnTheLegsLine(string? runDirectory)
+    {
+        var ledger = Ledger("passed", "412 tests", 2.5, 2.1, 412);
+
+        if (runDirectory is not null)
+        {
+            ledger = ledger.Replace("\"exitCode\": 0,", $"\"exitCode\": 0,\n  \"runDirectory\": \"{runDirectory}\",", StringComparison.Ordinal);
+        }
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, ledger);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(runDirectory, entry.RunDirectory);
+    }
+
+    /// <summary>
+    /// The steps the host's operating system left out travel on the leg's line, read from the very
+    /// document a host writes, so the two ends cannot disagree about where they are kept; a host
+    /// that ran every step names none.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheStepsTheHostsSystemLeftOut_AreCarriedOnTheLegsLine(bool leftOut)
+    {
+        IReadOnlyList<string> skipped = leftOut ? ["msvc", "sign"] : [];
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, SkippedSteps = skipped }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("run", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(skipped, entry.SkippedSteps);
+    }
+
+    /// <summary>
+    /// The project and test set a host's count belongs to travel with the count, read from the very
+    /// document the host writes: the host ran what it had, and this machine compares the count with
+    /// its siblings as it was counted there, never as its own configuration would name it now.
+    /// </summary>
+    [Fact]
+    public async Task TheProjectAndTestSetAHostCountedFor_AreCarriedWithTheCount()
+    {
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, TestCount = 2238, Project = "app", TestSet = "windows" }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(2238, entry.TestCount);
+        Assert.Equal("app", entry.Project);
+        Assert.Equal("windows", entry.TestSet);
+    }
+
+    /// <summary>
+    /// The compilers a host's build was configured with travel on the leg's line, read from the very
+    /// document the host writes, and are named once on this machine's line - not once per machine
+    /// the answer passed through.
+    /// </summary>
+    [Fact]
+    public async Task TheCompilersTheHostBuiltWith_AreCarried_AndNamedOnce()
+    {
+        IReadOnlyList<RepoHarness.Core.Build.CompilerFact> gnu = [new("C", "GNU", "13.2.0"), new("CXX", "GNU", "13.2.0")];
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Failed, Detail = "2 tests failed", Compilers = gnu }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, HarnessExit.CommandFailed);
+        });
+
+        var entry = await Runner(hosts).RunAsync("test", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(gnu, entry.Compilers);
+
+        var row = LedgerReport.From([entry], durationWarningFactor: 0).Render()[1];
+
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(row, "compiler:"));
+        Assert.EndsWith("2 tests failed; compiler: GNU 13.2.0 (C, CXX)", row, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The developer environment a host set up for the leg travels on the leg's line, read from the
+    /// very document the host writes, and is named once on this machine's line.
+    /// </summary>
+    [Fact]
+    public async Task TheDeveloperEnvironmentTheHostSetUp_IsCarried_AndNamedOnce()
+    {
+        var visualStudio = new DeveloperEnvironmentFact("vs", @"C:\VS", "18.0.1", "14.50.35717", "amd64");
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, DeveloperEnvironment = visualStudio }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, HarnessExit.Success);
+        });
+
+        var entry = await Runner(hosts).RunAsync("build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(visualStudio, entry.DeveloperEnvironment);
+
+        var row = LedgerReport.From([entry], durationWarningFactor: 0).Render()[1];
+
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(row, "developer environment:"));
+        Assert.EndsWith("developer environment: vs (Visual Studio 18.0.1, MSVC 14.50.35717, amd64)", row, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -319,17 +463,7 @@ public sealed class RemoteLegRunnerTests
     private static RemoteLegRunner Runner(ScriptedHostCommands hosts)
         => new(hosts, new HarnessFactory().Output);
 
-    /// <summary>
-    /// Writes a ledger where the host writes one: standard output. Standard error carries the
-    /// protocol's completion line, so an answer written there would be read as a transport message.
-    /// </summary>
-    private static void Answer(HostCommand command, string ledger)
-    {
-        foreach (var line in ledger.Split('\n'))
-        {
-            command.OnOutputLine?.Invoke(line.TrimEnd('\r'));
-        }
-    }
+    private static void Answer(HostCommand command, string ledger) => ScriptedHostCommands.Answer(command, ledger);
 
     private static HostAgentRequest Request(HostCommand? sent)
     {

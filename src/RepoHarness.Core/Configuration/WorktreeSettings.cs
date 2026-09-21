@@ -44,7 +44,9 @@ public sealed class WorktreeSettings
     /// <c>build/&lt;variant&gt;</c>, used to budget against the Windows path limit. The build
     /// directory's own name is added by the check itself, sized to the longest variant this machine
     /// builds, because the harness knows it and a number that had to include it went stale the day
-    /// build directories were keyed by variant. The default is measured against CMake and Ninja,
+    /// build directories were keyed by variant. It is a relative path's length, with no leading
+    /// separator, as a build measures one: the check counts every separator between the worktree,
+    /// the build directory and this path itself. The default is measured against CMake and Ninja,
     /// whose generated dependency files are the longest paths they produce there.
     /// </summary>
     /// <remarks>
@@ -58,8 +60,8 @@ public sealed class WorktreeSettings
     public int PathBudgetMargin { get; init; } = 20;
 
     /// <summary>
-    /// Path length to budget against, replacing the platform's own limit (260 on
-    /// Windows, none elsewhere). Leave it unset unless every tool the build runs
+    /// The length every path must stay under, replacing the platform's own limit (260
+    /// on Windows, none elsewhere). Leave it unset unless every tool the build runs
     /// handles long paths: the operating system allowing them is not enough, because
     /// compilers and build systems impose the limit independently.
     /// </summary>

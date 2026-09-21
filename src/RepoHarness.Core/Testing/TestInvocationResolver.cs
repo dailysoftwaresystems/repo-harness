@@ -213,7 +213,8 @@ public static class TestInvocationResolver
             platform?.Env ?? all?.Env ?? [],
             platform?.SuccessPattern ?? all?.SuccessPattern ?? string.Empty,
             platform?.CountPattern ?? all?.CountPattern,
-            platform?.WorkingDirectory ?? all?.WorkingDirectory);
+            platform?.WorkingDirectory ?? all?.WorkingDirectory,
+            platform?.TestSet ?? all?.TestSet);
 }
 
 /// <summary>One test invocation, with every field decided.</summary>
@@ -228,6 +229,7 @@ public static class TestInvocationResolver
 /// <param name="SuccessPattern">What must appear in the runner's own output for this to pass.</param>
 /// <param name="CountPattern">What captures how many tests ran, or null.</param>
 /// <param name="WorkingDirectory">Where the runner starts, or null for the leg's tree root.</param>
+/// <param name="TestSet">Which of the project's test sets it runs, or null for the shared one.</param>
 public sealed record ResolvedTestInvocation(
     string Runner,
     IReadOnlyList<string> Args,
@@ -239,7 +241,8 @@ public sealed record ResolvedTestInvocation(
     IReadOnlyDictionary<string, string> Env,
     string SuccessPattern,
     string? CountPattern,
-    string? WorkingDirectory = null);
+    string? WorkingDirectory = null,
+    string? TestSet = null);
 
 /// <summary>A test invocation ready to start.</summary>
 /// <param name="Program">The runner to start.</param>

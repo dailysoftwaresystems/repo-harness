@@ -1,6 +1,7 @@
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Anchors;
+using RepoHarness.Core.Commands;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Repository;
@@ -86,6 +87,9 @@ public sealed class InitServiceTests
         Assert.True(File.Exists(temp.Combine(".harness-config", "runner", ".env", ".gitkeep")));
         Assert.True(File.Exists(temp.Combine(".harness-config", "runner", ".secrets", ".gitkeep")));
         Assert.True(File.Exists(temp.Combine(".gitignore")));
+
+        // A first init declares no leg, so there is nothing to install for and nothing to say about it.
+        Assert.DoesNotContain(outcome.Details!, line => line.StartsWith("tools", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -158,14 +162,14 @@ public sealed class InitServiceTests
         using var interrupted = new CancellationTokenSource();
 
         harness.ToolProvisionService
-            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns<Task<ToolProvisionReport>>(_ =>
             {
                 interrupted.Cancel();
                 throw new OperationCanceledException(interrupted.Token);
             });
 
-        var outcome = await harness.InitService.InitializeAsync(temp.Path, interrupted.Token);
+        var outcome = await harness.InitService.InitializeAsync(temp.Path, installTools: true, interrupted.Token);
 
         Assert.Equal(HarnessExit.Cancelled, outcome.ExitCode);
         Assert.Contains(
@@ -191,11 +195,11 @@ public sealed class InitServiceTests
         harness.WriteConfig(temp.Path, OneLeg());
 
         harness.ToolProvisionService
-            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Throws(new InvalidOperationException("something nobody expected"));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => harness.InitService.InitializeAsync(temp.Path, TestContext.Current.CancellationToken));
+            () => harness.InitService.InitializeAsync(temp.Path, installTools: true, TestContext.Current.CancellationToken));
     }
 
     /// <summary>
@@ -213,11 +217,84 @@ public sealed class InitServiceTests
 
         // Nobody pressed anything: the run's token is untouched.
         harness.ToolProvisionService
-            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<CancellationToken>())
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Throws(new OperationCanceledException(new CancellationToken(canceled: true)));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => harness.InitService.InitializeAsync(temp.Path, TestContext.Current.CancellationToken));
+            () => harness.InitService.InitializeAsync(temp.Path, installTools: true, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// Adopting the harness's files changes one tree, and an install changes machines, so init
+    /// installs nothing unless asked - and says how, where there is a leg to install for.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InitializeAsync_InstallsTools_OnlyWhenAskedTo(bool installTools)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, token);
+        harness.WriteConfig(temp.Path, OneLeg());
+
+        var outcome = await harness.InitService.InitializeAsync(temp.Path, installTools, token);
+
+        Assert.True(outcome.Succeeded, outcome.Message);
+        await harness.ToolProvisionService
+            .Received(installTools ? 1 : 0)
+            .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+
+        var pointer = outcome.Details!.Where(line => line.StartsWith("tools   not checked", StringComparison.Ordinal)).ToList();
+
+        if (installTools)
+        {
+            Assert.Empty(pointer);
+            return;
+        }
+
+        Assert.Equal(
+            "tools   not checked; 'DssHarness install-missing-tools --dry-run' lists what each leg's host is missing, "
+            + "and 'DssHarness install-missing-tools' or 'DssHarness init --install-tools' installs it",
+            Assert.Single(pointer));
+    }
+
+    /// <summary>
+    /// Where git cannot say which rules decide the managed paths, init says so and finishes: the
+    /// tree is initialised either way, and a note that was never checked is not passed off as none.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_SaysSo_WhenGitCannotBeAskedAboutTheRules()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, token);
+
+        var git = new InterceptingGitClient(harness.GitClient)
+        {
+            AfterExplainIgnored = (_, _) => throw new HarnessException(HarnessExit.CommandFailed, "git could not answer"),
+        };
+
+        var init = new InitService(
+            harness.FileSystem,
+            harness.RepositoryLocator,
+            harness.ConfigStore,
+            harness.GitIgnoreManager,
+            harness.ProjectDetector,
+            harness.VerifyGitService,
+            harness.AnchorRegistryLocator,
+            harness.ToolProvisionService,
+            new ManagedIgnoreCheck(git, harness.FileSystem, harness.Platform, harness.Output),
+            harness.Platform);
+
+        var outcome = await init.InitializeAsync(temp.Path, token);
+
+        Assert.True(outcome.Succeeded, outcome.Message);
+        Assert.Contains(
+            "note    could not ask git which rules decide the paths the managed block keeps: git could not answer",
+            outcome.Details!);
     }
 
     /// <summary>A configuration with one leg, which is what makes init check tools at all.</summary>
@@ -315,6 +392,7 @@ public sealed class InitServiceTests
         // init leaves the root to the worktree commands, which create it the first time they need it.
         Assert.False(Directory.Exists(Path.Combine(temp.Path, root)), "init created the worktrees root");
         Assert.True(await IsIgnoredAsync(harness, temp.Path, $"{root}/", token), "absent, asked with a slash");
+        Assert.True(await IsIgnoredAsync(harness, temp.Path, root, token), "absent, asked without a slash");
 
         Directory.CreateDirectory(Path.Combine(temp.Path, root, "wt-a", "src"));
         File.WriteAllText(Path.Combine(temp.Path, root, "wt-a", "src", "main.c"), "int main(void) { return 0; }");
@@ -324,9 +402,9 @@ public sealed class InitServiceTests
         Assert.True(await IsIgnoredAsync(harness, temp.Path, $"{root}/wt-a/src/main.c", token), "a file inside a worktree");
 
         var ignore = File.ReadAllText(temp.Combine(".gitignore"));
-        Assert.Contains($"/{root}/\n", ignore, StringComparison.Ordinal);
-        Assert.DoesNotContain($"/{root}/*", ignore, StringComparison.Ordinal);
-        Assert.DoesNotContain($"!/{root}/", ignore, StringComparison.Ordinal);
+        Assert.Contains($"/{root}\n", ignore, StringComparison.Ordinal);
+        Assert.DoesNotContain($"/{root}/", ignore, StringComparison.Ordinal);
+        Assert.DoesNotContain($"!/{root}", ignore, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -347,11 +425,14 @@ public sealed class InitServiceTests
         await exclusions.RefuseWhenNoLongerIgnoredAsync(harness.GitClient, temp.Path, token);
     }
 
+    /// <summary>
+    /// A repository that already ignored a managed path by hand keeps its rule. One that says what the
+    /// block says changes nothing and is not named; one the block overrules is named as doing
+    /// nothing there, so whoever wrote it knows it no longer counts.
+    /// </summary>
     [Fact]
-    public async Task AHandWrittenRuleForAManagedPath_IsReported_AndLeftWhereItIs()
+    public async Task AHandWrittenRuleForAManagedPath_IsReportedOnlyWhereItTurnsIt_AndLeftWhereItIs()
     {
-        // A repository that already ignored the root by hand keeps its own rule and gains the
-        // managed one, and two statements of one path is a state nothing else points out.
         using var temp = new TempDirectory();
         var harness = new HarnessFactory();
         var token = TestContext.Current.CancellationToken;
@@ -363,13 +444,13 @@ public sealed class InitServiceTests
 
         Assert.True(outcome.Succeeded, outcome.Message);
 
-        var notes = outcome.Details!.Where(line => line.StartsWith("note", StringComparison.Ordinal)).ToList();
+        var note = Assert.Single(outcome.Details!, line => line.StartsWith("note", StringComparison.Ordinal));
 
-        Assert.Equal(2, notes.Count);
-        Assert.Contains(notes, note => note.Contains("line 2", StringComparison.Ordinal)
-            && note.Contains("repeats the managed block's rule for '.harness-config/worktrees'", StringComparison.Ordinal));
-        Assert.Contains(notes, note => note.Contains("line 3", StringComparison.Ordinal)
-            && note.Contains("re-includes '.harness-config/sshItems', which the managed block ignores", StringComparison.Ordinal));
+        Assert.Equal(
+            "note    .gitignore line 3 ('!/.harness-config/sshItems/*') re-includes '.harness-config/sshItems/<any>', "
+            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; a later rule decides them, so this "
+            + "one does nothing there",
+            note);
 
         // Reported, never removed: hand-written rules are the repository's own.
         var ignore = File.ReadAllText(temp.Combine(".gitignore"));
@@ -431,31 +512,56 @@ public sealed class InitServiceTests
         Assert.DoesNotContain(files, file => file.EndsWith("token.env", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A lane adopting the harness adopts it on its own branch: its configuration - the main
+    /// checkout's, which it was running with - its .gitignore and its placeholders are written in the
+    /// worktree, and the main checkout is left exactly as it was. Written there instead, the lane's
+    /// .gitignore never changed and main's did.
+    /// </summary>
     [Fact]
-    public async Task InitializeAsync_TargetsTheMainCheckout_WhenRunFromInsideAWorktree()
+    public async Task InitializeAsync_FromAWorktree_WritesThatTree_AndLeavesTheMainCheckoutAsItIs()
     {
-        using var temp = new TempDirectory();
+        using var repository = new TempDirectory();
+        using var elsewhere = new TempDirectory();
         var harness = new HarnessFactory();
-        var cancellationToken = TestContext.Current.CancellationToken;
+        var token = TestContext.Current.CancellationToken;
 
-        await harness.InitializeGitRepositoryAsync(temp.Path, cancellationToken);
-        await harness.InitService.InitializeAsync(temp.Path, cancellationToken);
-        await harness.RunGitAsync(temp.Path, ["add", "-A"], cancellationToken);
-        await harness.RunGitAsync(temp.Path, ["commit", "--quiet", "-m", "harness"], cancellationToken);
+        await harness.InitializeGitRepositoryAsync(repository.Path, token);
 
-        var worktreePath = temp.Combine(".harness-config", "worktrees", "wt-a");
-        await harness.RunGitAsync(
-            temp.Path,
-            ["worktree", "add", "--detach", worktreePath],
-            cancellationToken);
+        // The lane's branch predates the harness; main adopts it afterwards.
+        var worktree = elsewhere.Combine("lane");
+        await harness.RunGitAsync(repository.Path, ["worktree", "add", "--detach", worktree], token);
+        await harness.InitService.InitializeAsync(repository.Path, token);
+        harness.WriteConfig(repository.Path, new HarnessConfig { Legs = { ["lane-leg"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } }, BuildConfigs = { ["debug"] = new BuildConfiguration() } });
+        await harness.CommitAllAsync(repository.Path, "harness", token);
 
-        // Running init from inside the worktree must not create a second, nested
-        // harness state directory: the worktree already carries the tracked parts.
-        var outcome = await harness.InitService.InitializeAsync(worktreePath, cancellationToken);
+        var mainIgnore = File.ReadAllText(repository.Combine(".gitignore"));
+        var mainConfig = File.ReadAllText(repository.Combine(".harness-config", "config.json"));
 
-        Assert.True(outcome.Succeeded);
-        Assert.False(Directory.Exists(Path.Combine(worktreePath, ".harness-config", "worktrees", "wt-a")));
-        Assert.Contains(temp.Path, outcome.Message, StringComparison.OrdinalIgnoreCase);
+        var outcome = await harness.InitService.InitializeAsync(worktree, token);
+
+        Assert.True(outcome.Succeeded, outcome.Message);
+        Assert.Contains(worktree, outcome.Message, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Equal(mainConfig, File.ReadAllText(Path.Combine(worktree, ".harness-config", "config.json")));
+        Assert.Contains(
+            outcome.Details!,
+            line => line == "created .harness-config/config.json (copied from the main checkout's, which this worktree was running with)");
+        Assert.Contains(GitIgnoreManager.BeginMarker, File.ReadAllText(Path.Combine(worktree, ".gitignore")), StringComparison.Ordinal);
+
+        foreach (var directory in HarnessLayout.PlaceholderDirectories)
+        {
+            Assert.True(File.Exists(Path.Combine(worktree, ".harness-config", directory, ".gitkeep")), directory);
+        }
+
+        Assert.Contains(
+            outcome.Details!,
+            line => line.StartsWith("note    this is a worktree", StringComparison.Ordinal)
+                && line.Contains(repository.Combine(".harness-config"), StringComparison.OrdinalIgnoreCase));
+
+        // Nothing written in the main checkout: its files are as they were, and git sees no change.
+        Assert.Equal(mainIgnore, File.ReadAllText(repository.Combine(".gitignore")));
+        Assert.Empty((await harness.RunGitAsync(repository.Path, ["status", "--porcelain"], token)).OutputLines);
     }
 
     [Fact]
@@ -477,6 +583,8 @@ public sealed class InitServiceTests
 
         Assert.True(outcome.Succeeded, outcome.Message);
         Assert.False(Directory.Exists(repository.Combine(".plans")));
+        Assert.False(Directory.Exists(repository.Combine(".harness-config")));
+        Assert.True(File.Exists(Path.Combine(worktree, ".harness-config", "config.json")));
         Assert.True(File.Exists(Path.Combine(worktree, ".plans", "_deferred-anchor-registry-done.md")));
 
         await harness.AnchorRegistryService.WriteAsync(

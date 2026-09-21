@@ -134,7 +134,7 @@ public sealed class WorktreeServiceTests
             temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
-        Assert.Contains("the limit is 20", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("must stay under 20", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.False(Directory.Exists(HarnessFactory.WorktreePath(temp.Path, "wt")));
     }
 
@@ -178,16 +178,23 @@ public sealed class WorktreeServiceTests
         var outcome = await harness.WorktreeService.CreateAsync(
             temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
 
-        // '/build/x86_64-none-debug/': the long leg's, not the remote or the foreign one's.
+        // '/build/x86_64-none-debug/': the long leg's, not the remote or the foreign one's. The first
+        // separator is the budget's own, joining the worktree to whatever lies below it.
         var added = "build".Length + "x86_64-none-debug".Length + 3;
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
         Assert.Contains($"needs {path.Length + added + Reserve + Margin} characters", outcome.Outcome.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>A machine that builds no leg grows no build directory, and nothing is added for one.</summary>
-    [Fact]
-    public async Task CreateAsync_AddsNothing_WhenNoLegBuildsOnThisMachine()
+    /// <summary>
+    /// A machine that builds no leg grows no build directory, and nothing is added for one - but the
+    /// separator joining the worktree to what the reserve names still counts. The worktree fits one
+    /// character under the limit, and not at it: the limit counts the NUL that ends a path.
+    /// </summary>
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(0, false)]
+    public async Task CreateAsync_AddsNoBuildDirectory_WhenNoLegBuildsOnThisMachine(int slack, bool fits)
     {
         using var temp = new TempDirectory();
         var harness = new HarnessFactory();
@@ -199,7 +206,8 @@ public sealed class WorktreeServiceTests
 
         await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
         {
-            Worktrees = new WorktreeSettings { PathBudgetReserve = 5, PathBudgetMargin = 2, PathLimit = path.Length + 5 + 2 },
+            // The worktree, one separator, a reserve of 5 and a margin of 2.
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 5, PathBudgetMargin = 2, PathLimit = path.Length + 1 + 5 + 2 + slack },
             BuildConfigs = { ["debug"] = new BuildConfiguration() },
             Legs = { ["elsewhere"] = new LegConfig { Os = other, Processor = "x86_64", Config = "debug" } },
         });
@@ -207,7 +215,7 @@ public sealed class WorktreeServiceTests
         var outcome = await harness.WorktreeService.CreateAsync(
             temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
 
-        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.Equal(fits, outcome.Succeeded);
     }
 
     /// <summary>

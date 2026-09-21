@@ -117,6 +117,55 @@ at once, with the line it concerns where the parser knows it:
 - References are resolved: a leg naming an undeclared host or emulator, an emulator that
   runs programs for another processor than the leg's, a success pattern that does not
   compile, a commit template placeholder no variable declares.
+- **A toolchain CMake builds with names its compiler**: `CC` or `CXX` under `env`,
+  `CMAKE_C_COMPILER`, `CMAKE_CXX_COMPILER` or `CMAKE_TOOLCHAIN_FILE` under `cacheVars`, or a
+  `compilerId` CMake must configure it with. One naming none is refused, because CMake then takes
+  whatever compiler it finds first - how a leg named `msvc` built with MinGW's gcc on every run until
+  `CC` was declared - and the build directory guard has nothing to hold a later build to. A
+  toolchain only .NET or Dart projects build with names none: those resolve their own compilers,
+  and its `cacheVars` are that build's properties. `init`'s `msvc` toolchain names `cl`.
+- **Every CMake configure is asked which compilers it resolved**, through the file API: the build
+  writes the `toolchains-v1` query into its build directory before configuring, notes the answers
+  already there, and reads the one that configure wrote. Each leg's line names what CMake answered -
+  `compiler: MSVC 19.51.36231 (C, CXX)`, one entry per compiler with the languages it serves -
+  whatever the verdict, and `--json` carries it as `compilers`. A configure that fails answers
+  nothing about the compilers - CMake 4 writes an error index in its place, and leaves the last
+  successful configure's answer where it was - so it names none, never the ones an earlier
+  configure resolved; told apart by what was there before, never by the times in the names, which
+  a clock that stepped back would reorder. It travels beside the detail rather than inside it, so a
+  leg a host ran is named once on the machine that reports it. A toolchain's `compilerId` -
+  `{"C": "MSVC", "CXX": "MSVC"}`, in CMake's own ids - holds the build to it: a compiler CMake
+  configured that contradicts it fails the leg before anything is built, and a declared language
+  CMake named no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
+  answer, and a misspelled language is never answered. `test --no-build` names what its build
+  directory was last configured with, and holds it to the same `compilerId`: binaries a compiler
+  nobody chose produced are failed rather than tested. A runner that does not build names none.
+- **A toolchain may name a developer environment**, declared once under `developerEnvironments`,
+  and one naming none that is declared is refused, as is a `visualStudio` one on a toolchain whose
+  `platforms` is not `["windows"]`: a leg elsewhere would be turned away on every run for want of it.
+  `init`'s `msvc` toolchain names `visualStudio`. The survey asks every host a leg might land on
+  whether it can set it up - Visual Studio's installer, `vswhere`, naming the newest instance with
+  `requiresComponent` - and a host without one turns the leg away as `skipped-tool-missing`, naming
+  why, one that could not look as `skipped-unavailable`, and one never asked as `poisoned`, a
+  defect in this tool; a copy starts nothing and asks nothing. The host that runs the leg sets it up from the
+  instance its own survey found, never a second look: that instance's `vcvarsall.bat` for the leg's
+  processor (`amd64`, or `amd64_arm64` to cross-compile), run once per environment, instance,
+  architecture and host environment by `cmd.exe` from a batch file the harness writes, reading
+  `set` before and after it in UTF-16 and keeping only what changed; the batch file names its
+  variables `%%NAME%%`, so only `call`'s own pass expands them, and a path holding `%`, `^` or `&`
+  is used as it is. Its exit code, an `[ERROR` line in either encoding it prints, a
+  `VSCMD_ARG_TGT_ARCH` naming another processor, an instance removed since the survey and a capture
+  that cannot be written each fail the leg before anything of it starts: the survey found the
+  instance, and an environment that will not set up once a leg began is that leg failing, as a
+  program that will not start then is. A capture directory that cannot be removed afterwards is a
+  warning and fails nothing. What it set sits over the host's `env` and beneath the variant's, the
+  test invocation's and the runner's own, for every process the leg starts, so `cl` builds from a
+  plain shell. The programs the leg starts - which no survey can require, since that `PATH` exists
+  only once set up - are looked for on it then, before anything of the leg starts: one missing
+  there skips the leg as `skipped-tool-missing`, named, never a program failing halfway through a
+  build. Each leg's line names it - `developer environment: visualStudio (Visual Studio
+  18.0.11205.157, MSVC 14.50.35717, amd64)` - and `--json` carries it as `developerEnvironment`,
+  beside the detail rather than inside it, like the compilers.
 - **A leg naming a toolchain that does not exist on its own operating system is refused**, by the
   toolchain's `platforms` list. Refused when read rather than skipped when placed, because nothing
   about it needs measuring: a leg's `os` is required, and a leg only ever runs on a host whose
@@ -141,8 +190,12 @@ that fits; a shorter root such as `.worktrees` buys those characters back. The b
 checked against the real path, so a shorter root never hides an overrun — it only makes one
 avoidable.
 
-**The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>/` for it and
-creates nothing there; `create-worktree` makes the directory the first time it needs it. The other
+**The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>` for it and
+creates nothing there; `create-worktree` makes the directory the first time it needs it. It is
+ignored by name, with no trailing slash, as `.harness-config/runs` is: a rule ending in `/` matches
+only a directory, so a root or a runs directory kept on another disk through a link - which the
+worktree commands follow - was listed by `git status`, and committed by `git add -A`, as that link.
+By name, it is ignored whatever it is, and however it is asked about. The other
 harness directories a person fills by hand — `sshItems`, `wslDistros`, `runner/.env`,
 `runner/.secrets` — keep the opposite shape, their *contents* ignored and a `.gitkeep` tracked, so
 the directory itself tells that person where the file goes. The root cannot afford that shape.
@@ -156,11 +209,46 @@ showed as untracked until committed, which is exactly the state sync's no-longer
 refuses.
 
 `init` leaves hand-written `.gitignore` rules alone, so a repository that already ignored one of
-these paths by hand keeps its rule beside the managed one. `init` reports each such pair as a note,
-naming the line and saying whether the two rules repeat each other or point opposite ways, since
-whichever of two contradicting rules comes later in the file wins. The comparison is by exact path
-after dropping a leading `!`, one anchoring `/`, a trailing `/*` and a trailing `/`; a rule that
-reaches a managed path only through a wildcard is not reported.
+these paths by hand keeps its rule beside the managed one. What `init` reports is git's own answer,
+never a reading of how the rules are spelled. Each managed rule carries a path it decides - the
+file it names, or a name inside the directory it rules on - and `git check-ignore -v --no-index`
+says which rule decides each of those paths in the tree. A rule deciding one against the block is
+named as the rule git follows: it undoes the block there, whether it is a re-include after the
+block, a nested `.gitignore`, or a whole-directory rule such as `.env` - which takes the
+`runner/.env` directory, from which git re-includes no placeholder. The same paths are then asked of
+the tree's own `.gitignore` with the block blanked out, in a scratch repository holding nothing
+else; a hand-written rule that would decide one the other way, where the tree's answer is the
+block's, is named as doing nothing there. A rule agreeing with the block is not named at all: it
+changes nothing, and a broad rule covering a managed path is not a copy of the block's rule. The
+spelling comparison this replaced named rules that match nothing as overriding the block, and
+could not see a rule reaching a managed path through a wildcard.
+
+git's own answer has two blind spots, both measured. It never names a re-include that matched a
+directory above the path - the path is then decided by no rule at all - and it matches a rule
+ending in `/` against a path only where that path is a directory that exists. So a rule re-including
+each host's directory, `!/.harness-config/sshItems/*/`, left a file there to the block while
+putting every `.key` in reach of `git add`, and init said nothing; and `!/.harness-config/runs/`
+was reported as no rule at all, blamed on another `.gitignore`. Each slot is therefore asked about a
+file inside one of its directories too, and where the tree's answer is no rule for a path the block
+ignores, the question goes to a scratch repository holding the tree's `.gitignore`, and each
+`.gitignore` of its own along the path, with every directory above the path made: there git names
+the rule re-including the nearest of them, at the line the tree's file has it on. Those files outrank
+`.git/info/exclude` and every excludes file a configuration names, so a re-include undoing the block
+is in one of them; were none named even there, init says git does not ignore the path and names no
+rule, never where one might be. A path git will not answer about - one beyond a symbolic link, which
+git never looks past, ends a whole `check-ignore` with exit 128 - is asked again on its own, named
+with git's reason, and every other path is still answered. A scratch repository that cannot be
+written is a note that git could not be asked; one that cannot be removed afterwards is a warning,
+and the answer stands.
+
+`init` writes the tree it runs in, a worktree's own included: its configuration, its `.gitignore`
+and the placeholders that keep each directory in git. A lane adopting the harness adopts it on its
+own branch; written into the main checkout, the lane's `.gitignore` never changed and main's did. A
+worktree with no configuration of its own gets a copy of the main checkout's, which it was running
+with and warned about on every command; a default in its place would drop every leg, host and
+runner main declares. What git ignores - connection data, runner values and secrets, the lock - is
+read from the main checkout whichever tree asks, and `init` in a worktree says so rather than
+creating any of it there.
 
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
@@ -346,8 +434,42 @@ tool can infer. An empty list scans nothing and the command says so, rather than
 pass over a check that looked at no file. `--current-commit` reads HEAD, `--current-tree` reads
 the disk, `--current-pr` reads only what this branch changed.
 
-Resolution is by substring, so a row naming a more specific child answers a citation of its
-parent.
+A citation resolves to a row whose id is exactly the id cited, by the rule `read-anchor` finds
+a row by, so the two verbs never disagree about whether a row exists. Resolved by containment
+instead, a citation of `D-FF3-3` passed through a row `D-FF3-30-…`, and a wrapped fragment
+`D-PP-PRESCAN-` passed through the id it was cut from: a truncated or ambiguous citation was
+invisible to the gate. A citation that runs into a hyphen at the end of its line is reported as
+cut there whatever rows exist - even one named by the part before the cut - because it does not
+spell the id it was cut from. An id cut at its first or second hyphen is too short to be a
+citation on its own line, so it is one where the next line carries on with the segments that make
+it one: `D-PP-` before a line opening `PRESCAN` is reported cut, and `D-` before `day` - a wrapped
+D-day - is not. An id cut just before a hyphen is cut too: one that ends its line where the next
+opens - past its indentation and a comment's marker - with the hyphen and the segments that carry
+it on into a row's id, as `D-LK6-14` before `-INTEGRATION-PAYLOAD` where
+`D-LK6-14-INTEGRATION-PAYLOAD` is a row. Read on its own it resolved to the shorter row it happens
+to spell, or to none. Where the two lines joined spell no row, the hyphen opens something else - an
+option such as `-Wall`, a figure such as `(-40`, a line a diff removed - and read as a cut each
+failed the check over an id written whole; a list's `- ` and an option's `--` carry nothing on
+either way. What stays out of reach is a break inside a segment, with no hyphen on either side: it cannot be told from a line
+that simply ends there, so it reads as the shorter id, reported unresolved unless that shorter id
+is a row of its own. The failure says cut citations apart from those no row resolves, since adding
+a row answers only the second.
+
+`--current-commit` reads every file of the commit through one git process; asked for one at a
+time, each cost two, and 2,385 files took twenty minutes. A file is read as it would be from
+disk - its byte order mark, UTF-16 included, says how. git answers "missing" for a file whose
+object it cannot read exactly as for a path that names none, so a path it answers that way is
+looked for in the commit's listing: one listed there refuses the read, naming it, rather than
+passing with nothing read in it. `check-anchor-balance` reads its base through the same rule, so
+a registry git cannot read is refused rather than reported missing at the base.
+
+git holds a name as bytes, and nothing makes them UTF-8. A file in a root whose name is not
+UTF-8 refuses the check, named as git's quoting writes it (`caf\351.md`): no file opens by such a
+name here, and read as UTF-8 it became another name, which the disk silently did not have. Which
+root a name lies in is decided on the name as .NET reads it, a stray byte as U+FFFD, and never on
+the quoted form, whose backslash reads as a separator and moved `src\351.bak` into `src`. A file
+git lists once for each side of a conflict is scanned once; two names that only read alike are
+two files.
 
 The scanner is the point of the command. The guard it replaces required a word boundary before
 an id, which is right for `FIXED-32-BIT-WORD` — whose tail is anchor-shaped and is correctly
@@ -520,8 +642,14 @@ build, or has no copy of the repository.
 
 `install-missing-tools` runs over every declared leg, or those `--legs` names, on the host each
 leg names with `wsl` or `ssh` and on this machine otherwise. Its logic lives in the core, so
-other commands share it, and `init` calls it: a fresh clone should be ready to run rather than
-ready to be told what is missing.
+other commands share it, and `init --install-tools` calls it. Plain `init` installs nothing and
+says how: adopting the harness's files changes one tree, and an install changes machines.
+
+- **`--dry-run` installs nothing.** It reaches and asks every host exactly as a run does, and
+  reports each tool it would install or update as `would install` or `would update`, with the
+  command that would run, `sudo` and all. Nobody is asked for a password, and no host is asked
+  whether one is needed: a dry run that stopped for a password would be the install it says it
+  is not. It exits `1` while anything is missing, and `--json` carries `dryRun`.
 
 - **The .NET SDK is the default tool on every remote leg.** A WSL distribution or ssh host that
   cannot run DssHarness has it installed, under the home directory, where no login-free PATH
@@ -538,6 +666,37 @@ ready to be told what is missing.
   Left out, a tool is needed everywhere, which is what every list written before this meant.
   Without it a repository could not declare both a Windows compiler and a POSIX one: each was
   reported missing on the other's hosts, and no leg was ever fully provisioned.
+- **A tool may narrow that to the legs that need it**, and every scope it names must hold:
+  `toolchains` (legs whose variant builds with one), `legs` (legs or leg sets, by name),
+  `processors` and `emulators`. `processors` is the leg's processor, the one it is built for, which
+  under an emulator is not the host's - so it reaches a native arm64 host as surely as an emulated
+  leg, and what only the emulating host needs, such as the emulator itself, is scoped with
+  `emulators` instead. Two legs on one host share what is installed there, and each is told only
+  about the tools it needs: `cl` scoped to Windows alone was reported missing on a MinGW leg,
+  because that leg is Windows too. A host is asked about a tool once, whichever of its legs need it,
+  and not at all when none of them do. A scope naming nothing declared, or one covering no declared
+  leg, is refused when the configuration is read.
+- **Each leg is told about a tool as it will find it.** A leg whose toolchain names a developer
+  environment starts every process in it, so a tool it needs is looked for on the `PATH` that
+  environment sets up for its processor, as the run looks before the leg starts: set up on this
+  machine for the look, searched, then each directory searched for programs. Found there it is
+  started by its path for its version, and `cl` - which no plain shell has - is never reported
+  missing on the leg that builds with it. Every other leg looks on its host's own `PATH`, which is
+  looked at once and shared, so two legs on one host can be told different things about one tool:
+  CMake that only Visual Studio carries is there for the one and missing for the other, and a
+  Visual Studio copy older than `minVersion` that comes first on its `PATH` is outdated for the leg
+  that starts it, whatever the host's own `PATH` holds.
+  - **An install runs once on a host**, for whichever of its `PATH`s asked first - the host's own
+    comes first - and each then looks again, the environment set up afresh, since the install may
+    have added to what it sets up. A failed install is the answer every leg there that needed it is
+    given.
+  - **An environment with no instance leaves the host's own `PATH` all there is**, so a tool
+    missing there is missing, and an install that brings Visual Studio is what would help. One that
+    could not be looked at or set up leaves a tool the host's own `PATH` lacks unknown, saying why.
+  - **Another host's is set up by the DssHarness that runs its legs there**, and this command
+    reaches that host through its shell alone: a tool its own `PATH` lacks is unknown for a leg in a
+    developer environment, never missing, and nothing is installed for it - a second copy of a tool
+    the leg finds is exactly what this command must never install.
 - **A privileged install takes its credential from that host's own item, on standard input
   only.** The item declares it as `SUDO_PASSWORD` in its `.env`, beside the address and user:
   `.harness-config/sshItems/<name>/.env`, or `.harness-config/wslDistros/<distro>/.env`. It never
@@ -675,6 +834,28 @@ sync (when the host needs it)  →  build on buildCores  →  test on testCores
   `buildCores` and `testCores`, because a remote host rarely has the same core count
   as the machine that wrote the configuration, and a test invocation can replace the
   test count again with its own `cores`.
+- **A host's `env` reaches every process a leg starts there** - each build phase, the
+  ninja that reads the build's dependency records, the test runner and each step of a
+  runner - as the lowest layer, so everything more specific still says otherwise. From
+  lowest to highest: for a build, the host's `env` then the variant's (its toolchain's,
+  build config's, sanitizer's and project's); for a test, the host's then the test invocation's; for
+  a runner, the host's, then the runner's values and secrets, its own `env`, and the
+  step's. Names compare ignoring case on every platform, as they do on Windows: a value reaches
+  every spelling of its name the machine already has, and the one written, so `Path` written for
+  a Linux host sets its `PATH`, and `http_proxy` reaches both the curl that reads it and the
+  tools that read `HTTP_PROXY`.
+- **A PATH a host sets is the run's.** It is where that host finds every program a leg
+  starts there, and no survey can see it, so none of those programs is required of the
+  host before the leg starts - each is looked for, so the directory it is found in still
+  reaches that PATH, and a program that is then not found fails the leg, naming it. A leg in a
+  developer environment is the exception: the PATH it sets up is built over the host's, and
+  what the leg starts is looked for on it before anything of the leg starts, a program missing
+  there skipping the leg as a tool missing.
+- **A host running a leg another machine dispatched to it is told which host it is.** To
+  itself it is `local`, and `hosts.local` in the configuration the two share describes the
+  machine that dispatched it: read that way, a leg on a Mac ran with the Windows machine's
+  core counts and environment. The dispatch names the host, and its cores, its `env`, and
+  the `{host}` a label records are all read under that name.
 
 ## Leg integrity
 
@@ -700,6 +881,44 @@ tool replaces, where a green result had quietly stopped meaning anything.
   failure `buildOutputs` exists to prevent, and the legs and their operating systems are all known
   then. A suffix added automatically was the alternative and is weaker — it has to guess which
   entries name programs, and cannot express a name differing by more than its suffix.
+- A ninja build's dependency records are read after it, with `ninja -t deps`: an object that
+  recorded no header dependencies is never rebuilt when a header it includes changes, so it fails
+  the leg, and records that cannot be read leave it `unmeasured`. Only an object built under
+  `deps = msvc` - its build line's own, or else its rule's - can record none legitimately:
+  `/showIncludes` reports headers and never the source, and ninja drops every header whose path, as
+  ninja holds it relative to the build directory, names `program files` or `microsoft visual
+  studio` as the system's own. So a unit including nothing, or only the standard library and the
+  Windows SDK, records none, and so does one built from a precompiled header under `/Yu` that
+  includes, besides, only headers the precompiled header holds and guards - with `#pragma once` or
+  an include guard - which cl never opens again; one it holds unguarded is read again, and
+  recorded. Such a zero is excused only where ninja rebuilds the object, all the same, for every
+  header its compile surely includes: each header its command force-includes with `/FI`, and what
+  its source and those headers include by a quoted include beside them, of a header ninja keeps -
+  never inside a comment, and inside a conditional block only where the block is surely compiled.
+  A block is surely compiled where its condition is a number, or asks whether `__cplusplus` is
+  defined, which the unit's language answers - C++ under `/TP` or for a C++ source, C under `/TC`
+  or for a `.c` one - and never where it asks anything else: one under `#ifndef _WIN32` may be
+  compiled out. The command is the one ninja ran, evaluated as ninja evaluates it: CMake's C++ rule
+  adds `/TP`, and each build line's `FLAGS` force-includes the header CMake precompiles, which for
+  C++ holds its includes under `#ifdef __cplusplus`. An input a build line only depends on - an
+  `OBJECT_DEPENDS` directory, say - is rebuilt for and never read. Ninja rebuilds an object for its
+  build line's inputs and, for each input that is itself built, for what that build recorded and its
+  own inputs - so a unit is rebuilt through its `.pch` for every header the object compiling it
+  recorded, and while that object records none, neither it nor any unit built from it is excused
+  for a header it holds. Only the object's own build line ever excuses it. A `msvc_deps_prefix` that stops matching what
+  cl prints - a Visual Studio in another language - or a compiler cache replaying an object without
+  cl's includes breaks only the objects rebuilt since, while older records stand: rebuilt with the
+  prefix broken, two objects recorded `#deps 0` beside a precompiled header's object still
+  recording its four headers, and read as proof that the build reads them, that record would have
+  excused both; and rebuilt with it broken, a C++ precompiled header's object and every unit built
+  from it recorded nothing and fail the leg. Under `deps = gcc` the source itself is always
+  recorded, so zero is never legitimate there. How each object is built is read the way ninja
+  reads the manifest: across the files `build.ninja` includes, since CMake keeps its rules in
+  `CMakeFiles/rules.ninja`, with ninja's escapes undone, since CMake names each source absolutely
+  and a drive's colon arrives as `$:`, and with its variables evaluated, since a compile's options
+  arrive in them. Read from `build.ninja` alone, with the escapes
+  left in, no MSVC object was ever excused, and a translation unit including nothing failed every
+  MSVC build it was in.
 - Every run has its own id, and every log is scoped to it. No two legs ever write to one
   file, so one leg's result can never be read as another's.
 - The programs a command will start are resolved on the host before a leg starts - each command
@@ -808,16 +1027,40 @@ while a gate ran turned a green suite red, with four test processes live at once
   explicit option in the invocation's own `args` still wins.
 - A leg's environment is carried to its host explicitly. WSL passes on only the
   variables named in `WSLENV`, and ssh passes on none.
-- `countPattern` extracts how many tests each leg ran. Legs running the same tests that
-  report different counts are flagged: a platform that quietly skips a group of tests
-  passes on less evidence than its siblings.
+- `countPattern` extracts how many tests each leg ran. Legs running the same tests - the same
+  project, and the same `testSet` - that report different counts are marked, among at least
+  three: a platform that quietly skips a group of tests passes on less evidence than its
+  siblings. The mark is its own part of the leg's line, `test count differs: it ran 2238
+  test(s), where 2 other leg(s) ran 2237`, and its own fields in `--json`, `testCountDiffers`
+  and `testCountNote`, beside the `project` and `testSet` the count belongs to. It is never a
+  timing mark - a Windows-only test once read as a Windows leg's timings being suspect - and
+  never changes a verdict.
+  - **A difference that is expected is declared.** A test invocation naming a `testSet` - a
+    platform's own tests, a sanitizer leg's subset - is compared only with the legs naming the
+    same one, and every other leg of the project with the rest. A leg of another project runs
+    another suite, and is compared only with that project's legs; a count whose leg resolves no
+    project - which only `test --no-build` can reach - is compared with nothing.
+  - **A count is recorded with what it belongs to where it is made**, on the host that ran the
+    leg, and read back with it. A host running what it has staged may have run another set than
+    this machine's configuration now names, and is compared as it counted.
 - The ledger reports command time and harness overhead (sync, fingerprints, sampling)
   separately. A phase slower than `defaults.durationWarningFactor` times the same phase
   on sibling legs of the same kind is marked suspect. A timing mark never
   changes a verdict. An emulated leg is never compared with a native one.
-- `keepAwake` holds a host awake for the leg. A host that slept once reported a
-  4 millisecond test at 729 seconds. Without it, timings from a host that can sleep are
-  marked suspect.
+- `keepAwake` holds a host awake while a leg's own work runs there. A host that slept once
+  reported a 4 millisecond test at 729 seconds. The command is started on the machine that
+  runs the work - by the DssHarness on a host a leg was dispatched to, under that host's own
+  section - with `{pid}`, the one name it is filled in with, replaced by the DssHarness process
+  running the leg, and it is stopped when the work ends. `["caffeinate", "-dimsu", "-w",
+  "{pid}"]` on macOS also stops by itself should that process end first. A command that cannot
+  start, or ends early, is said and fails nothing: a sleep it did not prevent is still seen, as
+  wall time outrunning the monotonic clock, and marks the phase it interrupted suspect, as it
+  does on a host that declares no command at all. The survey asks about the command, so a
+  directory it is found in reaches its PATH, and turns no leg away for it.
+- A host's compiler cache is that cache's own variable in the host's `env` - `CCACHE_DIR` for
+  ccache - so two hosts never share one store, and a build keys it against the leg's own tree.
+  The `compilerCacheDirectory` key that once said the same is retired, and refused where it is
+  read, naming `env` instead.
 
 ### Hosts and trees
 
@@ -854,7 +1097,13 @@ Seven independent guarantees, each addressing a measured failure mode:
    worktree's build output can never land in the main checkout's.
 3. **Build directory guard.** Before configuring, `CMakeCache.txt` is read and
    the run is refused if `CMAKE_HOME_DIRECTORY` or the recorded compiler
-   disagrees with this leg.
+   disagrees with this leg. The compiler is compared by the file it starts: the name the
+   leg's toolchain gives is resolved on the PATH the build's phases are given - its
+   environment's own, or this process's, with the directories a survey found programs in
+   appended - and held to the whole path CMake cached. A name compared with a name let a
+   directory configured with one gcc be rebuilt with another earlier on the PATH, and the
+   leg reported on objects from both. A name the search finds nowhere cannot start, and is
+   compared by name until the build says so.
 4. **Per-host compiler cache.** `CCACHE_DIR` and `CCACHE_BASEDIR` are set
    explicitly per host rather than inherited, so hosts never share a store.
 5. **Clean run directories, incremental build directories.** Scratch and run
@@ -915,6 +1164,28 @@ while their sources are being replaced. A lock is released only by the run that 
 - A lock, or a log path, that cannot be given up once its work is done is a warning naming it,
   and the work's verdict stands. The entry names a process that has ended, and is reclaimed as
   a dead holder's is.
+
+### Where a run's records live
+
+A run's records - its logs, and what it has already completed - are kept in
+`.harness-config/runs/<run id>/` of **the tree that ran it**, a worktree's own included, so a
+lane reads what it judged without leaving its tree. Kept in the main checkout instead, as they
+once were, a worktree's runs landed beside the main checkout's. Nothing in `runs/` is shared
+between runs: each writes only the directory named by its own id. What two runs from different
+trees contend over is the lock above, which stays in the main checkout.
+
+The directory ignores itself: the run about to write there first gives it a `.gitignore` of its own,
+holding `*`, so its records never show in git status, whatever the tree's `.gitignore` says. Kept on
+another disk through a link, it is the link git sees, and never what is beyond it: the managed
+block ignores it by name, so the link is ignored too. A
+worktree of a branch that predates the harness holds no rule for it, and its records were committed
+by the next `git add -A` and made `delete-worktree` refuse over the harness's own logs. No sync
+carries them, as none carries any of the harness's own state; deleting a worktree deletes its runs
+with it; and a run is resumed from the tree it was started in. A caller never works the directory out:
+`build`, `test` and `run` name it on every exit that created one, as `logs: <directory>` and as
+`runDirectory` in `--json`. A leg another host ran was run there under a run of its own, and its
+line names that host's directory, as `logs of <leg> on <host>: <directory>` and as the leg's own
+`runDirectory`.
 
 ## Syncing a tree
 
@@ -1077,6 +1348,24 @@ sibling directory whose name merely starts the same way is outside, not inside.
   runs a program it ships says `workingDirectoryRoot: action` and names it `./probe.py`; a step
   that builds or tests the repository says nothing and keeps the root it always had. The roots are
   resolved relative to the leg's own tree, so a leg on a worktree reaches that worktree's copy.
+- **`runOn` picks a step per operating system.** A step naming `runOn: [windows]` runs only on a
+  Windows leg; one without it runs on every leg. A leg of another system drops the step before the
+  file is vetted, its names demanded or its phases made, so nothing about the step is asked of that
+  leg - neither its program, which no survey requires of that leg's host, nor a name its lines use.
+  The leg says so as it runs, and lists the step as `skippedSteps` on its line in `--json`, so a
+  step left out is never simply absent. A step that reads what a skipped step would have made finds
+  nothing there; the two take the same `runOn`. A run in which some leg's system runs no step at
+  all is refused before any host is measured, naming every such leg: it would pass having run
+  nothing.
+- **An input's value comes from `run --input name=value` first**, the runner value directories
+  second and the input's own `default` last. `--input` takes one pair each time it is given, for an
+  input the action declares, and only for the runner the command line names - a runner a run check
+  starts reads its own values. Any other name, a runner of phases, an empty value and a name given
+  twice are refused before a host is measured: an unset shell variable is not a request to run
+  with nothing, and a value for a name the file never reads changes nothing while the command line
+  says it did. A host running one of the run's legs is handed the same pairs, so no leg there runs
+  a default where the command line gave a value. The value is a plain one, on a command line and
+  so in the process table; a secret stays in `.secrets`.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the
@@ -1151,6 +1440,10 @@ mac-clang-release     passed           12m40s  412 tests; timings suspect: the h
 lin-gcc-release       inputs-moved      3m51s  2 inputs changed: config/c.lang.json, ...
 vps-arm64-gcc-rel     skipped-unavailable      ssh vps: ssh could not connect
 ```
+
+Beneath it, `logs:` names where the run's records are, and each leg another host ran names
+that host's own; `--json` carries the same as `runDirectory`, at the top and on such a leg (see
+"Where a run's records live").
 
 ## Exit codes
 

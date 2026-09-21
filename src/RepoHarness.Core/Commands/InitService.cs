@@ -20,6 +20,7 @@ public sealed class InitService(
     VerifyGitService verifyGitService,
     IAnchorRegistryLocator anchorRegistryLocator,
     IToolProvisionService toolProvisionService,
+    ManagedIgnoreCheck managedIgnoreCheck,
     IHostPlatform platform)
 {
     /// <summary>
@@ -45,11 +46,12 @@ public sealed class InitService(
     /// slots can afford and it cannot. Measured, in a throwaway repository:
     /// </para>
     /// <code>
-    /// query                          /wt/          /wt/* + !/wt/.gitkeep
-    /// check-ignore 'wt/'  absent     IGNORED       IGNORED
-    /// check-ignore 'wt'   absent     NOT-IGNORED   NOT-IGNORED
-    /// check-ignore 'wt/'  present    IGNORED       IGNORED, and NOT-IGNORED once .gitkeep is committed
-    /// check-ignore 'wt'   present    IGNORED       NOT-IGNORED
+    /// query                          /wt/          /wt           /wt/* + !/wt/.gitkeep
+    /// check-ignore 'wt/'  absent     IGNORED       IGNORED       IGNORED
+    /// check-ignore 'wt'   absent     NOT-IGNORED   IGNORED       NOT-IGNORED
+    /// check-ignore 'wt/'  present    IGNORED       IGNORED       IGNORED, and NOT-IGNORED once .gitkeep is committed
+    /// check-ignore 'wt'   present    IGNORED       IGNORED       NOT-IGNORED
+    /// git status 'wt'     a link     UNTRACKED     IGNORED       UNTRACKED
     /// </code>
     /// <para>
     /// Excluding the contents makes the directory's own answer depend on a trailing slash, and it
@@ -61,47 +63,69 @@ public sealed class InitService(
     /// placeholder as untracked until it is committed, which is exactly what sync refuses on.
     /// </para>
     /// <para>
+    /// And it is excluded by its name alone, with no trailing slash, as the runs directory is: a rule
+    /// ending in <c>/</c> matches only a directory, so a root or a runs directory kept on another disk
+    /// through a link - which the worktree commands follow - would be listed, and committed, as that
+    /// link. By name, it is ignored whatever it is and however it is asked about.
+    /// </para>
+    /// <para>
     /// The root is taken from the configuration, because a configured root that nothing ignores
     /// puts whole checkouts into <c>git status</c>.
     /// </para>
     /// </remarks>
-    private static string[] BuildIgnoreRules(WorktreeSettings worktrees)
+    internal static IReadOnlyList<ManagedIgnoreRule> BuildIgnoreRules(WorktreeSettings worktrees)
     {
         var root = HarnessLayout.DirectoryName;
         var keep = HarnessLayout.GitKeepFileName;
         var runner = HarnessLayout.RunnerDirectoryRelative;
         var worktreesRoot = worktrees.Root.Replace('\\', '/').Trim('/');
+        var any = ManagedIgnoreRule.AnyName;
 
         return
         [
-            $"/{root}/{HarnessLayout.LockFileName}",
+            new($"/{root}/{HarnessLayout.LockFileName}", [$"{root}/{HarnessLayout.LockFileName}"], Ignores: true),
 
-            // Run logs, which exist to be read after a run and never to be committed.
-            $"/{root}/{HarnessLayout.RunsDirectoryName}/",
+            // Run logs, which exist to be read after a run and never to be committed. By name, so a
+            // link to where they are kept is ignored as surely as the directory: see the remarks above.
+            new($"/{root}/{HarnessLayout.RunsDirectoryName}", [$"{root}/{HarnessLayout.RunsDirectoryName}/{any}"], Ignores: true),
 
-            // The directory itself, never only its contents: see the remarks above.
-            $"/{worktreesRoot}/",
+            // The directory itself, never only its contents, and by name: see the remarks above.
+            new($"/{worktreesRoot}", [$"{worktreesRoot}/{any}"], Ignores: true),
 
             // One directory per host, each holding an address, a user and a key. Nothing under
             // either may ever be tracked.
-            $"/{root}/{HarnessLayout.SshItemsDirectoryName}/*",
-            $"!/{root}/{HarnessLayout.SshItemsDirectoryName}/{keep}",
-            $"/{root}/{HarnessLayout.WslDistrosDirectoryName}/*",
-            $"!/{root}/{HarnessLayout.WslDistrosDirectoryName}/{keep}",
+            .. Slot($"{root}/{HarnessLayout.SshItemsDirectoryName}", keep),
+            .. Slot($"{root}/{HarnessLayout.WslDistrosDirectoryName}", keep),
 
             // Action files are tracked; the values they read are not.
-            $"/{runner}/{HarnessLayout.RunnerEnvDirectoryName}/*",
-            $"!/{runner}/{HarnessLayout.RunnerEnvDirectoryName}/{keep}",
-            $"/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/*",
-            $"!/{runner}/{HarnessLayout.RunnerSecretsDirectoryName}/{keep}",
+            .. Slot($"{runner}/{HarnessLayout.RunnerEnvDirectoryName}", keep),
+            .. Slot($"{runner}/{HarnessLayout.RunnerSecretsDirectoryName}", keep),
 
             // What an action's steps write, and what they asked to keep. Both sit beside the
             // action's own tracked files, at whatever depth the author grouped it to, so these are
             // matched at any depth rather than rooted. Neither is ever tracked: one is this run's
             // working space and the other is output, and output committed beside the thing that
             // produced it is how a repository comes to hold a measurement nobody can reproduce.
-            HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName),
-            HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName),
+            new(
+                HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName),
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionBuildDirectoryName}/{any}"],
+                Ignores: true),
+            new(
+                HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName),
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionArtifactsDirectoryName}/{any}"],
+                Ignores: true),
+        ];
+
+        // A slot's contents ignored, and its placeholder kept. Asked about a file there and a file in a
+        // directory there - one per host: a rule re-including those directories leaves the first to
+        // the block and puts every key the second stands for back in reach of git add.
+        static ManagedIgnoreRule[] Slot(string directory, string keep) =>
+        [
+            new(
+                $"/{directory}/*",
+                [$"{directory}/{ManagedIgnoreRule.AnyName}", $"{directory}/{ManagedIgnoreRule.AnyName}/{ManagedIgnoreRule.AnyName}"],
+                Ignores: true),
+            new($"!/{directory}/{keep}", [$"{directory}/{keep}"], Ignores: false),
         ];
     }
 
@@ -113,15 +137,37 @@ public sealed class InitService(
     private readonly VerifyGitService _verifyGitService = verifyGitService;
     private readonly IAnchorRegistryLocator _anchorRegistryLocator = anchorRegistryLocator;
     private readonly IToolProvisionService _toolProvisionService = toolProvisionService;
+    private readonly ManagedIgnoreCheck _managedIgnoreCheck = managedIgnoreCheck;
     private readonly IHostPlatform _platform = platform;
 
+    /// <summary>Initialises the tree containing <paramref name="startDirectory"/>, installing nothing.</summary>
+    /// <param name="startDirectory">A directory in the tree.</param>
+    /// <param name="cancellationToken">Stops the run; what was already created stays.</param>
+    public Task<CommandOutcome> InitializeAsync(string startDirectory, CancellationToken cancellationToken = default)
+        => InitializeAsync(startDirectory, installTools: false, cancellationToken);
+
     /// <summary>
-    /// Initialises the repository containing <paramref name="startDirectory"/>.
-    /// Safe to re-run: missing pieces are created and existing ones are left alone,
-    /// so this also repairs a partially initialised repository.
+    /// Initialises the tree containing <paramref name="startDirectory"/> - the worktree it is in, or
+    /// the main checkout. Safe to re-run: missing pieces are created and existing ones are left alone,
+    /// so this also repairs a partially initialised tree.
     /// </summary>
+    /// <param name="startDirectory">A directory in the tree.</param>
+    /// <param name="installTools">
+    /// Whether to install what each declared leg's host is missing as well. Off unless asked for:
+    /// adopting the harness's files is a change to one tree, and an install is a change to machines.
+    /// </param>
+    /// <param name="cancellationToken">Stops the run; what was already created stays.</param>
+    /// <remarks>
+    /// Everything git tracks is written in the tree it runs in, a worktree's included: its
+    /// configuration, its <c>.gitignore</c> and the placeholders that keep each directory in git. A
+    /// lane adopting the harness adopts it on its own branch; written into the main checkout, the
+    /// lane's own <c>.gitignore</c> never changed and main's did. What git ignores - connection data,
+    /// runner values and secrets, the lock - is read from the main checkout whichever tree asks, and
+    /// init in a worktree says so rather than creating any of it there.
+    /// </remarks>
     public async Task<CommandOutcome> InitializeAsync(
         string startDirectory,
+        bool installTools,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(startDirectory);
@@ -148,56 +194,36 @@ public sealed class InitService(
             return CommandOutcome.Failed(HarnessExit.Refused, "Could not resolve the repository root.");
         }
 
-        // Initialise the main checkout even when invoked from a worktree: the state
-        // created here is shared, and a second copy inside a worktree would be a
-        // second source of truth. The anchor registries are the exception, below.
-        var root = layout.MainCheckoutRoot;
+        var root = layout.RepositoryRoot;
+        var worktree = layout.IsWorktree(_platform);
         var actions = new List<string>();
 
-        EnsureDirectory(root, Path.Combine(root, HarnessLayout.DirectoryName), actions);
-
-        var configFile = Path.Combine(root, HarnessLayout.DirectoryName, HarnessLayout.ConfigFileName);
-        if (_fileSystem.FileExists(configFile))
-        {
-            actions.Add($"kept    {Describe(root, configFile)} (already present)");
-        }
-        else
-        {
-            var detected = _projectDetector.Detect(root);
-            _configStore.Save(configFile, DefaultConfigFactory.Create(detected, _platform.PlatformKey, _platform.Processor));
-
-            actions.Add(detected.Count == 0
-                ? $"created {Describe(root, configFile)} (no project detected; declare one under \"projects\")"
-                : $"created {Describe(root, configFile)} (detected {string.Join(", ", detected.Select(d => d.Type))}; legs for {_platform.PlatformKey} {_platform.Processor})");
-        }
+        EnsureDirectory(root, layout.HarnessDirectory, actions);
+        EnsureConfiguration(layout, worktree, actions);
 
         // Read back rather than assumed, so a configuration that already existed names the
         // registries, the worktrees root and the hosts it declares, not the defaults. Read before
         // the ignore rules are written, because the rules depend on the configured worktrees root.
-        var config = _configStore.Load(configFile);
+        var config = _configStore.Load(layout.ConfigFile);
 
-        // No worktrees root here. The worktree commands create it the first time they need it, and a
-        // placeholder in it is what would make it read as not ignored (see BuildIgnoreRules).
-        EnsurePlaceholderDirectory(root, layout.SshItemsDirectory, actions);
-        EnsurePlaceholderDirectory(root, layout.WslDistrosDirectory, actions);
-        // Described against the tree it is created in, not the main checkout. This one is tracked,
-        // so it belongs to whichever tree init was run from; described against the main checkout it
-        // prints as a path climbing out of one directory and back into another. It carries a
-        // placeholder for a different reason than the ignored directories above: nothing ignores it,
-        // but git tracks no empty directory, so without one a fresh clone would arrive with the
-        // directory every runner's action is resolved against simply missing.
-        EnsurePlaceholderDirectory(layout.RepositoryRoot, layout.RunnerActionsDirectory, actions);
-        EnsurePlaceholderDirectory(root, layout.RunnerEnvDirectory, actions);
-        EnsurePlaceholderDirectory(root, layout.RunnerSecretsDirectory, actions);
+        // Each carries a placeholder, because git tracks no empty directory: without one a fresh
+        // clone of this branch would arrive without the directory at all. Whether the rest of each
+        // is ignored is the block's to say, below. No worktrees root here: the worktree commands
+        // create it the first time they need it, and a placeholder in it is what would make it read
+        // as not ignored (see BuildIgnoreRules).
+        foreach (var directory in HarnessLayout.PlaceholderDirectories)
+        {
+            EnsurePlaceholderDirectory(root, Path.Combine(layout.HarnessDirectory, directory), actions);
+        }
 
         var gitIgnorePath = Path.Combine(root, ".gitignore");
         var ignoreRules = BuildIgnoreRules(config.Worktrees);
 
-        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, ignoreRules)
+        actions.Add(_gitIgnoreManager.Update(gitIgnorePath, [.. ignoreRules.Select(rule => rule.Rule)])
             ? $"updated {Describe(root, gitIgnorePath)}"
             : $"kept    {Describe(root, gitIgnorePath)} (rules already current)");
 
-        ReportOverlaps(root, gitIgnorePath, ignoreRules, actions);
+        await ReportConflictsAsync(root, gitIgnorePath, ignoreRules, actions, cancellationToken).ConfigureAwait(false);
 
         var registries = await _anchorRegistryLocator
             .LocateAsync(new HarnessContext(layout, config), cancellationToken)
@@ -208,16 +234,63 @@ public sealed class InitService(
             EnsureAnchorRegistry(root, registry, config.Anchors, actions);
         }
 
-        var interrupted = await ProvisionAsync(root, config, actions, cancellationToken).ConfigureAwait(false);
+        if (worktree)
+        {
+            actions.Add(
+                $"note    this is a worktree: what git ignores - connection data, runner values and secrets, "
+                + $"the lock - is read from the main checkout's '{layout.MainHarnessDirectory}', which init "
+                + "leaves as it is");
+        }
 
-        // The repository is initialised either way, and the list below says everything that was done.
-        // Only the exit code reports that the last step was stopped rather than that it finished.
+        var interrupted = installTools
+            ? await ProvisionAsync(root, config, actions, cancellationToken).ConfigureAwait(false)
+            : Unprovisioned(config, actions);
+
+        // The tree is initialised either way, and the list below says everything that was done. Only
+        // the exit code reports that the last step was stopped rather than that it finished.
         return interrupted
             ? CommandOutcome.Failed(
                 HarnessExit.Cancelled,
                 $"initialised {root}, and the tool check was interrupted",
                 actions)
             : CommandOutcome.Ok($"initialised {root}", actions);
+    }
+
+    /// <summary>
+    /// Creates the tree's configuration when it has none: a copy of the main checkout's, for a
+    /// worktree running on it, and one seeded from the projects detected here otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A worktree of a branch that predates the harness runs with the main checkout's configuration
+    /// until it has its own, and is warned on every command that it does. Adopting the harness there
+    /// keeps what it was running with, now tracked on its branch: a default in its place would drop
+    /// every leg, host and runner main declares, and say nothing.
+    /// </remarks>
+    private void EnsureConfiguration(HarnessLayout layout, bool worktree, List<string> actions)
+    {
+        var root = layout.RepositoryRoot;
+        var configFile = layout.ConfigFile;
+        var mainConfig = Path.Combine(layout.MainHarnessDirectory, HarnessLayout.ConfigFileName);
+
+        if (_fileSystem.FileExists(configFile))
+        {
+            actions.Add($"kept    {Describe(root, configFile)} (already present)");
+            return;
+        }
+
+        if (worktree && _fileSystem.FileExists(mainConfig))
+        {
+            _fileSystem.WriteAllTextAtomic(configFile, _fileSystem.ReadAllText(mainConfig));
+            actions.Add($"created {Describe(root, configFile)} (copied from the main checkout's, which this worktree was running with)");
+            return;
+        }
+
+        var detected = _projectDetector.Detect(root);
+        _configStore.Save(configFile, DefaultConfigFactory.Create(detected, _platform.PlatformKey, _platform.Processor));
+
+        actions.Add(detected.Count == 0
+            ? $"created {Describe(root, configFile)} (no project detected; declare one under \"projects\")"
+            : $"created {Describe(root, configFile)} (detected {string.Join(", ", detected.Select(d => d.Type))}; legs for {_platform.PlatformKey} {_platform.Processor})");
     }
 
     /// <summary>
@@ -243,32 +316,64 @@ public sealed class InitService(
     }
 
     /// <summary>
-    /// Names each hand-written rule that states again, perhaps in another shape, a path the managed
-    /// block already rules on.
+    /// Names each rule that turns a path the managed block rules on the other way, as git itself
+    /// decides those paths.
     /// </summary>
     /// <remarks>
-    /// Reported and never removed. The managed block leaves hand-written rules alone on purpose, so a
-    /// repository that already ignored one of these paths by hand keeps its own rule and gains a
-    /// second one — and two differently-shaped rules for one path is a state nothing else points
-    /// out. A whole-directory rule written by hand also silently cancels the managed block's
-    /// placeholder, since git cannot re-include a file inside an excluded directory. Read from the
-    /// file as it now is, so the line numbers are the ones a reader will find.
+    /// Reported and never removed: hand-written rules are the repository's own. A rule that git
+    /// follows undoes the block there - a re-include putting a secret back in reach of <c>git add</c>,
+    /// or a whole-directory rule no placeholder can be re-included from. One the block overrules does
+    /// nothing there, which is worth knowing when somebody wrote it meaning something. A rule that
+    /// agrees with the block changes nothing and is not named. A path git would not answer about -
+    /// one beyond a symbolic link - is named with git's reason, and the rest are still reported. Where
+    /// git could not be asked at all, that is said instead: the tree is initialised either way.
     /// </remarks>
-    private void ReportOverlaps(string root, string gitIgnorePath, IReadOnlyList<string> rules, List<string> actions)
+    private async Task ReportConflictsAsync(
+        string root,
+        string gitIgnorePath,
+        IReadOnlyList<ManagedIgnoreRule> rules,
+        List<string> actions,
+        CancellationToken cancellationToken)
     {
-        var shown = Describe(root, gitIgnorePath);
+        ManagedIgnoreFindings findings;
 
-        foreach (var overlap in _gitIgnoreManager.FindOverlaps(_fileSystem.ReadAllText(gitIgnorePath), rules))
+        try
         {
-            var where = $"note    {shown} line {overlap.LineNumber} ('{overlap.Rule}')";
-
-            actions.Add(overlap.Contradicts
-                ? $"{where} {(overlap.ReIncludes ? "re-includes" : "ignores")} '{overlap.Path}', which the managed "
-                    + $"block {(overlap.ReIncludes ? "ignores" : "re-includes")}; whichever of the two comes later in "
-                    + "the file wins"
-                : $"{where} repeats the managed block's rule for '{overlap.Path}'; keep one of them so there is one "
-                    + "statement of what is ignored");
+            findings = await _managedIgnoreCheck
+                .FindAsync(root, _fileSystem.ReadAllText(gitIgnorePath), rules, cancellationToken)
+                .ConfigureAwait(false);
         }
+        catch (HarnessException ex)
+        {
+            actions.Add($"note    could not ask git which rules decide the paths the managed block keeps: {ex.Message}");
+            return;
+        }
+
+        foreach (var conflict in findings.Conflicts)
+        {
+            var paths = Listed(conflict.Paths);
+            var managed = conflict.Ignores ? "keeps in git" : "ignores";
+            var where = $"note    {conflict.Source} line {conflict.Line} ('{conflict.Pattern}')";
+            var what = conflict.Ignores ? "ignores" : "re-includes";
+
+            actions.Add(conflict.Wins
+                ? $"{where} {what} {paths}, which the managed block {managed}; git follows that rule"
+                : $"{where} {what} {paths}, which the managed block {managed}; a later rule decides them, so this one does nothing there");
+        }
+
+        if (findings.Unruled.Count > 0)
+        {
+            actions.Add(
+                $"note    git does not ignore {Listed(findings.Unruled)}, which the managed block ignores, and names no rule "
+                + "that decides that");
+        }
+
+        foreach (var unanswered in findings.Unanswered)
+        {
+            actions.Add($"note    git would not say which rule decides '{unanswered.Path}': {unanswered.Why}");
+        }
+
+        static string Listed(IEnumerable<string> paths) => string.Join(", ", paths.Select(path => $"'{path}'"));
     }
 
     private void EnsureDirectory(string root, string path, List<string> actions)
@@ -305,9 +410,9 @@ public sealed class InitService(
     /// rather than ready to be told what is missing.
     /// </summary>
     /// <remarks>
-    /// Nothing happens where no leg is declared, which is every first <c>init</c>: the configuration
-    /// it has just written names no host. Where hosts are declared, a failure here is reported and
-    /// never fatal — the harness directory exists either way, and a host that is switched off is a
+    /// Only with <c>--install-tools</c>, and nothing happens where no leg is declared, as after a first
+    /// <c>init</c> that detected no project. Where legs are declared, a failure here is reported and
+    /// never fatal - the harness directory exists either way, and a host that is switched off is a
     /// normal state that must not leave a repository half-initialised. Being interrupted is not a
     /// failure of this step and is reported apart from one, because a privileged install can stop here
     /// to ask for a password and Ctrl+C is how somebody who has not got one answers.
@@ -327,7 +432,7 @@ public sealed class InitService(
         try
         {
             var report = await _toolProvisionService
-                .ProvisionAsync(root, legNames: null, cancellationToken)
+                .ProvisionAsync(root, legNames: null, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
             foreach (var leg in report.Legs)
@@ -363,6 +468,33 @@ public sealed class InitService(
         }
     }
 
+    /// <summary>
+    /// Says how to install what each declared leg's host is missing, where init was not asked to.
+    /// </summary>
+    /// <returns>Never interrupted: nothing ran.</returns>
+    private static bool Unprovisioned(HarnessConfig config, List<string> actions)
+    {
+        if (config.Legs.Count > 0)
+        {
+            actions.Add(
+                $"tools   not checked; 'DssHarness {ToolProvisionService.CommandName} --dry-run' lists what each leg's "
+                + $"host is missing, and 'DssHarness {ToolProvisionService.CommandName}' or 'DssHarness init "
+                + "--install-tools' installs it");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// A path as the list of what was done shows it: from the tree's root, or whole where it lies
+    /// outside the tree, as an ignored registry kept in the main checkout does.
+    /// </summary>
     private static string Describe(string root, string path)
-        => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+    {
+        var relative = Path.GetRelativePath(root, path);
+
+        return relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative)
+            ? path
+            : relative.Replace(Path.DirectorySeparatorChar, '/');
+    }
 }

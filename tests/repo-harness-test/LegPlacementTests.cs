@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Results;
@@ -129,6 +130,76 @@ public sealed class LegPlacementTests
             StringComparison.Ordinal);
 
         Assert.Equal(HostId.Wsl("Ubuntu"), Place(leg, Windows, working).Host?.Host);
+    }
+
+    /// <summary>
+    /// A leg whose toolchain names a developer environment is turned away from a host that cannot set
+    /// it up - as a tool missing where the host looked and has none, as unavailable where it could not
+    /// look, and as a defect in this tool where it was never asked - and placed where it can. A copy
+    /// starts nothing there, and needs none.
+    /// </summary>
+    [Fact]
+    public void Place_TurnsALegAway_WhereItsDeveloperEnvironmentCannotBeSetUp()
+    {
+        var config = new HarnessConfig
+        {
+            DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+            Toolchains = { ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" } },
+        };
+        var leg = new SelectedLeg("win", new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" });
+        var without = Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["vs"] = DeveloperEnvironmentCheck.Nowhere("no Visual Studio instance there has the component 'X'"),
+            },
+        };
+        var with = Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["vs"] = DeveloperEnvironmentCheck.Installed(@"C:\VS", "18.0.1"),
+            },
+        };
+
+        HostReport Answering(DeveloperEnvironmentCheck check) => Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase) { ["vs"] = check },
+        };
+
+        LegPlacement Placed(LegWorkload workload, HostReport host)
+            => LegPlacement.Place(config, leg, workload, new Dictionary<HostId, HostReport> { [host.Host] = host });
+
+        var turnedAway = Placed(LegWorkload.BuildOnly, without);
+
+        Assert.False(turnedAway.Runnable);
+        Assert.Equal(LegVerdict.SkippedToolMissing, turnedAway.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: developer environment 'vs' cannot be set up there: no Visual Studio instance there has the component 'X'",
+            turnedAway.Reason);
+
+        var unknown = Placed(LegWorkload.BuildOnly, Answering(DeveloperEnvironmentCheck.Unreadable("vswhere did not answer")));
+
+        Assert.Equal(LegVerdict.SkippedUnavailable, unknown.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: whether developer environment 'vs' can be set up there could not be established: vswhere did not answer",
+            unknown.Reason);
+
+        var unnamed = Placed(LegWorkload.BuildOnly, Answering(new DeveloperEnvironmentCheck(DeveloperEnvironmentFound.Installed, null, null, null)));
+
+        Assert.Equal(LegVerdict.SkippedUnavailable, unnamed.Verdict);
+        Assert.EndsWith("could not be established: the host named no instance", unnamed.Reason, StringComparison.Ordinal);
+
+        var neverAsked = Placed(new LegWorkload(Build: false, Test: true, []), Windows);
+
+        Assert.Equal(LegVerdict.Poisoned, neverAsked.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: whether developer environment 'vs' can be set up there was never asked, which is a defect in this tool: "
+            + "a host is asked about every developer environment a leg starts in",
+            neverAsked.Reason);
+
+        Assert.True(Placed(LegWorkload.BuildOnly, with).Runnable);
+        Assert.True(Placed(LegWorkload.Copy, without).Runnable);
     }
 
     [Fact]

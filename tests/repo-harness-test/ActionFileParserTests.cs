@@ -706,6 +706,118 @@ public sealed class ActionFileParserTests
         Assert.Contains("'true', 'false'", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A step's runOn names the operating systems it runs on, each read once; a step naming none
+    /// runs on every leg.
+    /// </summary>
+    [Fact]
+    public void Parse_ReadsRunOn_EachSystemOnce()
+    {
+        var steps = Parse("""
+            name: build
+            steps:
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows, linux, windows]
+              - name: everywhere
+                run: |
+                  cmake --build .
+            """).Steps;
+
+        Assert.Equal(["windows", "linux"], steps[0].RunOn);
+        Assert.Empty(steps[1].RunOn);
+        Assert.Equal(["msvc", "everywhere"], Parse("""
+            name: build
+            steps:
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows]
+              - name: everywhere
+                run: |
+                  cmake --build .
+            """).StepsOn("windows").Select(step => step.Name));
+    }
+
+    /// <summary>
+    /// A leg's operating system is read ignoring case, as it is everywhere else: a leg declaring
+    /// Windows runs the steps runOn gives windows, and the run it is in is not refused as running none.
+    /// </summary>
+    [Fact]
+    public void RunOn_ReadsALegsSystemIgnoringCase()
+    {
+        var file = Parse("""
+            name: build
+            steps:
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows]
+            """);
+
+        Assert.Equal(["msvc"], file.StepsOn("Windows").Select(step => step.Name));
+        file.RequireAStepOn("build", [("win", "Windows")]);
+    }
+
+    /// <summary>
+    /// A leg left with only predefined steps runs nothing of the file's own, and is named in the
+    /// refusal; a file of predefined steps alone runs no program on any leg, and is not refused.
+    /// </summary>
+    [Fact]
+    public void RequireAStepOn_CountsOnlyTheStepsThatRunPrograms_WhereTheFileHasAny()
+    {
+        var mixed = Parse("""
+            name: build
+            steps:
+              - name: at
+                uses: harness/checkout
+                ref: main
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows]
+            """);
+
+        var refusal = Assert.Throws<HarnessException>(() => mixed.RequireAStepOn("build", [("win", "windows"), ("lin", "linux")]));
+
+        Assert.Contains("leg 'lin' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("'win'", refusal.Message, StringComparison.Ordinal);
+
+        Parse("""
+            name: build
+            steps:
+              - name: at
+                uses: harness/checkout
+                ref: main
+            """).RequireAStepOn("build", [("lin", "linux")]);
+    }
+
+    /// <summary>
+    /// A runOn naming a system this tool does not know, naming none, or given as anything but a
+    /// list is refused: read as every system, the step runs where the file says it does not, and
+    /// read as none, a step the file says runs is dropped without a word.
+    /// </summary>
+    [Theory]
+    [InlineData("runOn: [Windows]", "'Windows' is not an operating system runOn can name. Available: 'windows', 'linux', 'macos'.")]
+    [InlineData("runOn: [windows, solaris]", "'solaris' is not an operating system runOn can name.")]
+    [InlineData("runOn: []", "names no operating system, so the step would never run")]
+    [InlineData("runOn: windows", "a step's 'runOn' is a list of the operating systems it runs on: 'windows', 'linux', 'macos'.")]
+    public void Parse_Refuses_ARunOnThatNamesNoSystemItKnows(string line, string expected)
+    {
+        var refusal = Refused($"""
+            name: build
+            steps:
+              - name: msvc
+                run: |
+                  cl /nologo
+                {line}
+            """);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
+    }
+
     private static ActionFileParser CreateParser()
         => new(
             new PhysicalFileSystem(FilePermissionsFactory.Create()),

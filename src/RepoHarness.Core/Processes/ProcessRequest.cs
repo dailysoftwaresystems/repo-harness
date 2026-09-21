@@ -48,6 +48,13 @@ public sealed record ProcessRequest
     public string? StandardInput { get; init; }
 
     /// <summary>
+    /// How the child's standard output is decoded, or <see langword="null"/> for UTF-8. Latin-1 turns
+    /// each byte into one character, for output a caller has to split by a byte count - git's batch
+    /// answers name each object's size in bytes, which UTF-8 text cannot be cut by.
+    /// </summary>
+    public System.Text.Encoding? StandardOutputEncoding { get; init; }
+
+    /// <summary>
     /// Keeps standard input open after <see cref="StandardInput"/> is written, until the child exits,
     /// instead of closing it at once. A child that acts on what it read and then watches for the end of
     /// its input learns from that end that this process has gone. A child that reads to the end before

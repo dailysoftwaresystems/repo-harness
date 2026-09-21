@@ -132,8 +132,16 @@ public sealed class LineEndingService(
             .ToList();
 
         var considered = await SelectAsync(root, request.Scope, cancellationToken).ConfigureAwait(false);
-        var covered = considered.Where(path => !IsExcluded(path, excludes)).ToList();
+        var reached = considered.Where(name => !IsExcluded(name.Text, excludes)).ToList();
 
+        // Before anything is read or rewritten: read as UTF-8, such a name became another, which the
+        // disk did not have, and the file was passed over without a word.
+        if (reached.FirstOrDefault(name => !name.IsUtf8) is { } unnamed)
+        {
+            throw unnamed.Unreadable("its line endings cannot be checked");
+        }
+
+        var covered = reached.Select(name => name.Text).ToList();
         var declared = await ReadPolicyAsync(root, covered, cancellationToken).ConfigureAwait(false);
 
         var changed = new List<LineEndingChange>();
@@ -261,28 +269,32 @@ public sealed class LineEndingService(
     private static bool IsExcluded(string path, IReadOnlyList<string> excludes)
         => PathPatterns.Matches(excludes, path);
 
-    private static IReadOnlyList<string> SplitPaths(string output)
-        => [.. output.Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(path => path.Trim('\n', '\r'))];
-
-    private async Task<IReadOnlyList<string>> SelectAsync(
+    /// <summary>
+    /// The files <paramref name="scope"/> covers, each once: git lists a file in conflict once for
+    /// each side of it, and one both staged and changed since in both lists. Compared whole, since two
+    /// names that are not UTF-8 can read alike and still be two files.
+    /// </summary>
+    private async Task<IReadOnlyList<GitName>> SelectAsync(
         string root,
         LineEndingScope scope,
         CancellationToken cancellationToken)
     {
         if (scope == LineEndingScope.All)
         {
-            var tracked = await RunAsync(root, ["ls-files", "-z", "--cached"], cancellationToken).ConfigureAwait(false);
-            return SplitPaths(tracked);
+            var tracked = await _gitClient.ListNamesAsync(root, ["ls-files", "-z", "--cached"], cancellationToken)
+                .ConfigureAwait(false);
+
+            return [.. tracked.Distinct()];
         }
 
         // Staged and unstaged, and nothing else: an untracked file is in neither, and rewriting one
         // would change a file the repository has never been asked to store.
-        var unstaged = await RunAsync(root, ["diff", "--name-only", "-z", "--diff-filter=d"], cancellationToken)
+        var unstaged = await _gitClient.ListNamesAsync(root, ["diff", "--name-only", "-z", "--diff-filter=d"], cancellationToken)
             .ConfigureAwait(false);
-        var staged = await RunAsync(root, ["diff", "--name-only", "-z", "--diff-filter=d", "--cached"], cancellationToken)
+        var staged = await _gitClient.ListNamesAsync(root, ["diff", "--name-only", "-z", "--diff-filter=d", "--cached"], cancellationToken)
             .ConfigureAwait(false);
 
-        return [.. SplitPaths(unstaged).Concat(SplitPaths(staged)).Distinct(StringComparer.Ordinal)];
+        return [.. unstaged.Concat(staged).Distinct()];
     }
 
     /// <summary>

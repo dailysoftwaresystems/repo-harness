@@ -120,11 +120,43 @@ public sealed class AnchorCitationService(
         var citations = new List<AnchorCitation>();
         var scanned = 0;
 
-        foreach (var path in selection.Paths.Where(path => IsInsideARoot(path, roots)))
+        // Each once: git lists a file in conflict once for each side of it, and scanned that many
+        // times, each of its citations was reported that many times. Compared whole, since two names
+        // that are not UTF-8 can read alike and still be two files.
+        var inRoots = selection.Names
+            .Distinct()
+            .Where(name => IsInsideARoot(name.Text, roots))
+            .ToList();
+
+        // Before anything is read: read as UTF-8, such a name became another, which the commit "could
+        // not read" and the disk silently did not have.
+        if (inRoots.FirstOrDefault(name => !name.IsUtf8) is { } unnamed)
+        {
+            throw unnamed.Unreadable("the citations in it cannot be checked");
+        }
+
+        var paths = inRoots.Select(name => name.Text).ToList();
+
+        // By the rule read-anchor finds a row by, so the two verbs cannot disagree about whether a
+        // row exists. Read before the files are, because a line ending in an id and the next opening
+        // with a hyphen are one id cut in two only where the two join into a row's id.
+        var rows = await _registryService
+            .ListAsync(startDirectory, new AnchorListFilter(), cancellationToken)
+            .ConfigureAwait(false);
+
+        var ids = rows.Select(entry => entry.Row.Id).ToHashSet(AnchorIdMatch.Comparer);
+
+        // Every file of a commit read by one git process. Asked for one at a time, each cost two
+        // processes, which was measured at 20 minutes over 2,385 files where the disk took 6.5 seconds.
+        var committed = selection.Commit is { } commit
+            ? await _gitClient.ReadFilesAtCommitAsync(root, commit, paths, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var text = await ReadAsync(root, selection.Commit, path, cancellationToken).ConfigureAwait(false);
+            var text = committed is not null ? committed[path] : ReadFromDisk(root, path);
 
             if (text is null || IsBinary(text))
             {
@@ -132,15 +164,12 @@ public sealed class AnchorCitationService(
             }
 
             scanned++;
-            citations.AddRange(scanner.Scan(path, text));
+            citations.AddRange(scanner.Scan(path, text, ids));
         }
 
-        var rows = await _registryService
-            .ListAsync(startDirectory, new AnchorListFilter(), cancellationToken)
-            .ConfigureAwait(false);
-
-        var ids = rows.Select(entry => entry.Row.Id).ToList();
-        var unresolved = citations.Where(citation => !Resolves(citation.Id, ids)).ToList();
+        // A citation cut at the end of its line is reported whatever rows exist, because the id it
+        // was cut from is not the one it spells.
+        var unresolved = citations.Where(citation => citation.Cut || !ids.Contains(citation.Id)).ToList();
 
         return new AnchorCitationReport(
             subject,
@@ -148,18 +177,9 @@ public sealed class AnchorCitationService(
             roots,
             scanned,
             citations.Count,
-            ids.Count,
+            rows.Count,
             unresolved);
     }
-
-    /// <summary>
-    /// Whether a cited id resolves. Resolution is by substring rather than by equality, following the
-    /// guard this replaces: a registry row naming a more specific child (<c>D-AREA-TOPIC-DETAIL</c>)
-    /// answers a citation of the parent (<c>D-AREA-TOPIC</c>), which is how a registry that grew more
-    /// specific does not orphan the citations written before it did.
-    /// </summary>
-    private static bool Resolves(string id, IEnumerable<string> rows)
-        => rows.Any(row => row.Contains(id, StringComparison.Ordinal));
 
     /// <summary>
     /// Whether a repository-relative path lies inside a declared root. A root names a file or a
@@ -176,10 +196,6 @@ public sealed class AnchorCitationService(
     private static bool IsBinary(string text)
         => text.AsSpan(0, Math.Min(text.Length, BinaryProbeLength)).IndexOf('\0') >= 0;
 
-    /// <summary>Splits git's NUL-separated output, which needs no quoting and so loses no path.</summary>
-    private static IReadOnlyList<string> SplitPaths(string output)
-        => [.. output.Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(path => path.Trim('\n', '\r'))];
-
     private async Task<AnchorCitationSelection> SelectAsync(
         string root,
         AnchorCitationSubject subject,
@@ -191,12 +207,12 @@ public sealed class AnchorCitationService(
             {
                 // Tracked files and untracked ones git does not ignore: what a person editing the
                 // tree would call "the files", which is what --current-tree is asked about.
-                var listed = await RunAsync(
+                var listed = await _gitClient.ListNamesAsync(
                     root,
                     ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                     cancellationToken).ConfigureAwait(false);
 
-                return new AnchorCitationSelection(SplitPaths(listed), "the working tree", null);
+                return new AnchorCitationSelection(listed, "the working tree", null);
             }
 
             case AnchorCitationSubject.CurrentPullRequest:
@@ -207,13 +223,13 @@ public sealed class AnchorCitationService(
                     .ConfigureAwait(false);
                 var commit = mergeBase.Trim();
 
-                var changed = await RunAsync(
+                var changed = await _gitClient.ListNamesAsync(
                     root,
                     ["diff", "--name-only", "-z", "--diff-filter=d", commit, "--"],
                     cancellationToken).ConfigureAwait(false);
 
                 return new AnchorCitationSelection(
-                    SplitPaths(changed),
+                    changed,
                     $"what this branch changed against {branch} ({Short(commit)})",
                     null);
             }
@@ -225,29 +241,21 @@ public sealed class AnchorCitationService(
                         HarnessExit.Refused,
                         "HEAD names no commit, so there is no commit to check. Commit first, or use --current-tree.");
 
-                var listed = await RunAsync(root, ["ls-tree", "-r", "-z", "--name-only", commit], cancellationToken)
-                    .ConfigureAwait(false);
+                // Files alone: a submodule's entry names a commit in another repository, which is
+                // no file here, and every file listed is one git must then be able to read.
+                var listed = await _gitClient.ListFilesAtCommitAsync(root, commit, cancellationToken).ConfigureAwait(false);
 
-                return new AnchorCitationSelection(SplitPaths(listed), $"the files at HEAD ({Short(commit)})", commit);
+                return new AnchorCitationSelection(listed, $"the files at HEAD ({Short(commit)})", commit);
             }
         }
     }
 
     /// <summary>
-    /// A file's text: from the commit when one is being checked, so a smudged checkout cannot change
-    /// what a committed file is judged to say, and from disk otherwise.
+    /// A file's text as the disk holds it. A commit's files are read from the commit instead, so a
+    /// smudged checkout cannot change what a committed file is judged to say.
     /// </summary>
-    private async Task<string?> ReadAsync(
-        string root,
-        string? commit,
-        string path,
-        CancellationToken cancellationToken)
+    private string? ReadFromDisk(string root, string path)
     {
-        if (commit is not null)
-        {
-            return await _gitClient.ReadFileAtCommitAsync(root, commit, path, cancellationToken).ConfigureAwait(false);
-        }
-
         var full = Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar));
 
         // A path git listed can be gone by the time it is read: a file staged and then deleted, or
@@ -305,7 +313,7 @@ public sealed class AnchorCitationService(
     /// The files a subject covers, how to describe it, and the commit to read them from when the
     /// subject is a commit rather than the disk.
     /// </summary>
-    private sealed record AnchorCitationSelection(IReadOnlyList<string> Paths, string Description, string? Commit);
+    private sealed record AnchorCitationSelection(IReadOnlyList<GitName> Names, string Description, string? Commit);
 }
 
 /// <summary>Turns a citation report into what check-anchor-citations prints.</summary>
@@ -326,7 +334,9 @@ public static class AnchorCitationReports
 
         IReadOnlyList<string> data = json
             ? [Json(report)]
-            : [.. report.Unresolved.Select(citation => $"{citation.Path}:{citation.LineNumber}: {citation.Id}")];
+            : [.. report.Unresolved.Select(citation => citation.Cut
+                ? $"{citation.Path}:{citation.LineNumber}: {citation.Written} (cut at the end of the line)"
+                : $"{citation.Path}:{citation.LineNumber}: {citation.Id}")];
 
         var looked =
             $"{report.CitationsFound} citation(s) over {report.FilesScanned} file(s) of {report.SubjectDescription}, "
@@ -337,15 +347,34 @@ public static class AnchorCitationReports
             return CommandOutcome.Ok($"every cited anchor resolves: {looked}") with { Data = data, Quiet = json };
         }
 
-        var distinct = report.Unresolved
-            .Select(citation => citation.Id)
-            .Distinct(StringComparer.Ordinal)
-            .Count();
+        // Said apart: a cut citation fails whatever rows exist, so "add the row" is no answer to one -
+        // not even where the part before the cut happens to be a row.
+        var missing = report.Unresolved.Where(citation => !citation.Cut).ToList();
+        var cut = report.Unresolved.Count - missing.Count;
+        var findings = new List<string>();
+
+        if (missing.Count > 0)
+        {
+            var distinct = missing
+                .Select(citation => citation.Id)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+
+            findings.Add(
+                $"{missing.Count} citation(s) of {distinct} anchor id(s) resolve to no row in either registry; "
+                + "add the row, or correct the citation.");
+        }
+
+        if (cut > 0)
+        {
+            findings.Add(
+                $"{cut} citation(s) are cut at the end of a line, so none spells the id it was cut from; "
+                + "keep each id whole on one line.");
+        }
 
         return CommandOutcome.Failed(
             AnchorExit.Findings,
-            $"{report.Unresolved.Count} citation(s) of {distinct} anchor id(s) resolve to no row in either registry; "
-            + $"add the row, or correct the citation. Scanned {looked}.") with
+            $"{string.Join(' ', findings)} Scanned {looked}.") with
         { Data = data };
     }
 
@@ -364,6 +393,7 @@ public static class AnchorCitationReports
                 ["anchor"] = citation.Id,
                 ["file"] = citation.Path,
                 ["line"] = citation.LineNumber,
+                ["cut"] = citation.Cut,
             })]),
         };
 

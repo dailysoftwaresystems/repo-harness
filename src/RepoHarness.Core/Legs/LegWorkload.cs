@@ -32,6 +32,19 @@ public sealed record LegWorkload(bool Build, bool Test, IReadOnlyList<string> Pr
     /// </summary>
     public IReadOnlyList<string> UnderOwnPath { get; init; } = [];
 
+    /// <summary>
+    /// What the command starts only on legs of some operating systems: the programs of an action's
+    /// steps that name <c>runOn</c>. A leg of any other system never starts them, and is never turned
+    /// away for want of one.
+    /// </summary>
+    public IReadOnlyList<OsScopedStart> OnlyOn { get; init; } = [];
+
+    /// <summary>
+    /// Whether the command starts any program on the leg's host. A copy starts none, so nothing has to
+    /// be set up there for it - not even the developer environment the leg's toolchain names.
+    /// </summary>
+    public bool StartsPrograms => Build || Test || Programs.Count > 0 || UnderOwnPath.Count > 0 || OnlyOn.Count > 0;
+
     /// <summary>Building and testing: what a leg is for, and what <c>legs</c> answers for.</summary>
     public static LegWorkload BuildAndTest { get; } = new(Build: true, Test: true, []);
 
@@ -58,16 +71,46 @@ public sealed record LegWorkload(bool Build, bool Test, IReadOnlyList<string> Pr
 
         var runnerPath = ProcessRunner.SetsPath(runner.Env.Keys);
 
-        List<(string Program, bool OwnPath)> starts = action is null
+        List<OsScopedStart> starts = action is null
             ? [.. runner.Phases
                 .Where(phase => phase.Command.Count > 0)
-                .Select(phase => (phase.Command[0], runnerPath || ProcessRunner.SetsPath(phase.Env.Keys)))]
+                .Select(phase => new OsScopedStart(phase.Command[0], runnerPath || ProcessRunner.SetsPath(phase.Env.Keys), []))]
             : [.. action.Steps
-                .SelectMany(step => step.Commands.Select(command => (command.Program, runnerPath || ProcessRunner.SetsPath(step.Env.Keys))))];
+                .SelectMany(step => step.Commands.Select(command =>
+                    new OsScopedStart(command.Program, runnerPath || ProcessRunner.SetsPath(step.Env.Keys), step.RunOn)))];
 
-        return new LegWorkload(Build: runner.RequireBuild, Test: false, [.. starts.Where(start => !start.OwnPath).Select(start => start.Program)])
+        var everywhere = starts.Where(start => start.RunOn.Count == 0).ToList();
+
+        return new LegWorkload(Build: runner.RequireBuild, Test: false, [.. everywhere.Where(start => !start.OwnPath).Select(start => start.Program)])
         {
-            UnderOwnPath = [.. starts.Where(start => start.OwnPath).Select(start => start.Program)],
+            UnderOwnPath = [.. everywhere.Where(start => start.OwnPath).Select(start => start.Program)],
+            OnlyOn = [.. starts.Where(start => start.RunOn.Count > 0)],
+        };
+    }
+
+    /// <summary>
+    /// What the command starts on a leg of <paramref name="os"/>: what it starts on every leg, and
+    /// what the steps that system runs add.
+    /// </summary>
+    /// <param name="os">The leg's operating system.</param>
+    public LegWorkload On(string os)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(os);
+
+        // Ignoring case, as a leg's os is compared everywhere else.
+        var here = OnlyOn.Where(start => start.RunOn.Contains(os, StringComparer.OrdinalIgnoreCase)).ToList();
+
+        return this with
+        {
+            Programs = [.. Programs, .. here.Where(start => !start.OwnPath).Select(start => start.Program)],
+            UnderOwnPath = [.. UnderOwnPath, .. here.Where(start => start.OwnPath).Select(start => start.Program)],
+            OnlyOn = [],
         };
     }
 }
+
+/// <summary>A program a command starts, where, and whether under an environment that sets PATH.</summary>
+/// <param name="Program">The program, as the line names it.</param>
+/// <param name="OwnPath">Whether it starts under an environment that sets PATH.</param>
+/// <param name="RunOn">The operating systems it starts on; empty, every one.</param>
+public sealed record OsScopedStart(string Program, bool OwnPath, IReadOnlyList<string> RunOn);
