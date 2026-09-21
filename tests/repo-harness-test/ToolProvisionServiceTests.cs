@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
@@ -875,6 +876,179 @@ public sealed class ToolProvisionServiceTests
         Assert.Null(typeof(LocalHostConfig).GetProperty(nameof(RemoteHostConfig.RepositoryPath)));
     }
 
+    /// <summary>
+    /// A tool a leg's developer environment provides - cl, where the leg builds with msvc - is looked
+    /// for on the PATH that environment sets up, as the run finds it, and never reported missing for
+    /// being off the PATH a plain shell has.
+    /// </summary>
+    [Fact]
+    public async Task AToolTheLegsDeveloperEnvironmentProvides_IsNotReportedMissing()
+    {
+        using var visualStudio = new ScriptedVisualStudio().Carrying("x64", "cl");
+        using var here = new VisualStudioHere(visualStudio, [new ToolConfig { Name = "cl", Toolchains = ["msvc"] }]);
+
+        var report = await here.ProvisionAsync();
+
+        var leg = Assert.Single(report.Legs);
+        Assert.Equal(ToolState.AlreadyCurrent, Assert.Single(leg.Tools).State);
+        Assert.True(report.Passed);
+        Assert.Single(visualStudio.Captures);
+    }
+
+    /// <summary>
+    /// Two legs on one host are each told about a tool as the PATH they start it on holds it: CMake,
+    /// carried by Visual Studio alone, is there for the leg in its developer environment and missing
+    /// for the one that builds from a plain shell.
+    /// </summary>
+    [Fact]
+    public async Task EachLegOnAHost_IsToldAboutATool_AsThePathItStartsItOnHoldsIt()
+    {
+        using var visualStudio = new ScriptedVisualStudio().Carrying("x64", "cmake");
+        using var here = new VisualStudioHere(visualStudio, [new ToolConfig { Name = "cmake" }], plainLeg: true);
+
+        var report = await here.ProvisionAsync();
+
+        Assert.Equal(ToolState.AlreadyCurrent, Assert.Single(report.Legs.Single(leg => leg.Leg == "native").Tools).State);
+        Assert.Equal(ToolState.Missing, Assert.Single(report.Legs.Single(leg => leg.Leg == "mingw").Tools).State);
+        Assert.False(report.Passed);
+    }
+
+    /// <summary>
+    /// A tool's install runs once on a host, whichever of its PATHs asked for it first, and each PATH
+    /// then looks again with the environment set up afresh. Where Visual Studio's own older copy still
+    /// comes first on the PATH its environment sets up, the leg starting it there is told so, since
+    /// that copy is the one it starts.
+    /// </summary>
+    [Fact]
+    public async Task AnInstallTwoPathsNeed_RunsOnce_AndEachPathLooksAgain()
+    {
+        using var visualStudio = new ScriptedVisualStudio().Carrying("x64", "ninja");
+        var ninja = new ToolConfig
+        {
+            Name = "ninja",
+            Probe = new ToolProbe { Args = ["--version"] },
+            MinVersion = "1.12.0",
+            Install = { ["all"] = new ToolInstall { Command = [VisualStudioHere.InstallNinja] } },
+        };
+
+        using var here = new VisualStudioHere(visualStudio, [ninja], plainLeg: true);
+
+        var report = await here.ProvisionAsync();
+
+        var plain = Assert.Single(report.Legs.Single(leg => leg.Leg == "mingw").Tools);
+        Assert.Equal(ToolState.Installed, plain.State);
+        Assert.Equal(VisualStudioHere.InstalledNinja, plain.Version);
+
+        var native = Assert.Single(report.Legs.Single(leg => leg.Leg == "native").Tools);
+        Assert.Equal(ToolState.Failed, native.State);
+        Assert.Equal(
+            $"its install reported success, and it is still {VisualStudioHere.StudioNinja}, where at least 1.12.0 is needed",
+            native.Detail);
+
+        Assert.Equal(1, here.Installs);
+        Assert.Equal(2, visualStudio.Captures.Count);
+    }
+
+    /// <summary>
+    /// A tool looked for again after its install, where the PATH its leg starts it on can no longer
+    /// be looked at - Visual Studio's environment will not set up the second time, and the install put
+    /// the tool nowhere else - is unknown, saying the install reported success and why nobody can say
+    /// more: never failed on a guess, nor passed as installed.
+    /// </summary>
+    [Fact]
+    public async Task ATool_WhoseEnvironmentWillNotSetUpWhenLookedAtAgain_IsUnknown_AfterItsInstall()
+    {
+        const string Full = "There is not enough space on the disk.";
+
+        using var visualStudio = new ScriptedVisualStudio
+        {
+            Holding = (capture, _) => capture == 1 ? throw new IOException(Full) : Task.CompletedTask,
+        };
+        var ninja = new ToolConfig
+        {
+            Name = "ninja",
+            Install = { ["all"] = new ToolInstall { Command = [VisualStudioHere.InstallNinjaIntoVisualStudio] } },
+        };
+
+        using var here = new VisualStudioHere(visualStudio, [ninja]);
+
+        var report = await here.ProvisionAsync();
+
+        var tool = Assert.Single(Assert.Single(report.Legs).Tools);
+        Assert.Equal(ToolState.Unknown, tool.State);
+        Assert.StartsWith(
+            "its install reported success, and whether 'ninja' is there could not be established: 'ninja' is not on the PATH there",
+            tool.Detail,
+            StringComparison.Ordinal);
+        Assert.EndsWith(Full, tool.Detail, StringComparison.Ordinal);
+        Assert.Equal(1, here.Installs);
+        Assert.Equal(2, visualStudio.Captures.Count);
+    }
+
+    /// <summary>
+    /// A developer environment that will not set up leaves a tool the host's own PATH lacks unknown,
+    /// saying why, rather than missing: the PATH its legs would find it on could not be looked at.
+    /// </summary>
+    [Fact]
+    public async Task AToolOffThePath_WhereTheDeveloperEnvironmentWillNotSetUp_IsUnknown_SayingWhy()
+    {
+        using var visualStudio = new ScriptedVisualStudio { ExitCode = "1" }.Carrying("x64", "cl");
+        using var here = new VisualStudioHere(visualStudio, [new ToolConfig { Name = "cl", Toolchains = ["msvc"] }]);
+
+        var report = await here.ProvisionAsync();
+
+        var cl = Assert.Single(Assert.Single(report.Legs).Tools);
+        Assert.Equal(ToolState.Unknown, cl.State);
+        Assert.Equal(
+            "'cl' is not on the PATH there, and the PATH developer environment 'vs' sets up, where the legs that need it start it, "
+            + "could not be set up: developer environment 'vs': vcvarsall.bat amd64 exited 1 and printed nothing",
+            cl.Detail);
+    }
+
+    /// <summary>
+    /// Where no instance of the developer environment is installed, the host's own PATH is all its legs
+    /// could find a tool on, so a tool missing there is missing - and installing it is what would help.
+    /// </summary>
+    [Fact]
+    public async Task AToolOffThePath_WhereNoInstanceIsInstalled_IsMissing()
+    {
+        using var visualStudio = new ScriptedVisualStudio { Instances = "[]" };
+        using var here = new VisualStudioHere(visualStudio, [new ToolConfig { Name = "cl", Toolchains = ["msvc"] }]);
+
+        var report = await here.ProvisionAsync();
+
+        Assert.Equal(ToolState.Missing, Assert.Single(Assert.Single(report.Legs).Tools).State);
+        Assert.Empty(visualStudio.Captures);
+    }
+
+    /// <summary>
+    /// A leg on another host that starts in a developer environment finds its tools on the PATH that
+    /// environment sets up there, which this command, reaching that host through its shell, cannot set
+    /// up: a tool not on the host's own PATH is unknown, saying so, and never installed a second time.
+    /// </summary>
+    [Fact]
+    public async Task AToolOffAnotherHostsPath_ForALegInADeveloperEnvironment_IsUnknown_NotInstalled()
+    {
+        using var fixture = new Fixture(
+            tools: [Apt("cl")],
+            configure: config =>
+            {
+                config.DeveloperEnvironments["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio };
+                config.Toolchains["msvc"] = new ToolchainConfig { DeveloperEnvironment = "vs" };
+                config.Legs["on-distro"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug", Wsl = Distro, Toolchain = "msvc" };
+            });
+
+        var report = await fixture.ProvisionAsync();
+
+        var cl = Assert.Single(Assert.Single(report.Legs).Tools, tool => tool.Tool == "cl");
+        Assert.Equal(ToolState.Unknown, cl.State);
+        Assert.Equal(
+            "'cl' is not on the PATH there, and the PATH developer environment 'vs' sets up, where the legs that need it start it, "
+            + "is set up by this command only on the machine it runs on",
+            cl.Detail);
+        Assert.DoesNotContain(fixture.Host.Calls, call => call.Program == "apt-get" || call.Arguments.Contains("cl-build"));
+    }
+
     /// <summary>A tool apt installs, whose package is named after it.</summary>
     private static ToolConfig Apt(
         string name,
@@ -896,6 +1070,131 @@ public sealed class ToolProvisionServiceTests
         Emulators = emulators ?? [],
         Install = { ["linux"] = new ToolInstall { Manager = "apt", Id = name + "-build" } },
     };
+
+    /// <summary>
+    /// This machine, with a leg that builds with msvc in Visual Studio's developer environment, and,
+    /// when asked for, one beside it that builds from a plain shell. Programs are looked for as this
+    /// machine looks for them, by file: nothing is on the PATH a plain shell has until an install puts
+    /// it there, and Visual Studio carries what a test says it does.
+    /// </summary>
+    private sealed class VisualStudioHere : IDisposable
+    {
+        /// <summary>The command that installs ninja on this machine's own PATH.</summary>
+        public const string InstallNinja = "install-ninja";
+
+        /// <summary>The command that adds ninja to Visual Studio, as its CMake component carries it.</summary>
+        public const string InstallNinjaIntoVisualStudio = "install-ninja-into-visual-studio";
+
+        /// <summary>What the ninja an install puts on this machine's own PATH reports.</summary>
+        public const string InstalledNinja = "1.12.1";
+
+        /// <summary>What the ninja Visual Studio carries reports.</summary>
+        public const string StudioNinja = "1.10.2";
+
+        private readonly TempDirectory _repository = new();
+        private readonly TempDirectory _path = new();
+        private readonly TempDirectory _searched = new();
+        private readonly ScriptedVisualStudio _visualStudio;
+        private readonly ToolProvisionService _service;
+        private int _installs;
+
+        public VisualStudioHere(ScriptedVisualStudio visualStudio, IReadOnlyList<ToolConfig> tools, bool plainLeg = false)
+        {
+            _visualStudio = visualStudio;
+
+            var config = new HarnessConfig
+            {
+                Tools = [.. tools],
+
+                // Nothing searched beyond a PATH but a directory nothing is in, on any machine: the
+                // built-in list would find this machine's own tools, where Linux keeps them.
+                ToolSearchDirectories = new(StringComparer.OrdinalIgnoreCase) { ["all"] = [_searched.Path] },
+                DeveloperEnvironments = { ["vs"] = new DeveloperEnvironmentConfig { Kind = DeveloperEnvironmentKinds.VisualStudio } },
+                Toolchains =
+                {
+                    ["msvc"] = new ToolchainConfig { DeveloperEnvironment = "vs" },
+                    ["mingw"] = new ToolchainConfig(),
+                },
+
+                // The PATH Visual Studio's environment is set up over, as this machine's own is: what an
+                // install puts on the one is on the other too, behind Visual Studio's own directories.
+                Hosts = new HostsConfig
+                {
+                    Local = new LocalHostConfig { Env = new(StringComparer.OrdinalIgnoreCase) { ["PATH"] = _path.Path } },
+                },
+                Legs = { ["native"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" } },
+            };
+
+            if (plainLeg)
+            {
+                config.Legs["mingw"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "mingw" };
+            }
+
+            var platform = new HostPlatform();
+            var permissions = FilePermissionsFactory.Create();
+            var fileSystem = new PhysicalFileSystem(permissions);
+            var commands = new ScriptedHostCommands(Respond);
+            var programs = new HostProgramResolver(new LocalProgramResolver(platform, permissions, () => _path.Path), commands);
+            var connector = new HostConnector(
+                platform,
+                Substitute.For<IProcessRunner>(),
+                commands,
+                new HostSecretsStore(fileSystem, permissions, platform),
+                new HostAddressResolver(Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero),
+                programs);
+
+            _service = new ToolProvisionService(
+                HostDoubles.Loader(config, _repository.Path),
+                connector,
+                commands,
+                programs,
+                new DeveloperEnvironmentProbe(HostDoubles.Platform(PlatformId.Windows, "x86_64"), visualStudio),
+                visualStudio.Provider(),
+                platform,
+                permissions,
+                new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false),
+                new FakePrompt(PromptAvailability.Unavailable));
+        }
+
+        /// <summary>How many times ninja's install ran.</summary>
+        public int Installs => _installs;
+
+        public Task<ToolProvisionReport> ProvisionAsync()
+            => _service.ProvisionAsync(_repository.Path, null, dryRun: false, TestContext.Current.CancellationToken);
+
+        public void Dispose()
+        {
+            _searched.Dispose();
+            _path.Dispose();
+            _repository.Dispose();
+        }
+
+        /// <summary>This machine running what provisioning asks: ninja's install, and ninja telling its version.</summary>
+        private ProcessResult Respond(HostConnection connection, HostCommand command)
+        {
+            if (command.Program == InstallNinja)
+            {
+                _installs++;
+                _path.WriteProgram(".", "ninja");
+                return HostResults.Ok("installed\n");
+            }
+
+            if (command.Program == InstallNinjaIntoVisualStudio)
+            {
+                _installs++;
+                _visualStudio.Carrying("x64", "ninja");
+                return HostResults.Ok("installed\n");
+            }
+
+            if (Path.GetFileNameWithoutExtension(command.Program) == "ninja")
+            {
+                // Visual Studio's copy is started by its path, and the one on the PATH by its name.
+                return HostResults.Ok((Path.IsPathRooted(command.Program) ? StudioNinja : InstalledNinja) + "\n");
+            }
+
+            throw HostResults.Unexpected(command);
+        }
+    }
 
     /// <summary>One command a host was asked to run, and what it was given.</summary>
     private sealed record HostCall(HostId Host, string Program, IReadOnlyList<string> Arguments, string StandardInput);
@@ -1176,12 +1475,21 @@ public sealed class ToolProvisionServiceTests
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, permissions, () => "/usr/bin"), commands);
             var connector = new HostConnector(platform, processRunner, commands, secrets, addresses, programs);
 
+            // No developer environment is looked at or set up here: a leg starts in one only on this
+            // machine, and only where a test says so, which it does with VisualStudioHere.
+            var windows = HostDoubles.Platform(PlatformId.Windows, "x86_64");
+            var output = new ConsoleHarnessOutput(Output, Error, verbose: false);
+
             _service = new ToolProvisionService(
                 HostDoubles.Loader(config, _repository.Path),
                 connector,
                 commands,
                 programs,
-                new ConsoleHarnessOutput(Output, Error, verbose: false),
+                new DeveloperEnvironmentProbe(windows, Unasked()),
+                new DeveloperEnvironmentProvider(windows, Unasked(), fileSystem, output),
+                platform,
+                permissions,
+                output,
                 Prompt);
         }
 
@@ -1197,6 +1505,16 @@ public sealed class ToolProvisionServiceTests
             => _service.ProvisionAsync(_repository.Path, legs, dryRun, TestContext.Current.CancellationToken);
 
         public void Dispose() => _repository.Dispose();
+
+        /// <summary>A machine whose Visual Studio nothing here may ask about.</summary>
+        private static IProcessRunner Unasked()
+        {
+            var processes = Substitute.For<IProcessRunner>();
+            processes.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+                .ThrowsAsync(new InvalidOperationException("No developer environment was expected to be looked at or set up."));
+
+            return processes;
+        }
 
         /// <summary>No ssh host is reached here, so no name is ever looked up.</summary>
         private sealed class NoLookup : INameLookup
