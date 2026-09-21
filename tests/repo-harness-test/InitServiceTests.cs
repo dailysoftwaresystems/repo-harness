@@ -286,7 +286,7 @@ public sealed class InitServiceTests
             harness.VerifyGitService,
             harness.AnchorRegistryLocator,
             harness.ToolProvisionService,
-            new ManagedIgnoreCheck(git, harness.FileSystem),
+            new ManagedIgnoreCheck(git, harness.FileSystem, harness.Platform, harness.Output),
             harness.Platform);
 
         var outcome = await init.InitializeAsync(temp.Path, token);
@@ -392,6 +392,7 @@ public sealed class InitServiceTests
         // init leaves the root to the worktree commands, which create it the first time they need it.
         Assert.False(Directory.Exists(Path.Combine(temp.Path, root)), "init created the worktrees root");
         Assert.True(await IsIgnoredAsync(harness, temp.Path, $"{root}/", token), "absent, asked with a slash");
+        Assert.True(await IsIgnoredAsync(harness, temp.Path, root, token), "absent, asked without a slash");
 
         Directory.CreateDirectory(Path.Combine(temp.Path, root, "wt-a", "src"));
         File.WriteAllText(Path.Combine(temp.Path, root, "wt-a", "src", "main.c"), "int main(void) { return 0; }");
@@ -401,9 +402,9 @@ public sealed class InitServiceTests
         Assert.True(await IsIgnoredAsync(harness, temp.Path, $"{root}/wt-a/src/main.c", token), "a file inside a worktree");
 
         var ignore = File.ReadAllText(temp.Combine(".gitignore"));
-        Assert.Contains($"/{root}/\n", ignore, StringComparison.Ordinal);
-        Assert.DoesNotContain($"/{root}/*", ignore, StringComparison.Ordinal);
-        Assert.DoesNotContain($"!/{root}/", ignore, StringComparison.Ordinal);
+        Assert.Contains($"/{root}\n", ignore, StringComparison.Ordinal);
+        Assert.DoesNotContain($"/{root}/", ignore, StringComparison.Ordinal);
+        Assert.DoesNotContain($"!/{root}", ignore, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -447,7 +448,8 @@ public sealed class InitServiceTests
 
         Assert.Equal(
             "note    .gitignore line 3 ('!/.harness-config/sshItems/*') re-includes '.harness-config/sshItems/<any>', "
-            + "which the managed block ignores; a later rule decides them, so this one does nothing there",
+            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; a later rule decides them, so this "
+            + "one does nothing there",
             note);
 
         // Reported, never removed: hand-written rules are the repository's own.

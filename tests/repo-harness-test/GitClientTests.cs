@@ -617,6 +617,63 @@ public sealed class GitClientTests
         Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
         Assert.StartsWith("Could not ask git which rules decide 1 path(s)", refusal.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A path beyond a symbolic link makes git refuse the whole question. Asked again one at a time,
+    /// every other path is answered, and that one says why it was not, in git's words.
+    /// </summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_AnswersEveryOtherPath_WhereOneIsBeyondALink()
+    {
+        using var temp = new TempDirectory();
+        using var elsewhere = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        await harness.InitializeGitRepositoryAsync(temp.Path, token);
+        temp.WriteFile(".gitignore", "*.log\n");
+
+        try
+        {
+            Directory.CreateSymbolicLink(temp.Combine("linked"), elsewhere.Path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        var decisions = await harness.GitClient.ExplainIgnoredAsync(temp.Path, ["linked/a.log", "a.log", "src/main.c"], token);
+
+        Assert.Null(decisions[0].Source);
+        Assert.Contains("symbolic link", decisions[0].Unanswered, StringComparison.Ordinal);
+        Assert.Equal(new IgnoreDecision("a.log", ".gitignore", 1, "*.log"), decisions[1]);
+        Assert.Equal(new IgnoreDecision("src/main.c", null, 0, null), decisions[2]);
+    }
+
+    /// <summary>Where git answers about none of the paths, one at a time either, the question is refused as before.</summary>
+    [Fact]
+    public async Task ExplainIgnoredAsync_Throws_WhenGitAnswersAboutNoneOfThePaths()
+    {
+        using var temp = new TempDirectory();
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() =>
+            new HarnessFactory().GitClient.ExplainIgnoredAsync(temp.Path, [".secret", ".key"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+        Assert.StartsWith("Could not ask git which rules decide 2 path(s)", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An answer whose line is not a number is refused as one this build cannot read, naming the path,
+    /// rather than escaping as a defect in this tool.
+    /// </summary>
+    [Fact]
+    public void ReadDecisions_RefusesALineThatIsNotANumber()
+    {
+        var refusal = Assert.Throws<HarnessException>(() => GitClient.ReadDecisions(".gitignore\0one\0*.log\0a.log\0", ["a.log"]));
+
+        Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+        Assert.Equal("git answered which rule decides 'a.log' in a form this build cannot read: 'one' is not a line number.", refusal.Message);
+    }
 }
 
 /// <summary>What the git client sends to git, and how it reads answers, against scripted results.</summary>

@@ -12,7 +12,14 @@ public sealed record IgnoreDecision(string Path, string? Source, int Line, strin
 {
     /// <summary>
     /// Whether git ignores the path: a rule matched it, and that rule is not a re-include. A rule
-    /// that begins with an escaped <c>\!</c> ignores; only a bare <c>!</c> re-includes.
+    /// that begins with an escaped <c>\!</c> ignores; only a bare <c>!</c> re-includes. Says nothing
+    /// where git would not answer; see <see cref="Unanswered"/>.
     /// </summary>
     public bool Ignored => Pattern is { Length: > 0 } rule && rule[0] != '!';
+
+    /// <summary>
+    /// Why git would not say which rule decides the path, in its own words - one beyond a symbolic
+    /// link, which git never looks past - or <see langword="null"/> where it said.
+    /// </summary>
+    public string? Unanswered { get; init; }
 }

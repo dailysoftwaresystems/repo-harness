@@ -376,26 +376,65 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             return [];
         }
 
-        // NUL-separated both ways, so a path or a rule may hold anything a line can; and every path
-        // answered, matched or not, so the answer lines up with the question.
-        var result = await RunForBytesAsync(
-                directory,
-                ["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"],
-                cancellationToken,
-                string.Join('\0', paths) + '\0')
-            .ConfigureAwait(false);
+        var result = await CheckIgnoreAsync(directory, paths, cancellationToken).ConfigureAwait(false);
 
-        // 0 when some path matched a rule and 1 when none did; anything else is git unable to answer,
-        // and folded into "nothing matched" it would report every managed path as unruled.
-        if (result.TimedOut || result.ExitCode is not (0 or 1))
+        if (Answered(result))
         {
-            throw new HarnessException(
-                HarnessExit.CommandFailed,
-                $"Could not ask git which rules decide {paths.Count} path(s) in '{directory}': {result.FailureMessage}");
+            return ReadDecisions(result.StandardOutput, paths);
         }
 
+        // One path git will not answer about - one beyond a symbolic link, which git never looks past -
+        // ends the whole question. Asked one at a time, every other path is still answered, and that one
+        // says why it was not; where none is, git cannot answer at all.
+        if (paths.Count > 1 && !result.TimedOut)
+        {
+            var decisions = new List<IgnoreDecision>(paths.Count);
+
+            foreach (var path in paths)
+            {
+                var alone = await CheckIgnoreAsync(directory, [path], cancellationToken).ConfigureAwait(false);
+
+                decisions.Add(Answered(alone)
+                    ? ReadDecisions(alone.StandardOutput, [path])[0]
+                    : new IgnoreDecision(path, null, 0, null) { Unanswered = alone.FailureMessage });
+            }
+
+            if (decisions.Any(decision => decision.Unanswered is null))
+            {
+                return decisions;
+            }
+        }
+
+        throw new HarnessException(
+            HarnessExit.CommandFailed,
+            $"Could not ask git which rules decide {paths.Count} path(s) in '{directory}': {result.FailureMessage}");
+    }
+
+    /// <summary>Asks git which rule decides each of <paramref name="paths"/>, as <c>check-ignore</c> answers.</summary>
+    /// <remarks>
+    /// NUL-separated both ways, so a path or a rule may hold anything a line can; and every path
+    /// answered, matched or not, so the answer lines up with the question.
+    /// </remarks>
+    private Task<GitCommandResult> CheckIgnoreAsync(string directory, IReadOnlyList<string> paths, CancellationToken cancellationToken)
+        => RunForBytesAsync(
+            directory,
+            ["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"],
+            cancellationToken,
+            string.Join('\0', paths) + '\0');
+
+    /// <summary>
+    /// Whether <c>check-ignore</c> answered: 0 when some path matched a rule and 1 when none did.
+    /// Anything else is git unable to answer, and folded into "nothing matched" it would report every
+    /// path asked about as unruled.
+    /// </summary>
+    private static bool Answered(GitCommandResult result) => !result.TimedOut && result.ExitCode is 0 or 1;
+
+    /// <summary>What <c>check-ignore -v -n -z</c> printed, one decision per path of <paramref name="paths"/>, in order.</summary>
+    /// <exception cref="HarnessException">git answered in another form, or about other paths.</exception>
+    internal static IReadOnlyList<IgnoreDecision> ReadDecisions(string output, IReadOnlyList<string> paths)
+    {
         // Four fields to a path - source, line, pattern, path - and nothing after the last NUL.
-        var fields = result.StandardOutput.Split('\0');
+        var fields = output.Split('\0');
 
         if (fields.Length != (paths.Count * 4) + 1)
         {
@@ -419,13 +458,21 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
                     $"git answered about '{path}' where it was asked about '{paths[index]}'.");
             }
 
-            decisions.Add(source.Length == 0
-                ? new IgnoreDecision(path, null, 0, null)
-                : new IgnoreDecision(
-                    path,
-                    source,
-                    int.Parse(fields[(index * 4) + 1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture),
-                    pattern));
+            if (source.Length == 0)
+            {
+                decisions.Add(new IgnoreDecision(path, null, 0, null));
+                continue;
+            }
+
+            if (!int.TryParse(fields[(index * 4) + 1], NumberStyles.None, CultureInfo.InvariantCulture, out var line))
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git answered which rule decides '{path}' in a form this build cannot read: "
+                    + $"'{fields[(index * 4) + 1]}' is not a line number.");
+            }
+
+            decisions.Add(new IgnoreDecision(path, source, line, pattern));
         }
 
         return decisions;

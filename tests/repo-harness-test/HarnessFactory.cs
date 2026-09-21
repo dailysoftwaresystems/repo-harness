@@ -51,9 +51,9 @@ public sealed class HarnessFactory
         AnchorRegistryService = new AnchorRegistryService(ContextLoader, AnchorRegistryLocator, AnchorRegistryLock, FileSystem);
         AnchorBalanceService = new AnchorBalanceService(ContextLoader, AnchorRegistryLocator, GitClient, FileSystem);
 
-        // A double rather than the real service: init calls it for every declared leg, and the real
-        // one reaches hosts. A test that declared a leg would otherwise try to install a .NET SDK
-        // somewhere, which is not what any of these tests are about.
+        // A double rather than the real service: init --install-tools calls it for every declared leg,
+        // and the real one reaches hosts. A test that declared a leg would otherwise try to install a
+        // .NET SDK somewhere, which is not what any of these tests are about.
         ToolProvisionService = Substitute.For<IToolProvisionService>();
         ToolProvisionService
             .ProvisionAsync(Arg.Any<string>(), Arg.Any<IReadOnlyList<string>?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
@@ -68,7 +68,7 @@ public sealed class HarnessFactory
             VerifyGitService,
             AnchorRegistryLocator,
             ToolProvisionService,
-            new ManagedIgnoreCheck(GitClient, FileSystem),
+            new ManagedIgnoreCheck(GitClient, FileSystem, Platform, Output),
             Platform);
     }
 

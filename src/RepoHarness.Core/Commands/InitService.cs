@@ -46,11 +46,12 @@ public sealed class InitService(
     /// slots can afford and it cannot. Measured, in a throwaway repository:
     /// </para>
     /// <code>
-    /// query                          /wt/          /wt/* + !/wt/.gitkeep
-    /// check-ignore 'wt/'  absent     IGNORED       IGNORED
-    /// check-ignore 'wt'   absent     NOT-IGNORED   NOT-IGNORED
-    /// check-ignore 'wt/'  present    IGNORED       IGNORED, and NOT-IGNORED once .gitkeep is committed
-    /// check-ignore 'wt'   present    IGNORED       NOT-IGNORED
+    /// query                          /wt/          /wt           /wt/* + !/wt/.gitkeep
+    /// check-ignore 'wt/'  absent     IGNORED       IGNORED       IGNORED
+    /// check-ignore 'wt'   absent     NOT-IGNORED   IGNORED       NOT-IGNORED
+    /// check-ignore 'wt/'  present    IGNORED       IGNORED       IGNORED, and NOT-IGNORED once .gitkeep is committed
+    /// check-ignore 'wt'   present    IGNORED       IGNORED       NOT-IGNORED
+    /// git status 'wt'     a link     UNTRACKED     IGNORED       UNTRACKED
     /// </code>
     /// <para>
     /// Excluding the contents makes the directory's own answer depend on a trailing slash, and it
@@ -60,6 +61,12 @@ public sealed class InitService(
     /// is the difference between a clean sync and shipping every worktree to a remote host, asked
     /// for in the most natural spelling and answered wrongly without a word. It also shows the
     /// placeholder as untracked until it is committed, which is exactly what sync refuses on.
+    /// </para>
+    /// <para>
+    /// And it is excluded by its name alone, with no trailing slash, as the runs directory is: a rule
+    /// ending in <c>/</c> matches only a directory, so a root or a runs directory kept on another disk
+    /// through a link - which the worktree commands follow - would be listed, and committed, as that
+    /// link. By name, it is ignored whatever it is and however it is asked about.
     /// </para>
     /// <para>
     /// The root is taken from the configuration, because a configured root that nothing ignores
@@ -76,13 +83,14 @@ public sealed class InitService(
 
         return
         [
-            new($"/{root}/{HarnessLayout.LockFileName}", $"{root}/{HarnessLayout.LockFileName}", Ignores: true),
+            new($"/{root}/{HarnessLayout.LockFileName}", [$"{root}/{HarnessLayout.LockFileName}"], Ignores: true),
 
-            // Run logs, which exist to be read after a run and never to be committed.
-            new($"/{root}/{HarnessLayout.RunsDirectoryName}/", $"{root}/{HarnessLayout.RunsDirectoryName}/{any}", Ignores: true),
+            // Run logs, which exist to be read after a run and never to be committed. By name, so a
+            // link to where they are kept is ignored as surely as the directory: see the remarks above.
+            new($"/{root}/{HarnessLayout.RunsDirectoryName}", [$"{root}/{HarnessLayout.RunsDirectoryName}/{any}"], Ignores: true),
 
-            // The directory itself, never only its contents: see the remarks above.
-            new($"/{worktreesRoot}/", $"{worktreesRoot}/{any}", Ignores: true),
+            // The directory itself, never only its contents, and by name: see the remarks above.
+            new($"/{worktreesRoot}", [$"{worktreesRoot}/{any}"], Ignores: true),
 
             // One directory per host, each holding an address, a user and a key. Nothing under
             // either may ever be tracked.
@@ -100,19 +108,24 @@ public sealed class InitService(
             // produced it is how a repository comes to hold a measurement nobody can reproduce.
             new(
                 HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName),
-                $"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionBuildDirectoryName}/{any}",
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionBuildDirectoryName}/{any}"],
                 Ignores: true),
             new(
                 HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName),
-                $"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionArtifactsDirectoryName}/{any}",
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionArtifactsDirectoryName}/{any}"],
                 Ignores: true),
         ];
 
-        // A slot's contents ignored, and its placeholder kept.
+        // A slot's contents ignored, and its placeholder kept. Asked about a file there and a file in a
+        // directory there - one per host: a rule re-including those directories leaves the first to
+        // the block and puts every key the second stands for back in reach of git add.
         static ManagedIgnoreRule[] Slot(string directory, string keep) =>
         [
-            new($"/{directory}/*", $"{directory}/{ManagedIgnoreRule.AnyName}", Ignores: true),
-            new($"!/{directory}/{keep}", $"{directory}/{keep}", Ignores: false),
+            new(
+                $"/{directory}/*",
+                [$"{directory}/{ManagedIgnoreRule.AnyName}", $"{directory}/{ManagedIgnoreRule.AnyName}/{ManagedIgnoreRule.AnyName}"],
+                Ignores: true),
+            new($"!/{directory}/{keep}", [$"{directory}/{keep}"], Ignores: false),
         ];
     }
 
@@ -311,8 +324,9 @@ public sealed class InitService(
     /// follows undoes the block there - a re-include putting a secret back in reach of <c>git add</c>,
     /// or a whole-directory rule no placeholder can be re-included from. One the block overrules does
     /// nothing there, which is worth knowing when somebody wrote it meaning something. A rule that
-    /// agrees with the block changes nothing and is not named. Where git could not be asked, that is
-    /// said instead: the tree is initialised either way.
+    /// agrees with the block changes nothing and is not named. A path git would not answer about -
+    /// one beyond a symbolic link - is named with git's reason, and the rest are still reported. Where
+    /// git could not be asked at all, that is said instead: the tree is initialised either way.
     /// </remarks>
     private async Task ReportConflictsAsync(
         string root,
@@ -321,11 +335,11 @@ public sealed class InitService(
         List<string> actions,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<ManagedIgnoreConflict> conflicts;
+        ManagedIgnoreFindings findings;
 
         try
         {
-            conflicts = await _managedIgnoreCheck
+            findings = await _managedIgnoreCheck
                 .FindAsync(root, _fileSystem.ReadAllText(gitIgnorePath), rules, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -335,17 +349,10 @@ public sealed class InitService(
             return;
         }
 
-        foreach (var conflict in conflicts)
+        foreach (var conflict in findings.Conflicts)
         {
-            var paths = string.Join(", ", conflict.Paths.Select(path => $"'{path}'"));
+            var paths = Listed(conflict.Paths);
             var managed = conflict.Ignores ? "keeps in git" : "ignores";
-
-            if (conflict.Source is null)
-            {
-                actions.Add($"note    no rule ignores {paths}, which the managed block ignores; git reads another .gitignore than this one");
-                continue;
-            }
-
             var where = $"note    {conflict.Source} line {conflict.Line} ('{conflict.Pattern}')";
             var what = conflict.Ignores ? "ignores" : "re-includes";
 
@@ -353,6 +360,20 @@ public sealed class InitService(
                 ? $"{where} {what} {paths}, which the managed block {managed}; git follows that rule"
                 : $"{where} {what} {paths}, which the managed block {managed}; a later rule decides them, so this one does nothing there");
         }
+
+        if (findings.Unruled.Count > 0)
+        {
+            actions.Add(
+                $"note    git does not ignore {Listed(findings.Unruled)}, which the managed block ignores, and names no rule "
+                + "that decides that");
+        }
+
+        foreach (var unanswered in findings.Unanswered)
+        {
+            actions.Add($"note    git would not say which rule decides '{unanswered.Path}': {unanswered.Why}");
+        }
+
+        static string Listed(IEnumerable<string> paths) => string.Join(", ", paths.Select(path => $"'{path}'"));
     }
 
     private void EnsureDirectory(string root, string path, List<string> actions)
@@ -389,9 +410,9 @@ public sealed class InitService(
     /// rather than ready to be told what is missing.
     /// </summary>
     /// <remarks>
-    /// Only with <c>--install-tools</c>, and nothing happens where no leg is declared, which is every
-    /// first <c>init</c>: the configuration it has just written names no host. Where hosts are
-    /// declared, a failure here is reported and never fatal — the harness directory exists either way, and a host that is switched off is a
+    /// Only with <c>--install-tools</c>, and nothing happens where no leg is declared, as after a first
+    /// <c>init</c> that detected no project. Where legs are declared, a failure here is reported and
+    /// never fatal - the harness directory exists either way, and a host that is switched off is a
     /// normal state that must not leave a repository half-initialised. Being interrupted is not a
     /// failure of this step and is reported apart from one, because a privileged install can stop here
     /// to ask for a password and Ctrl+C is how somebody who has not got one answers.

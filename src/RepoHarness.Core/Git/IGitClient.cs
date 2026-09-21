@@ -127,13 +127,18 @@ public interface IGitClient
     /// <param name="directory">The work tree's root.</param>
     /// <param name="paths">Paths relative to that root, with forward separators.</param>
     /// <param name="cancellationToken">Stops the question.</param>
-    /// <returns>One decision per path, in the order asked.</returns>
-    /// <exception cref="HarnessException">git could not answer, or answered about other paths.</exception>
+    /// <returns>
+    /// One decision per path, in the order asked. A path git would not answer about, where it answered
+    /// about others, says why in <see cref="IgnoreDecision.Unanswered"/>.
+    /// </returns>
+    /// <exception cref="HarnessException">git could answer about none of them, or answered in another form or about other paths.</exception>
     /// <remarks>
     /// git's own answer rather than a reading of the rules: what a rule matches depends on its file's
     /// directory, on every rule before and after it, and on whether a directory above the path is
     /// already excluded, where no re-include reaches. Asked without the index, so a tracked file is
-    /// judged by the rules alone.
+    /// judged by the rules alone. git names no re-include that matched a directory above the path, and
+    /// matches a rule ending in <c>/</c> against the path itself only where it is a directory that
+    /// exists - never a link to one.
     /// </remarks>
     Task<IReadOnlyList<IgnoreDecision>> ExplainIgnoredAsync(
         string directory,
