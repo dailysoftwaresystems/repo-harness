@@ -137,6 +137,15 @@ public sealed class AnchorCitationService(
 
         var paths = inRoots.Select(name => name.Text).ToList();
 
+        // By the rule read-anchor finds a row by, so the two verbs cannot disagree about whether a
+        // row exists. Read before the files are, because a line ending in an id and the next opening
+        // with a hyphen are one id cut in two only where the two join into a row's id.
+        var rows = await _registryService
+            .ListAsync(startDirectory, new AnchorListFilter(), cancellationToken)
+            .ConfigureAwait(false);
+
+        var ids = rows.Select(entry => entry.Row.Id).ToHashSet(AnchorIdMatch.Comparer);
+
         // Every file of a commit read by one git process. Asked for one at a time, each cost two
         // processes, which was measured at 20 minutes over 2,385 files where the disk took 6.5 seconds.
         var committed = selection.Commit is { } commit
@@ -155,17 +164,11 @@ public sealed class AnchorCitationService(
             }
 
             scanned++;
-            citations.AddRange(scanner.Scan(path, text));
+            citations.AddRange(scanner.Scan(path, text, ids));
         }
 
-        var rows = await _registryService
-            .ListAsync(startDirectory, new AnchorListFilter(), cancellationToken)
-            .ConfigureAwait(false);
-
-        // By the rule read-anchor finds a row by, so the two verbs cannot disagree about whether a
-        // row exists - and a citation cut at the end of its line is reported whatever rows exist,
-        // because the id it was cut from is not the one it spells.
-        var ids = rows.Select(entry => entry.Row.Id).ToHashSet(AnchorIdMatch.Comparer);
+        // A citation cut at the end of its line is reported whatever rows exist, because the id it
+        // was cut from is not the one it spells.
         var unresolved = citations.Where(citation => citation.Cut || !ids.Contains(citation.Id)).ToList();
 
         return new AnchorCitationReport(
