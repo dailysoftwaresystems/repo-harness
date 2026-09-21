@@ -180,20 +180,28 @@ public sealed record ActionFile(
     /// <param name="runnerName">The runner, as the refusal names it.</param>
     /// <param name="legs">Each leg the run reaches, by name, with its operating system.</param>
     /// <exception cref="HarnessException">
-    /// Every step names <c>runOn</c>, and none names some leg's operating system. Every such leg is
-    /// named.
+    /// Some leg's operating system runs none of the steps that run programs, where the file has any.
+    /// Every such leg is named.
     /// </exception>
     /// <remarks>
     /// Such a leg would pass having run nothing - every step it ran succeeded, since it ran none - and
     /// a green line that says nothing about its leg is what a verdict exists to prevent. So it is
     /// refused before anything starts, as a step whose <c>runOn</c> names no system is refused when
-    /// the file is read.
+    /// the file is read. A predefined action is not such a step: checking out and reading inputs
+    /// settle what the steps after them run, and run nothing of the file's own - left with only
+    /// those, a leg passed on "0 step(s) passed". A file of predefined actions alone runs no program
+    /// on any leg, and is what it always was.
     /// </remarks>
     public void RequireAStepOn(string runnerName, IEnumerable<(string Leg, string Os)> legs)
     {
         ArgumentNullException.ThrowIfNull(legs);
 
-        var idle = legs.Where(leg => StepsOn(leg.Os).Count == 0).ToList();
+        if (!Steps.Any(RunsPrograms))
+        {
+            return;
+        }
+
+        var idle = legs.Where(leg => !StepsOn(leg.Os).Any(RunsPrograms)).ToList();
 
         if (idle.Count > 0)
         {
@@ -205,4 +213,7 @@ public sealed record ActionFile(
                 + "with --legs, or from the runner's own legs.");
         }
     }
+
+    /// <summary>Whether <paramref name="step"/> runs programs of its own, rather than a predefined action.</summary>
+    private static bool RunsPrograms(ActionStep step) => step.Uses == PredefinedAction.None;
 }

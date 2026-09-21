@@ -1161,6 +1161,44 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A leg left with only predefined steps runs nothing of the action's own: reading inputs settles
+    /// what the steps after it run, and runs none. Refused like a leg left with no step at all, where
+    /// it passed on "0 step(s) passed".
+    /// </summary>
+    [Fact]
+    public async Task ALegLeftWithOnlyPredefinedSteps_IsRefused_NotPassed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            inputs:
+              corpusRoot:
+                default: corpus
+            steps:
+              - name: read
+                uses: harness/read-inputs
+              - name: msvc
+                runOn: [windows]
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with { Identity = Identity("linux") },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"leg '{Leg}' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("would run nothing and pass", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A step naming runOn needs a leg's operating system to be chosen by, and a run reaching no leg
     /// has none: refused rather than guessed, as a step asking for contention is.
     /// </summary>

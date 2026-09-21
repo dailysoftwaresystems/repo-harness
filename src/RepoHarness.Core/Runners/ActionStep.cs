@@ -56,7 +56,12 @@ public sealed record ActionStep
 
     /// <summary>Whether a leg of <paramref name="os"/> runs this step.</summary>
     /// <param name="os">The leg's operating system.</param>
-    public bool RunsOn(string os) => RunOn.Count == 0 || RunOn.Contains(os, StringComparer.Ordinal);
+    /// <remarks>
+    /// Compared ignoring case, as a leg's <c>os</c> is everywhere else: a leg may declare
+    /// <c>Windows</c>, and read exactly it was refused as running no step, while the host it ran on
+    /// ran every one.
+    /// </remarks>
+    public bool RunsOn(string os) => RunOn.Count == 0 || RunOn.Contains(os, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Environment for this step, applied over the runner's own.</summary>
     public IReadOnlyDictionary<string, string> Env { get; init; }

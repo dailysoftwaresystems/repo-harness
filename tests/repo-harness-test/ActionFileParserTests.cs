@@ -741,6 +741,59 @@ public sealed class ActionFileParserTests
     }
 
     /// <summary>
+    /// A leg's operating system is read ignoring case, as it is everywhere else: a leg declaring
+    /// Windows runs the steps runOn gives windows, and the run it is in is not refused as running none.
+    /// </summary>
+    [Fact]
+    public void RunOn_ReadsALegsSystemIgnoringCase()
+    {
+        var file = Parse("""
+            name: build
+            steps:
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows]
+            """);
+
+        Assert.Equal(["msvc"], file.StepsOn("Windows").Select(step => step.Name));
+        file.RequireAStepOn("build", [("win", "Windows")]);
+    }
+
+    /// <summary>
+    /// A leg left with only predefined steps runs nothing of the file's own, and is named in the
+    /// refusal; a file of predefined steps alone runs no program on any leg, and is not refused.
+    /// </summary>
+    [Fact]
+    public void RequireAStepOn_CountsOnlyTheStepsThatRunPrograms_WhereTheFileHasAny()
+    {
+        var mixed = Parse("""
+            name: build
+            steps:
+              - name: at
+                uses: harness/checkout
+                ref: main
+              - name: msvc
+                run: |
+                  cl /nologo
+                runOn: [windows]
+            """);
+
+        var refusal = Assert.Throws<HarnessException>(() => mixed.RequireAStepOn("build", [("win", "windows"), ("lin", "linux")]));
+
+        Assert.Contains("leg 'lin' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("'win'", refusal.Message, StringComparison.Ordinal);
+
+        Parse("""
+            name: build
+            steps:
+              - name: at
+                uses: harness/checkout
+                ref: main
+            """).RequireAStepOn("build", [("lin", "linux")]);
+    }
+
+    /// <summary>
     /// A runOn naming a system this tool does not know, naming none, or given as anything but a
     /// list is refused: read as every system, the step runs where the file says it does not, and
     /// read as none, a step the file says runs is dropped without a word.

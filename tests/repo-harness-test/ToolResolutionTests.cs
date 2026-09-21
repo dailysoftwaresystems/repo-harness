@@ -492,6 +492,10 @@ public sealed class ToolResolutionTests
         Assert.Equal(["arm-none-eabi-size"], steps.On("linux").UnderOwnPath);
         Assert.Empty(steps.On("windows").UnderOwnPath);
 
+        // A leg's os is read ignoring case, as everywhere else.
+        Assert.Equal(["arm-none-eabi-size"], steps.On("Linux").UnderOwnPath);
+        Assert.Contains("cl", steps.On("WINDOWS").Programs);
+
         var wanted = LegPrograms.Wanted(config, steps);
 
         Assert.Contains("cl", wanted);

@@ -97,7 +97,8 @@ public sealed record LegWorkload(bool Build, bool Test, IReadOnlyList<string> Pr
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(os);
 
-        var here = OnlyOn.Where(start => start.RunOn.Contains(os, StringComparer.Ordinal)).ToList();
+        // Ignoring case, as a leg's os is compared everywhere else.
+        var here = OnlyOn.Where(start => start.RunOn.Contains(os, StringComparer.OrdinalIgnoreCase)).ToList();
 
         return this with
         {
