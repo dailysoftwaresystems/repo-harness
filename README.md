@@ -116,6 +116,11 @@ both x86_64 and arm64.
 enough that the code alone is not evidence. An entry is a path, or a mapping of platform to path
 where the platforms disagree about what the same target is called (`app` against `app.exe`), and
 an entry naming no path for a platform some leg builds on is refused when `config.json` is read.
+A test passes only where its runner printed its `successPattern`, and `countPattern` reads how
+many tests ran: a leg that ran a different number than the other legs of its project and
+`testSet` is marked on its own line, never as a timing and never changing its verdict. A set
+that differs on purpose, such as a platform's own tests, is named with `testSet` on that
+platform's test invocation.
 
 **Refuse early, with the arithmetic.** `create-worktree` will not create a worktree
 whose build paths cannot fit inside Windows' path limit, because that failure
@@ -188,7 +193,8 @@ A host's section can also give its own `buildCores` and `testCores`, and an `env
 process a leg starts there sees - each build phase, the test runner, each step of a runner - as
 the lowest layer, beneath the variant's, the test invocation's and the runner's own. A `PATH`
 set there is where that host finds those programs, so none of them is required of it before a
-leg starts: each is the run's to find.
+leg starts: each is the run's to find - except in a developer environment, whose `PATH`, built
+over the host's, is looked in before the leg starts.
 
 A toolchain can name a developer environment that its legs start in, declared once and set up on
 the host that runs each leg, over that host's `env` and beneath everything more specific:
@@ -204,11 +210,14 @@ the host that runs each leg, over that host's `env` and beneath everything more 
 
 Every host a leg might land on is asked, through Visual Studio's installer, whether it has an
 instance with `requiresComponent` - the C++ build tools unless another is named - and one without
-turns the leg away as a tool missing. On the host that runs the leg, the instance its survey found
-has its `vcvarsall.bat` run once for the leg's processor, cross-compiling where the host's differs,
-and what it set is what the leg's build, tests and runner steps start with. A `vcvarsall.bat` that fails, prints an `[ERROR`,
-or sets up another processor skips the leg before anything of it starts. As with a `PATH` a host
-sets, the programs of such a leg are the run's to find. The leg's line names the environment -
+turns the leg away as a tool missing; one that could not look leaves it unavailable. On the host
+that runs the leg, the instance its survey found has its `vcvarsall.bat` run once for the leg's
+processor, cross-compiling where the host's differs, and what it set is what the leg's build, tests
+and runner steps start with. A `vcvarsall.bat` that fails, prints an `[ERROR`, or sets up another
+processor fails the leg before anything of it starts. The programs the leg starts are then looked
+for on the `PATH` it set up - Visual Studio carries `cl` and `link`, and CMake and Ninja with its
+CMake component - and one missing there skips the leg as a tool missing, named, before anything of
+it starts. The leg's line names the environment -
 `developer environment: visualStudio (Visual Studio 18.0.11205.157, MSVC 14.50.35717, amd64)` - and
 `--json` carries it as `developerEnvironment`.
 
@@ -234,8 +243,14 @@ password at all, which is usually the answer in CI. An entry may name the platfo
 is needed on — `"platforms": ["windows"]` — and a host whose platform it does not name is never
 asked about it, so a repository can declare both a Windows compiler and a POSIX one. It may
 narrow that further, to `toolchains`, `legs`, `processors` and `emulators`, so `cl` scoped to
-`msvc` is never reported missing on a MinGW leg of the same machine. `--dry-run` asks every host
-and installs nothing, naming each command that would run. `sync` creates the host's copy
+`msvc` is never reported missing on a MinGW leg of the same machine. Each leg is told about a tool
+as it will find it: a leg whose toolchain names a developer environment, on the `PATH` that
+environment sets up for its processor - set up here for the look, so `cl` is found where Visual
+Studio keeps it - and every other leg on its host's own `PATH`. An install runs once on a host,
+whichever of its legs asked first, and each leg is then told what it finds. On another host, a
+tool its own `PATH` lacks is unknown for a leg in a developer environment, since this command
+sets one up only on the machine it runs on, and nothing is installed for it. `--dry-run` asks
+every host and installs nothing, naming each command that would run. `sync` creates the host's copy
 of the repository at its `repositoryPath` and keeps it in step, deletions included. An
 emulator counts only once its witness proves it runs programs for its processor.
 

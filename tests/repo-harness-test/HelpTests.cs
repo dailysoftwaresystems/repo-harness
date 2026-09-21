@@ -88,6 +88,26 @@ public sealed partial class HelpTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The config topic says a test count that differs is marked on its own, never as a timing, and
+    /// how a set that differs on purpose is declared.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysATestCountThatDiffers_IsNoTimingMark_AndHowATestSetIsNamed()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "and test set is marked on its own - 'test count differs', and testCountDiffers and",
+            "testCountNote in --json - never as a timing, and never changes a verdict either. A",
+            "\"windows\": { \"testSet\": \"windows\" }",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_QuotesTheLimitsFromTheCode()
     {
@@ -146,9 +166,10 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
-    /// The tools topic says what --dry-run does, that init installs only when asked, and how a tool
-    /// narrows the legs that need it; the layout topic says init writes the tree it runs in and names
-    /// a rule by git's own answer.
+    /// The tools topic says what --dry-run does, that init installs only when asked, how a tool
+    /// narrows the legs that need it, and that a leg in a developer environment is told about a tool
+    /// as the PATH it sets up holds it; the layout topic says init writes the tree it runs in and
+    /// names a rule by git's own answer.
     /// </summary>
     [Fact]
     public async Task ToolsAndLayoutTopics_SayWhatInitAndInstallMissingToolsDo()
@@ -164,7 +185,9 @@ public sealed partial class HelpTests
             "\"legs\": [\"win-arm\", \"gate\"]",
             "\"processors\": [\"arm64\"]",
             "\"emulators\": [\"qemu-arm64\"]",
-            "scope naming nothing declared, or one covering no declared leg, is refused.",
+            "a developer environment, on the PATH that environment sets up for its processor -",
+            "own PATH lacks is unknown for a leg in a developer environment, which this command",
+            "covering no declared leg, is refused.",
         })
         {
             Assert.Contains(text, tools.StandardOutput, StringComparison.Ordinal);
@@ -190,8 +213,10 @@ public sealed partial class HelpTests
     {
         var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
 
-        Assert.Contains("A toolchain also names its compiler - CC or CXX under env, or CMAKE_C_COMPILER or", result.StandardOutput, StringComparison.Ordinal);
-        Assert.Contains("then held to the compiler it was configured with by the file that compiler starts on", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("A toolchain CMake builds with also names its compiler - CC or CXX under env,", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("One only .NET or Dart builds with names none.", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("build directory is then held to the compiler it was configured with by the file that", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("and by its name only where that PATH holds", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("A build CMake configured with another compiler fails before anything is built with", result.StandardOutput, StringComparison.Ordinal);
     }
