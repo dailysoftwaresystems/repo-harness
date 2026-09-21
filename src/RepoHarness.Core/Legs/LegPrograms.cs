@@ -50,17 +50,43 @@ public static class LegPrograms
 
         // Under either, every program the leg starts is found on a PATH no survey can see: the one the
         // host's own environment sets, or the one its developer environment sets up when the leg runs.
-        // What the developer environment needs is checked on its own, as missing or not.
+        // The developer environment itself is checked on its own, as missing or not, and what the leg
+        // starts is looked for on its PATH once it is set up; see InDeveloperEnvironment.
         if (ProcessRunner.SetsPath(host.Env.Keys) || DeveloperEnvironmentOf(config, leg, workload) is not null)
         {
             return [];
         }
 
-        return [.. Starts(config, leg, workload, host.Env)
+        return Required(config, leg, workload, host);
+    }
+
+    /// <summary>
+    /// The programs <paramref name="leg"/> starts for <paramref name="workload"/> that the PATH its
+    /// developer environment sets up must hold: what its host would have been required to have, were
+    /// that PATH not one no survey can see. Looked for on it once it is set up, before anything of the
+    /// leg starts - a PATH the host's own environment sets included, since vcvarsall.bat builds on it,
+    /// so the look sees exactly the PATH the leg's processes start with.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="leg">The leg.</param>
+    /// <param name="workload">What the command has the leg do.</param>
+    /// <param name="host">What the host the leg runs on declares for itself.</param>
+    public static IReadOnlyList<string> InDeveloperEnvironment(HarnessConfig config, LegConfig leg, LegWorkload workload, HostSettings host)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(leg);
+        ArgumentNullException.ThrowIfNull(workload);
+        ArgumentNullException.ThrowIfNull(host);
+
+        return Required(config, leg, workload, host);
+    }
+
+    /// <summary>The programs <paramref name="leg"/> starts for <paramref name="workload"/>, but those under a PATH of their own.</summary>
+    private static IReadOnlyList<string> Required(HarnessConfig config, LegConfig leg, LegWorkload workload, HostSettings host)
+        => [.. Starts(config, leg, workload, host.Env)
             .Where(start => !start.UnderOwnPath)
             .Select(start => start.Program)
             .Distinct(StringComparer.Ordinal)];
-    }
 
     /// <summary>
     /// Every program any declared leg starts to build and test, what <paramref name="workload"/>

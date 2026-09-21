@@ -170,7 +170,7 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
             {
                 DeveloperEnvironments = developerEnvironments.Keys.ToDictionary(
                     name => name,
-                    _ => new DeveloperEnvironmentCheck(true, null, @"C:\Program Files\Microsoft Visual Studio\18\Enterprise", "18.10.12210.168"),
+                    _ => DeveloperEnvironmentCheck.Installed(@"C:\Program Files\Microsoft Visual Studio\18\Enterprise", "18.10.12210.168"),
                     StringComparer.OrdinalIgnoreCase),
             };
         }

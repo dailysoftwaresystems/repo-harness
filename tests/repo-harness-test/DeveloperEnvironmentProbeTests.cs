@@ -28,7 +28,7 @@ public sealed class DeveloperEnvironmentProbeTests
 
         var check = await Probe(visualStudio).CheckAsync(environment, TestContext.Current.CancellationToken);
 
-        Assert.True(check.Available, check.Reason);
+        Assert.True(check.CanSetUp, check.Reason);
         Assert.Equal(visualStudio.InstallationPath, check.InstallationPath);
         Assert.Equal(ScriptedVisualStudio.InstallationVersion, check.InstallationVersion);
 
@@ -53,7 +53,7 @@ public sealed class DeveloperEnvironmentProbeTests
         var check = await new DeveloperEnvironmentProbe(HostDoubles.Platform(PlatformId.Linux), processes)
             .CheckAsync(VisualStudio, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal("Visual Studio is set up on windows, and this host runs linux", check.Reason);
         await processes.DidNotReceiveWithAnyArgs().RunAsync(default!, TestContext.Current.CancellationToken);
     }
@@ -66,7 +66,7 @@ public sealed class DeveloperEnvironmentProbeTests
 
         var check = await Probe(visualStudio).CheckAsync(new DeveloperEnvironmentConfig { Kind = "xcode" }, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal("this build does not know how to set up a 'xcode' environment", check.Reason);
         Assert.Empty(visualStudio.Probes);
     }
@@ -82,7 +82,7 @@ public sealed class DeveloperEnvironmentProbeTests
         var check = await new DeveloperEnvironmentProbe(HostDoubles.Platform(PlatformId.Windows), processes)
             .CheckAsync(VisualStudio, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal($"Visual Studio's installer is not there: '{DeveloperEnvironmentProbe.VsWherePath}' was not found", check.Reason);
     }
 
@@ -97,7 +97,7 @@ public sealed class DeveloperEnvironmentProbeTests
         var check = await new DeveloperEnvironmentProbe(HostDoubles.Platform(PlatformId.Windows), processes)
             .CheckAsync(VisualStudio, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Unreadable, check.Found);
         Assert.Equal($"'{DeveloperEnvironmentProbe.VsWherePath}' could not be started: Access is denied.", check.Reason);
     }
 
@@ -109,7 +109,7 @@ public sealed class DeveloperEnvironmentProbeTests
 
         var check = await Probe(visualStudio).CheckAsync(VisualStudio, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Unreadable, check.Found);
         Assert.Equal($"'{DeveloperEnvironmentProbe.VsWherePath}' could not list the Visual Studio instances (exit 87): vswhere: no instances", check.Reason);
     }
 
@@ -121,7 +121,7 @@ public sealed class DeveloperEnvironmentProbeTests
 
         var check = await Probe(visualStudio).CheckAsync(VisualStudio, TestContext.Current.CancellationToken);
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal("no Visual Studio instance there has the component 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'", check.Reason);
     }
 
@@ -142,7 +142,7 @@ public sealed class DeveloperEnvironmentProbeTests
     {
         var check = DeveloperEnvironmentProbe.Read(json, "C");
 
-        Assert.Equal(available, check.Available);
+        Assert.Equal(available ? DeveloperEnvironmentFound.Installed : DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal(path, check.InstallationPath);
         Assert.Equal(version, check.InstallationVersion);
         Assert.Equal(available ? null : "no Visual Studio instance there has the component 'C'", check.Reason);
@@ -154,7 +154,7 @@ public sealed class DeveloperEnvironmentProbeTests
     {
         var check = DeveloperEnvironmentProbe.Read("Visual Studio Locator version 3.1.7", "C");
 
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Unreadable, check.Found);
         Assert.StartsWith("vswhere answered in a form this build cannot read: ", check.Reason, StringComparison.Ordinal);
     }
 

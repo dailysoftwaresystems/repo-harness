@@ -43,7 +43,7 @@ internal sealed class ScriptedVisualStudio : IProcessRunner, IDisposable
     public string InstallationPath => _instance.Path;
 
     /// <summary>The instance as a survey of the machine reports it.</summary>
-    public DeveloperEnvironmentCheck Found => new(true, null, InstallationPath, InstallationVersion);
+    public DeveloperEnvironmentCheck Found => DeveloperEnvironmentCheck.Installed(InstallationPath, InstallationVersion);
 
     /// <summary>What vswhere prints; the instance, when left out.</summary>
     public string? Instances { get; init; }
@@ -105,6 +105,22 @@ internal sealed class ScriptedVisualStudio : IProcessRunner, IDisposable
     /// <summary>The directory vcvarsall.bat puts first on PATH for a build for <paramref name="target"/>.</summary>
     /// <param name="target">What <c>VSCMD_ARG_TGT_ARCH</c> says: <c>x64</c>, <c>arm64</c>.</param>
     public string BinFor(string target) => Path.Combine(InstallationPath, "VC", "Tools", "MSVC", ToolsVersion, "bin", "Hostx64", target);
+
+    /// <summary>
+    /// Puts <paramref name="programs"/> in the directory vcvarsall.bat puts first on PATH for a build for
+    /// <paramref name="target"/>, as Visual Studio carries cl, link, and CMake and Ninja with its CMake component.
+    /// </summary>
+    /// <param name="target">What <c>VSCMD_ARG_TGT_ARCH</c> says: <c>x64</c>, <c>arm64</c>.</param>
+    /// <param name="programs">The programs, by name.</param>
+    public ScriptedVisualStudio Carrying(string target, params string[] programs)
+    {
+        foreach (var program in programs)
+        {
+            _instance.WriteProgram(System.IO.Path.GetRelativePath(_instance.Path, BinFor(target)), program);
+        }
+
+        return this;
+    }
 
     /// <summary>The INCLUDE vcvarsall.bat sets.</summary>
     public string Include => Path.Combine(InstallationPath, "VC", "Tools", "MSVC", ToolsVersion, "include");
@@ -170,7 +186,7 @@ internal sealed class ScriptedVisualStudio : IProcessRunner, IDisposable
 
         var after = new Dictionary<string, string>(before, StringComparer.OrdinalIgnoreCase)
         {
-            ["PATH"] = BinFor(target) + ";" + before["PATH"],
+            ["PATH"] = BinFor(target) + System.IO.Path.PathSeparator + before["PATH"],
             ["INCLUDE"] = Include,
             ["LIB"] = Path.Combine(InstallationPath, "VC", "Tools", "MSVC", ToolsVersion, "lib", target),
             ["VCToolsVersion"] = ToolsVersion,

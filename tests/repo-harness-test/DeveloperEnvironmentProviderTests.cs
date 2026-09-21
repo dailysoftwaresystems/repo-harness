@@ -32,11 +32,11 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", host, TestContext.Current.CancellationToken);
 
-        Assert.Null(setUp.Unavailable);
+        Assert.Null(setUp.Failure);
         Assert.Equal(
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["PATH"] = visualStudio.BinFor("x64") + ";" + ScriptedVisualStudio.ShellPath,
+                ["PATH"] = visualStudio.BinFor("x64") + Path.PathSeparator + ScriptedVisualStudio.ShellPath,
                 ["INCLUDE"] = visualStudio.Include,
                 ["LIB"] = Path.Combine(visualStudio.InstallationPath, "VC", "Tools", "MSVC", ScriptedVisualStudio.ToolsVersion, "lib", "x64"),
                 ["VCToolsVersion"] = ScriptedVisualStudio.ToolsVersion,
@@ -89,7 +89,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", host, TestContext.Current.CancellationToken);
 
-        Assert.Equal(visualStudio.BinFor("x64") + @";D:\tools", setUp.Environment["PATH"]);
+        Assert.Equal(visualStudio.BinFor("x64") + Path.PathSeparator + @"D:\tools", setUp.Environment["PATH"]);
     }
 
     /// <summary>
@@ -103,10 +103,10 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider("x86_64").SetUpAsync("vs", visualStudio.Found, "arm64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Null(setUp.Unavailable);
+        Assert.Null(setUp.Failure);
         Assert.Equal("amd64_arm64", setUp.Fact!.Architecture);
         Assert.Equal("arm64", setUp.Environment["VSCMD_ARG_TGT_ARCH"]);
-        Assert.StartsWith(visualStudio.BinFor("arm64") + ";", setUp.Environment["PATH"], StringComparison.Ordinal);
+        Assert.StartsWith(visualStudio.BinFor("arm64") + Path.PathSeparator, setUp.Environment["PATH"], StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -169,7 +169,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         try
         {
-            Assert.Null(setUp.Unavailable);
+            Assert.Null(setUp.Failure);
             Assert.Contains(
                 $"developer-environment: WARN - developer environment 'vs': '{scratch}' could not be removed: {HeldFiles.Said}",
                 harness.StandardError.ToString(),
@@ -215,7 +215,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await wanted;
 
-        Assert.Null(setUp.Unavailable);
+        Assert.Null(setUp.Failure);
         Assert.Equal(2, visualStudio.Captures.Count);
     }
 
@@ -235,7 +235,14 @@ public sealed class DeveloperEnvironmentProviderTests
         Assert.Empty(visualStudio.Probes);
         Assert.Single(visualStudio.Captures);
 
-        foreach (var none in new[] { DeveloperEnvironmentCheck.Unavailable("no instance"), new DeveloperEnvironmentCheck(true, null, null, null), new DeveloperEnvironmentCheck(true, null, string.Empty, null), new DeveloperEnvironmentCheck(false, "gone", visualStudio.InstallationPath, null) })
+        foreach (var none in new[]
+        {
+            DeveloperEnvironmentCheck.Nowhere("no instance"),
+            DeveloperEnvironmentCheck.Unreadable("vswhere did not answer"),
+            new DeveloperEnvironmentCheck(DeveloperEnvironmentFound.Installed, null, null, null),
+            new DeveloperEnvironmentCheck(DeveloperEnvironmentFound.Installed, null, string.Empty, null),
+            new DeveloperEnvironmentCheck(DeveloperEnvironmentFound.Nowhere, "gone", visualStudio.InstallationPath, null),
+        })
         {
             // Refused as the call is made, before any of it starts.
             Assert.Throws<ArgumentException>(
@@ -254,7 +261,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "riscv64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Equal("developer environment 'vs' has no vcvarsall.bat architecture for a riscv64 leg on a x86_64 host", setUp.Unavailable);
+        Assert.Equal("developer environment 'vs' has no vcvarsall.bat architecture for a riscv64 leg on a x86_64 host", setUp.Failure);
         Assert.Empty(visualStudio.Captures);
     }
 
@@ -267,7 +274,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync(
             "vs",
-            new DeveloperEnvironmentCheck(true, null, empty.Path, null),
+            DeveloperEnvironmentCheck.Installed(empty.Path, null),
             "x86_64",
             NoHostEnvironment,
             TestContext.Current.CancellationToken);
@@ -275,7 +282,7 @@ public sealed class DeveloperEnvironmentProviderTests
         Assert.Equal(
             $"developer environment 'vs' found Visual Studio at '{empty.Path}', which has no "
             + $"'{Path.Combine(empty.Path, "VC", "Auxiliary", "Build", "vcvarsall.bat")}'",
-            setUp.Unavailable);
+            setUp.Failure);
         Assert.Empty(visualStudio.Captures);
     }
 
@@ -291,7 +298,18 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 exited 1: [ERROR:vcvarsall.bat] Invalid argument found : amd64x", setUp.Unavailable);
+        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 exited 1: [ERROR:vcvarsall.bat] Invalid argument found : amd64x", setUp.Failure);
+    }
+
+    /// <summary>One that exits non-zero having printed nothing says that, rather than trailing off after its exit code.</summary>
+    [Fact]
+    public async Task AVcvarsallThatExitsNonZero_HavingPrintedNothing_SaysSo()
+    {
+        using var visualStudio = new ScriptedVisualStudio { ExitCode = "1" };
+
+        var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
+
+        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 exited 1 and printed nothing", setUp.Failure);
     }
 
     /// <summary>
@@ -312,7 +330,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Equal($"developer environment 'vs': vcvarsall.bat amd64 reported an error: ********** / {Said}", setUp.Unavailable);
+        Assert.Equal($"developer environment 'vs': vcvarsall.bat amd64 reported an error: ********** / {Said}", setUp.Failure);
     }
 
     /// <summary>An environment set up for another processor builds code for that one, and is refused.</summary>
@@ -323,7 +341,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 set up VSCMD_ARG_TGT_ARCH 'x86', where 'x64' was asked for", setUp.Unavailable);
+        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 set up VSCMD_ARG_TGT_ARCH 'x86', where 'x64' was asked for", setUp.Failure);
     }
 
     /// <summary>A batch file cmd.exe never ran is refused with what cmd.exe said.</summary>
@@ -336,7 +354,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         Assert.Equal(
             "developer environment 'vs': vcvarsall.bat amd64 could not be run: cmd.exe (exit 1): The system cannot find the path specified.",
-            setUp.Unavailable);
+            setUp.Failure);
     }
 
     /// <summary>
@@ -350,7 +368,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.StartsWith("developer environment 'vs': vcvarsall.bat amd64 could not be run: ", setUp.Unavailable, StringComparison.Ordinal);
+        Assert.StartsWith("developer environment 'vs': vcvarsall.bat amd64 could not be run: ", setUp.Failure, StringComparison.Ordinal);
     }
 
     /// <summary>A vcvarsall.bat that outlives its budget is refused, naming the budget.</summary>
@@ -361,7 +379,7 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var setUp = await visualStudio.Provider().SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
 
-        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 did not finish within 120 seconds", setUp.Unavailable);
+        Assert.Equal("developer environment 'vs': vcvarsall.bat amd64 did not finish within 120 seconds", setUp.Failure);
     }
 
     /// <summary>A shell that will not start is refused, naming the shell.</summary>
@@ -376,7 +394,68 @@ public sealed class DeveloperEnvironmentProviderTests
         Assert.Equal(
             $"developer environment 'vs': vcvarsall.bat amd64 could not be run, because '{shell}' could not be started: "
             + new ExecutableNotFoundException(shell).Message,
-            setUp.Unavailable);
+            setUp.Failure);
+    }
+
+    /// <summary>
+    /// A capture that cannot be written - a temporary directory this user cannot write, a disk that is
+    /// full - fails the setup naming the directory, rather than escaping as a defect in this tool.
+    /// </summary>
+    [Fact]
+    public async Task ACaptureThatCannotBeWritten_FailsTheSetup_NamingTheDirectory()
+    {
+        using var visualStudio = new ScriptedVisualStudio();
+        var unwritable = new UnwritableScratch(new PhysicalFileSystem(FilePermissionsFactory.Create()));
+
+        var setUp = await visualStudio.Provider(fileSystem: unwritable)
+            .SetUpAsync("vs", visualStudio.Found, "x86_64", NoHostEnvironment, TestContext.Current.CancellationToken);
+
+        Assert.True(setUp.HasFailed);
+        Assert.StartsWith("developer environment 'vs': the capture of vcvarsall.bat amd64 in '", setUp.Failure, StringComparison.Ordinal);
+        Assert.EndsWith($"' could not be written or read: {UnwritableScratch.Said}", setUp.Failure, StringComparison.Ordinal);
+        Assert.Empty(visualStudio.Captures);
+    }
+
+    /// <summary>
+    /// The batch file reaches vcvarsall.bat however its instance's path is spelled - with a percent
+    /// pair, a caret, an exclamation mark, an ampersand, spaces and parentheses - since call expands
+    /// the path once and reads it as nothing but a path. Run by this machine's own cmd.exe; skipped
+    /// where there is none.
+    /// </summary>
+    [Fact]
+    public async Task TheCapture_ReachesAnInstanceWhateverItsPathHolds()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "cmd.exe runs the capture on Windows alone.");
+
+        using var temp = new TempDirectory();
+        var platform = HostDoubles.Platform(PlatformId.Windows, "x86_64");
+        var processes = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
+        var provider = new DeveloperEnvironmentProvider(platform, processes, new PhysicalFileSystem(FilePermissionsFactory.Create()), new HarnessFactory().Output);
+
+        foreach (var name in new[] { "p%OS%q", "a^b", "x!y", "r&d (x86)" })
+        {
+            temp.WriteFile(
+                Path.Combine(name, "VC", "Auxiliary", "Build", "vcvarsall.bat"),
+                "@echo off\r\nset \"VSCMD_ARG_TGT_ARCH=x64\"\r\nset \"VCToolsVersion=14.99.00000\"\r\nexit /b 0\r\n");
+
+            var setUp = await provider.SetUpAsync(
+                "vs",
+                DeveloperEnvironmentCheck.Installed(temp.Combine(name), "18.0.0"),
+                "x86_64",
+                NoHostEnvironment,
+                TestContext.Current.CancellationToken);
+
+            Assert.False(setUp.HasFailed, $"{name}: {setUp.Failure}");
+            Assert.Equal("14.99.00000", setUp.Environment["VCToolsVersion"]);
+        }
+    }
+
+    /// <summary>A file system in which no directory can be made, as where the temporary directory cannot be written.</summary>
+    private sealed class UnwritableScratch(IFileSystem inner) : PassThroughFileSystem(inner)
+    {
+        public const string Said = "Access to the path is denied.";
+
+        public override void CreateDirectory(string path) => throw new UnauthorizedAccessException(Said);
     }
 
     /// <summary>A file system whose directories cannot be removed, as while a scanner holds a file in one.</summary>
@@ -436,12 +515,12 @@ public sealed class DeveloperEnvironmentProviderTests
 
         var found = await probe.CheckAsync(VisualStudio, token);
 
-        Assert.SkipUnless(found.Available, $"This machine has no Visual Studio with the C++ build tools: {found.Reason}");
+        Assert.SkipUnless(found.CanSetUp, $"This machine has no Visual Studio with the C++ build tools: {found.Reason}");
 
         var provider = new DeveloperEnvironmentProvider(platform, processes, new PhysicalFileSystem(FilePermissionsFactory.Create()), new HarnessFactory().Output);
         var setUp = await provider.SetUpAsync("vs", found, platform.Processor, NoHostEnvironment, token);
 
-        Assert.Null(setUp.Unavailable);
+        Assert.Null(setUp.Failure);
         Assert.False(string.IsNullOrEmpty(setUp.Environment["INCLUDE"]));
         Assert.False(string.IsNullOrEmpty(setUp.Environment["LIB"]));
         Assert.Contains(

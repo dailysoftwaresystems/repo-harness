@@ -471,6 +471,29 @@ public sealed class LegRunServiceTests
     }
 
     /// <summary>
+    /// A run makes the runs directory it writes into ignore itself, whatever the tree's own .gitignore
+    /// says: a tree with no rule for it - a worktree of a branch that predates the harness - showed a
+    /// run's records in git status, where the next 'git add -A' committed them.
+    /// </summary>
+    [Fact]
+    public async Task ARun_KeepsItsRecordsOutOfGit_WhereTheTreeHasNoRuleForThem()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.RunGitAsync(temp.Path, ["init", "--quiet", "."], token);
+
+        var outcome = await OutcomeAsync(temp, harness, OneLeg(harness), SshAndLocal(harness), new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.Copy });
+        var status = await harness.RunGitAsync(temp.Path, ["status", "--porcelain", "--untracked-files=all", "--", ".harness-config/runs"], token);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.True(Directory.Exists(RunDirectoryOf(outcome, json: true)));
+        Assert.Equal(string.Empty, status.StandardOutput.Trim());
+        Assert.Equal(HarnessLayout.RunsIgnoreRule, File.ReadAllText(temp.Combine(".harness-config", "runs", ".gitignore")));
+    }
+
+    /// <summary>
     /// A leg whose toolchain names a developer environment runs in it: every process it starts is
     /// given what Visual Studio set up, over what the host declares - the host's own PATH kept behind
     /// Visual Studio's tools, its other variables untouched - and its line names the environment.
@@ -479,7 +502,7 @@ public sealed class LegRunServiceTests
     public async Task ALegWhoseToolchainNamesADeveloperEnvironment_RunsInIt_AndNamesIt()
     {
         using var temp = new TempDirectory();
-        using var visualStudio = new ScriptedVisualStudio();
+        using var visualStudio = new ScriptedVisualStudio().Carrying("x64", "cl", "cmake");
         var harness = new HarnessFactory();
         IReadOnlyDictionary<string, string>? given = null;
         IReadOnlyDictionary<string, string>? built = null;
@@ -500,7 +523,7 @@ public sealed class LegRunServiceTests
 
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.NotNull(given);
-        Assert.Equal(visualStudio.BinFor("x64") + @";D:\tools", given["PATH"]);
+        Assert.Equal(visualStudio.BinFor("x64") + Path.PathSeparator + @"D:\tools", given["PATH"]);
         Assert.Equal(visualStudio.Include, given["INCLUDE"]);
         Assert.Equal(@"D:\cache", given["CCACHE_DIR"]);
         Assert.Equal(given, built);
@@ -520,11 +543,12 @@ public sealed class LegRunServiceTests
     }
 
     /// <summary>
-    /// A developer environment that cannot be set up where the leg runs leaves the leg skipped as a
-    /// tool missing, saying why, before anything of it starts - as the survey would have, had it seen.
+    /// A developer environment the survey found that will not set up where the leg runs fails the leg,
+    /// saying why, before anything of it starts: as a program that will not start once a leg began
+    /// does, never as a skip a gate accepting an incomplete run would pass.
     /// </summary>
     [Fact]
-    public async Task ADeveloperEnvironmentThatCannotBeSetUp_SkipsItsLeg_BeforeAnythingOfItStarts()
+    public async Task ADeveloperEnvironmentThatWillNotSetUp_FailsItsLeg_BeforeAnythingOfItStarts()
     {
         using var temp = new TempDirectory();
         using var visualStudio = new ScriptedVisualStudio
@@ -547,10 +571,48 @@ public sealed class LegRunServiceTests
         using var document = JsonDocument.Parse(Assert.Single(verdicts.Data));
         var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
 
-        Assert.Equal("skipped-tool-missing", leg.GetProperty("verdict").GetString());
+        Assert.Equal("failed", leg.GetProperty("verdict").GetString());
         Assert.Equal(
             "developer environment 'vs': vcvarsall.bat amd64 exited 1: [ERROR:vcvarsall.bat] Invalid argument found : amd64",
             leg.GetProperty("detail").GetString());
+        Assert.Empty(ran);
+    }
+
+    /// <summary>
+    /// A program the leg starts that the PATH its developer environment set up does not hold - CMake,
+    /// where Visual Studio's CMake component is not installed - skips the leg as a tool missing, named,
+    /// before anything of it starts: the survey could not require it, and the run finds it missing then
+    /// rather than halfway through a build. So it does where the host's own env sets a PATH, which the
+    /// environment is set up over. Its line still names the environment it looked in.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AProgramTheDeveloperEnvironmentLacks_SkipsItsLeg_NamingIt_BeforeAnythingOfItStarts(bool hostSetsPath)
+    {
+        using var temp = new TempDirectory();
+        using var visualStudio = new ScriptedVisualStudio().Carrying("x64", "cl");
+        var harness = new HarnessFactory();
+        var ran = new List<string>();
+
+        var outcome = await OutcomeAsync(
+            temp,
+            harness,
+            MsvcLeg(hostSetsPath),
+            WindowsHere(visualStudio),
+            new LegRunRequest(temp.Path, null, Json: true) { Workload = LegWorkload.BuildOnly },
+            ran: leg => ran.Add(leg.Name),
+            developerEnvironments: visualStudio.Provider());
+
+        using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
+        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal("skipped-tool-missing", leg.GetProperty("verdict").GetString());
+        Assert.StartsWith(
+            "'cmake' is not installed there: neither on the PATH developer environment 'vs' sets up nor in any directory searched for programs",
+            leg.GetProperty("detail").GetString(),
+            StringComparison.Ordinal);
+        Assert.Equal("vs", leg.GetProperty("developerEnvironment").GetProperty("name").GetString());
         Assert.Empty(ran);
     }
 
@@ -579,9 +641,10 @@ public sealed class LegRunServiceTests
 
     /// <summary>
     /// A Windows leg built with msvc, whose toolchain names the Visual Studio environment, on a
-    /// machine whose own env declares a PATH and a compiler cache.
+    /// machine whose own env declares a compiler cache - and a PATH, unless <paramref name="hostSetsPath"/>
+    /// says it declares none.
     /// </summary>
-    private static HarnessConfig MsvcLeg() => new()
+    private static HarnessConfig MsvcLeg(bool hostSetsPath = true) => new()
     {
         BuildConfigs = { ["debug"] = new BuildConfiguration() },
         Projects = { new ProjectConfig { Name = "app", Type = "cmake", Path = "." } },
@@ -590,7 +653,15 @@ public sealed class LegRunServiceTests
         {
             ["msvc"] = new ToolchainConfig { Platforms = ["windows"], Env = { ["CC"] = "cl" }, DeveloperEnvironment = "vs" },
         },
-        Hosts = new HostsConfig { Local = new LocalHostConfig { Env = { ["Path"] = @"D:\tools", ["CCACHE_DIR"] = @"D:\cache" } } },
+        Hosts = new HostsConfig
+        {
+            Local = new LocalHostConfig
+            {
+                Env = hostSetsPath
+                    ? new(StringComparer.OrdinalIgnoreCase) { ["Path"] = @"D:\tools", ["CCACHE_DIR"] = @"D:\cache" }
+                    : new(StringComparer.OrdinalIgnoreCase) { ["CCACHE_DIR"] = @"D:\cache" },
+            },
+        },
         Legs = { ["native"] = new LegConfig { Os = "windows", Processor = "x86_64", Config = "debug", Toolchain = "msvc" } },
     };
 
@@ -730,6 +801,8 @@ public sealed class LegRunServiceTests
             new RemoteLegRunner(hosts ?? new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
             new KeepAwake(keepAwake ?? new HeldProcesses(), harness.Output),
             developerEnvironments ?? NoDeveloperEnvironment(harness),
+            harness.FileSystem,
+            harness.FilePermissions,
             harness.Platform,
             harness.Output);
 

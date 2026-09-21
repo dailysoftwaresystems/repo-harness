@@ -269,7 +269,7 @@ public sealed class HostAgentServiceTests
         Assert.NotNull(info);
 
         var check = info.DeveloperEnvironments["vs"];
-        Assert.False(check.Available);
+        Assert.Equal(DeveloperEnvironmentFound.Nowhere, check.Found);
         Assert.Equal("Visual Studio is set up on windows, and this host runs linux", check.Reason);
     }
 

@@ -508,7 +508,7 @@ public sealed class HostInspectorTests
 
             var checks = request!.DeveloperEnvironments.ToDictionary(
                 pair => pair.Key,
-                pair => DeveloperEnvironmentCheck.Unavailable($"no Visual Studio instance there has the component '{pair.Value.RequiresComponent}'"),
+                pair => DeveloperEnvironmentCheck.Nowhere($"no Visual Studio instance there has the component '{pair.Value.RequiresComponent}'"),
                 StringComparer.OrdinalIgnoreCase);
 
             return HostResults.Ok(JsonSerializer.Serialize(

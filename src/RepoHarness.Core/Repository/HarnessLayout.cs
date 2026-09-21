@@ -272,10 +272,27 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// checkout's, where a caller confined to the worktree could not reach them. Nothing is shared
     /// across runs here: each writes only a directory named by its own id, which no other run can
     /// hold. What two runs from different trees do contend over is the lock, which stays in the main
-    /// checkout (<see cref="LockFile"/>). Ignored like the rest of the harness's state, so no sync
-    /// carries it, and deleting a worktree deletes its records with it.
+    /// checkout (<see cref="LockFile"/>). It ignores itself (<see cref="RunsIgnoreFile"/>), so its
+    /// records never show in git status, whatever the tree's own .gitignore says; no sync carries it,
+    /// as none carries any of the harness's own state; and deleting a worktree deletes its records
+    /// with it.
     /// </remarks>
     public string RunsDirectory => Path.Combine(HarnessDirectory, RunsDirectoryName);
+
+    /// <summary>
+    /// The ignore file the runs directory holds for itself, whose one rule, <see cref="RunsIgnoreRule"/>,
+    /// keeps everything in that directory - itself included - out of git.
+    /// </summary>
+    /// <remarks>
+    /// Written by the run about to write there, rather than left to the tree's .gitignore: a worktree
+    /// of a branch that predates the harness runs on the main checkout's configuration and holds no
+    /// rule for the directory, so its records showed in git status, would be committed by the next
+    /// 'git add -A', and made delete-worktree refuse over the harness's own logs.
+    /// </remarks>
+    public string RunsIgnoreFile => Path.Combine(RunsDirectory, ".gitignore");
+
+    /// <summary>What <see cref="RunsIgnoreFile"/> holds.</summary>
+    public const string RunsIgnoreRule = "*\n";
 
     /// <summary>One run's directory, named by its id.</summary>
     /// <param name="runId">The run's id.</param>

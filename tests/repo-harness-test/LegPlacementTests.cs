@@ -133,9 +133,10 @@ public sealed class LegPlacementTests
     }
 
     /// <summary>
-    /// A leg whose toolchain names a developer environment is turned away, as a tool missing, from a
-    /// host that cannot set it up or was never asked - and placed where it can. A copy starts nothing
-    /// there, and needs none.
+    /// A leg whose toolchain names a developer environment is turned away from a host that cannot set
+    /// it up - as a tool missing where the host looked and has none, as unavailable where it could not
+    /// look, and as a defect in this tool where it was never asked - and placed where it can. A copy
+    /// starts nothing there, and needs none.
     /// </summary>
     [Fact]
     public void Place_TurnsALegAway_WhereItsDeveloperEnvironmentCannotBeSetUp()
@@ -150,15 +151,20 @@ public sealed class LegPlacementTests
         {
             DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
             {
-                ["vs"] = DeveloperEnvironmentCheck.Unavailable("no Visual Studio instance there has the component 'X'"),
+                ["vs"] = DeveloperEnvironmentCheck.Nowhere("no Visual Studio instance there has the component 'X'"),
             },
         };
         var with = Windows with
         {
             DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase)
             {
-                ["vs"] = new(true, null, @"C:\VS", "18.0.1"),
+                ["vs"] = DeveloperEnvironmentCheck.Installed(@"C:\VS", "18.0.1"),
             },
+        };
+
+        HostReport Answering(DeveloperEnvironmentCheck check) => Windows with
+        {
+            DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentCheck>(StringComparer.OrdinalIgnoreCase) { ["vs"] = check },
         };
 
         LegPlacement Placed(LegWorkload workload, HostReport host)
@@ -172,10 +178,25 @@ public sealed class LegPlacementTests
             $"{HostId.Local}: developer environment 'vs' cannot be set up there: no Visual Studio instance there has the component 'X'",
             turnedAway.Reason);
 
+        var unknown = Placed(LegWorkload.BuildOnly, Answering(DeveloperEnvironmentCheck.Unreadable("vswhere did not answer")));
+
+        Assert.Equal(LegVerdict.SkippedUnavailable, unknown.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: whether developer environment 'vs' can be set up there could not be established: vswhere did not answer",
+            unknown.Reason);
+
+        var unnamed = Placed(LegWorkload.BuildOnly, Answering(new DeveloperEnvironmentCheck(DeveloperEnvironmentFound.Installed, null, null, null)));
+
+        Assert.Equal(LegVerdict.SkippedUnavailable, unnamed.Verdict);
+        Assert.EndsWith("could not be established: the host named no instance", unnamed.Reason, StringComparison.Ordinal);
+
         var neverAsked = Placed(new LegWorkload(Build: false, Test: true, []), Windows);
 
-        Assert.Equal(LegVerdict.SkippedToolMissing, neverAsked.Verdict);
-        Assert.Equal($"{HostId.Local}: developer environment 'vs' was never looked for there", neverAsked.Reason);
+        Assert.Equal(LegVerdict.Poisoned, neverAsked.Verdict);
+        Assert.Equal(
+            $"{HostId.Local}: whether developer environment 'vs' can be set up there was never asked, which is a defect in this tool: "
+            + "a host is asked about every developer environment a leg starts in",
+            neverAsked.Reason);
 
         Assert.True(Placed(LegWorkload.BuildOnly, with).Runnable);
         Assert.True(Placed(LegWorkload.Copy, without).Runnable);

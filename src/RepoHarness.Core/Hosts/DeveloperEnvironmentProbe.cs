@@ -1,20 +1,60 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 
 namespace RepoHarness.Core.Hosts;
 
+/// <summary>What looking for a developer environment on a host found.</summary>
+/// <remarks>
+/// Three facts, kept apart as a program's are: one looked for and found, one looked for and not
+/// there, and one the host could not look for. A look that failed must not read as one that looked
+/// and found nothing: that sent a reader to reinstall Visual Studio over an installer that timed out.
+/// </remarks>
+public enum DeveloperEnvironmentFound
+{
+    /// <summary>An instance with what it requires is there: the one that would be set up.</summary>
+    Installed,
+
+    /// <summary>The host looked, and has none: what a leg starting in it needs is not installed there.</summary>
+    Nowhere,
+
+    /// <summary>
+    /// The host could not look - its installer's vswhere would not start, did not answer, or answered
+    /// in a form this build cannot read - so nothing is known either way, and no refusal may call it
+    /// missing.
+    /// </summary>
+    Unreadable,
+}
+
 /// <summary>Whether a developer environment can be set up on a host, and which instance would be.</summary>
-/// <param name="Available">Whether it can.</param>
-/// <param name="Reason">Why it cannot, naming what was looked for, when it cannot.</param>
+/// <param name="Found">What looking for it found.</param>
+/// <param name="Reason">Why it cannot be set up there, naming what was looked for, when it cannot.</param>
 /// <param name="InstallationPath">The instance that would be set up, when there is one.</param>
 /// <param name="InstallationVersion">That instance's version, as its installer reports it.</param>
-public sealed record DeveloperEnvironmentCheck(bool Available, string? Reason, string? InstallationPath, string? InstallationVersion)
+public sealed record DeveloperEnvironmentCheck(DeveloperEnvironmentFound Found, string? Reason, string? InstallationPath, string? InstallationVersion)
 {
-    /// <summary>One that cannot be set up there, and why.</summary>
+    /// <summary>The instance that would be set up there.</summary>
+    /// <param name="installationPath">Where it is.</param>
+    /// <param name="installationVersion">Its version, as its installer reports it.</param>
+    public static DeveloperEnvironmentCheck Installed(string installationPath, string? installationVersion)
+        => new(DeveloperEnvironmentFound.Installed, null, installationPath, installationVersion);
+
+    /// <summary>None there, and why, naming what was looked for.</summary>
     /// <param name="reason">Why, naming what was looked for.</param>
-    public static DeveloperEnvironmentCheck Unavailable(string reason) => new(false, reason, null, null);
+    public static DeveloperEnvironmentCheck Nowhere(string reason) => new(DeveloperEnvironmentFound.Nowhere, reason, null, null);
+
+    /// <summary>Whether one is there could not be established, and why.</summary>
+    /// <param name="reason">Why the host could not look.</param>
+    public static DeveloperEnvironmentCheck Unreadable(string reason) => new(DeveloperEnvironmentFound.Unreadable, reason, null, null);
+
+    /// <summary>
+    /// Whether it can be set up there: installed, and the instance named. What placing a leg and
+    /// setting it up both ask, so a check one would take the other cannot refuse.
+    /// </summary>
+    [JsonIgnore]
+    public bool CanSetUp => Found == DeveloperEnvironmentFound.Installed && InstallationPath is { Length: > 0 };
 }
 
 /// <summary>
@@ -54,12 +94,12 @@ public sealed class DeveloperEnvironmentProbe(IHostPlatform platform, IProcessRu
 
         if (!string.Equals(environment.Kind, DeveloperEnvironmentKinds.VisualStudio, StringComparison.OrdinalIgnoreCase))
         {
-            return DeveloperEnvironmentCheck.Unavailable($"this build does not know how to set up a '{environment.Kind}' environment");
+            return DeveloperEnvironmentCheck.Nowhere($"this build does not know how to set up a '{environment.Kind}' environment");
         }
 
         if (!string.Equals(_platform.PlatformKey, PlatformNames.Windows, StringComparison.Ordinal))
         {
-            return DeveloperEnvironmentCheck.Unavailable($"Visual Studio is set up on windows, and this host runs {_platform.PlatformKey}");
+            return DeveloperEnvironmentCheck.Nowhere($"Visual Studio is set up on windows, and this host runs {_platform.PlatformKey}");
         }
 
         var vswhere = VsWherePath;
@@ -82,16 +122,16 @@ public sealed class DeveloperEnvironmentProbe(IHostPlatform platform, IProcessRu
         }
         catch (ExecutableNotFoundException)
         {
-            return DeveloperEnvironmentCheck.Unavailable($"Visual Studio's installer is not there: '{vswhere}' was not found");
+            return DeveloperEnvironmentCheck.Nowhere($"Visual Studio's installer is not there: '{vswhere}' was not found");
         }
         catch (ProgramStartException ex)
         {
-            return DeveloperEnvironmentCheck.Unavailable($"'{vswhere}' could not be started: {ex.Message}");
+            return DeveloperEnvironmentCheck.Unreadable($"'{vswhere}' could not be started: {ex.Message}");
         }
 
         if (result.TimedOut || result.ExitCode != 0)
         {
-            return DeveloperEnvironmentCheck.Unavailable(HostProbes.Failure($"'{vswhere}' could not list the Visual Studio instances", result));
+            return DeveloperEnvironmentCheck.Unreadable(HostProbes.Failure($"'{vswhere}' could not list the Visual Studio instances", result));
         }
 
         return Read(result.StandardOutput, environment.RequiresComponent);
@@ -118,14 +158,14 @@ public sealed class DeveloperEnvironmentProbe(IHostPlatform platform, IProcessRu
                     ? declared.GetString()
                     : null;
 
-                return new DeveloperEnvironmentCheck(true, null, installationPath, version);
+                return DeveloperEnvironmentCheck.Installed(installationPath, version);
             }
 
-            return DeveloperEnvironmentCheck.Unavailable($"no Visual Studio instance there has the component '{component}'");
+            return DeveloperEnvironmentCheck.Nowhere($"no Visual Studio instance there has the component '{component}'");
         }
         catch (JsonException ex)
         {
-            return DeveloperEnvironmentCheck.Unavailable($"vswhere answered in a form this build cannot read: {ex.Message}");
+            return DeveloperEnvironmentCheck.Unreadable($"vswhere answered in a form this build cannot read: {ex.Message}");
         }
     }
 }

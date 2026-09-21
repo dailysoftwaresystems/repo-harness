@@ -3,6 +3,7 @@ using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Output;
@@ -80,6 +81,8 @@ public sealed class LegRunService(
     RemoteLegRunner remoteLegs,
     KeepAwake keepAwake,
     DeveloperEnvironmentProvider developerEnvironments,
+    IFileSystem fileSystem,
+    IFilePermissions filePermissions,
     IHostPlatform platform,
     IHarnessOutput output)
 {
@@ -93,6 +96,8 @@ public sealed class LegRunService(
     private readonly RemoteLegRunner _remoteLegs = remoteLegs;
     private readonly KeepAwake _keepAwake = keepAwake;
     private readonly DeveloperEnvironmentProvider _developerEnvironments = developerEnvironments;
+    private readonly IFileSystem _fileSystem = fileSystem;
+    private readonly IFilePermissions _filePermissions = filePermissions;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
@@ -137,6 +142,8 @@ public sealed class LegRunService(
         var runId = RunId.New();
         var runDirectory = context.Layout.RunDirectory(runId.Value);
         var ledger = new LegLedger(_output, commandName);
+
+        IgnoreRunRecords(context.Layout);
 
         foreach (var entry in skipped)
         {
@@ -220,6 +227,34 @@ public sealed class LegRunService(
         {
             await _logOwnership.ReleaseAsync(runDirectory, runId, CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Makes the tree's runs directory ignore itself, before a run writes into it.
+    /// </summary>
+    /// <exception cref="HarnessException">The file could not be written: refused, naming it.</exception>
+    /// <remarks>
+    /// Whatever the tree's own .gitignore says; see <see cref="HarnessLayout.RunsIgnoreFile"/>. Written
+    /// through the rule every file a run decides by is written through, so a runs directory nobody can
+    /// write is refused here, naming it, as the claim below would refuse it.
+    /// </remarks>
+    private void IgnoreRunRecords(HarnessLayout layout)
+    {
+        var ignore = layout.RunsIgnoreFile;
+
+        if (_fileSystem.FileExists(ignore))
+        {
+            return;
+        }
+
+        MachineWideFile.Written(
+            $"The runs directory's own ignore file '{ignore}'",
+            "Until it can be, a run's records would show in git status and be committed with the tree.",
+            () =>
+            {
+                _fileSystem.CreateDirectory(layout.RunsDirectory);
+                _fileSystem.WriteAllTextAtomic(ignore, HarnessLayout.RunsIgnoreRule);
+            });
     }
 
     /// <summary>
@@ -425,35 +460,80 @@ public sealed class LegRunService(
             // declares - under the section the machine that dispatched the leg knows it by.
             await using var awake = _keepAwake.Hold(commandName, leg.Name, leg.HostSettings, leg.Host.ProgramDirectories, cancellationToken);
 
-            var setUp = await SetUpDeveloperEnvironmentAsync(context.Config, leg, request.Workload, ledger, cancellationToken)
-                .ConfigureAwait(false);
+            var environmentName = LegPrograms.DeveloperEnvironmentOf(context.Config, leg.Leg, request.Workload);
+            DeveloperEnvironmentSetup? setUp = null;
 
-            if (setUp?.Unavailable is { } unavailable)
+            if (environmentName is not null)
             {
-                // Before anything of the leg started, as the survey would have turned it away had it
-                // seen this: a tool the leg needs is not there to be had.
-                return new LegEntry
+                setUp = await SetUpDeveloperEnvironmentAsync(environmentName, leg, ledger, cancellationToken).ConfigureAwait(false);
+
+                if (setUp.HasFailed)
                 {
-                    Leg = leg.Name,
-                    Verdict = LegVerdict.SkippedToolMissing,
-                    Detail = unavailable,
-                    Duration = Stopwatch.GetElapsedTime(started),
-                    Emulated = leg.Emulated,
-                };
+                    // The survey found the instance and the leg was placed here for it, so an environment
+                    // that will not set up now is the leg failing, as a program that will not start once a
+                    // leg began is: read as a skip, a gate that accepts an incomplete run passed it.
+                    return new LegEntry
+                    {
+                        Leg = leg.Name,
+                        Verdict = LegVerdict.Failed,
+                        Detail = setUp.Failure,
+                        Duration = Stopwatch.GetElapsedTime(started),
+                        Emulated = leg.Emulated,
+                    };
+                }
+
+                if (MissingInDeveloperEnvironment(context.Config, leg, request.Workload, environmentName, setUp) is { } missing)
+                {
+                    return new LegEntry
+                    {
+                        Leg = leg.Name,
+                        Verdict = missing.Verdict,
+                        Detail = missing.Reason,
+                        Duration = Stopwatch.GetElapsedTime(started),
+                        Emulated = leg.Emulated,
+                        DeveloperEnvironment = setUp.Fact,
+                    };
+                }
+
+                leg = leg with { DeveloperEnvironment = setUp.Environment };
             }
 
-            var entry = await work(
-                    new LegWork(setUp is null ? leg : leg with { DeveloperEnvironment = setUp.Environment }, context, runId, runDirectory, request.Time),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            var entry = await work(new LegWork(leg, context, runId, runDirectory, request.Time), cancellationToken).ConfigureAwait(false);
 
             return setUp is null ? entry : entry with { DeveloperEnvironment = setUp.Fact };
         }
     }
 
     /// <summary>
-    /// Sets up, on this machine, the developer environment <paramref name="leg"/> starts
-    /// <paramref name="workload"/> in, or returns <see langword="null"/> where it needs none.
+    /// The programs <paramref name="leg"/> starts that the PATH its developer environment set up does
+    /// not hold, said as one reason with what the run records for it, or <see langword="null"/> where
+    /// it holds them all.
+    /// </summary>
+    /// <remarks>
+    /// The survey could not require them: that PATH exists only once the environment is set up, here,
+    /// now. So they are looked for then, before anything of the leg starts, and one that is missing is
+    /// a tool missing, named, as the survey names one it can see - never a program failing to start
+    /// halfway through a build. Visual Studio carries cl and link, and CMake and Ninja only where its
+    /// CMake component is installed.
+    /// </remarks>
+    private (string Reason, LegVerdict Verdict)? MissingInDeveloperEnvironment(
+        HarnessConfig config,
+        PlacedLeg leg,
+        LegWorkload workload,
+        string name,
+        DeveloperEnvironmentSetup setUp)
+    {
+        var search = PathSearch.For(PhaseEnvironment.Layered(leg.HostSettings.Env, setUp.Environment), leg.Host.ProgramDirectories);
+
+        return LegPlacement.MissingPrograms(
+            LegPrograms.InDeveloperEnvironment(config, leg.Leg, workload, leg.HostSettings),
+            program => search.Find(_platform, _filePermissions, program),
+            $"the PATH developer environment '{name}' sets up");
+    }
+
+    /// <summary>
+    /// Sets up, on this machine, the developer environment <paramref name="name"/> that
+    /// <paramref name="leg"/> starts its work in.
     /// </summary>
     /// <remarks>
     /// Here, on the machine that runs the leg, and never on the one that placed it: what Visual
@@ -461,18 +541,12 @@ public sealed class LegRunService(
     /// environment, through <see cref="LegPrograms.DeveloperEnvironmentOf"/>, and the leg was placed
     /// here because it found an instance, so that instance is the one set up.
     /// </remarks>
-    private async Task<DeveloperEnvironmentSetup?> SetUpDeveloperEnvironmentAsync(
-        HarnessConfig config,
+    private async Task<DeveloperEnvironmentSetup> SetUpDeveloperEnvironmentAsync(
+        string name,
         PlacedLeg leg,
-        LegWorkload workload,
         LegLedger ledger,
         CancellationToken cancellationToken)
     {
-        if (LegPrograms.DeveloperEnvironmentOf(config, leg.Leg, workload) is not { } name)
-        {
-            return null;
-        }
-
         ledger.Transition(leg.Name, $"setting up developer environment '{name}'");
 
         return await _developerEnvironments

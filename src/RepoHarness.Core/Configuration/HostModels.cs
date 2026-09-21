@@ -90,7 +90,8 @@ public abstract class HostSettings
     /// <remarks>
     /// A PATH set here is where every one of those programs is found on this machine, and no survey
     /// can see it: none of them is required of the machine before a leg starts, and each is the run's
-    /// to find, as under any environment that sets PATH.
+    /// to find, as under any environment that sets PATH - except for a leg in a developer environment,
+    /// whose programs are looked for, before it starts, on the PATH that environment builds over this one.
     /// </remarks>
     public Dictionary<string, string> Env { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }

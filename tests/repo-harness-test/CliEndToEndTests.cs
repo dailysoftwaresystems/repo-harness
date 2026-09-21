@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
@@ -845,13 +846,62 @@ public sealed partial class CliEndToEndTests
     public async Task ATestOfABuildItDoesNotMake_NamesTheCompilersItsDirectoryWasConfiguredWith()
     {
         using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        await ConfiguredWithGnuAsync(temp, new ToolchainConfig { Env = { ["CC"] = "cc" } }, token);
+
+        var result = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var compiler = Assert.Single(Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("compilers").EnumerateArray());
+
+        Assert.Equal("GNU", compiler.GetProperty("id").GetString());
+        Assert.Equal("13.2.0", compiler.GetProperty("version").GetString());
+    }
+
+    /// <summary>
+    /// A leg testing a build it does not make holds that build to its toolchain's compilerId, as the
+    /// build that made it would have been: a directory CMake configured with another compiler is failed
+    /// rather than tested, and a declared language CMake named nothing for is unwitnessed.
+    /// </summary>
+    [Theory]
+    [InlineData("C", "Clang", HarnessExit.CommandFailed, "failed", "CMake configured this build with another compiler than toolchain 'cc' declares: C with GNU 13.2.0, not Clang")]
+    [InlineData("CXX", "GNU", LegExit.Unwitnessed, "unwitnessed", "toolchain 'cc' declares the compiler for CXX, and CMake named none for it")]
+    public async Task ATestOfABuildItDoesNotMake_HoldsItToTheToolchainsCompilerId(string language, string id, int exitCode, string verdict, string detail)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        await ConfiguredWithGnuAsync(temp, new ToolchainConfig { Env = { ["CC"] = "cc" }, CompilerId = { [language] = id } }, token);
+
+        var result = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(exitCode, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal(verdict, leg.GetProperty("verdict").GetString());
+        Assert.StartsWith(detail, leg.GetProperty("detail").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A repository whose one leg builds with <paramref name="toolchain"/>, named cc, whose build
+    /// directory CMake last configured with GNU 13.2.0 for C, as its file API answered.
+    /// </summary>
+    private static async Task ConfiguredWithGnuAsync(TempDirectory temp, ToolchainConfig toolchain, CancellationToken token)
+    {
         var harness = new HarnessFactory();
         var platform = harness.Platform;
-        var token = TestContext.Current.CancellationToken;
+
+        toolchain.Platforms.Clear();
+        toolchain.Platforms.Add(platform.PlatformKey);
 
         await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
         {
-            Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Env = { ["CC"] = "cc" } } },
+            Toolchains = { ["cc"] = toolchain },
             BuildConfigs = { ["debug"] = new BuildConfiguration() },
             Projects =
             {
@@ -871,16 +921,6 @@ public sealed partial class CliEndToEndTests
         temp.WriteFile(
             Path.Combine(replies, "toolchains-v1-a.json"),
             """{ "toolchains": [ { "language": "C", "compiler": { "id": "GNU", "version": "13.2.0" } } ] }""");
-
-        var result = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "--json", "-C", temp.Path], token);
-
-        Assert.Equal(HarnessExit.Success, result.ExitCode);
-
-        using var document = JsonDocument.Parse(result.StandardOutput);
-        var compiler = Assert.Single(Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("compilers").EnumerateArray());
-
-        Assert.Equal("GNU", compiler.GetProperty("id").GetString());
-        Assert.Equal("13.2.0", compiler.GetProperty("version").GetString());
     }
 
     /// <summary>
@@ -944,9 +984,16 @@ public sealed partial class CliEndToEndTests
 
     /// <summary>
     /// An msvc leg builds from a plain shell: the environment Visual Studio sets up is set up for it
-    /// on this machine, CMake configures it with MSVC - which its toolchain's compilerId holds it to -
-    /// and its line names both. Skipped where this machine has no Visual Studio with the C++ build
-    /// tools, or no CMake or Ninja in the environment it sets up.
+    /// on this machine, CMake configures its C and its C++ with MSVC - which its toolchain's compilerId
+    /// holds it to - and its line names both. A unit including nothing, one including only a header
+    /// ninja takes for the system's, and one including a header beside it pass the dependency check;
+    /// so do the units built from a precompiled header under /Yu and /FI, in C and in C++ - one holding
+    /// only a compile-time assertion, one using a header it never includes itself, one including a
+    /// header the precompiled header holds and guards, which cl never opens again - each rebuilt through
+    /// the object compiling the precompiled header, which records what it holds. The check reads every
+    /// object and excuses exactly those that include nothing ninja keeps or are rebuilt that way. Skipped
+    /// where this machine has no Visual Studio with the C++ build tools, or no CMake or Ninja in the
+    /// environment it sets up.
     /// </summary>
     [Fact]
     public async Task AnMsvcLeg_BuildsFromAPlainShell_InTheEnvironmentVisualStudioSetsUp()
@@ -959,12 +1006,12 @@ public sealed partial class CliEndToEndTests
 
         var found = await probe.CheckAsync(visualStudio, token);
 
-        Assert.SkipUnless(found.Available, $"This machine has no Visual Studio with the C++ build tools: {found.Reason}");
+        Assert.SkipUnless(found.CanSetUp, $"This machine has no Visual Studio with the C++ build tools: {found.Reason}");
 
         var setUp = await new DeveloperEnvironmentProvider(platform, harness.ProcessRunner, harness.FileSystem, harness.Output)
             .SetUpAsync("visualStudio", found, platform.Processor, new Dictionary<string, string>(), token);
 
-        Assert.Null(setUp.Unavailable);
+        Assert.Null(setUp.Failure);
 
         var path = setUp.Environment.TryGetValue("PATH", out var set) ? set : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         var reachable = path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
@@ -984,8 +1031,8 @@ public sealed partial class CliEndToEndTests
                 {
                     Platforms = ["windows"],
                     Generator = "Ninja",
-                    Env = { ["CC"] = "cl" },
-                    CompilerId = { ["C"] = "MSVC" },
+                    Env = { ["CC"] = "cl", ["CXX"] = "cl" },
+                    CompilerId = { ["C"] = "MSVC", ["CXX"] = "MSVC" },
                     DeveloperEnvironment = "visualStudio",
                 },
             },
@@ -1016,8 +1063,25 @@ public sealed partial class CliEndToEndTests
             },
         });
 
-        temp.WriteFile("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\n");
+        temp.WriteFile(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.20)\nproject(probe C CXX)\nadd_executable(probe main.c system.c local.c)\n"
+            + "add_library(precompiled STATIC stub.c uses.c holds.c)\ntarget_precompile_headers(precompiled PRIVATE probe.h held.h)\n"
+            + "add_library(precompiledcxx STATIC stub.cpp holds.cpp)\ntarget_precompile_headers(precompiledcxx PRIVATE held.h)\n");
         temp.WriteFile("main.c", "int main(void) { return 0; }\n");
+        temp.WriteFile("system.c", "#include <stdio.h>\nint system_only(void) { return printf(\"\"); }\n");
+        temp.WriteFile("local.c", "#include \"probe.h\"\nint local(void) { return PROBE; }\n");
+        temp.WriteFile("probe.h", "#define PROBE 0\n");
+        temp.WriteFile("held.h", "#pragma once\n#define HELD 1\n");
+
+        // None records a header: cl reads the precompiled header compiled, and never opens again a
+        // header it holds and guards that the unit includes itself. For C++, CMake holds the
+        // precompiled header's includes under #ifdef __cplusplus.
+        temp.WriteFile("stub.c", "typedef char int_is_wide_enough[sizeof(int) >= 2 ? 1 : -1];\n");
+        temp.WriteFile("uses.c", "int uses(void) { return PROBE; }\n");
+        temp.WriteFile("holds.c", "#include \"held.h\"\nint holds(void) { return HELD; }\n");
+        temp.WriteFile("stub.cpp", "static_assert(sizeof(int) >= 2, \"int is wide enough\");\n");
+        temp.WriteFile("holds.cpp", "#include \"held.h\"\nint holds_too() { return HELD; }\n");
 
         var build = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
 
@@ -1028,7 +1092,13 @@ public sealed partial class CliEndToEndTests
         var environment = leg.GetProperty("developerEnvironment");
 
         Assert.Equal("passed", leg.GetProperty("verdict").GetString());
-        Assert.Equal("MSVC", Assert.Single(leg.GetProperty("compilers").EnumerateArray()).GetProperty("id").GetString());
+
+        // Ten objects: three of the program, and a precompiled header's object and its units in each
+        // language. Seven record nothing, each legitimately: two include nothing ninja keeps, and five
+        // are built from a precompiled header.
+        Assert.Equal("10 object(s) read, 7 excused", leg.GetProperty("detail").GetString());
+        Assert.All(leg.GetProperty("compilers").EnumerateArray(), compiler => Assert.Equal("MSVC", compiler.GetProperty("id").GetString()));
+        Assert.Equal(["C", "CXX"], leg.GetProperty("compilers").EnumerateArray().Select(compiler => compiler.GetProperty("language").GetString()).Order());
         Assert.Equal("visualStudio", environment.GetProperty("name").GetString());
         Assert.Equal(found.InstallationPath, environment.GetProperty("installationPath").GetString());
         Assert.Equal(setUp.Fact!.ToolsVersion, environment.GetProperty("toolsVersion").GetString());

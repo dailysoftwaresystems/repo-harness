@@ -83,10 +83,11 @@ public sealed class HarnessContextLoader(
         // which is what this did — a lane could not run anything it had just written, and nothing
         // said so: the tree's own file was read by nobody and no message named the file that was.
         //
-        // State stays where it was. Runs, locks and connection data are gitignored and shared, so
-        // they resolve against MainCheckoutRoot through the layout and are unaffected by this. The
-        // rule is the one the runner directory already follows: what git tracks belongs to the tree,
-        // what git ignores belongs to the checkout that owns the repository.
+        // State stays where it was. Locks and connection data are gitignored and shared, so they
+        // resolve against MainCheckoutRoot through the layout and are unaffected by this. The rule is
+        // the one the runner directory already follows: what git tracks belongs to the tree, what git
+        // ignores belongs to the checkout that owns the repository - with one exception, a run's
+        // records, which belong to the tree that ran it (HarnessLayout.RunsDirectory).
         var configFile = layout.ConfigFile;
 
         if (!_fileSystem.FileExists(configFile))
