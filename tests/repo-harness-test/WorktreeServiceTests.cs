@@ -134,7 +134,7 @@ public sealed class WorktreeServiceTests
             temp.Path, "wt", useRandomName: false, TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
-        Assert.Contains("the limit is 20", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("must stay under 20", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.False(Directory.Exists(HarnessFactory.WorktreePath(temp.Path, "wt")));
     }
 
@@ -188,12 +188,12 @@ public sealed class WorktreeServiceTests
 
     /// <summary>
     /// A machine that builds no leg grows no build directory, and nothing is added for one - but the
-    /// separator joining the worktree to what the reserve names still counts. The worktree fits at
-    /// exactly that length and not one character under it, where it was once believed to fit.
+    /// separator joining the worktree to what the reserve names still counts. The worktree fits one
+    /// character under the limit, and not at it: the limit counts the NUL that ends a path.
     /// </summary>
     [Theory]
-    [InlineData(0, true)]
-    [InlineData(-1, false)]
+    [InlineData(1, true)]
+    [InlineData(0, false)]
     public async Task CreateAsync_AddsNoBuildDirectory_WhenNoLegBuildsOnThisMachine(int slack, bool fits)
     {
         using var temp = new TempDirectory();

@@ -44,9 +44,12 @@ public sealed class PathBudget(IHostPlatform platform) : IPathBudget
         // wherever that caller added nothing: the check then believed it had a character to spare.
         var below = reserve > 0 ? 1 + reserve : 0;
         var required = Path.TrimEndingDirectorySeparator(directory).Length + below + margin;
-        var availableNameLength = effectiveLimit - below - margin - GetParentLength(directory);
 
-        return required <= effectiveLimit
+        // Under the limit, never at it: Windows' 260 counts the NUL that ends a path, so the longest
+        // path it takes is 259 characters, and one of 260 fails as the compile errors it always does.
+        var availableNameLength = effectiveLimit - 1 - below - margin - GetParentLength(directory);
+
+        return required < effectiveLimit
             ? PathBudgetResult.WithinBudget(required, effectiveLimit, availableNameLength)
             : PathBudgetResult.Exceeded(required, effectiveLimit, availableNameLength);
     }
@@ -116,10 +119,10 @@ public sealed record PathBudgetResult
 
         if (IsWithinBudget)
         {
-            return $"'{directory}' needs {RequiredLength} of the {limit} characters allowed.";
+            return $"'{directory}' needs {RequiredLength} characters, under the limit of {limit}.";
         }
 
-        return $"'{directory}' needs {RequiredLength} characters but the limit is {limit}. "
+        return $"'{directory}' needs {RequiredLength} characters but must stay under {limit}. "
             + (AvailableNameLength > 0
                 ? $"A name of at most {AvailableNameLength} characters would fit here."
                 : "No name fits here; move the repository to a shorter path.");

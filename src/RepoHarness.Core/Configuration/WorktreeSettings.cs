@@ -60,8 +60,8 @@ public sealed class WorktreeSettings
     public int PathBudgetMargin { get; init; } = 20;
 
     /// <summary>
-    /// Path length to budget against, replacing the platform's own limit (260 on
-    /// Windows, none elsewhere). Leave it unset unless every tool the build runs
+    /// The length every path must stay under, replacing the platform's own limit (260
+    /// on Windows, none elsewhere). Leave it unset unless every tool the build runs
     /// handles long paths: the operating system allowing them is not enough, because
     /// compilers and build systems impose the limit independently.
     /// </summary>
