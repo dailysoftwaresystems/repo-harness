@@ -195,7 +195,24 @@ internal static class TestCommand
         }
         else
         {
-            compilers = toolchains.Configured(leg.Project, leg.BuildDirectory);
+            // Held to the toolchain as the build that made the directory is: binaries a compiler nobody
+            // chose produced are no more tested than they would have been built, and a declared compiler
+            // nothing established is unwitnessed here as there.
+            var reading = toolchains.Configured(leg.Project, leg.BuildDirectory);
+            compilers = reading?.Compilers ?? [];
+
+            if (reading is not null && CompilerFacts.HeldTo(config, leg.Variant.Toolchain, reading) is { } held)
+            {
+                return new LegEntry
+                {
+                    Leg = leg.Name,
+                    Verdict = held.Verdict,
+                    Detail = held.Detail,
+                    Duration = Stopwatch.GetElapsedTime(started),
+                    Emulated = leg.Emulated,
+                    Compilers = compilers,
+                };
+            }
         }
 
         // Derived once from the placed leg, the same way the runner derives it.

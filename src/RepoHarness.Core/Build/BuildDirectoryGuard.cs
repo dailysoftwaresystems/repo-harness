@@ -23,29 +23,6 @@ public sealed record BuildDirectoryRecord(
     string? CCompilerArguments = null,
     string? CxxCompilerArguments = null);
 
-/// <summary>Where a build's phases look for a program named by its name.</summary>
-/// <param name="Path">
-/// The PATH they are given: the one their environment sets, and this process's where it sets none.
-/// </param>
-/// <param name="ProgramDirectories">The directories appended to it, where a survey found programs off it.</param>
-public sealed record CompilerSearch(string? Path, IReadOnlyList<string> ProgramDirectories)
-{
-    /// <summary>Where the phases of a build started with <paramref name="environment"/> look.</summary>
-    /// <param name="environment">The environment the phases start with, over this process's own.</param>
-    /// <param name="programDirectories">What every phase's PATH is given after its own.</param>
-    public static CompilerSearch For(IReadOnlyDictionary<string, string?> environment, IReadOnlyList<string> programDirectories)
-    {
-        ArgumentNullException.ThrowIfNull(environment);
-        ArgumentNullException.ThrowIfNull(programDirectories);
-
-        var declared = environment.FirstOrDefault(pair => string.Equals(pair.Key, "PATH", StringComparison.OrdinalIgnoreCase));
-
-        return new CompilerSearch(
-            declared.Key is null ? Environment.GetEnvironmentVariable("PATH") : declared.Value,
-            programDirectories);
-    }
-}
-
 /// <summary>
 /// Refuses a build directory that was configured for something other than this leg.
 /// </summary>
@@ -129,7 +106,7 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
         CompilerValue? expectedCompiler,
         CompilerValue? expectedCxxCompiler,
         string? expectedBuildType,
-        CompilerSearch search)
+        PathSearch search)
     {
         ArgumentNullException.ThrowIfNull(search);
 
@@ -204,7 +181,7 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
     /// <param name="expected">What this leg names.</param>
     /// <param name="search">Where the build's phases look for a program named by its name.</param>
     /// <param name="starts">The file <paramref name="expected"/> starts now, where the search found one.</param>
-    private bool SameCompiler(string recorded, string? recordedArguments, CompilerValue expected, CompilerSearch search, out string? starts)
+    private bool SameCompiler(string recorded, string? recordedArguments, CompilerValue expected, PathSearch search, out string? starts)
         => SameProgram(recorded, expected.Program, search, out starts)
             && (recordedArguments ?? string.Empty)
                 .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
@@ -222,13 +199,13 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
     /// resolves to on the PATH the build's phases are given, the way each phase finds its program.
     /// </summary>
     /// <remarks>
-    /// Compared by the file, never by the name alone. A cache records a whole path and a leg names a
-    /// program, so a name compared with a name let a directory configured with one gcc be rebuilt with
-    /// another - a second installation earlier on the PATH, a toolchain upgraded beside the old one -
-    /// and the leg reported on objects from both. A program the search finds nowhere cannot start;
-    /// the build says so when it tries, and until then only its name can be compared.
+    /// Compared by the file wherever the search finds one. A cache records a whole path and a leg names
+    /// a program, so a name compared with a name let a directory configured with one gcc be rebuilt
+    /// with another - a second installation earlier on the PATH, a toolchain upgraded beside the old
+    /// one - and the leg reported on objects from both. A program the search finds nowhere cannot
+    /// start; the build says so when it tries, and until then only its name can be compared.
     /// </remarks>
-    private bool SameProgram(string recorded, string expected, CompilerSearch search, out string? starts)
+    private bool SameProgram(string recorded, string expected, PathSearch search, out string? starts)
     {
         starts = null;
 
@@ -237,8 +214,7 @@ public sealed class BuildDirectoryGuard(IFileSystem fileSystem, IHostPlatform pl
             return true;
         }
 
-        var found = new LocalProgramResolver(_platform, _filePermissions, () => search.Path)
-            .Find(expected, search.ProgramDirectories);
+        var found = search.Find(_platform, _filePermissions, expected);
 
         if (found.Found is ProgramFound.OnPath or ProgramFound.OffPath && found.Path is { Length: > 0 } path)
         {

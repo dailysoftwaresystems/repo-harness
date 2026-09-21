@@ -515,6 +515,8 @@ public static partial class HarnessConfigValidator
 
     private static void ValidateToolchains(HarnessConfig config, List<string> problems)
     {
+        var builtByCMake = ToolchainsCMakeBuildsWith(config);
+
         foreach (var (name, toolchain) in config.Toolchains)
         {
             foreach (var platform in toolchain.Platforms)
@@ -527,10 +529,6 @@ public static partial class HarnessConfigValidator
                 }
             }
 
-            // A toolchain is the compiler a leg builds with. One naming none leaves the build system
-            // to take whatever compiler it finds first - how a leg named msvc built with MinGW's gcc
-            // on every run until CC was declared - and gives the build directory guard nothing to hold
-            // a later build to.
             foreach (var (language, id) in toolchain.CompilerId)
             {
                 if (!CMakeLanguagePattern().IsMatch(language))
@@ -567,15 +565,55 @@ public static partial class HarnessConfigValidator
                 }
             }
 
-            if (!Build.CompilerValue.Named(toolchain.CacheVars, toolchain.Env))
+            // A toolchain CMake builds with names its compiler. One naming none leaves CMake to take
+            // whatever compiler it finds first - how a leg named msvc built with MinGW's gcc on every
+            // run until CC was declared - and gives the build directory guard nothing to hold a later
+            // build to. A toolchain file names it for CMake, and a compilerId holds the build to one
+            // whatever name reaches it. One only .NET or Dart builds with names none: those resolve
+            // their own compilers, and its cacheVars are that build's properties.
+            if (builtByCMake.Contains(name)
+                && !Build.CompilerValue.Named(toolchain.CacheVars, toolchain.Env)
+                && !toolchain.CacheVars.ContainsKey(ToolchainFileVariable)
+                && toolchain.CompilerId.Count == 0)
             {
                 problems.Add(
-                    $"toolchain '{name}' names no compiler: declare CC or CXX under its env, or "
-                    + "CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars. Without one the build "
-                    + "system takes whatever compiler it finds first, and the leg reports on a compiler "
-                    + "nobody chose");
+                    $"toolchain '{name}', which CMake builds with, names no compiler: declare CC or CXX under "
+                    + $"its env, CMAKE_C_COMPILER, CMAKE_CXX_COMPILER or {ToolchainFileVariable} under its "
+                    + "cacheVars, or the compilerId CMake must configure it with. Without one CMake takes "
+                    + "whatever compiler it finds first, and the leg reports on a compiler nobody chose");
             }
         }
+    }
+
+    /// <summary>The cache variable naming the CMake toolchain file, which names the compiler for CMake.</summary>
+    private const string ToolchainFileVariable = "CMAKE_TOOLCHAIN_FILE";
+
+    /// <summary>
+    /// The toolchains a CMake project builds with: each a CMake leg names or its project's
+    /// defaultToolchain gives it, and each a CMake project's defaultToolchain names for any platform.
+    /// </summary>
+    private static HashSet<string> ToolchainsCMakeBuildsWith(HarnessConfig config)
+    {
+        static bool IsCMake(ProjectConfig? project) => project is not null && Build.BuildAdapters.Find(project.Type) is Build.CMakeAdapter;
+
+        var toolchains = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var project in config.Projects.Where(IsCMake))
+        {
+            toolchains.UnionWith(project.DefaultToolchain.Values);
+        }
+
+        foreach (var leg in config.Legs.Values)
+        {
+            var project = Build.VariantKey.ProjectFor(config, leg);
+
+            if (IsCMake(project) && (leg.Toolchain ?? PlatformScope.Select(project!.DefaultToolchain, leg.Os)) is { } toolchain)
+            {
+                toolchains.Add(toolchain);
+            }
+        }
+
+        return toolchains;
     }
 
     private static void ValidateDeveloperEnvironments(HarnessConfig config, List<string> problems)

@@ -1272,34 +1272,57 @@ public sealed class ConfigStoreTests
     }
 
     /// <summary>
-    /// A toolchain names the compiler it builds with. One naming none left the build system to take
-    /// whatever it found first, which is how a leg named msvc built with MinGW's gcc on every run.
+    /// A toolchain CMake builds with names the compiler it builds with - as a CMake project's default,
+    /// or as a CMake leg's own. One naming none left CMake to take whatever it found first, which is how
+    /// a leg named msvc built with MinGW's gcc on every run.
     /// </summary>
-    [Fact]
-    public void Load_RejectsAToolchainThatNamesNoCompiler()
+    [Theory]
+    [InlineData("""{ "projects": [{ "name": "app", "type": "cmake", "path": ".", "defaultToolchain": { "linux": "gcc" } }] }""")]
+    [InlineData("""{ "projects": [{ "name": "app", "type": "cmake", "path": "." }], "buildConfigs": { "debug": {} }, "legs": { "lin": { "os": "linux", "processor": "x86_64", "config": "debug", "toolchain": "gcc" } } }""")]
+    public void Load_RejectsAToolchainCMakeBuildsWith_ThatNamesNoCompiler(string uses)
     {
-        var exception = LoadInvalid("""{ "toolchains": { "gcc": { "platforms": ["linux"], "generator": "Ninja", "env": { "CFLAGS": "-O2" } } } }""");
+        var exception = LoadInvalid(
+            uses[..^1] + """, "toolchains": { "gcc": { "platforms": ["linux"], "generator": "Ninja", "env": { "CFLAGS": "-O2" } } } }""");
 
         Assert.Contains(
-            "toolchain 'gcc' names no compiler: declare CC or CXX under its env, or CMAKE_C_COMPILER or CMAKE_CXX_COMPILER under its cacheVars",
+            "toolchain 'gcc', which CMake builds with, names no compiler: declare CC or CXX under its env, CMAKE_C_COMPILER, "
+            + "CMAKE_CXX_COMPILER or CMAKE_TOOLCHAIN_FILE under its cacheVars, or the compilerId CMake must configure it with",
             exception.Message,
             StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Any one of the four names a compiler: either language, in its environment or in the cache
-    /// variable CMake is given for it - the one CMake itself reads first.
+    /// Any of these names a compiler for CMake: either language, in its environment or in the cache
+    /// variable CMake is given for it - the one CMake itself reads first - a toolchain file, which
+    /// names it for CMake, or the compilerId the build is held to.
     /// </summary>
     [Theory]
     [InlineData("\"env\": { \"CC\": \"gcc\" }")]
     [InlineData("\"env\": { \"CXX\": \"g++\" }")]
     [InlineData("\"cacheVars\": { \"CMAKE_C_COMPILER\": \"gcc\" }")]
     [InlineData("\"cacheVars\": { \"CMAKE_CXX_COMPILER\": \"g++\" }")]
+    [InlineData("\"cacheVars\": { \"CMAKE_TOOLCHAIN_FILE\": \"cmake/arm-gcc.cmake\" }")]
+    [InlineData("\"compilerId\": { \"C\": \"GNU\" }")]
     public void AToolchainNamingOneCompiler_AnyWay_IsAccepted(string names)
     {
-        var config = LoadValid($$"""{ "toolchains": { "gcc": { "platforms": ["linux"], {{names}} } } }""");
+        var config = LoadValid(
+            $$"""{ "projects": [{ "name": "app", "type": "cmake", "path": ".", "defaultToolchain": { "linux": "gcc" } }], "toolchains": { "gcc": { "platforms": ["linux"], {{names}} } } }""");
 
         Assert.True(config.Toolchains.ContainsKey("gcc"));
+    }
+
+    /// <summary>
+    /// A toolchain only a .NET or Dart project builds with names no compiler: their build systems
+    /// resolve their own, and its cacheVars are that build's properties. Refused for it, a
+    /// configuration that built was refused as a whole.
+    /// </summary>
+    [Fact]
+    public void AToolchainOnlyANonCMakeProjectBuildsWith_NeedNameNoCompiler()
+    {
+        var config = LoadValid(
+            """{ "projects": [{ "name": "app", "type": "dotnet", "path": "App.slnx", "defaultToolchain": { "all": "net" } }], "toolchains": { "net": { "platforms": ["all"], "cacheVars": { "TargetFramework": "net9.0" } } } }""");
+
+        Assert.Equal("net9.0", config.Toolchains["net"].CacheVars["TargetFramework"]);
     }
 
     /// <summary>A toolchain may declare the compiler CMake must configure it with, by language.</summary>

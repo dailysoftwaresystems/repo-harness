@@ -60,7 +60,7 @@ public sealed class CMakeToolchainReaderTests
     /// </summary>
     [Theory]
     [InlineData("none", "CMake wrote no file API answer there, which it does from version 3.20")]
-    [InlineData("no-index", "CMake wrote no file API index there")]
+    [InlineData("no-index", "CMake wrote no file API answer there, which it does from version 3.20")]
     [InlineData("no-answer", "CMake's file API index holds no answer about the compilers")]
     [InlineData("error", "CMake answered that it could not say: unknown request kind")]
     [InlineData("missing-file", "CMake's answer about the compilers names 'toolchains-v1-gone.json', which is not there")]
@@ -109,9 +109,43 @@ public sealed class CMakeToolchainReaderTests
         using var temp = new TempDirectory();
         var build = WriteReply(temp, "index-1.json", "toolchains-v1-a.json", ("GNU", "13.2.0"));
 
-        Assert.NotEmpty(Reader().Configured(new ProjectConfig { Name = "app", Type = "cmake", Path = "." }, build));
-        Assert.Empty(Reader().Configured(new ProjectConfig { Name = "app", Type = "dotnet", Path = "." }, build));
-        Assert.Empty(Reader().Configured(null, build));
+        Assert.NotEmpty(Reader().Configured(new ProjectConfig { Name = "app", Type = "cmake", Path = "." }, build)!.Compilers);
+        Assert.Null(Reader().Configured(new ProjectConfig { Name = "app", Type = "dotnet", Path = "." }, build));
+        Assert.Null(Reader().Configured(null, build));
+    }
+
+    /// <summary>
+    /// Read for a configure it asked, only what that configure answered: an answer the directory held
+    /// before is an earlier configure's, whatever the times in the names say. A configure that failed
+    /// says why, in CMake's words where it wrote its error index; one that wrote nothing says that.
+    /// </summary>
+    [Fact]
+    public void Read_ForAConfigureItAsked_TakesOnlyWhatThatConfigureAnswered()
+    {
+        using var temp = new TempDirectory();
+        var build = WriteReply(temp, "index-2026-09-19T16-16-05-0385.json", "toolchains-v1-a.json", ("GNU", "13.2.0"));
+        var replies = Path.Combine(build, ".cmake", "api", "v1", "reply");
+        var reader = Reader();
+
+        var silent = reader.Read(build, reader.Ask(build));
+
+        Assert.Empty(silent.Compilers);
+        Assert.Equal("this configure wrote no file API answer, which CMake does from version 3.20", silent.Unread);
+
+        var asked = reader.Ask(build);
+        temp.WriteFile(Path.Combine(replies, "error-2026-09-19T16-17-00-0001.json"), """{ "reply": { "toolchains-v1": { "error": "no buildsystem generated" } } }""");
+
+        var failed = reader.Read(build, asked);
+
+        Assert.Empty(failed.Compilers);
+        Assert.Equal("CMake answered that it could not say: no buildsystem generated", failed.Unread);
+        Assert.Equal("GNU", Assert.Single(reader.Read(build).Compilers, compiler => compiler.Language == "C").Id);
+
+        // A newer answer is read even where the clock that named it had stepped back.
+        asked = reader.Ask(build);
+        WriteReply(temp, "index-2026-01-01T00-00-00-0000.json", "toolchains-v1-b.json", ("Clang", "17.0.6"));
+
+        Assert.All(reader.Read(build, asked).Compilers, compiler => Assert.Equal("Clang", compiler.Id));
     }
 
     /// <summary>

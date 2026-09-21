@@ -1,6 +1,7 @@
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Results;
 
@@ -182,7 +183,7 @@ public sealed class BuildVariantTests
             temp,
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={configured.Replace('\\', '/')}");
 
-        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, new CompilerSearch(null, [temp.Combine("found")]));
+        Guard().Check(buildDirectory, temp.Path, CompilerValue.Read("gcc"), null, null, new PathSearch(null, [temp.Combine("found")]));
 
         Assert.Throws<HarnessException>(() => Guard().Check(
             buildDirectory,
@@ -190,7 +191,7 @@ public sealed class BuildVariantTests
             CompilerValue.Read("gcc"),
             null,
             null,
-            new CompilerSearch(null, [temp.Combine("other")])));
+            new PathSearch(null, [temp.Combine("other")])));
     }
 
     /// <summary>
@@ -218,13 +219,13 @@ public sealed class BuildVariantTests
     [Fact]
     public void TheSearch_IsThePathTheBuildsEnvironmentSets_OrThisProcesss()
     {
-        var declared = CompilerSearch.For(
+        var declared = PathSearch.For(
             new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase) { ["Path"] = "/opt/arm/bin" },
             ["/opt/found"]);
 
         Assert.Equal("/opt/arm/bin", declared.Path);
         Assert.Equal(["/opt/found"], declared.ProgramDirectories);
-        Assert.Equal(Environment.GetEnvironmentVariable("PATH"), CompilerSearch.For(new Dictionary<string, string?>(), []).Path);
+        Assert.Equal(Environment.GetEnvironmentVariable("PATH"), PathSearch.For(new Dictionary<string, string?>(), []).Path);
     }
 
     /// <summary>
@@ -277,10 +278,10 @@ public sealed class BuildVariantTests
         => new(new HarnessFactory().FileSystem, new HostPlatform(), FilePermissionsFactory.Create());
 
     /// <summary>A search that finds no program at all, so only names can be compared.</summary>
-    private static CompilerSearch Nowhere => new(null, []);
+    private static PathSearch Nowhere => new(null, []);
 
     /// <summary>A search whose PATH is <paramref name="directories"/>, in order, and nothing else.</summary>
-    private static CompilerSearch OnPath(params string[] directories) => new(string.Join(Path.PathSeparator, directories), []);
+    private static PathSearch OnPath(params string[] directories) => new(string.Join(Path.PathSeparator, directories), []);
 
     private static string WriteCache(TempDirectory temp, string contents)
     {

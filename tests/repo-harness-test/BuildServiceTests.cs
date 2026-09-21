@@ -409,9 +409,30 @@ public sealed class BuildServiceTests
 
         Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
         Assert.Contains(
-            "toolchain 'gcc' declares the compiler for C, and CMake named none for it: CMake wrote no file API answer there",
+            "toolchain 'gcc' declares the compiler for C, and CMake named none for it: this configure wrote no file API answer",
             result.Verdict.Detail,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A configure that fails names no compiler an earlier configure resolved. CMake leaves that answer
+    /// where it was and writes an error index of its own; read as the newest answer, the earlier one
+    /// named a leg whose compiler had changed by the compiler before it.
+    /// </summary>
+    [Fact]
+    public async Task AFailedConfigure_NamesNoCompilerAnEarlierConfigureResolved()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        using var temp = new TempDirectory();
+        var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
+
+        var first = await Service(factory, exitCode: 0, phases: new ConfiguringRunner("GNU", "13.2.0")).BuildAsync(Config(), request, cancellationToken);
+        var failed = await Service(factory, exitCode: 1, phases: new ConfiguringRunner("Clang", "17.0.6", exitCode: 1))
+            .BuildAsync(Declaring(("C", "Clang")), request, cancellationToken);
+
+        Assert.NotEmpty(first.Compilers);
+        Assert.Equal(LegVerdict.Failed, failed.Verdict.Verdict);
+        Assert.Empty(failed.Compilers);
     }
 
     /// <summary>The compiler the toolchain declares, as CMake spells it or not, passes the build through.</summary>
@@ -450,10 +471,14 @@ public sealed class BuildServiceTests
 
     /// <summary>
     /// A CMake that answers the file API query on configure, as CMake 4.3 does, with
-    /// <paramref name="id"/> for C and C++; every other phase starts nothing.
+    /// <paramref name="id"/> for C and C++ - or, where it fails with <paramref name="exitCode"/>, with
+    /// the error index CMake 4.3 writes in its place - and every other phase starts nothing.
     /// </summary>
-    private sealed class ConfiguringRunner(string id, string version) : IProcessRunner
+    private sealed class ConfiguringRunner(string id, string version, int exitCode = 0) : IProcessRunner
     {
+        /// <summary>How many answers every configure so far wrote, which names each one, as CMake's moment of writing does.</summary>
+        private static int _written;
+
         private readonly List<IReadOnlyList<string>> _started = [];
 
         /// <summary>The arguments of every phase started, in order.</summary>
@@ -471,16 +496,27 @@ public sealed class BuildServiceTests
                 Asked = File.Exists(Path.Combine(build, ".cmake", "api", "v1", "query", "toolchains-v1"));
 
                 var replies = Path.Combine(build, ".cmake", "api", "v1", "reply");
+                var moment = $"2026-09-19T16-16-05-{Interlocked.Increment(ref _written):D4}";
                 Directory.CreateDirectory(replies);
-                File.WriteAllText(
-                    Path.Combine(replies, "index-2026-09-19T16-16-05-0385.json"),
-                    """{ "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-a.json" } } }""");
-                File.WriteAllText(
-                    Path.Combine(replies, "toolchains-v1-a.json"),
-                    $$"""{ "toolchains": [ { "language": "C", "compiler": { "id": "{{id}}", "version": "{{version}}" } }, { "language": "CXX", "compiler": { "id": "{{id}}", "version": "{{version}}" } } ] }""");
+
+                if (exitCode != 0)
+                {
+                    File.WriteAllText(
+                        Path.Combine(replies, $"error-{moment}.json"),
+                        """{ "reply": { "toolchains-v1": { "error": "no buildsystem generated" } } }""");
+                }
+                else
+                {
+                    File.WriteAllText(
+                        Path.Combine(replies, $"index-{moment}.json"),
+                        $$"""{ "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-{{moment}}.json" } } }""");
+                    File.WriteAllText(
+                        Path.Combine(replies, $"toolchains-v1-{moment}.json"),
+                        $$"""{ "toolchains": [ { "language": "C", "compiler": { "id": "{{id}}", "version": "{{version}}" } }, { "language": "CXX", "compiler": { "id": "{{id}}", "version": "{{version}}" } } ] }""");
+                }
             }
 
-            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
+            return Task.FromResult(new ProcessResult(exitCode, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
         }
 
         public string? FindExecutable(string command) => command;
