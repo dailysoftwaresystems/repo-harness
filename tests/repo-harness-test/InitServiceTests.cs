@@ -565,6 +565,29 @@ public sealed class InitServiceTests
         Assert.Empty((await harness.RunGitAsync(repository.Path, ["status", "--porcelain"], token)).OutputLines);
     }
 
+    /// <summary>
+    /// init in a submodule initialises the submodule's own checkout as a main checkout - never as a
+    /// worktree of the git directory its superproject keeps it in, which git names as its main worktree,
+    /// and where its connection data and runs would otherwise be looked for.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_InASubmodule_TakesItsOwnCheckoutForTheMainOne()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        var submodule = await GitClientTests.AddSubmoduleAsync(harness, temp, token);
+
+        var outcome = await harness.InitService.InitializeAsync(submodule, token);
+        var layout = await harness.RepositoryLocator.LocateAsync(submodule, token);
+
+        Assert.True(outcome.Succeeded, outcome.Message);
+        Assert.DoesNotContain(outcome.Details!, line => line.Contains("this is a worktree", StringComparison.Ordinal));
+        Assert.True(File.Exists(Path.Combine(submodule, ".harness-config", "config.json")));
+        Assert.NotNull(layout);
+        PathAssert.Same(submodule, layout.MainCheckoutRoot);
+    }
+
     [Fact]
     public async Task InitializeAsync_FromAWorktreeWhoseBranchHasNoRegistries_CreatesThemInThatWorktree()
     {

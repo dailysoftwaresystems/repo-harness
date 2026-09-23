@@ -95,8 +95,63 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
             return null;
         }
 
-        // git always lists the main worktree first.
-        return ParseWorktrees(result.StandardOutput).FirstOrDefault();
+        // git always lists the main worktree first - named for the git directory its worktrees share:
+        // that directory's parent, where it is called .git, and the directory itself otherwise, which is
+        // no checkout. A submodule's is named so, kept under its superproject's .git/modules, and so is
+        // one made apart from its checkout with --separate-git-dir.
+        var worktrees = ParseWorktrees(result.StandardOutput);
+
+        return worktrees.FirstOrDefault() is { IsBare: false } main
+            && await IsGitDirectoryAsync(main.Path, cancellationToken).ConfigureAwait(false)
+            ? await CheckoutOfAsync(directory, main, worktrees, cancellationToken).ConfigureAwait(false)
+            : worktrees.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/>, as git spells a worktree it lists, is a git directory itself: git
+    /// asked there names it as its own git directory, where a checkout's is the <c>.git</c> in it.
+    /// <see langword="false"/> where git cannot say.
+    /// </summary>
+    /// <remarks>
+    /// Asked where the git directory is, never with <c>--is-inside-git-dir</c>: in a submodule's git
+    /// directory, whose <c>core.worktree</c> names its checkout, git 2.43 answers that false and git 2.55
+    /// true. <c>--absolute-git-dir</c> resolves the path as the list does, so the two compare as written.
+    /// </remarks>
+    private async Task<bool> IsGitDirectoryAsync(string path, CancellationToken cancellationToken)
+    {
+        var result = await RunQueryAsync(path, ["rev-parse", "--absolute-git-dir"], cancellationToken).ConfigureAwait(false);
+
+        return result.Succeeded
+            && result.StandardOutput.Trim() is { Length: > 0 } gitDirectory
+            && string.Equals(NormalizeDirectory(gitDirectory), path, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The main worktree git named <paramref name="listed"/>, its git directory: the checkout that
+    /// directory's configuration records, as a submodule's <c>core.worktree</c> does - or, where it
+    /// records none, as <c>--separate-git-dir</c> leaves it, the tree at <paramref name="directory"/>
+    /// where <paramref name="worktrees"/> lists it as no linked worktree. <see langword="null"/> where
+    /// neither says which checkout it is.
+    /// </summary>
+    private async Task<GitWorktree?> CheckoutOfAsync(
+        string directory,
+        GitWorktree listed,
+        IReadOnlyList<GitWorktree> worktrees,
+        CancellationToken cancellationToken)
+    {
+        var recorded = await RunQueryAsync(listed.Path, ["rev-parse", "--show-toplevel"], cancellationToken).ConfigureAwait(false);
+
+        if (recorded.Succeeded && recorded.StandardOutput.Trim() is { Length: > 0 } checkout)
+        {
+            return listed with { Path = NormalizeDirectory(checkout) };
+        }
+
+        // git spells a worktree it lists as it spells the top of one it is asked from.
+        var here = await GetRepositoryRootAsync(directory, cancellationToken).ConfigureAwait(false);
+
+        return here is not null && !worktrees.Skip(1).Any(worktree => string.Equals(worktree.Path, here, StringComparison.Ordinal))
+            ? listed with { Path = here }
+            : null;
     }
 
     public async Task<bool> IsDirtyAsync(string directory, CancellationToken cancellationToken = default)

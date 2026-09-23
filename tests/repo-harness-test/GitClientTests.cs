@@ -68,6 +68,80 @@ public sealed class GitClientTests
         PathAssert.Same(linked, linkedRoot);
     }
 
+    /// <summary>
+    /// A submodule's main checkout is its own - never the git directory its superproject keeps it in under
+    /// .git/modules, which git names as the main worktree - from the submodule and from a linked worktree
+    /// of it alike, as that directory's configuration records it.
+    /// </summary>
+    [Fact]
+    public async Task GetMainWorktreeAsync_FindsASubmodulesOwnCheckout_NotTheGitDirectoryGitNames()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var submodule = await AddSubmoduleAsync(harness, temp, cancellationToken);
+        var linked = temp.Combine("linked");
+
+        await harness.RunGitAsync(submodule, ["worktree", "add", "--detach", linked], cancellationToken);
+
+        foreach (var from in new[] { submodule, linked })
+        {
+            var main = await harness.GitClient.GetMainWorktreeAsync(from, cancellationToken);
+
+            Assert.NotNull(main);
+            Assert.True(main.IsMain);
+            PathAssert.Same(submodule, main.Path);
+        }
+    }
+
+    /// <summary>
+    /// A checkout whose git directory was made apart from it, with --separate-git-dir, is its own main
+    /// checkout, though git names that directory as the main worktree and records no checkout for it. From
+    /// a linked worktree of it, nothing says which checkout is the main one, and none is named.
+    /// </summary>
+    [Fact]
+    public async Task GetMainWorktreeAsync_FindsACheckoutWhoseGitDirectoryIsApart_AsItsOwnMain()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var checkout = Directory.CreateDirectory(temp.Combine("checkout")).FullName;
+        var linked = temp.Combine("linked");
+
+        await harness.RunGitAsync(checkout, ["init", "--quiet", $"--separate-git-dir={temp.Combine("git")}", "."], cancellationToken);
+        await harness.RunGitAsync(
+            checkout,
+            ["-c", "user.name=Harness Test", "-c", "user.email=harness@test.invalid", "commit", "--quiet", "--allow-empty", "-m", "initial"],
+            cancellationToken);
+
+        var main = await harness.GitClient.GetMainWorktreeAsync(checkout, cancellationToken);
+
+        Assert.NotNull(main);
+        PathAssert.Same(checkout, main.Path);
+
+        await harness.RunGitAsync(checkout, ["worktree", "add", "--detach", linked], cancellationToken);
+
+        Assert.Null(await harness.GitClient.GetMainWorktreeAsync(linked, cancellationToken));
+    }
+
+    /// <summary>
+    /// Adds a repository as the submodule <c>sub</c> of another, both under <paramref name="temp"/>, and
+    /// returns the submodule's checkout.
+    /// </summary>
+    internal static async Task<string> AddSubmoduleAsync(HarnessFactory harness, TempDirectory temp, CancellationToken cancellationToken)
+    {
+        var inner = Directory.CreateDirectory(temp.Combine("inner")).FullName;
+        var super = Directory.CreateDirectory(temp.Combine("super")).FullName;
+
+        await harness.InitializeGitRepositoryAsync(inner, cancellationToken);
+        await harness.InitializeGitRepositoryAsync(super, cancellationToken);
+
+        // git refuses a submodule from a local path unless told to allow the file protocol.
+        await harness.RunGitAsync(super, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", inner, "sub"], cancellationToken);
+
+        return Path.Combine(super, "sub");
+    }
+
     [Fact]
     public async Task Roots_AreReportedInOneForm_WhenTheRepositoryIsReachedThroughASymbolicLink()
     {
