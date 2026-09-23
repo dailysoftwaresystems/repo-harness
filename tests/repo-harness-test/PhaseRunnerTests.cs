@@ -282,11 +282,35 @@ public sealed class PhaseRunnerTests
             around >= TimeSpan.FromSeconds(1),
             $"This machine's clock moved by {around} while the phase ran, so the phase did not run on an honest clock.");
 
-        // Both readings cover the same window, so on a machine whose clock is honest they agree.
-        // The other side of this rule — a clock that steps by 25 seconds mid-phase — cannot be
-        // exercised without moving this machine's clock, which a test must not do.
+        // Both readings cover the same window, so on a machine whose clock is honest they agree. The
+        // other side of this rule, a clock that steps mid-phase, is the next test, which steps the
+        // runner's own wall clock rather than this machine's.
         Assert.False(result.ClockStepped);
         Assert.True(result.ClockDrift < TimeSpan.FromSeconds(1), $"wall and monotonic time disagreed by {result.ClockDrift}");
+    }
+
+    /// <summary>
+    /// A wall clock that steps while a phase runs - by 25 seconds, as the measured host's does, and
+    /// back as well as forward - disagrees with the monotonic clock by the step, and the phase says it
+    /// spanned one. What stamps an object during a step can no longer be ordered against anything,
+    /// and this is the reading everything downstream of that rests on.
+    /// </summary>
+    [Theory]
+    [InlineData(25)]
+    [InlineData(-25)]
+    public async Task APhaseTheWallClockStepsDuring_RecordsTheStep(int seconds)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var clock = new SteppingClock();
+        var step = TimeSpan.FromSeconds(seconds);
+
+        var result = await new PhaseRunner(new SteppingRunner(clock, step), factory.FileSystem, factory.Output, clock).RunAsync(
+            Child("echo-args", temp.Combine("clock.log"), "stepped") with { ClockStepToleranceMilliseconds = 2000 },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.ClockStepped, $"a step of {step} went unrecorded; the phase measured a drift of {result.ClockDrift}");
+        Assert.True(result.ClockDrift >= step.Duration() - TimeSpan.FromSeconds(1), $"a step of {step} measured as {result.ClockDrift}");
     }
 
     private static PhaseRunner Runner(HarnessFactory factory)
@@ -350,6 +374,25 @@ public sealed class PhaseRunnerTests
         public string? FindExecutable(string command) => command;
 
         private static string Said(bool speaks, string line) => speaks ? line + "\n" : string.Empty;
+    }
+
+    /// <summary>
+    /// A runner that starts, steps <paramref name="clock"/> by <paramref name="step"/> while it runs,
+    /// and exits 0 having said nothing.
+    /// </summary>
+    private sealed class SteppingRunner(SteppingClock clock, TimeSpan step) : IProcessRunner
+    {
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            request.OnStarted?.Invoke();
+            clock.Step(step);
+
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
     }
 
     /// <summary>

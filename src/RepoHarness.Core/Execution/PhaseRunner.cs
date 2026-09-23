@@ -82,7 +82,11 @@ public sealed record PhaseRequest
 /// its silence rather than by a guess at how long it should take, and every duration comes from the
 /// monotonic clock while the wall clock is watched for the steps one host makes every few seconds.
 /// </remarks>
-public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSystem, IHarnessOutput output)
+public sealed class PhaseRunner(
+    IProcessRunner processRunner,
+    IFileSystem fileSystem,
+    IHarnessOutput output,
+    TimeProvider? wallClock = null)
 {
     /// <summary>
     /// How long a pattern may spend on one match. A pattern that backtracks past this is refused
@@ -97,6 +101,12 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
+
+    /// <summary>
+    /// The wall clock, read as a phase starts and ends so a step in it can be told from the phase's
+    /// own duration: the system's, unless a test needs one that steps.
+    /// </summary>
+    private readonly TimeProvider _wallClock = wallClock ?? TimeProvider.System;
 
     /// <summary>Runs <paramref name="request"/> to completion, or until it stalls.</summary>
     /// <param name="request">The phase.</param>
@@ -137,7 +147,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         var clock = new StallClock();
         var streamed = new StringBuilder();
 
-        WriteHeader(log, gate, request);
+        WriteHeader(log, gate, request, _wallClock.GetUtcNow());
 
         void Line(string raw, bool error)
         {
@@ -196,9 +206,9 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             // honest run that exceeds it gets killed. The stall bound below is the bound in force.
         };
 
-        var startedUtc = DateTimeOffset.UtcNow;
+        var startedUtc = _wallClock.GetUtcNow();
         var result = await RunBoundedAsync(processRequest, request.StallSeconds, clock, cancellationToken).ConfigureAwait(false);
-        var wall = DateTimeOffset.UtcNow - startedUtc;
+        var wall = _wallClock.GetUtcNow() - startedUtc;
 
         // Both readings cover the same window, so what they disagree by is the clock's own movement:
         // a step forward, a step back, or a host that slept in the middle of the phase.
@@ -331,7 +341,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         }
     }
 
-    private static void WriteHeader(StreamWriter log, Lock gate, PhaseRequest request)
+    private static void WriteHeader(StreamWriter log, Lock gate, PhaseRequest request, DateTimeOffset started)
     {
         // Written for whoever reads the log, and deliberately never matched against: this is the
         // text a success pattern would otherwise witness itself in.
@@ -339,7 +349,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         {
             log.WriteLine($"# leg {request.Leg}, phase {request.Phase}");
             log.WriteLine($"# command {request.FileName} {string.Join(' ', request.Arguments)}");
-            log.WriteLine($"# started {DateTimeOffset.UtcNow:u}");
+            log.WriteLine($"# started {started:u}");
         }
     }
 
