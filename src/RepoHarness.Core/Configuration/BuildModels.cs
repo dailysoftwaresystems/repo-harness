@@ -44,7 +44,8 @@ public sealed class ToolchainConfig : VariantOverlay
     /// <summary>
     /// The compiler CMake must configure this toolchain's builds with, by language, in CMake's own
     /// ids: <c>{"C": "MSVC", "CXX": "MSVC"}</c>. A build CMake configured with another fails, and one
-    /// CMake named no compiler for is unwitnessed.
+    /// CMake identified no compiler for is unwitnessed. A language only a subproject enables is
+    /// identified from CMake's own record of it, since CMake's answer carries no id for it.
     /// </summary>
     /// <remarks>
     /// What CMake resolved, not what the toolchain names: a name reaches whatever answers to it

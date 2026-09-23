@@ -7,6 +7,7 @@ using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Tools;
@@ -980,6 +981,135 @@ public sealed partial class CliEndToEndTests
             Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
             Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// A real configure of a C++ project whose C only a dependency's project() enables, as googletest's
+    /// does, by the CMake on this machine: its answer names C's compiler with no id, and C is identified
+    /// from CMake's own record of it - named on the leg's line, and held to the toolchain's compilerId,
+    /// a matching one building and another failing the leg, never leaving it unwitnessed. A test of the
+    /// build it did not make identifies C the same way, from a record the answer ties to it; after a
+    /// configure since that identified C again and failed - writing no answer, and leaving a record newer
+    /// than the last - nothing ties that record to the build, and C is unwitnessed rather than named
+    /// from it. Skipped where this machine has no CMake, no Ninja, or no C or C++ compiler.
+    /// </summary>
+    [Fact]
+    public async Task ALanguageOnlyADependencyEnables_IsIdentified_AndHeldToTheToolchain()
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var (c, cxx) = OperatingSystem.IsWindows() ? ("gcc", "g++") : ("cc", "c++");
+        var programs = new[] { "cmake", "ninja", c, cxx }.ToDictionary(program => program, harness.ProcessRunner.FindExecutable);
+
+        Assert.SkipUnless(
+            programs.Values.All(found => found is not null),
+            $"This machine lacks cmake, ninja, {c} or {cxx}, which a real configure needs.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        HarnessConfig Config(params (string Language, string Id)[] declared)
+        {
+            var toolchain = new ToolchainConfig { Platforms = [platform.PlatformKey], Generator = "Ninja", Env = { ["CC"] = c, ["CXX"] = cxx } };
+
+            foreach (var (language, id) in declared)
+            {
+                toolchain.CompilerId[language] = id;
+            }
+
+            return new HarnessConfig
+            {
+                Toolchains = { ["cc"] = toolchain },
+                BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
+                Projects =
+                {
+                    new ProjectConfig
+                    {
+                        Name = "app",
+                        Type = "cmake",
+                        Path = ".",
+                        BuildOutputs = [BuildOutput.Keyed([new("windows", "probe.exe"), new("all", "probe")])],
+                        Test = new TestConfig { All = new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" } },
+                    },
+                },
+                Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+            };
+        }
+
+        async Task<(JsonElement Leg, string Said)> RunAsync(params string[] command)
+        {
+            var result = await CliRunner.RunAsync([.. command, "--legs", "native", "--json", "-C", temp.Path], token);
+
+            using var document = JsonDocument.Parse(result.StandardOutput);
+
+            return (Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray()).Clone(), result.StandardError);
+        }
+
+        Task<(JsonElement Leg, string Said)> BuildAsync() => RunAsync("build");
+
+        await harness.InitializeHarnessAsync(temp.Path, token, Config());
+
+        // FAIL, never set by a leg, fails a configure only after the dependency has enabled C.
+        temp.WriteFile(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.20)\nproject(probe CXX)\nadd_subdirectory(dependency)\n"
+            + "if(FAIL)\n  message(FATAL_ERROR \"failing after C was identified\")\nendif()\n"
+            + "add_executable(probe main.cpp)\ntarget_link_libraries(probe PRIVATE dependency)\n");
+        temp.WriteFile("main.cpp", "int dependency();\nint main() { return dependency(); }\n");
+
+        // Declares C and C++ by leaving its languages out, as googletest's project() does, and compiles no C.
+        temp.WriteFile(Path.Combine("dependency", "CMakeLists.txt"), "project(dependency)\nadd_library(dependency STATIC dependency.cpp)\n");
+        temp.WriteFile(Path.Combine("dependency", "dependency.cpp"), "int dependency() { return 0; }\n");
+
+        var (named, said) = await BuildAsync();
+        var ids = named.GetProperty("compilers").EnumerateArray().ToDictionary(
+            compiler => compiler.GetProperty("language").GetString()!,
+            compiler => compiler.GetProperty("id").GetString()!);
+
+        Assert.Equal("passed", named.GetProperty("verdict").GetString());
+        Assert.True(ids.ContainsKey("C") && ids.ContainsKey("CXX"), said);
+        Assert.All(ids.Values, id => Assert.False(string.IsNullOrEmpty(id)));
+
+        harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
+
+        var (held, heldSaid) = await BuildAsync();
+
+        Assert.True(held.GetProperty("verdict").GetString() == "passed", heldSaid);
+
+        harness.WriteConfig(temp.Path, Config(("C", "NoSuchCompiler"), ("CXX", ids["CXX"])));
+
+        var (contradicted, _) = await BuildAsync();
+
+        Assert.Equal("failed", contradicted.GetProperty("verdict").GetString());
+        Assert.Contains($"C with {ids["C"]}", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        Assert.Contains("not NoSuchCompiler", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+        harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
+
+        var (tested, testedSaid) = await RunAsync("test", "--no-build");
+
+        Assert.True(tested.GetProperty("verdict").GetString() == "passed", testedSaid);
+        Assert.Contains(
+            tested.GetProperty("compilers").EnumerateArray(),
+            compiler => compiler.GetProperty("language").GetString() == "C" && compiler.GetProperty("id").GetString() == ids["C"]);
+
+        var failed = await harness.ProcessRunner.RunAsync(
+            new ProcessRequest
+            {
+                FileName = programs["cmake"]!,
+                Arguments = ["--fresh", "-S", temp.Path, "-B", temp.Combine("build", $"{platform.Processor}-cc-debug"), "-G", "Ninja", $"-DCMAKE_MAKE_PROGRAM={programs["ninja"]}", "-DFAIL=ON"],
+                Environment = new Dictionary<string, string?>(StringComparer.Ordinal) { ["CC"] = c, ["CXX"] = cxx },
+                AppendToPath = [.. programs.Values.Select(found => Path.GetDirectoryName(found)!).Distinct(StringComparer.Ordinal)],
+            },
+            token);
+
+        Assert.True(failed.ExitCode != 0, $"the configure meant to fail passed: {failed.StandardOutput}");
+
+        var (untied, untiedSaid) = await RunAsync("test", "--no-build");
+
+        Assert.True(untied.GetProperty("verdict").GetString() == "unwitnessed", untiedSaid);
+        Assert.Contains("CMake identified none for it", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        Assert.Contains("was written after that answer", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>
