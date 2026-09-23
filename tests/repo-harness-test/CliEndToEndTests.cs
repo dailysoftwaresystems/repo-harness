@@ -977,6 +977,18 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// Rewrites the record a build left in <paramref name="buildDirectory"/> as 0.5.8 wrote one for a build
+    /// it marked unordered - the mark alone on its first line, the variant, and a fingerprint line for each
+    /// input, with no reason, no dates and no newest file - so the next build starts from clean.
+    /// </summary>
+    private static void Unordered(string buildDirectory)
+    {
+        var record = Path.Combine(buildDirectory, ".harness-build");
+
+        File.WriteAllText(record, EarlierRecord.Written(File.ReadAllText(record), unordered: true));
+    }
+
+    /// <summary>
     /// A repository whose one leg builds with <paramref name="toolchain"/>, named cc, whose build
     /// directory CMake last configured with GNU 13.2.0 for C, as its file API answered.
     /// </summary>
@@ -1058,6 +1070,19 @@ public sealed partial class CliEndToEndTests
 
         var build = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
         var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        // A record marked unordered, as an earlier version marked one, starts the next build from clean,
+        // and a runner that built first says so on its leg's line, as a build's own line does.
+        Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
+
+        var rerun = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        using (var rerunDocument = JsonDocument.Parse(rerun.StandardOutput))
+        {
+            Assert.Contains(
+                Assert.Single(rerunDocument.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("timingNotes").EnumerateArray(),
+                note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
+        }
 
         foreach (var result in new[] { build, run })
         {
@@ -1173,6 +1198,17 @@ public sealed partial class CliEndToEndTests
         Assert.Contains("not NoSuchCompiler", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
 
         harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
+
+        // A record marked unordered starts the next build from clean, and a test run that built first
+        // says so on its leg's line, as a build's own line does.
+        Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
+
+        var (rebuiltTested, rebuiltSaid) = await RunAsync("test");
+
+        Assert.True(rebuiltTested.GetProperty("verdict").GetString() == "passed", rebuiltSaid);
+        Assert.Contains(
+            rebuiltTested.GetProperty("timingNotes").EnumerateArray(),
+            note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
 
         var (tested, testedSaid) = await RunAsync("test", "--no-build");
 

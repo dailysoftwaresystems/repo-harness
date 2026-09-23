@@ -116,6 +116,120 @@ public sealed class PhysicalFileSystemTests
         Assert.Equal([Path.Combine(tree, "out"), Path.Combine(tree, "sub", "loop")], links);
     }
 
+    /// <summary>
+    /// The walk that dates what it finds reads each file's time as the file system keeps it, walks
+    /// where the plain walk walks and nowhere else, and dates a link as itself: a link into the tree
+    /// from outside it, made now to a file dated a day ahead, is dated now.
+    /// </summary>
+    [Fact]
+    public void EnumerateWrittenFiles_DatesEachFile_WalkingNoDirectoryLink_AndALinkAsItself()
+    {
+        using var temp = new TempDirectory();
+        var target = temp.WriteFile(Path.Combine("outside", "ahead.txt"), "x");
+        var own = temp.WriteFile(Path.Combine("tree", "sub", "own.txt"), "x");
+        var tree = temp.Combine("tree");
+        var ownTime = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        File.SetLastWriteTimeUtc(own, ownTime);
+        File.SetLastWriteTimeUtc(target, DateTime.UtcNow.AddDays(1));
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(tree, "out"), temp.Combine("outside"));
+            File.CreateSymbolicLink(Path.Combine(tree, "linked.txt"), target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        var written = Create().EnumerateWrittenFiles(tree).OrderBy(file => file.Path, StringComparer.Ordinal).ToList();
+
+        Assert.Equal([Path.Combine(tree, "linked.txt"), own], written.Select(file => file.Path));
+        Assert.True(written[0].LastWriteTimeUtc < DateTime.UtcNow.AddHours(1), $"the link was dated {written[0].LastWriteTimeUtc:O}, as what it points at");
+        Assert.Equal(ownTime, written[1].LastWriteTimeUtc);
+    }
+
+    /// <summary>
+    /// A file the walk listed but could not stat is asked again directly, and one gone since the walk
+    /// listed it - its directory gone too, or not - is left out rather than failing the walk: on Linux and
+    /// macOS a file removed between the listing and the stat is exactly that, and one deleted at the wrong
+    /// moment left a build nothing to date its changes against.
+    /// </summary>
+    [Fact]
+    public void Dated_AsksAgainAFileTheWalkCouldNotStat_AndLeavesOutOneGoneSince()
+    {
+        using var temp = new TempDirectory();
+        var kept = temp.WriteFile("kept.txt", "x");
+        var keptTime = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        var unstatted = DateTime.FromFileTimeUtc(0);
+
+        File.SetLastWriteTimeUtc(kept, keptTime);
+
+        var dated = Create().Dated(
+        [
+            new WrittenFile(temp.Combine("gone.txt"), unstatted),
+            new WrittenFile(kept, unstatted),
+            new WrittenFile(temp.Combine("gone", "scratch.o"), unstatted),
+        ]).ToList();
+
+        Assert.Equal([new WrittenFile(kept, keptTime)], dated);
+    }
+
+    /// <summary>
+    /// Asked when a path holding no file was last written, it raises rather than answering: the runtime
+    /// answers 1601 for nothing there, which reads as a real time, and its own time for a directory, which
+    /// is no file's. A file's is its own.
+    /// </summary>
+    [Fact]
+    public void LastWriteTimeUtc_RaisesForAPathHoldingNoFile_NothingThereOrADirectory()
+    {
+        using var temp = new TempDirectory();
+        var file = temp.WriteFile("file.txt", "x");
+        var written = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        File.SetLastWriteTimeUtc(file, written);
+        Directory.CreateDirectory(temp.Combine("folder"));
+
+        Assert.Equal(written, Create().LastWriteTimeUtc(file));
+        Assert.Throws<FileNotFoundException>(() => Create().LastWriteTimeUtc(temp.Combine("absent.txt")));
+        Assert.Throws<FileNotFoundException>(() => Create().LastWriteTimeUtc(temp.Combine("folder")));
+    }
+
+    /// <summary>
+    /// A file that is there, and whose time cannot be read - in a directory that can be listed but not
+    /// searched, or read not at all - raises rather than being left out as gone: nothing says it is. A name
+    /// starting with '.', hidden on Linux and macOS as a build directory's .ninja_log is, is no different.
+    /// </summary>
+    [Theory]
+    [InlineData("listed.txt", UnixFileMode.UserRead)]
+    [InlineData(".ninja_log", UnixFileMode.UserRead)]
+    [InlineData("listed.txt", UnixFileMode.UserWrite)]
+    [UnsupportedOSPlatform("windows")]
+    public void Dated_RaisesForAFileThatIsThere_WhoseTimeCannotBeRead(string name, UnixFileMode mode)
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows has no directory that can be listed and not searched.");
+
+        using var temp = new TempDirectory();
+        var file = temp.WriteFile(Path.Combine("unsearchable", name), "x");
+        var directory = temp.Combine("unsearchable");
+
+        File.SetUnixFileMode(directory, mode);
+
+        try
+        {
+            Assert.SkipWhen(File.Exists(file), "This user reads past a directory's permissions.");
+
+            var raised = Record.Exception(() => Create().Dated([new WrittenFile(file, DateTime.FromFileTimeUtc(0))]).ToList());
+
+            Assert.True(raised is IOException or UnauthorizedAccessException, $"raised {raised?.GetType().Name ?? "nothing"}");
+        }
+        finally
+        {
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
     /// <summary>A tree with no link in it has none to name.</summary>
     [Fact]
     public void EnumerateDirectoryLinks_NamesNothing_WhereThereIsNoLink()

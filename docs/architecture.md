@@ -1020,22 +1020,49 @@ for about 200 milliseconds, every few seconds, and the steps reach file modifica
 times: a file written one second after a marker carried a timestamp 24 seconds before
 it. So:
 
-- Nothing compares two timestamps taken at different moments or on different hosts.
-  Change is detected by equality, as above, which a clock cannot distort because both
-  readings carry the same distortion. Sync decides what to delete by comparing
-  manifests, never by stamp order.
+- Nothing decides that something changed by comparing two timestamps taken at different
+  moments or on different hosts. Change is detected by equality, as above, which a clock
+  cannot distort because both readings carry the same distortion. Sync decides what to
+  delete by comparing manifests, never by stamp order. Where dates are still ordered, it
+  is to ask what a build system that orders them will do with a change already found by
+  content, below, or which of two files CMake wrote in one configure came first.
 - Durations come from the monotonic clock. UTC times are for display only.
 - Each phase compares elapsed wall-clock time with elapsed monotonic time. Drift beyond
   `defaults.clockStepToleranceMilliseconds` records a clock step or a host sleep inside
   that phase: its durations are suspect, and so is every timestamp it wrote.
 - Incremental builds are protected from it. Ninja, Make and MSBuild decide what is
   stale by ordering timestamps, which a stepped clock defeats without a word: an object
-  stamped during a forward step looks newer than a source edited just after it. The
-  harness records a content fingerprint of each variant's inputs with its last
-  successful build. Before building again, if a changed input is not newer than the
-  newest output, or the previous build spanned a clock step, that variant is rebuilt
-  from clean and the ledger says why. A stale binary reported as a pass is the one price
-  an incremental build must never pay.
+  stamped during a forward step looks newer than a source edited just after it. In each
+  variant's build directory the harness keeps a record of the build that last ran there:
+  a content fingerprint of the inputs the build system was given, and when each had last
+  been written, taken before it runs, so a build that fails or is stopped by a lane's
+  time limit leaves the record of what it compiled from. A phase that spans a clock step
+  marks the record at once; the end of the build writes it again with the newest file the
+  build left, and marks it unordered, with why, if anything doubted it: inputs that did
+  not hold still, a directory something else used, an input that could not be read.
+  Before building again, if the record is marked unordered, or an input whose content
+  changed since is dated no later than the newest file that build left, the variant is
+  rebuilt from clean and the ledger says why, naming the file and both dates; so is a
+  directory that holds files and no record, as a clean start stopped part way through its
+  delete can leave one, since nothing says what they were built from. The newest
+  file, not the declared outputs or the record: a step forward and back inside one phase
+  measures no drift, and an object compiled in it is dated ahead of the binary linked
+  after. What the build left, not the directory as it stands: a test run writes there
+  too - ctest its logs as a suite ends - and an edit made while the suite ran would be
+  dated behind them. After a build that never finished, which recorded no newest file and
+  whose guards never said whether its tree held still, the directory is read as it
+  stands, and an input written again since it began counts as changed though its content
+  held: a stash and its pop leave one exactly as it was, having let the compiler read
+  something else in between. A stale binary reported as a pass is the one price an
+  incremental build must never pay. An input changed and dated after all of that is the
+  build system's to act on - newer than every output, it rebuilds what reads it - as is
+  one deleted since, which a build system sees gone without asking its date, and a CMake
+  project is configured on every build. What a build system does not know reads a file -
+  a custom command's input it names in no `DEPENDS` - is not remade. Rebuilding from clean
+  for every change put a consumer through 1,186 steps from nothing for one edit to a test
+  budget table, and a build stopped for running long would have started from clean again
+  every time. The record keeps `clock-stepped` on its first line for an unordered build,
+  and each input's fingerprint on a line of its own, as 0.5.8 wrote and reads them.
 
 ### One run per build directory
 

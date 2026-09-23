@@ -129,6 +129,27 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The config topic says when a combination's build directory is kept and when it starts from
+    /// clean, and what rebuildableFormats decides: a consumer found both only by reading the source.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysWhenABuildDirectoryIsKept_AndWhatCountsAsAnInput()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "A combination's directory is kept between builds, and its build system decides",
+            "  - an input that changed since that build began is dated no later than the newest",
+            "  - nothing can say: no record of what it was built from, the files git tracks",
+            "DEPENDS is not remade. A project's rebuildableFormats says which files are inputs,",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_QuotesTheLimitsFromTheCode()
     {

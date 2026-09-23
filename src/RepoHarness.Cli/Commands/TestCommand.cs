@@ -174,6 +174,9 @@ internal static class TestCommand
         // tests a build it does not make - what its directory was last configured with.
         IReadOnlyList<CompilerFact> compilers;
 
+        // What the build says beyond its verdict, which the leg's line carries as the build's own does.
+        IReadOnlyList<string> built = [];
+
         if (!skipBuild)
         {
             var build = await builds
@@ -181,6 +184,7 @@ internal static class TestCommand
                 .ConfigureAwait(false);
 
             compilers = build.Compilers;
+            built = build.Notes;
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
             {
@@ -191,6 +195,7 @@ internal static class TestCommand
                     Detail = build.Verdict.Detail,
                     Duration = Stopwatch.GetElapsedTime(started),
                     Emulated = leg.Emulated,
+                    TimingNotes = built,
                     Compilers = compilers,
                 };
             }
@@ -221,6 +226,11 @@ internal static class TestCommand
 
         // The leg's whole duration, not the runner's: the build, the fingerprints and the sampling
         // are what the ledger reports as overhead, and leaving them out would hide them.
-        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started), Compilers = compilers };
+        return result.Entry with
+        {
+            Duration = Stopwatch.GetElapsedTime(started),
+            TimingNotes = [.. built, .. result.Entry.TimingNotes],
+            Compilers = compilers,
+        };
     }
 }

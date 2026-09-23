@@ -78,6 +78,21 @@ public sealed record LegGuardRequest
     /// </summary>
     public LegInputs Inputs { get; init; } = LegInputs.None;
 
+    /// <summary>
+    /// A snapshot of exactly those inputs the caller took moments before, to open with rather than
+    /// reading them again, or <see langword="null"/> to take one as the guards open.
+    /// </summary>
+    /// <remarks>
+    /// What a caller that has just read the tree passes on, so the reading it acted on and the one the
+    /// guards compare against are the same: two readings a moment apart leave a file changed between
+    /// them read by neither comparison. Whatever changed between the reading and the opening counts as
+    /// moving under the work watched - the safe direction, since that work is then called a moving
+    /// tree, never a clean one - so a caller passes on a reading only where the time between is time
+    /// it cannot avoid, as a build that keeps its directory, having read it, cannot. One that deletes
+    /// its directory in between takes none: the delete is time it chose, and the guards read afresh.
+    /// </remarks>
+    public InputSnapshot? Opening { get; init; }
+
     /// <summary>What to watch the process table for, or <see langword="null"/> to watch nothing.</summary>
     public ContentionRequest? Contention { get; init; }
 }
@@ -183,6 +198,12 @@ public sealed class LegGuards : IAsyncDisposable
         _sampling = sampling;
     }
 
+    /// <summary>
+    /// The inputs as they stood when the guards opened, which is what the work starts from, or
+    /// <see langword="null"/> when none were watched.
+    /// </summary>
+    public InputSnapshot? Opening => _before;
+
     /// <summary>Opens the guards this work asked for, and none it did not.</summary>
     /// <param name="fingerprints">Takes and compares the fingerprints.</param>
     /// <param name="sampler">Samples the process table.</param>
@@ -203,7 +224,7 @@ public sealed class LegGuards : IAsyncDisposable
         var watching = request.Inputs.Watching;
 
         var before = watching
-            ? await fingerprints.TakeAsync(request.TreeRoot, request.Inputs.Paths, cancellationToken).ConfigureAwait(false)
+            ? request.Opening ?? await fingerprints.TakeAsync(request.TreeRoot, request.Inputs.Paths, cancellationToken).ConfigureAwait(false)
             : null;
 
         // Before, during and after. Two snapshots alone cannot see an edit that was undone before

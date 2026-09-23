@@ -3,6 +3,7 @@ using NSubstitute.ExceptionExtensions;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -47,16 +48,8 @@ public sealed class BuildServiceTests
     {
         using var temp = new TempDirectory();
         var request = Request(temp, outputs: ["bin/app.dll"]);
-        var directory = request.Variant.DirectoryUnder(temp.Path);
         var deepest = Path.Combine("obj", "nested", "deeper", "still", "file.obj");
-
-        foreach (var file in new[] { Path.Combine("bin", "app.dll"), deepest })
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(directory, file))!);
-            await File.WriteAllTextAsync(Path.Combine(directory, file), "built", TestContext.Current.CancellationToken);
-        }
-
-        var (service, factory) = await TrackedWithFactoryAsync(temp, TestContext.Current.CancellationToken);
+        var (service, factory) = await TrackedWithFactoryAsync(temp, TestContext.Current.CancellationToken, leaves: [Path.Combine("bin", "app.dll"), deepest]);
         var reserve = deepest.Length + reserveAgainstDeepest;
 
         await service.BuildAsync(
@@ -86,7 +79,7 @@ public sealed class BuildServiceTests
         // so with a zero exit code, and the objects on disk are the previous build's.
         using var temp = new TempDirectory();
 
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: [])).BuildAsync(
             Config(),
             Request(temp, outputs: ["bin/app.dll"]),
             TestContext.Current.CancellationToken);
@@ -101,12 +94,8 @@ public sealed class BuildServiceTests
         using var temp = new TempDirectory();
         var request = Request(temp, outputs: ["bin/app.dll"]);
 
-        // Written where the build would have put it, so the witness has something to find.
-        var produced = Path.Combine(request.Variant.DirectoryUnder(temp.Path), "bin", "app.dll");
-        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
-        await File.WriteAllTextAsync(produced, "built", TestContext.Current.CancellationToken);
-
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        // Left where the build puts it, so the witness has something to find.
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: ["bin/app.dll"])).BuildAsync(
             Config(),
             request,
             TestContext.Current.CancellationToken);
@@ -130,7 +119,8 @@ public sealed class BuildServiceTests
     /// <summary>
     /// The measurement that opened this: from a consumer's worktree, one markdown edit made two
     /// legs rebuild from clean, discarding a warm build directory that had cost eleven minutes.
-    /// Neither named file is read by the build.
+    /// Neither named file is read by the build - so even an edit dated before the build, which would
+    /// rebuild from clean were it an input, keeps the directory.
     /// </summary>
     [Fact]
     public async Task ADocumentationEdit_KeepsTheWarmBuildDirectory()
@@ -139,43 +129,749 @@ public sealed class BuildServiceTests
         var token = TestContext.Current.CancellationToken;
         var (factory, request) = await TrackedTreeAsync(temp, token);
 
-        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
 
-        // Edited after the build and dated after what it produced, so only the content comparison
-        // can have anything to say about it.
-        await TouchAsync(temp, "docs/guide.md", "rewritten\n", token);
+        await EditAsync(temp, "docs/guide.md", "rewritten\n", HoursFromNow(-2), token);
 
-        var again = await BuildOnceAsync(factory, request, temp, token);
+        var again = await BuildOnceAsync(factory, request, token);
 
         Assert.Null(again.RebuiltFromClean);
     }
 
     /// <summary>
-    /// The other half, which is the one that must never be lost: a file whose content differs from
-    /// what this directory was built from is stale however its timestamp reads.
+    /// An edit to something the build reads, dated after the build as an edit is, is the build
+    /// system's to act on: newer than every output the build left, it rebuilds whatever reads it, and
+    /// the warm directory is kept. Rebuilt from clean instead, one edit to a consumer's test budget
+    /// table cost 1,186 steps from nothing, and ran past its lane's time limit.
     /// </summary>
     [Theory]
     [InlineData("src/app.cpp")]
     [InlineData("VERSION")]
-    public async Task AnEditToSomethingTheBuildReads_DiscardsIt_AndSaysWhichConditionFired(string edited)
+    public async Task AnEditDatedAfterTheBuild_KeepsTheWarmBuildDirectory_ForTheBuildSystemToAct(string edited)
     {
         using var temp = new TempDirectory();
         var token = TestContext.Current.CancellationToken;
         var (factory, request) = await TrackedTreeAsync(temp, token);
 
-        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
 
-        await TouchAsync(temp, edited, "changed\n", token);
+        await EditAsync(temp, edited, "changed\n", HoursFromNow(1), token);
 
-        var again = await BuildOnceAsync(factory, request, temp, token);
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.Null(again.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// The half that must never be lost: a file whose content differs from what this directory was
+    /// built from, dated no later than that build - as a stepped clock or a tool keeping a file's old
+    /// time leaves it - is one a build system comparing times could miss, and the directory is
+    /// rebuilt from clean, saying which file and which condition.
+    /// </summary>
+    [Theory]
+    [InlineData("src/app.cpp")]
+    [InlineData("VERSION")]
+    public async Task AnEditDatedNoLaterThanTheBuild_DiscardsIt_AndSaysWhichConditionFired(string edited)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, edited, "changed\n", HoursFromNow(-2), token);
+
+        var again = await BuildOnceAsync(factory, request, token);
 
         Assert.NotNull(again.RebuiltFromClean);
         Assert.Contains(edited, again.RebuiltFromClean, StringComparison.Ordinal);
 
-        // Which of the three conditions fired, not only which file differed. A consumer measured
-        // their file against the timestamp rule, found it did not hold, and could not tell from the
-        // line whether the clock-step condition had fired instead.
-        Assert.Contains("changed content:", again.RebuiltFromClean, StringComparison.Ordinal);
+        // Which condition fired, not only which file differed. A consumer measured their file against
+        // the timestamp rule, found it did not hold, and could not tell from the line whether the
+        // clock-step condition had fired instead.
+        Assert.StartsWith("a change a build system could miss:", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A change is dated against the newest file the build left, not its record or its binary: a host
+    /// whose clock steps forward for a moment and back stamps an object compiled in that moment ahead
+    /// of everything written after it, and a phase that starts and ends outside the step measures no
+    /// drift. An edit dated after the record, but not after that object, is one the build system could
+    /// miss - and the line names the object and both dates, so whoever reads it can see what the
+    /// change was held to.
+    /// </summary>
+    [Fact]
+    public async Task AChange_IsDatedAgainstTheNewestFileTheBuildLeft_WhichTheLineNames()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var ahead = HoursFromNow(3);
+        var edited = HoursFromNow(1);
+        var stepped = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: () => WriteBuilt(request, temp, "obj/app.o", ahead)));
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token, stepped)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", "changed\n", edited, token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a change a build system could miss: 'src/app.cpp'", again.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Contains($"dated {edited:u}, no later than 'obj/app.o' at {ahead:u}, the newest file that build left", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// What is written into the directory after the build ends is not what the build left: ctest writes
+    /// its logs there as a suite ends, and an edit made while the suite ran is dated before them. Dated
+    /// against the directory as it stands, that edit rebuilt everything from clean; dated against what
+    /// the build left, it is the build system's to act on.
+    /// </summary>
+    [Fact]
+    public async Task AnEditMadeWhileTheTestsRan_IsNotDatedAgainstWhatTheyWroteAfterTheBuild()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", "changed\n", HoursFromNow(1), token);
+        WriteBuilt(request, temp, "Testing/Temporary/LastTest.log", HoursFromNow(2));
+
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A change dated to the same instant as the newest file in the directory is one a build system
+    /// could miss: ninja and make rebuild what is older than an input, never what is as old, and a
+    /// file system that keeps whole seconds dates an edit made in the second the build ended exactly
+    /// so.
+    /// </summary>
+    [Fact]
+    public async Task AChangeDatedTheSameInstantAsTheNewestFile_IsOneABuildSystemCouldMiss()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        var instant = HoursFromNow(1);
+        var compiling = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: () => WriteBuilt(request, temp, "obj/app.o", instant)));
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token, compiling)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", "changed\n", instant, token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a change a build system could miss: 'src/app.cpp'", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An input the record never held - new to the set since, as a file first committed after the
+    /// build that compiled it is - is judged by the build system alone, as every file outside the set
+    /// is, however it is dated: no recorded content says it changed.
+    /// </summary>
+    [Fact]
+    public async Task AnInputNewToTheSetSinceTheBuild_IsJudgedByTheBuildSystemAlone()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/extra.cpp", "int extra;\n", HoursFromNow(-2), token);
+        await factory.RunGitAsync(temp.Path, ["add", "src/extra.cpp"], token);
+
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A build that fails still leaves what it compiled, from the tree it was given, and the build
+    /// after it dates its changes from that tree: a fix dated after what the failed build compiled
+    /// keeps the directory, and one dated before it, which a build system would miss, does not.
+    /// Dated from the last build that passed instead, every change made before the failure is older
+    /// than what the failed build compiled, and fixing a compile error would rebuild everything from
+    /// clean.
+    /// </summary>
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(1.5, true)]
+    public async Task AFailedBuild_LeavesTheTreeItWasGiven_ForTheFixToBeDatedAgainst(double fixedAt, bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        // Two edits, and a build that compiles one of them and fails on the other.
+        await EditAsync(temp, "VERSION", "2.0.0\n", HoursFromNow(1), token);
+        await EditAsync(temp, "src/app.cpp", "int main({}\n", HoursFromNow(1), token);
+
+        var failing = Service(
+            factory,
+            exitCode: 0,
+            phases: new ScriptedPhases(building: () => WriteBuilt(request, temp, "obj/version.o", HoursFromNow(2)), buildExitCode: 1));
+        var failed = await failing.BuildAsync(Config(), request, token);
+
+        Assert.Equal(LegVerdict.Failed, failed.Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", "int main(){}\n", HoursFromNow(fixedAt), token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.Equal(rebuilds, again.RebuiltFromClean is not null);
+        Assert.True(!rebuilds || again.RebuiltFromClean!.StartsWith("a change a build system could miss: 'src/app.cpp'", StringComparison.Ordinal), again.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A build stopped part way - by a lane's time limit, or anything else that ends it - reaches no
+    /// verdict and leaves only what it compiled. The record written as it began is what the next
+    /// build dates its changes from, so that build carries on from what the stopped one compiled,
+    /// and still starts from clean for a change dated before it. Dated from the build before it
+    /// instead, a lane whose build is stopped for running long would start from clean every time,
+    /// and never finish.
+    /// </summary>
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(1.5, true)]
+    public async Task ABuildStoppedPartWay_LeavesTheRecordItBeganWith_ForTheNextToDateAgainst(double editedAt, bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, "VERSION", "2.0.0\n", HoursFromNow(1), token);
+
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var stopping = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: limit.Cancel));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stopping.BuildAsync(Config(), request, limit.Token));
+
+        // What the stopped build compiled before it was stopped.
+        WriteBuilt(request, temp, "obj/version.o", HoursFromNow(2));
+        await EditAsync(temp, "src/app.cpp", "int main(){ return 0; }\n", HoursFromNow(editedAt), token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.Equal(rebuilds, again.RebuiltFromClean is not null);
+        Assert.True(!rebuilds || again.RebuiltFromClean!.StartsWith("a change a build system could miss: 'src/app.cpp'", StringComparison.Ordinal), again.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// An input deleted since the build is left to the build system, which sees an input gone
+    /// without asking its date. It is not asked here either: a file that is not there has no date to
+    /// give.
+    /// </summary>
+    [Fact]
+    public async Task AnInputDeletedSinceTheBuild_IsLeftToTheBuildSystem()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        File.Delete(temp.Combine("VERSION"));
+
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// After a build that never finished, and so recorded no newest file, the directory is read for its
+    /// own; one that cannot be read leaves nothing to date a change against, which rebuilds from clean
+    /// for that reason alone, and says so. The decision reads it only where an input changed, so where
+    /// none did the directory is kept, and the one walk of it is the build's own, as it ends.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnUnreadableBuildDirectory_RebuildsFromClean_OnlyWhereAnInputChanged(bool changed)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+        await StopPartWayAsync(factory, request, token);
+
+        if (changed)
+        {
+            await EditAsync(temp, "src/app.cpp", "changed\n", HoursFromNow(1), token);
+        }
+
+        var unreadable = new UnreadableBuildDirectory(factory.FileSystem, request.Variant.DirectoryUnder(temp.Path));
+        var again = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, fileSystem: unreadable));
+
+        if (changed)
+        {
+            Assert.NotNull(again.RebuiltFromClean);
+            Assert.StartsWith("an unreadable build directory: 'src/app.cpp' changed", again.RebuiltFromClean, StringComparison.Ordinal);
+            Assert.Contains(UnreadableBuildDirectory.Refusal.TrimEnd('.'), again.RebuiltFromClean, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Null(again.RebuiltFromClean);
+        }
+
+        // The decision's walk where an input changed, and the build's own as it ended.
+        Assert.Equal(changed ? 2 : 1, unreadable.Walks);
+    }
+
+    /// <summary>
+    /// A changed input whose date cannot be read leaves nothing to say whether the build system will
+    /// see the change, which rebuilds from clean for that reason alone, and says so.
+    /// </summary>
+    [Fact]
+    public async Task AChangedInputThatCannotBeDated_RebuildsFromClean_SayingSo()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", "changed\n", HoursFromNow(1), token);
+
+        var undatable = Service(factory, exitCode: 0, fileSystem: new UndatableInput(factory.FileSystem, "src/app.cpp"));
+        var again = await BuildOnceAsync(factory, request, token, undatable);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("an undated input: 'src/app.cpp' changed", again.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Contains(UndatableInput.Refusal.TrimEnd('.'), again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A link the build made to an input is dated as the link, when the build made it, never as the
+    /// input it points at: a build that links its test data in from the source tree would otherwise
+    /// date every edit to that data against the edit itself, and rebuild from clean for each one.
+    /// Asked after a build that never finished, whose directory is read as it stands, which is where a
+    /// link could be read as what it points at.
+    /// </summary>
+    [Fact]
+    public async Task ALinkTheBuildMadeToAnInput_IsDatedAsTheLink_NotAsTheInput()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        try
+        {
+            File.CreateSymbolicLink(Path.Combine(request.Variant.DirectoryUnder(temp.Path), "VERSION"), temp.Combine("VERSION"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        await StopPartWayAsync(factory, request, token);
+        await EditAsync(temp, "VERSION", "2.0.0\n", HoursFromNow(1), token);
+
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// The guards open on the reading the decision took, not on another taken moments later: a file
+    /// changed between two readings would be what the build records it was given, compared and dated
+    /// by neither. So an input is read once as the build begins and once as it ends.
+    /// </summary>
+    [Fact]
+    public async Task TheGuards_OpenOnTheReadingTheDecisionTook()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var counting = new CountingReads(factory.FileSystem, "src/app.cpp");
+
+        Assert.Null((await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, fileSystem: counting))).RebuiltFromClean);
+        Assert.Equal(2, counting.Reads);
+    }
+
+    /// <summary>
+    /// After a build that finished, its guards vouched for the tree while it ran, so an input written
+    /// again since with the same content - dated before what the build left, as a tool that keeps a
+    /// file's old time writes it - is no change at all, and keeps the directory.
+    /// </summary>
+    [Fact]
+    public async Task AnInputRewrittenAsItWasAfterAFinishedBuild_IsNoChange()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await EditAsync(temp, "src/app.cpp", await File.ReadAllTextAsync(temp.Combine("src", "app.cpp"), token), HoursFromNow(-2), token);
+
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A build stopped part way says nothing of whether its tree held still, and one that moved and
+    /// came back - a stash and its pop, the compiler reading the file in between and the object it
+    /// wrote dated after both - leaves every input as the record has it. Written again since the build
+    /// began, the file counts as changed, and is dated against what that build left.
+    /// </summary>
+    [Fact]
+    public async Task AnInputWrittenAgainDuringABuildThatNeverFinished_CountsAsChanged()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var app = temp.Combine("src", "app.cpp");
+        var committed = await File.ReadAllTextAsync(app, token);
+
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var stashing = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: () =>
+        {
+            File.WriteAllText(app, "int main(){ return 2; }\n");
+            File.WriteAllText(app, committed);
+            WriteBuilt(request, temp, "obj/app.o", DateTime.UtcNow.AddMinutes(1));
+            limit.Cancel();
+        }));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stashing.BuildAsync(Config(), request, limit.Token));
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a change a build system could miss: 'src/app.cpp' was written again after the last build began", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A phase that spans a clock step marks the record at once, not only as the build ends: a build
+    /// stopped in the phase after it would otherwise leave a record saying nothing of the step, and
+    /// the next build would carry on from objects that cannot be ordered.
+    /// </summary>
+    [Fact]
+    public async Task AStepInAPhaseBeforeTheBuildIsStopped_StillStartsTheNextFromClean()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var clock = new SteppingClock();
+
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var stepping = Service(
+            factory,
+            exitCode: 0,
+            phases: new ScriptedPhases(configuring: () => clock.Step(TimeSpan.FromSeconds(25)), building: limit.Cancel),
+            wallClock: clock);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stepping.BuildAsync(Config(), request, limit.Token));
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a clock step: the previous build's 'configure' phase spanned one", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A build during one of whose phases the wall clock stepped stamped objects that cannot be
+    /// ordered against anything since, and the next build starts from clean, naming the phase.
+    /// </summary>
+    [Fact]
+    public async Task ABuildThatSpannedAClockStep_StartsTheNextFromClean_NamingThePhase()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var clock = new SteppingClock();
+        var stepping = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: () => clock.Step(TimeSpan.FromSeconds(25))), wallClock: clock);
+
+        Assert.Contains((await BuildOnceAsync(factory, request, token, stepping)).Phases, phase => phase.ClockStepped);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a clock step: the previous build's 'build' phase spanned one", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A build whose inputs moved while it ran compiled a tree no record describes, and the next
+    /// build starts from clean - saying that, and not a clock step that never happened.
+    /// </summary>
+    [Fact]
+    public async Task ABuildWhoseInputsMovedWhileItRan_StartsTheNextFromClean_SayingWhy()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        var editing = Service(
+            factory,
+            exitCode: 0,
+            phases: new ScriptedPhases(building: () => File.WriteAllText(temp.Combine("src", "app.cpp"), "int main(){ return 1; }\n")));
+
+        Assert.Equal(LegVerdict.InputsMoved, (await BuildOnceAsync(factory, request, token, editing)).Verdict.Verdict);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a moving tree:", again.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Contains("src/app.cpp", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A build that could not be shown to have had its directory to itself - here because the
+    /// machine's process table could not be read - leaves objects nobody can vouch for, and the next
+    /// build starts from clean, saying so rather than naming a clock step.
+    /// </summary>
+    [Fact]
+    public async Task ABuildNotShownToHaveHadItsDirectoryToItself_StartsTheNextFromClean_SayingWhy()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var blind = Service(factory, exitCode: 0, processTable: new UnreadableProcessTable());
+
+        Assert.Equal(LegVerdict.Unmeasured, (await BuildOnceAsync(factory, request, token, blind)).Verdict.Verdict);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("a shared build directory:", again.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Contains(UnreadableProcessTable.Blocked, again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An input that cannot be read says nothing about whether the tree held still, and the build
+    /// starts from clean. The record it writes, having begun without reading that input, is marked,
+    /// so the build after it starts from clean too: a record short of one input would compare that
+    /// input as though it had held still. Marked as the build begins, so one stopped part way leaves
+    /// the mark as surely as one that finished.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnUnreadableInput_StartsFromClean_AndMarksTheRecordItBeganWithout(bool stopped)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var unreadable = new UnreadableInput(factory.FileSystem, "src/app.cpp");
+
+        if (stopped)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var stopping = Service(factory, exitCode: 0, phases: new ScriptedPhases(building: limit.Cancel), fileSystem: unreadable);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stopping.BuildAsync(Config(), request, limit.Token));
+        }
+        else
+        {
+            var unread = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, fileSystem: unreadable));
+
+            Assert.NotNull(unread.RebuiltFromClean);
+            Assert.StartsWith("an unreadable input: 'src/app.cpp'", unread.RebuiltFromClean, StringComparison.Ordinal);
+        }
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("an unrecorded input: 'src/app.cpp'", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A record holding no fingerprint - written before fingerprinting was, or when nothing could be
+    /// fingerprinted - says nothing about whether the tree held still, and the next build starts
+    /// from clean.
+    /// </summary>
+    [Fact]
+    public async Task ARecordWithNoFingerprint_StartsTheNextFromClean()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        await File.WriteAllTextAsync(RecordOf(request, temp), $"clean\n{request.Variant.DirectoryName}\n", token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("no record to compare:", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A directory that holds files and no record starts from clean, naming one of them: a clean start
+    /// stopped part way through its delete can take the record and leave the objects it was there to
+    /// discard, and a configure run by hand leaves a build nothing recorded. One that holds nothing, or is
+    /// not there, has nothing to discard.
+    /// </summary>
+    [Theory]
+    [InlineData("a file", true)]
+    [InlineData("nothing", false)]
+    [InlineData("no directory", false)]
+    public async Task ADirectoryWithNoRecord_StartsFromClean_WhereItHoldsFiles(string holds, bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        if (holds != "no directory")
+        {
+            Directory.CreateDirectory(Path.Combine(request.Variant.DirectoryUnder(temp.Path), "obj"));
+        }
+
+        if (holds == "a file")
+        {
+            WriteBuilt(request, temp, "obj/app.o", HoursFromNow(-1));
+        }
+
+        var built = await BuildOnceAsync(factory, request, token);
+
+        Assert.Equal(LegVerdict.Passed, built.Verdict.Verdict);
+        Assert.Equal(rebuilds, built.RebuiltFromClean is not null);
+        Assert.True(
+            !rebuilds || built.RebuiltFromClean!.StartsWith(
+                "no record to compare: the directory holds files - 'obj/app.o' among them - and no record of what they were built from",
+                StringComparison.Ordinal),
+            built.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A directory with no record that cannot be read for whether it holds anything leaves nothing to say
+    /// it holds nothing, which starts it from clean for that reason alone, and says so.
+    /// </summary>
+    [Fact]
+    public async Task ADirectoryWithNoRecordThatCannotBeRead_StartsFromClean_SayingSo()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var directory = request.Variant.DirectoryUnder(temp.Path);
+
+        Directory.CreateDirectory(directory);
+
+        var unreadable = new UnreadableBuildDirectory(factory.FileSystem, directory);
+        var built = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, fileSystem: unreadable));
+
+        Assert.NotNull(built.RebuiltFromClean);
+        Assert.StartsWith("an unreadable build directory: it holds no record, and whether it holds anything else could not be read", built.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Contains(UnreadableBuildDirectory.Refusal.TrimEnd('.'), built.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Where the decision discards the directory, the guards read the tree afresh once it is gone, not
+    /// on the decision's own reading: an input unreadable only as the decision read it - held open a
+    /// moment by another process - is read for the clean build, which passes and leaves a record the next
+    /// build keeps its directory by. On the decision's reading, the clean build was unmeasured and its
+    /// record marked, and the next build started from clean again.
+    /// </summary>
+    [Fact]
+    public async Task AnInputUnreadableOnlyAsTheDecisionReadIt_IsReadAfreshForTheCleanBuild()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var once = new UnreadableInput(factory.FileSystem, "src/app.cpp", refusals: 1);
+        var clean = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, fileSystem: once));
+
+        Assert.NotNull(clean.RebuiltFromClean);
+        Assert.StartsWith("an unreadable input: 'src/app.cpp'", clean.RebuiltFromClean, StringComparison.Ordinal);
+        Assert.Equal(LegVerdict.Passed, clean.Verdict.Verdict);
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// A record 0.5.8 marked unordered - which said so, and never why - still starts the next build
+    /// from clean: whatever made it so stamped the objects it describes.
+    /// </summary>
+    [Fact]
+    public async Task ARecordAnEarlierVersionMarkedUnordered_StillStartsTheNextFromClean()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var record = RecordOf(request, temp);
+
+        await File.WriteAllTextAsync(record, EarlierRecord.Written(await File.ReadAllTextAsync(record, token), unordered: true), token);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith("an unordered build:", again.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A clean record 0.5.8 wrote, which says neither when each input was written nor which file its
+    /// build left newest, is read as one a build that never finished left: an input whose content held
+    /// keeps the directory, and one that changed is dated against the directory as it stands - kept where
+    /// dated after it, started from clean where dated no later.
+    /// </summary>
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(1.0, false)]
+    [InlineData(-2.0, true)]
+    public async Task ACleanRecordAnEarlierVersionWrote_IsReadAsOneABuildThatNeverFinishedLeft(double? editedAt, bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var record = RecordOf(request, temp);
+
+        await File.WriteAllTextAsync(record, EarlierRecord.Written(await File.ReadAllTextAsync(record, token), unordered: false), token);
+
+        if (editedAt is { } hours)
+        {
+            await EditAsync(temp, "src/app.cpp", "changed\n", HoursFromNow(hours), token);
+        }
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.Equal(rebuilds, again.RebuiltFromClean is not null);
+        Assert.True(
+            !rebuilds || again.RebuiltFromClean!.StartsWith(
+                "a change a build system could miss: 'src/app.cpp' differs from what this directory was last given to build",
+                StringComparison.Ordinal),
+            again.RebuiltFromClean);
+        Assert.True(!rebuilds || again.RebuiltFromClean!.Contains("the newest file in the directory", StringComparison.Ordinal), again.RebuiltFromClean);
+    }
+
+    /// <summary>
+    /// Only the record's first line says whether it is unordered. Every later one names an input,
+    /// and an input can be called anything: read from the whole record, a source whose path held the
+    /// mark rebuilt its variant from clean on every build.
+    /// </summary>
+    [Fact]
+    public async Task AnInputNamedLikeTheMark_IsNotReadAsOne()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        await File.WriteAllTextAsync(temp.Combine("src", "clock-stepped.cpp"), "int stepped;\n", token);
+        await factory.CommitAllAsync(temp.Path, "a source named like the mark", token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+        Assert.Null((await BuildOnceAsync(factory, request, token)).RebuiltFromClean);
     }
 
     /// <summary>
@@ -194,11 +890,12 @@ public sealed class BuildServiceTests
         var token = TestContext.Current.CancellationToken;
         var (factory, request) = await TrackedTreeAsync(temp, token, formats);
 
-        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, temp, token)).Verdict.Verdict);
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
 
-        await TouchAsync(temp, "docs/guide.md", "rewritten\n", token);
+        // Dated before the build, so only whether the file is an input decides.
+        await EditAsync(temp, "docs/guide.md", "rewritten\n", HoursFromNow(-2), token);
 
-        var again = await BuildOnceAsync(factory, request, temp, token);
+        var again = await BuildOnceAsync(factory, request, token);
 
         Assert.Equal(rebuilds, again.RebuiltFromClean is not null);
     }
@@ -243,53 +940,64 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
-    /// Builds once with the output present, so the build is witnessed and records what it was built
-    /// from, then dates every tracked file well before that output.
+    /// Builds once, with the service given or else one whose every phase exits 0; either leaves the
+    /// output as its build phase runs, unless told otherwise, so the build is witnessed.
     /// </summary>
-    /// <remarks>
-    /// The dates are the subject of a rule of their own: a changed input that is not newer than the
-    /// newest output is read as a stepped clock. Left at the times a test writes them, every file
-    /// in the tree sits inside that window and the timestamp condition fires before the one under
-    /// test can.
-    /// </remarks>
-    private static async Task<BuildResult> BuildOnceAsync(
+    private static Task<BuildResult> BuildOnceAsync(
         HarnessFactory factory,
         BuildRequest request,
-        TempDirectory temp,
-        CancellationToken cancellationToken)
-    {
-        var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
-        var produced = Path.Combine(buildDirectory, "bin", "app");
+        CancellationToken cancellationToken,
+        BuildService? service = null)
+        => (service ?? Service(factory, exitCode: 0)).BuildAsync(Config(), request, cancellationToken);
 
-        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
-        await File.WriteAllTextAsync(produced, "built", cancellationToken);
+    /// <summary>Now, moved by <paramref name="hours"/>: what a test dates an edit or an output by.</summary>
+    private static DateTime HoursFromNow(double hours) => DateTime.UtcNow.AddHours(hours);
 
-        var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
-        var old = DateTime.UtcNow.AddHours(-1);
-
-        foreach (var file in Directory.EnumerateFiles(temp.Path, "*", SearchOption.AllDirectories))
-        {
-            if (!file.StartsWith(buildDirectory, StringComparison.Ordinal))
-            {
-                File.SetLastWriteTimeUtc(file, old);
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>Rewrites one tracked file and dates it after the build, so only content can matter.</summary>
-    private static async Task TouchAsync(
+    /// <summary>
+    /// Rewrites one tracked file and dates it: after the build it follows, as an edit is, or before
+    /// it, as a stepped clock or a tool that keeps a file's old time leaves one.
+    /// </summary>
+    private static async Task EditAsync(
         TempDirectory temp,
         string relativePath,
         string content,
+        DateTime dated,
         CancellationToken cancellationToken)
     {
         var path = Path.Combine(temp.Path, relativePath.Replace('/', Path.DirectorySeparatorChar));
 
         await File.WriteAllTextAsync(path, content, cancellationToken);
-        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(1));
+        File.SetLastWriteTimeUtc(path, dated);
     }
+
+    /// <summary>
+    /// Writes a file into the build directory, dated as whatever wrote it left it: a phase compiling it,
+    /// or something run after the build.
+    /// </summary>
+    private static void WriteBuilt(BuildRequest request, TempDirectory temp, string relativePath, DateTime dated)
+    {
+        var path = Path.Combine(request.Variant.DirectoryUnder(temp.Path), relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "compiled");
+        File.SetLastWriteTimeUtc(path, dated);
+    }
+
+    /// <summary>
+    /// A build stopped as its build phase starts, as a lane's time limit stops one: it leaves the record
+    /// it began with, and no newest file.
+    /// </summary>
+    private static async Task StopPartWayAsync(HarnessFactory factory, BuildRequest request, CancellationToken cancellationToken)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Service(factory, exitCode: 0, phases: new ScriptedPhases(building: limit.Cancel)).BuildAsync(Config(), request, limit.Token));
+    }
+
+    /// <summary>The record a build leaves beside itself, which the next build reads.</summary>
+    private static string RecordOf(BuildRequest request, TempDirectory temp)
+        => Path.Combine(request.Variant.DirectoryUnder(temp.Path), ".harness-build");
 
     /// <summary>
     /// A service whose tree git can be asked about. A build reads the tree while it runs, so a tree
@@ -297,14 +1005,19 @@ public sealed class BuildServiceTests
     /// the same rule the test verb has always applied. Every build here needs a repository for that
     /// reason and not because these tests are about git.
     /// </summary>
-    private static async Task<BuildService> TrackedAsync(TempDirectory temp, CancellationToken cancellationToken, int exitCode = 0)
-        => (await TrackedWithFactoryAsync(temp, cancellationToken, exitCode)).Service;
+    private static async Task<BuildService> TrackedAsync(
+        TempDirectory temp,
+        CancellationToken cancellationToken,
+        int exitCode = 0,
+        IReadOnlyList<string>? leaves = null)
+        => (await TrackedWithFactoryAsync(temp, cancellationToken, exitCode, leaves)).Service;
 
     /// <summary>The same, with the factory, for a test that reads what the build said.</summary>
     private static async Task<(BuildService Service, HarnessFactory Factory)> TrackedWithFactoryAsync(
         TempDirectory temp,
         CancellationToken cancellationToken,
-        int exitCode = 0)
+        int exitCode = 0,
+        IReadOnlyList<string>? leaves = null)
     {
         var factory = new HarnessFactory();
 
@@ -314,7 +1027,7 @@ public sealed class BuildServiceTests
         await File.WriteAllTextAsync(temp.Combine("src.cs"), "class App;" + Environment.NewLine, cancellationToken);
         await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
 
-        return (Service(factory, exitCode), factory);
+        return (Service(factory, exitCode, leaves: leaves), factory);
     }
 
     /// <summary>
@@ -442,10 +1155,6 @@ public sealed class BuildServiceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         using var temp = new TempDirectory();
         var (factory, request) = await TrackedTreeAsync(temp, cancellationToken);
-        var produced = Path.Combine(request.Variant.DirectoryUnder(temp.Path), "bin", "app");
-
-        Directory.CreateDirectory(Path.GetDirectoryName(produced)!);
-        await File.WriteAllTextAsync(produced, "built", cancellationToken);
 
         var result = await Service(factory, exitCode: 0, phases: new ConfiguringRunner("GNU", "13.2.0"))
             .BuildAsync(Declaring(("C", "gnu"), ("CXX", "GNU")), request, cancellationToken);
@@ -525,16 +1234,35 @@ public sealed class BuildServiceTests
     /// <summary>Where a test puts the compilers its build's PATH names, outside anything the build reads.</summary>
     private const string ToolchainDirectory = "toolchain-bin";
 
-    private static BuildService Service(HarnessFactory factory, int exitCode, IProcessRunner? dependencies = null, IProcessRunner? phases = null)
+    /// <summary>What a tracked tree's project declares its build produces, and what a build leaves unless told otherwise.</summary>
+    private const string App = "bin/app";
+
+    /// <summary>
+    /// A build service over <paramref name="factory"/>, whose phases exit with
+    /// <paramref name="exitCode"/> unless another runner is given, and whose build phase leaves
+    /// <paramref name="leaves"/> - <see cref="App"/> unless told otherwise - below the directory it
+    /// builds; <paramref name="fileSystem"/> is what the service and its fingerprints read the tree and
+    /// the build directory through, <paramref name="wallClock"/> the clock its phases are timed against,
+    /// and <paramref name="processTable"/> the machine its guards find - a quiet one unless told otherwise.
+    /// </summary>
+    private static BuildService Service(
+        HarnessFactory factory,
+        int exitCode,
+        IProcessRunner? dependencies = null,
+        IProcessRunner? phases = null,
+        IProcessTable? processTable = null,
+        IFileSystem? fileSystem = null,
+        TimeProvider? wallClock = null,
+        IReadOnlyList<string>? leaves = null)
         => new(
-            new PhaseRunner(phases ?? new QuietRunner(exitCode), factory.FileSystem, factory.Output),
+            new PhaseRunner(new Leaving(phases ?? new QuietRunner(exitCode), leaves ?? [App]), factory.FileSystem, factory.Output, wallClock),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
-            new InputFingerprint(factory.FileSystem, factory.Platform),
-            new ProcessSampler(factory.ProcessTable, factory.Platform, factory.Output),
+            new InputFingerprint(fileSystem ?? factory.FileSystem, factory.Platform),
+            new ProcessSampler(processTable ?? new QuietProcessTable(), factory.Platform, factory.Output),
             factory.GitClient,
-            factory.FileSystem,
+            fileSystem ?? factory.FileSystem,
             factory.Output);
 
     private static HarnessConfig Config() => new()
@@ -555,7 +1283,7 @@ public sealed class BuildServiceTests
     {
         using var temp = new TempDirectory();
 
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: [])).BuildAsync(
             Config(),
             Request(
                 temp,
@@ -591,16 +1319,12 @@ public sealed class BuildServiceTests
     {
         using var temp = new TempDirectory();
 
-        // The second entry resolves and is found, so only the unresolved one can decide this.
-        var build = temp.Combine("build", "x86_64-msvc-release");
-        Directory.CreateDirectory(build);
-        File.WriteAllText(Path.Combine(build, "compile_commands.json"), "[]");
-
         BuildOutput[] outputs = alsoDeclaresOneThatResolves
             ? [Keyed(("windows", "bin/app.exe")), (BuildOutput)"compile_commands.json"]
             : [Keyed(("windows", "bin/app.exe"))];
 
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        // The second entry resolves and is found, so only the unresolved one can decide this.
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: ["compile_commands.json"])).BuildAsync(
             Config(),
             Request(temp, outputs, "linux"),
             TestContext.Current.CancellationToken);
@@ -616,11 +1340,8 @@ public sealed class BuildServiceTests
     public async Task APlainOutput_StillAppliesOnEveryPlatform()
     {
         using var temp = new TempDirectory();
-        var build = temp.Combine("build", "x86_64-msvc-release");
-        Directory.CreateDirectory(build);
-        File.WriteAllText(Path.Combine(build, "compile_commands.json"), "[]");
 
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: ["compile_commands.json"])).BuildAsync(
             Config(),
             Request(temp, [(BuildOutput)"compile_commands.json"], "macos"),
             TestContext.Current.CancellationToken);
@@ -632,11 +1353,8 @@ public sealed class BuildServiceTests
     public async Task AKeyedOutput_IsWitnessed_WhenThePlatformsOwnFileIsThere()
     {
         using var temp = new TempDirectory();
-        var build = temp.Combine("build", "x86_64-msvc-release", "bin");
-        Directory.CreateDirectory(build);
-        File.WriteAllText(Path.Combine(build, "app.exe"), "program");
 
-        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken)).BuildAsync(
+        var result = await (await TrackedAsync(temp, TestContext.Current.CancellationToken, leaves: ["bin/app.exe"])).BuildAsync(
             Config(),
             Request(temp, [Keyed(("windows", "bin/app.exe"), ("all", "bin/app"))], "windows"),
             TestContext.Current.CancellationToken);
@@ -667,7 +1385,6 @@ public sealed class BuildServiceTests
     private static BuildOutput Keyed(params (string Platform, string Path)[] paths)
         => BuildOutput.Keyed(paths.Select(entry => new KeyValuePair<string, string>(entry.Platform, entry.Path)));
 
-    /// <summary>A runner that starts nothing, prints nothing, and exits as it was told to.</summary>
     /// <summary>
     /// The dependency records are read by the ninja the build ran, as its configuration recorded it:
     /// one only the build's own environment could find is found all the same, and reads the records
@@ -684,8 +1401,9 @@ public sealed class BuildServiceTests
         // Whole on the machine that ran the build, written the way CMake writes it.
         var recorded = temp.Combine("toolchain", "bin", "ninja").Replace('\\', '/');
 
-        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
-        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        // Built once, and configured as CMake would have configured it then: the directory is kept for
+        // the build that follows, which reads what that configure wrote.
+        await BuildOnceAsync(factory, request, cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
@@ -722,8 +1440,9 @@ public sealed class BuildServiceTests
         };
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
 
-        Directory.CreateDirectory(Path.Combine(buildDirectory, "bin"));
-        await File.WriteAllTextAsync(Path.Combine(buildDirectory, "bin", "app"), "built", cancellationToken);
+        // Built once, and configured as CMake would have configured it then: the directory is kept for
+        // the build that follows, whose dependency records are read.
+        await BuildOnceAsync(factory, request, cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(buildDirectory, NinjaDependencyCheck.ManifestFileName), string.Empty, cancellationToken);
 
         var config = Config();
@@ -793,7 +1512,8 @@ public sealed class BuildServiceTests
         };
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
 
-        Directory.CreateDirectory(buildDirectory);
+        // Built once, and configured as CMake would have configured it then.
+        await BuildOnceAsync(factory, request, cancellationToken);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:FILEPATH={ccache.Replace('\\', '/')}\nCMAKE_C_COMPILER_ARG1:STRING= clang\n",
@@ -802,6 +1522,7 @@ public sealed class BuildServiceTests
         var result = await Service(factory, exitCode: 0).BuildAsync(Config(), request, cancellationToken);
 
         Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+        Assert.Null(result.RebuiltFromClean);
     }
 
     /// <summary>
@@ -826,19 +1547,20 @@ public sealed class BuildServiceTests
             ProgramDirectories = [temp.Combine(ToolchainDirectory)],
         };
         var buildDirectory = request.Variant.DirectoryUnder(temp.Path);
+        var config = Config();
+        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], CacheVars = { ["CMAKE_C_COMPILER"] = "gcc" } };
 
-        Directory.CreateDirectory(buildDirectory);
+        // Built once, and configured as CMake would have configured it then.
+        await Service(factory, exitCode: 0).BuildAsync(config, request, cancellationToken);
         await File.WriteAllTextAsync(
             Path.Combine(buildDirectory, BuildDirectoryGuard.CMakeCacheFileName),
             $"CMAKE_HOME_DIRECTORY:INTERNAL={temp.Path.Replace('\\', '/')}\nCMAKE_C_COMPILER:STRING={gcc.Replace('\\', '/')}\n",
             cancellationToken);
 
-        var config = Config();
-        config.Toolchains["gcc"] = new ToolchainConfig { Platforms = [PlatformNames.Linux], CacheVars = { ["CMAKE_C_COMPILER"] = "gcc" } };
-
         var result = await Service(factory, exitCode: 0).BuildAsync(config, request, cancellationToken);
 
         Assert.NotEqual(LegVerdict.Poisoned, result.Verdict.Verdict);
+        Assert.Null(result.RebuiltFromClean);
     }
 
     /// <summary>
@@ -898,11 +1620,142 @@ public sealed class BuildServiceTests
         public string? FindExecutable(string command) => command;
     }
 
+    /// <summary>A runner that starts nothing, prints nothing, and exits as it was told to.</summary>
     private sealed class QuietRunner(int exitCode) : IProcessRunner
     {
         public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new ProcessResult(exitCode, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
 
         public string? FindExecutable(string command) => command;
+    }
+
+    /// <summary>
+    /// Every phase starts nothing. As configure starts, <paramref name="configuring"/> happens, and as
+    /// the build starts, <paramref name="building"/> - an input rewritten, as an editor saving mid-build
+    /// does; an object compiled; the clock stepped; the run stopped, as a lane's time limit stops one -
+    /// and each goes on only if the run still wants it, configure exiting 0 and the build
+    /// <paramref name="buildExitCode"/>.
+    /// </summary>
+    private sealed class ScriptedPhases(Action? configuring = null, Action? building = null, int buildExitCode = 0) : IProcessRunner
+    {
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            var build = request.Arguments is ["--build", ..];
+
+            (build ? building : configuring)?.Invoke();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return Task.FromResult(new ProcessResult(build ? buildExitCode : 0, string.Empty, string.Empty, TimeSpan.Zero, TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
+    }
+
+    /// <summary>
+    /// A build system's leavings: as the build phase starts, <paramref name="files"/> are written below the
+    /// directory it builds - what <c>cmake --build</c> names, or a dotnet build's artifacts path - before
+    /// <paramref name="inner"/> runs it. Written while the build runs, never before it: a directory holding
+    /// files and no record is one nothing says what was built from, and it starts from clean.
+    /// </summary>
+    private sealed class Leaving(IProcessRunner inner, IReadOnlyList<string> files) : IProcessRunner
+    {
+        /// <summary>What a dotnet build names the directory it builds in with.</summary>
+        private const string ArtifactsPath = "--artifacts-path:";
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            var directory = request.Arguments is ["--build", var built, ..]
+                ? built
+                : request.Arguments.FirstOrDefault(argument => argument.StartsWith(ArtifactsPath, StringComparison.Ordinal))?[ArtifactsPath.Length..];
+
+            foreach (var file in directory is null ? [] : files)
+            {
+                var path = Path.Combine(directory!, file);
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, "built");
+            }
+
+            return inner.RunAsync(request, cancellationToken);
+        }
+
+        public string? FindExecutable(string command) => inner.FindExecutable(command);
+    }
+
+    /// <summary>A file system that refuses a walk of one build directory, as one it may not read refuses.</summary>
+    private sealed class UnreadableBuildDirectory(IFileSystem inner, string buildDirectory) : PassThroughFileSystem(inner)
+    {
+        /// <summary>What the refusal says.</summary>
+        public const string Refusal = "Access to the path is denied to this test.";
+
+        /// <summary>How often the build directory was walked.</summary>
+        public int Walks { get; private set; }
+
+        public override IEnumerable<WrittenFile> EnumerateWrittenFiles(string path)
+        {
+            if (!string.Equals(Path.GetFullPath(path), Path.GetFullPath(buildDirectory), StringComparison.Ordinal))
+            {
+                return base.EnumerateWrittenFiles(path);
+            }
+
+            Walks++;
+
+            return Enumerable.Range(0, 1).Select<int, WrittenFile>(_ => throw new UnauthorizedAccessException(Refusal));
+        }
+    }
+
+    /// <summary>A file system that counts how often one input is opened for its content.</summary>
+    private sealed class CountingReads(IFileSystem inner, string input) : PassThroughFileSystem(inner)
+    {
+        /// <summary>How often the input was opened.</summary>
+        public int Reads { get; private set; }
+
+        public override Stream OpenRead(string path)
+        {
+            if (path.Replace('\\', '/').EndsWith(input, StringComparison.Ordinal))
+            {
+                Reads++;
+            }
+
+            return base.OpenRead(path);
+        }
+    }
+
+    /// <summary>
+    /// A file system that cannot open one input, as one held open by another process cannot be: the
+    /// first <paramref name="refusals"/> times it is asked, or every time.
+    /// </summary>
+    private sealed class UnreadableInput(IFileSystem inner, string input, int refusals = int.MaxValue) : PassThroughFileSystem(inner)
+    {
+        private int _refused;
+
+        public override Stream OpenRead(string path)
+            => path.Replace('\\', '/').EndsWith(input, StringComparison.Ordinal) && _refused++ < refusals
+                ? throw new IOException($"'{path}' is held open by another process.")
+                : base.OpenRead(path);
+    }
+
+    /// <summary>A file system that cannot say when one input was written, as one gone since it was read cannot.</summary>
+    private sealed class UndatableInput(IFileSystem inner, string input) : PassThroughFileSystem(inner)
+    {
+        /// <summary>What the refusal says.</summary>
+        public const string Refusal = "The input could not be asked when it was last written.";
+
+        public override DateTime LastWriteTimeUtc(string path)
+            => path.Replace('\\', '/').EndsWith(input, StringComparison.Ordinal)
+                ? throw new IOException(Refusal)
+                : base.LastWriteTimeUtc(path);
+    }
+
+    /// <summary>A process table this machine will not let anybody read.</summary>
+    private sealed class UnreadableProcessTable : IProcessTable
+    {
+        /// <summary>Why every reading comes back empty.</summary>
+        public const string Blocked = "the process query is blocked on this machine";
+
+        public Task<ProcessTableReading> ReadAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(new ProcessTableReading([], Blocked));
     }
 }

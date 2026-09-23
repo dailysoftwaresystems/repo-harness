@@ -51,6 +51,22 @@ public interface IFileSystem
     IEnumerable<string> EnumerateFiles(string path, bool recursive);
 
     /// <summary>
+    /// Every file under <paramref name="path"/>, recursively, with when it was last written, as
+    /// <see cref="EnumerateFiles"/> walks: never through a directory link, and a link dated as itself.
+    /// A file removed while the walk runs never fails it: on Windows, whose listing carries each file's
+    /// time, it is given as the listing saw it; on Linux and macOS, where its time is asked of the file
+    /// itself, it is left out, as a directory removed then is.
+    /// </summary>
+    /// <param name="path">The directory to walk.</param>
+    /// <exception cref="IOException">A directory under it, or the date of a file still in it, could not be read.</exception>
+    /// <exception cref="UnauthorizedAccessException">This process may not read a directory under it, or a file's date.</exception>
+    /// <remarks>
+    /// One walk for both, where asking each file its date afterwards would stat every file twice: a
+    /// build directory can hold a hundred thousand of them, and it is walked at the end of every build.
+    /// </remarks>
+    IEnumerable<WrittenFile> EnumerateWrittenFiles(string path);
+
+    /// <summary>
     /// The directory links and junctions anywhere under <paramref name="path"/>: exactly the
     /// directories a recursive <see cref="EnumerateFiles"/> does not walk.
     /// </summary>
@@ -74,11 +90,18 @@ public interface IFileSystem
     /// When <paramref name="path"/> was last written, in UTC.
     /// </summary>
     /// <param name="path">The file to ask about.</param>
-    /// <exception cref="IOException">The file could not be asked about.</exception>
+    /// <exception cref="FileNotFoundException">Nothing, or a directory, is at the path.</exception>
+    /// <exception cref="IOException">The path could not be looked up, whether or not a file is there.</exception>
+    /// <exception cref="UnauthorizedAccessException">This process may not look the path up, whether or not a file is there.</exception>
     /// <remarks>
     /// Behind the seam with everything else, and it raises rather than answering with a sentinel:
-    /// the runtime returns the year 1601 for a path it cannot stat, and a caller comparing that
+    /// the runtime returns the year 1601 for a path that is not there, and a caller comparing that
     /// against a build output concludes the file is older than everything and stops looking.
+    /// <para>
+    /// A link is dated as itself, when it was made, and never as what it points at, on every
+    /// platform: a link a build made to a file in the source tree was written when the build made
+    /// it, and the source file's own date is not one the build wrote.
+    /// </para>
     /// </remarks>
     DateTime LastWriteTimeUtc(string path);
 
