@@ -510,6 +510,38 @@ public sealed class ConfigStoreTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A worktrees root or a sync path spelled with a '.' segment or a doubled separator inside it is
+    /// compared as written - by sync's lists, and by init's ignore rule for the root - and so would
+    /// withhold and ignore nothing it names: refused, with the one spelling to write.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "worktrees": { "root": ".harness-config/./worktrees" } }""", "worktrees.root names '.harness-config/./worktrees'", ".harness-config/worktrees")]
+    [InlineData("""{ "sync": { "neverTransfer": ["build//x"] } }""", "sync.neverTransfer names 'build//x'", "build/x")]
+    [InlineData("""{ "sync": { "exclude": ["docs/./old"] } }""", "sync.exclude names 'docs/./old'", "docs/old")]
+    public void Load_RejectsAPathSpelledTwoWays_NamingTheOneSpelling(string json, string named, string spelling)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(named, exception.Message, StringComparison.Ordinal);
+        Assert.Contains($"write '{spelling}'", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A worktrees root that is the tree itself is refused as that, and only as that: it is no path
+    /// spelled two ways, and a line saying to write '' would send the reader nowhere.
+    /// </summary>
+    [Theory]
+    [InlineData(".")]
+    [InlineData("./")]
+    public void Load_RejectsAWorktreesRootThatIsTheTreeItself_AsThatAlone(string root)
+    {
+        var exception = LoadInvalid($$"""{ "worktrees": { "root": "{{root}}" } }""");
+
+        Assert.Contains("worktrees.root cannot be the repository root itself", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("doubled separator", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Load_RejectsAnUnsupportedVersion()
     {

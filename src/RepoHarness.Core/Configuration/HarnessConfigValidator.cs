@@ -156,6 +156,13 @@ public static partial class HarnessConfigValidator
         // sibling of the tree it came from.
         RequireRelativePaths([worktrees.Root], "worktrees.root", problems);
 
+        // Compared as written wherever it is read - by sync's withheld list, by init's ignore rule - so a
+        // spelling the file system reads past would leave its worktrees neither withheld nor ignored.
+        if (Repository.PathPatterns.Misspelling(worktrees.Root) is { } misspelled)
+        {
+            problems.Add($"worktrees.root names '{worktrees.Root}', which {misspelled}");
+        }
+
         if (worktrees.Root.Trim() is "" or "." or "./")
         {
             problems.Add("worktrees.root cannot be the repository root itself");

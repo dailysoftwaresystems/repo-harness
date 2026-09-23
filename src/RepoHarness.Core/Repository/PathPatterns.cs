@@ -117,8 +117,39 @@ public static class PathPatterns
             return $"is '{AnyDepth}' with no name after it; write the name it should match at any depth";
         }
 
+        // The whole pattern, not what follows '**/': './' just after it is inside the pattern.
+        if (MisspellingOf(normalized) is { } misspelled)
+        {
+            return misspelled;
+        }
+
         return rest.Contains('*', StringComparison.Ordinal)
             ? $"holds '*', which is only understood as a leading '{AnyDepth}' meaning that name at any depth"
+            : null;
+    }
+
+    /// <summary>
+    /// Why <paramref name="path"/> is spelled so that no path it names compares equal to it, or
+    /// <see langword="null"/> where it is not: a <c>.</c> segment or a doubled separator inside it,
+    /// which the file system reads past and a comparison of paths as written never does.
+    /// </summary>
+    /// <param name="path">The path, as written.</param>
+    /// <remarks>
+    /// A leading <c>./</c> and a trailing separator are not counted: every reading of a path here
+    /// drops them first. Refused rather than read past: the same spelling is read elsewhere as written
+    /// - init writes the worktrees root into <c>.gitignore</c> as given - so tidying it here would only
+    /// make the two disagree.
+    /// </remarks>
+    public static string? Misspelling(string? path) => MisspellingOf(Normalize(path));
+
+    /// <summary><see cref="Misspelling"/> of a path already normalised.</summary>
+    private static string? MisspellingOf(string normalized)
+    {
+        var segments = normalized.Split('/');
+
+        return segments.Length > 1 && segments.Any(segment => segment is "" or ".")
+            ? "holds a '.' segment or a doubled separator, which the file system reads past and a comparison "
+                + $"of paths never does; write '{string.Join('/', segments.Where(segment => segment is not ("" or ".")))}'"
             : null;
     }
 

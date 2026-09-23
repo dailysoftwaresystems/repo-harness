@@ -61,6 +61,9 @@ public sealed class PathPatternsTests
     [InlineData("*.pyc")]
     [InlineData("**/")]
     [InlineData("")]
+    [InlineData("build/./x")]
+    [InlineData("build//x")]
+    [InlineData("**/./x")]
     public void APatternThisCannotUnderstand_IsRefused(string pattern)
         => Assert.NotNull(PathPatterns.Problem(pattern));
 
@@ -68,8 +71,25 @@ public sealed class PathPatternsTests
     [InlineData("build")]
     [InlineData("**/__pycache__")]
     [InlineData(".harness-config")]
+    [InlineData("./build")]
+    [InlineData("tools/build/")]
     public void APatternThisUnderstands_IsAccepted(string pattern)
         => Assert.Null(PathPatterns.Problem(pattern));
+
+    /// <summary>
+    /// A path spelled with a '.' segment or a doubled separator inside it names, to the file system, the
+    /// path without them - and compared as written, matches nothing. Said with the one spelling to write;
+    /// a leading './' and a trailing separator are read past everywhere, and are not counted.
+    /// </summary>
+    [Theory]
+    [InlineData(".harness-config/./worktrees", ".harness-config/worktrees")]
+    [InlineData("wt//lanes", "wt/lanes")]
+    [InlineData("**/./x", "**/x")]
+    public void APathSpelledTwoWays_IsNamedWithTheOneSpelling(string path, string spelling)
+    {
+        Assert.EndsWith($"write '{spelling}'", PathPatterns.Misspelling(path), StringComparison.Ordinal);
+        Assert.EndsWith($"write '{spelling}'", PathPatterns.Problem(path), StringComparison.Ordinal);
+    }
 
     /// <summary>Both spellings arrive, and a Windows source must match a Linux copy.</summary>
     [Theory]

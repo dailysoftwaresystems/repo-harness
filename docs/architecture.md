@@ -216,7 +216,11 @@ The root is configurable because it is spent before a worktree's own name. The d
 characters of the Windows path budget, and a repository whose build paths are long has no name left
 that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
 checked against the real path, so a shorter root never hides an overrun — it only makes one
-avoidable.
+avoidable. A root spelled with a `.` segment or a doubled separator inside it -
+`.harness-config/./worktrees` - is refused with the one spelling to write, and so is a
+`sync.exclude` or `sync.neverTransfer` entry spelled that way: each is compared as written, by
+sync's lists and by `init`'s ignore rule, so the file system's reading of it would put the
+worktrees where nothing withholds or ignores them, and an entry would protect nothing.
 
 **The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>` for it and
 creates nothing there; `create-worktree` makes the directory the first time it needs it. It is
