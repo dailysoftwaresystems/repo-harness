@@ -344,6 +344,17 @@ internal static class HelpCommand
         builder.AppendLine("run in which some leg would run no step at all is refused before anything starts,");
         builder.AppendLine("naming the leg: it would pass having run nothing.");
         builder.AppendLine();
+        builder.AppendLine("  successPattern: <regular expression>   what the step's last line must print");
+        builder.AppendLine();
+        builder.AppendLine("A step passes when each of its lines exits 0; one that declares successPattern must");
+        builder.AppendLine("also have its last line print something the pattern matches, since a program that");
+        builder.AppendLine("exits 0 has not shown it did anything. The pattern is a .NET regular expression,");
+        builder.AppendLine("matched with ^ and $ at each line, against that line's standard output and standard");
+        builder.AppendLine("error read together, after secrets are redacted. One that does not compile, or that");
+        builder.AppendLine("is empty and so matches anything, is refused when the file is read. The earlier lines");
+        builder.AppendLine("of a run block answer with their exit codes alone: the witness belongs to the step,");
+        builder.AppendLine("and its last line finishing is its work being done.");
+        builder.AppendLine();
         builder.AppendLine("Names a run line may use");
         builder.AppendLine();
         builder.AppendLine("A run line is written for this tool, so a name in braces it cannot fill in is");

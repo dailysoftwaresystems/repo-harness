@@ -151,6 +151,26 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The runners topic names a step's successPattern, which line it is matched against, and which of
+    /// that line's streams.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhatAStepsSuccessPatternIsMatchedAgainst()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "successPattern: <regular expression>   what the step's last line must print",
+            "matched with ^ and $ at each line, against that line's standard output and standard",
+            "error read together, after secrets are redacted.",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_QuotesTheLimitsFromTheCode()
     {
