@@ -135,6 +135,200 @@ public sealed class SyncExclusionsReachTests
     }
 
     /// <summary>
+    /// What a sync.neverTransfer entry covers, and the worktrees root, are not searched: what they hold
+    /// is kept from every sync already, by an entry the configuration's author wrote, and each worktree
+    /// is a checkout of its own. Measured on a consumer's tree, nearly every directory lay in there, and a
+    /// search that went in spent its whole budget before it reached the rest, saying so on every sync.
+    /// Left out, the search finishes, and still names the entry a name outside them shows protects
+    /// nothing - never one whose name is found only in there.
+    /// </summary>
+    [Fact]
+    public void WhatAnotherEntryWithholds_IsNotSearched_SoTheSearchFinishes()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        for (var index = 0; index < 20; index++)
+        {
+            Directory.CreateDirectory(temp.Combine("build", $"b{index}"));
+            Directory.CreateDirectory(temp.Combine(".worktrees", $"w{index}", "node_modules"));
+        }
+
+        Directory.CreateDirectory(temp.Combine("build", "lib", ".secrets"));
+        Directory.CreateDirectory(temp.Combine("scripts", "a", "__pycache__"));
+
+        var exclusions = new SyncExclusions(
+            new SyncConfig { NeverTransfer = ["build", "__pycache__", ".secrets", "node_modules"] },
+            worktreesRoot: ".worktrees");
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            mostDirectoriesRead: 10,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(["__pycache__"], report.MatchingNothing);
+        Assert.Null(report.Incomplete);
+    }
+
+    /// <summary>
+    /// The harness's own directory is still searched, though git ignores most of it by design - a host's
+    /// directory under sshItems among it, as git lists it to a sync under init's own rules, or all of it
+    /// in a tree that ignores the whole directory - since a .secrets there is what this was written to
+    /// find. The worktrees root inside it, where it is by default, is not gone into, however many
+    /// directories its worktrees hold.
+    /// </summary>
+    [Theory]
+    [InlineData(".harness-config/sshItems/vps")]
+    [InlineData(".harness-config")]
+    public void TheHarnessDirectory_IsSearched_ButNotTheWorktreesRootInsideIt(string ignored)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        Directory.CreateDirectory(temp.Combine(".harness-config", "sshItems", "vps", ".secrets"));
+        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane", "node_modules"));
+
+        for (var index = 0; index < 20; index++)
+        {
+            Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane", $"src{index}"));
+        }
+
+        var exclusions = new SyncExclusions(
+            new SyncConfig { NeverTransfer = [".secrets", "node_modules"] },
+            worktreesRoot: ".harness-config/worktrees",
+            gitIgnored: [ignored, ".harness-config/worktrees"]);
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            mostDirectoriesRead: 10,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal([".secrets"], report.MatchingNothing);
+        Assert.Null(report.Incomplete);
+    }
+
+    /// <summary>
+    /// Where what is searched holds more directories than the search may read, it says so - never
+    /// "found none" - and says what it did not count.
+    /// </summary>
+    [Fact]
+    public void ASearchThatRunsOutOfDirectories_SaysSo_AndWhatItDidNotCount()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        for (var index = 0; index < 20; index++)
+        {
+            Directory.CreateDirectory(temp.Combine("src", $"s{index}"));
+        }
+
+        var exclusions = new SyncExclusions(new SyncConfig { NeverTransfer = [".secrets"] }, worktreesRoot: ".worktrees");
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            mostDirectoriesRead: 5,
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(report.MatchingNothing);
+        Assert.Equal(
+            $"more than 5 directories under '{temp.Path}' would have had to be read, though none a sync "
+            + "withholds is read outside the harness's own directory",
+            report.Incomplete);
+    }
+
+    /// <summary>
+    /// A name counts only where nothing the configuration writes covers it: an entry for any depth, as the
+    /// warning advises writing, and the worktrees root. Counted, the author who wrote **/.env as advised
+    /// would be told to write it on every sync.
+    /// </summary>
+    [Fact]
+    public void ANameTheConfigurationAlreadyCovers_DoesNotCount()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        temp.WriteFile(Path.Combine("services", "api", ".env"), "KEY=value\n");
+        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane"));
+
+        var exclusions = new SyncExclusions(
+            new SyncConfig { NeverTransfer = [".env", "**/.env", "worktrees"] },
+            worktreesRoot: ".harness-config/worktrees");
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(report.MatchingNothing);
+        Assert.Null(report.Incomplete);
+    }
+
+    /// <summary>
+    /// An entry covers its own path and nothing that shares its name deeper: build/ at the root is not
+    /// searched, while tools/build, which a sync carries, is - and a .secrets there counts.
+    /// </summary>
+    [Fact]
+    public void ADirectoryASyncCarries_IsSearched_ThoughAnEntryNamesItsNameAtTheRoot()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        Directory.CreateDirectory(temp.Combine("build"));
+        Directory.CreateDirectory(temp.Combine("tools", "build", ".secrets"));
+
+        var exclusions = new SyncExclusions(new SyncConfig { NeverTransfer = ["build", ".secrets"] }, worktreesRoot: ".worktrees");
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal([".secrets"], report.MatchingNothing);
+    }
+
+    /// <summary>
+    /// A directory git ignores outside the harness's own is not gone into - what it holds is generated or
+    /// fetched, and it is where a tree's size is - though its own name, seen from the directory holding
+    /// it, still counts.
+    /// </summary>
+    [Fact]
+    public void WhatGitIgnores_IsNotGoneInto_ThoughItsOwnNameCounts()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+
+        for (var index = 0; index < 20; index++)
+        {
+            Directory.CreateDirectory(temp.Combine("web", "node_modules", $"p{index}"));
+        }
+
+        temp.WriteFile(Path.Combine("web", "node_modules", "p0", ".env"), "KEY=value\n");
+
+        var exclusions = new SyncExclusions(
+            new SyncConfig { NeverTransfer = ["node_modules", ".env"] },
+            worktreesRoot: ".worktrees",
+            gitIgnored: ["web/node_modules"]);
+
+        var report = exclusions.RootedEntriesMatchingNothing(
+            harness.FileSystem,
+            temp.Path,
+            harness.Platform.PathComparison,
+            mostDirectoriesRead: 10,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(["node_modules"], report.MatchingNothing);
+        Assert.Null(report.Incomplete);
+    }
+
+    /// <summary>
     /// An entry already written for any depth is doing what it says, and a name that exists nowhere
     /// at all is not evidence of anything — neither is worth a line somebody has to read past.
     /// </summary>

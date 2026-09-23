@@ -1330,6 +1330,22 @@ directory here cannot drift apart.
   local `.env`, a virtual environment or an editor's cache never reaches a host, and the host's own
   copies of such things are left alone. `sync.exclude` names paths to withhold *in addition* to
   these.
+- **A `sync.neverTransfer` name that protects nothing is named.** An entry is rooted: `.secrets`
+  covers the root's and no other, so one absent from the root while the name exists deeper protects
+  nothing, and a reader takes it for protection. Before every sync the tree is searched for such
+  names, and each is named with the fix, `**/<name>`. A name counts only where nothing the
+  configuration writes covers it - not where an entry covers the path, the `**/<name>` the warning
+  asks for among them, and not in the worktrees root - or the author who followed the advice would
+  be told it again on every sync. The search goes where a sync goes, and into the harness's own
+  directory besides: never into what a sync withholds - what an entry covers, the worktrees root,
+  what git ignores, what `sync.exclude` names - though such a directory's own name is seen from the
+  one holding it, so a `node_modules` git ignores still counts. What lies inside is generated,
+  fetched or another checkout's, and it is where a tree's size is: on a consumer's tree 68,697 of
+  69,890 directories lay under what its entries name, and a search that went in spent its
+  20,000-directory budget before it reached most of the tree, and said so on every sync. The
+  harness's own directory is searched all the same, though git ignores most of it by design,
+  because a `.secrets` there is what the search was written to find. A search that still runs out
+  says so; it never reads as having found none.
 - **The copy gets `.harness-config/config.json`, and nothing else from that directory.** A leg
   placed on a host runs DssHarness there, and DssHarness in a directory holding no configuration
   refuses as not initialised — so without it the copy is a tree no leg can run in. The rest of the
