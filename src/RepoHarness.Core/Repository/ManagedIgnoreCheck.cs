@@ -11,8 +11,8 @@ namespace RepoHarness.Core.Repository;
 /// <param name="Probes">
 /// Paths the rule decides, relative to the tree's root with forward separators: the file the rule
 /// names, or <see cref="AnyName"/> inside the directory it rules on - and, where that directory holds
-/// directories of its own, a name inside one of those too: a rule re-including them puts what they
-/// hold back in git while the directory's own answer stays the block's.
+/// directories of its own, a name inside one of those too, <see cref="AnyDirectoryName"/>: a rule
+/// re-including them puts what they hold back in git while the directory's own answer stays the block's.
 /// </param>
 /// <param name="Ignores">Whether the rule keeps its probes out of git, rather than in it.</param>
 public sealed record ManagedIgnoreRule(string Rule, IReadOnlyList<string> Probes, bool Ignores)
@@ -20,13 +20,22 @@ public sealed record ManagedIgnoreRule(string Rule, IReadOnlyList<string> Probes
     /// <summary>The name a probe gives what a rule rules on without naming it.</summary>
     public const string AnyName = "dssharness-probe";
 
+    /// <summary>
+    /// The name a probe gives a directory it sits in that the rule does not name, apart from
+    /// <see cref="AnyName"/>, so that no probe is ever a directory above another. A scratch repository
+    /// makes every directory above a probe, as git takes each for one in the tree too; were a probe
+    /// among them, a rule ending in <c>/</c> would match it there, where in the tree it matches no path
+    /// but a directory.
+    /// </summary>
+    public const string AnyDirectoryName = "dssharness-folder";
+
     /// <summary><paramref name="probe"/> as a reader is shown it, a name the rule does not spell reading as &lt;any&gt;.</summary>
     /// <param name="probe">One of a rule's <see cref="Probes"/>.</param>
     public static string Shown(string probe)
     {
         ArgumentNullException.ThrowIfNull(probe);
 
-        return probe.Replace(AnyName, "<any>", StringComparison.Ordinal);
+        return probe.Replace(AnyName, "<any>", StringComparison.Ordinal).Replace(AnyDirectoryName, "<any>", StringComparison.Ordinal);
     }
 }
 
@@ -37,7 +46,9 @@ public sealed record ManagedIgnoreRule(string Rule, IReadOnlyList<string> Probes
 /// <param name="Paths">What it turns, each as <see cref="ManagedIgnoreRule.Shown"/> shows it.</param>
 /// <param name="Wins">
 /// Whether git follows it. A rule that wins undoes the block for those paths; one that loses does
-/// nothing there, because a rule after it decides them.
+/// nothing there, because another rule decides them - the block's own, one after it, one in an
+/// ignore file nearer the paths, or one excluding a directory above them in any ignore file, since git
+/// never looks inside an excluded directory.
 /// </param>
 /// <param name="Ignores">Whether the rule ignores the paths, where the block keeps them in git.</param>
 public sealed record ManagedIgnoreConflict(
@@ -57,7 +68,7 @@ public sealed record ManagedIgnoreUnanswered(string Path, string Why);
 /// <param name="Conflicts">Every rule that turns one of them the other way, the ones that win first, then in file and line order.</param>
 /// <param name="Unruled">
 /// Paths the block ignores and git does not, where git names no rule deciding them, neither in the
-/// tree nor in a scratch repository holding the tree's own ignore files along the way. Each as
+/// tree nor in a scratch repository holding the tree's own ignore files. Each as
 /// <see cref="ManagedIgnoreRule.Shown"/> shows it.
 /// </param>
 /// <param name="Unanswered">Paths git would not answer about, while it answered about the rest.</param>
@@ -85,18 +96,29 @@ public sealed record ManagedIgnoreFindings(
 /// block undoes the block there. git never names a re-include that matched a directory above the
 /// path, though - the path is then decided by no rule at all - and matches a rule ending in <c>/</c>
 /// only against a directory that exists. So where the tree's answer is no rule, the question goes to
-/// a scratch repository holding the tree's own ignore files along the path, with every directory
-/// above it made: there git names the rule re-including the nearest of them. A path git will not
-/// answer about - one beyond a symbolic link, which it never looks past - is said, and the rest are
-/// still answered.
+/// a scratch repository holding the tree's own ignore files, with every directory above the path
+/// made: there git names the rule re-including the nearest of them. A path git will not answer about
+/// - one beyond a symbolic link, which it never looks past - is said, and the rest are still answered.
 /// </para>
 /// <para>
 /// Asked of the tree's own <c>.gitignore</c> with the block taken out, in a scratch repository holding
 /// nothing else, git says which hand-written rule would decide each path on its own; one that would
-/// decide it the other way, where the tree's answer is the block's, does nothing there. A rule
+/// decide it the other way, where the tree's answer is the block's, is overruled there. A rule
 /// agreeing with the block is left alone whatever it spells: repeating the block changes nothing, and
 /// a broad rule such as <c>.env</c> that happens to cover a managed path is not a second copy of the
 /// block's rule for it.
+/// </para>
+/// <para>
+/// An overruled rule is named as doing nothing there only where nothing the harness keeps in git rests
+/// on it. Taken out of the tree's ignore files - its <c>.gitignore</c> files, its
+/// <c>.git/info/exclude</c> and the excludes file its configuration names - in scratch repositories
+/// asked with and without it, it must turn from kept to ignored no path the block rules on and no file
+/// the harness keeps in git, and so no directory one of those is in. An allowlist that excludes
+/// <c>/.harness-config/*</c>, or everything, re-includes each slot a placeholder is kept in - by the
+/// slot's name, or by <c>!*/</c> - and git never looks inside an excluded directory: that re-include is
+/// overruled for the slot's contents and needed for its placeholder, and is never told it does
+/// nothing; nor is one the harness's configuration, an action's own files or an anchor registry rests
+/// on. A re-include of a directory nothing excludes changes nothing, and is named.
 /// </para>
 /// </remarks>
 public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, IHostPlatform platform, IHarnessOutput output)
@@ -116,17 +138,24 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
     /// <param name="root">The tree's root, whose <c>.gitignore</c> holds the managed block.</param>
     /// <param name="content">That <c>.gitignore</c> as it now is.</param>
     /// <param name="rules">The block's rules, each with the paths it is asked about.</param>
+    /// <param name="kept">
+    /// The files the harness keeps in git - its configuration, each placeholder, each file of an action's
+    /// git keeps and a name standing for any action's, the anchor registries - relative to the tree's root
+    /// with forward separators: no rule one of them rests on is told it does nothing.
+    /// </param>
     /// <param name="cancellationToken">Stops the questions.</param>
     /// <exception cref="HarnessException">git could not answer, or its scratch repository could not be made.</exception>
     public async Task<ManagedIgnoreFindings> FindAsync(
         string root,
         string content,
         IReadOnlyList<ManagedIgnoreRule> rules,
+        IReadOnlyList<string> kept,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(content);
         ArgumentNullException.ThrowIfNull(rules);
+        ArgumentNullException.ThrowIfNull(kept);
 
         var asked = rules.SelectMany(rule => rule.Probes.Select(probe => (Rule: rule, Probe: probe))).ToList();
 
@@ -168,24 +197,41 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
 
         using var scratch = new ScratchDirectory(_fileSystem, "ignore", why => _output.Warn(CommandName, why));
 
+        // Asked of the tree only where a scratch repository holding its ignore files is made.
+        var excludes = new Lazy<Task<TreeExcludes>>(() => ExcludesAsync(root, cancellationToken));
+
         if (agreeing.Count > 0)
         {
             var alone = await HandWrittenAsync(scratch, content, [.. agreeing.Select(entry => entry.Probe)], cancellationToken)
                 .ConfigureAwait(false);
+            var overruled = agreeing.Zip(alone)
+                .Where(pair => pair.Second is { } own && own.Ignored != pair.First.Rule.Ignores)
+                .Select(pair => (pair.First.Rule, pair.First.Probe, Own: pair.Second!))
+                .ToList();
+            var needed = await NeededAsync(
+                    scratch,
+                    root,
+                    content,
+                    excludes,
+                    [.. overruled.Select(entry => entry.Own.Line).Distinct()],
+                    [.. asked.Select(entry => entry.Probe).Concat(kept).Distinct(StringComparer.Ordinal)],
+                    cancellationToken)
+                .ConfigureAwait(false);
 
-            foreach (var ((rule, probe), own) in agreeing.Zip(alone))
-            {
-                if (own is not null && own.Ignored != rule.Ignores)
-                {
-                    found.Add((own, rule, probe, Wins: false));
-                }
-            }
+            // Overruled for these paths, a rule does nothing there only where nothing the harness keeps
+            // rests on it: one it needs - an allowlist's re-include of the slot a placeholder is kept in
+            // - would be deleted on the strength of the note, and the placeholder with it.
+            found.AddRange(overruled
+                .Where(entry => !needed.Contains(entry.Own.Line))
+                .Select(entry => (entry.Own, entry.Rule, entry.Probe, Wins: false)));
         }
 
         if (unnamed.Count > 0)
         {
-            var reIncluded = await ReIncludedAsync(scratch, root, content, [.. unnamed.Select(entry => entry.Probe)], cancellationToken)
+            var probes = unnamed.Select(entry => entry.Probe).ToList();
+            var whole = await WholeAsync(scratch, "whole", root, content, await excludes.Value.ConfigureAwait(false), probes, cancellationToken)
                 .ConfigureAwait(false);
+            var reIncluded = await DecideAsync(scratch, whole, probes, cancellationToken).ConfigureAwait(false);
 
             foreach (var ((rule, probe), named) in unnamed.Zip(reIncluded))
             {
@@ -232,7 +278,7 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
         IReadOnlyList<string> probes,
         CancellationToken cancellationToken)
     {
-        var repository = await RepositoryAsync(scratch, "alone", GitIgnoreManager.WithoutManagedBlock(content), cancellationToken)
+        var repository = await RepositoryAsync(scratch, "alone", GitIgnoreManager.WithoutManagedBlock(content), null, cancellationToken)
             .ConfigureAwait(false);
 
         var decisions = await DecideAsync(scratch, repository, probes, cancellationToken).ConfigureAwait(false);
@@ -241,27 +287,91 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
     }
 
     /// <summary>
-    /// The rule re-including a directory above each probe, asked of a scratch repository holding the
-    /// tree's <c>.gitignore</c> and every <c>.gitignore</c> of its own along the way; <see langword="null"/>
-    /// where no such rule is there.
+    /// Of <paramref name="lines"/> of the tree's <c>.gitignore</c>, those something the harness keeps
+    /// rests on: taken out, each turns a path in <paramref name="paths"/> from kept to ignored - asked of
+    /// scratch repositories holding the tree's ignore files, with and without it.
     /// </summary>
     /// <remarks>
-    /// Those files outrank <c>.git/info/exclude</c> and every excludes file a configuration names, so a
-    /// re-include undoing the block is in one of them. One that is a link is left out, as git leaves
-    /// it out of the tree.
+    /// Only a path taken from git counts: one taking it out would put in git - a file <c>*</c> hid from
+    /// it - rested on nothing. A directory counts through the paths in it, as git answers a path below
+    /// an excluded directory as ignored: every directory the block rules on holds a file the harness
+    /// keeps, or is one the block excludes whatever else is written.
     /// </remarks>
-    private async Task<IReadOnlyList<IgnoreDecision?>> ReIncludedAsync(
+    private async Task<HashSet<int>> NeededAsync(
         ScratchDirectory scratch,
         string root,
         string content,
-        IReadOnlyList<string> probes,
+        Lazy<Task<TreeExcludes>> excludes,
+        IReadOnlyList<int> lines,
+        IReadOnlyList<string> paths,
         CancellationToken cancellationToken)
     {
-        var repository = await RepositoryAsync(scratch, "whole", content, cancellationToken).ConfigureAwait(false);
+        var needed = new HashSet<int>();
+
+        if (lines.Count == 0)
+        {
+            return needed;
+        }
+
+        var tree = await excludes.Value.ConfigureAwait(false);
+        var whole = await WholeAsync(scratch, "whole", root, content, tree, paths, cancellationToken).ConfigureAwait(false);
+        var without = await WholeAsync(scratch, "without", root, content, tree, paths, cancellationToken).ConfigureAwait(false);
+
+        MakeDirectories(scratch, whole, paths);
+        MakeDirectories(scratch, without, paths);
+
+        var with = await _git.ExplainIgnoredAsync(whole, paths, cancellationToken).ConfigureAwait(false);
+
+        foreach (var line in lines)
+        {
+            InScratch(scratch, () => _fileSystem.WriteAllTextAtomic(Path.Combine(without, GitIgnoreFileName), WithoutLine(content, line)));
+
+            var answers = await _git.ExplainIgnoredAsync(without, paths, cancellationToken).ConfigureAwait(false);
+
+            if (with.Zip(answers).Any(pair => !pair.First.Ignored && pair.Second.Ignored))
+            {
+                needed.Add(line);
+            }
+        }
+
+        return needed;
+    }
+
+    /// <summary><paramref name="content"/> with its line <paramref name="line"/>, counting from one, blanked, so every other keeps its number.</summary>
+    private static string WithoutLine(string content, int line)
+    {
+        var lines = content.Split('\n');
+
+        lines[line - 1] = string.Empty;
+
+        return string.Join('\n', lines);
+    }
+
+    /// <summary>
+    /// A scratch repository named <paramref name="name"/> holding the tree's ignore files: its
+    /// <c>.gitignore</c> as <paramref name="gitIgnore"/> gives it, every <c>.gitignore</c> of its own on
+    /// the way to each of <paramref name="paths"/>, and <paramref name="excludes"/>. Asked for again, it
+    /// is the same repository, with what the later paths need added.
+    /// </summary>
+    /// <remarks>
+    /// A nested file that is a link is left out, as git leaves it out of the tree. The files beside the
+    /// <c>.gitignore</c> files rank below them, and still decide a path none of them does - one a rule
+    /// being taken out leaves to them.
+    /// </remarks>
+    private async Task<string> WholeAsync(
+        ScratchDirectory scratch,
+        string name,
+        string root,
+        string gitIgnore,
+        TreeExcludes excludes,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var repository = await RepositoryAsync(scratch, name, gitIgnore, excludes, cancellationToken).ConfigureAwait(false);
 
         InScratch(scratch, () =>
         {
-            foreach (var directory in probes.SelectMany(Above).Distinct(StringComparer.Ordinal))
+            foreach (var directory in paths.SelectMany(Above).Distinct(StringComparer.Ordinal))
             {
                 var own = Path.Combine(root, directory, GitIgnoreFileName);
 
@@ -273,7 +383,49 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
             }
         });
 
-        return await DecideAsync(scratch, repository, probes, cancellationToken).ConfigureAwait(false);
+        return repository;
+    }
+
+    /// <summary>
+    /// The tree's ignore files beside its <c>.gitignore</c> files: its <c>.git/info/exclude</c> - its
+    /// main checkout's, for a worktree, as git reads it - and the excludes file its configuration names.
+    /// </summary>
+    /// <exception cref="HarnessException">git would not say where they are, or the first could not be read.</exception>
+    private async Task<TreeExcludes> ExcludesAsync(string root, CancellationToken cancellationToken)
+    {
+        var where = await _git.RunAsync(root, ["rev-parse", "--git-path", "info/exclude"], cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!where.Succeeded)
+        {
+            throw new HarnessException(HarnessExit.CommandFailed, $"git would not say where '{root}' keeps its info/exclude: {where.FailureMessage}");
+        }
+
+        var configured = await _git.RunAsync(root, ["config", "--path", "--get", "core.excludesFile"], cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        // git config exits 1 where the name is not set, which is no failure: git then reads its default
+        // excludes file, which every scratch repository reads as the tree does. Set to nothing, the name
+        // has git read no excludes file at all, not the default one, and each scratch repository is set so.
+        if (!configured.Succeeded && configured.ExitCode != 1)
+        {
+            throw new HarnessException(HarnessExit.CommandFailed, $"git would not say which excludes file '{root}' reads: {configured.FailureMessage}");
+        }
+
+        var info = Path.GetFullPath(Path.Combine(root, where.StandardOutput.Trim()));
+
+        try
+        {
+            return new TreeExcludes(
+                _fileSystem.FileExists(info) ? _fileSystem.ReadAllText(info) : null,
+                !configured.Succeeded ? null
+                : configured.StandardOutput.Trim() is { Length: > 0 } file ? Path.GetFullPath(Path.Combine(root, file))
+                : string.Empty);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new HarnessException(HarnessExit.Refused, $"'{info}' could not be read: {ex.Message.TrimEnd('.')}", ex);
+        }
     }
 
     /// <summary>
@@ -283,6 +435,9 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
     /// git never names for the path below, and one ending in <c>/</c> matches only once the directory
     /// exists. <see langword="null"/> where neither is there.
     /// </summary>
+    /// <remarks>
+    /// No probe is made a directory, as none is one in the tree: see <see cref="ManagedIgnoreRule.AnyDirectoryName"/>.
+    /// </remarks>
     private async Task<IReadOnlyList<IgnoreDecision?>> DecideAsync(
         ScratchDirectory scratch,
         string repository,
@@ -291,13 +446,7 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
     {
         var directories = probes.SelectMany(Above).Distinct(StringComparer.Ordinal).ToList();
 
-        InScratch(scratch, () =>
-        {
-            foreach (var directory in directories)
-            {
-                _fileSystem.CreateDirectory(Path.Combine(repository, directory));
-            }
-        });
+        MakeDirectories(scratch, repository, probes);
 
         var answers = await _git.ExplainIgnoredAsync(repository, [.. probes, .. directories], cancellationToken).ConfigureAwait(false);
         var byDirectory = directories.Zip(answers.Skip(probes.Count)).ToDictionary(pair => pair.First, pair => pair.Second, StringComparer.Ordinal);
@@ -314,20 +463,64 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
         static bool Named(IgnoreDecision decision) => decision is { Unanswered: null, Source: not null };
     }
 
-    /// <summary>A fresh repository in <paramref name="scratch"/>, named <paramref name="name"/>, whose <c>.gitignore</c> holds <paramref name="gitIgnore"/>.</summary>
-    private async Task<string> RepositoryAsync(ScratchDirectory scratch, string name, string gitIgnore, CancellationToken cancellationToken)
+    /// <summary>Makes every directory above each of <paramref name="paths"/> in the scratch repository at <paramref name="repository"/>.</summary>
+    private void MakeDirectories(ScratchDirectory scratch, string repository, IEnumerable<string> paths)
+        => InScratch(scratch, () =>
+        {
+            foreach (var directory in paths.SelectMany(Above).Distinct(StringComparer.Ordinal))
+            {
+                _fileSystem.CreateDirectory(Path.Combine(repository, directory));
+            }
+        });
+
+    /// <summary>
+    /// The repository in <paramref name="scratch"/> named <paramref name="name"/> - made the first time
+    /// it is asked for, with <paramref name="excludes"/> where given - whose <c>.gitignore</c> now holds
+    /// <paramref name="gitIgnore"/>.
+    /// </summary>
+    private async Task<string> RepositoryAsync(
+        ScratchDirectory scratch,
+        string name,
+        string gitIgnore,
+        TreeExcludes? excludes,
+        CancellationToken cancellationToken)
     {
         var repository = Path.Combine(scratch.Path, name);
 
-        InScratch(scratch, () => _fileSystem.CreateDirectory(repository));
-
-        var created = await _git.RunAsync(repository, ["init", "--quiet"], cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        if (!created.Succeeded)
+        if (!_fileSystem.DirectoryExists(Path.Combine(repository, ".git")))
         {
-            throw new HarnessException(
-                HarnessExit.CommandFailed,
-                $"Could not make a scratch repository to ask git about '{GitIgnoreFileName}': {created.FailureMessage}");
+            InScratch(scratch, () => _fileSystem.CreateDirectory(repository));
+
+            var created = await _git.RunAsync(repository, ["init", "--quiet"], cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (!created.Succeeded)
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"Could not make a scratch repository to ask git about '{GitIgnoreFileName}': {created.FailureMessage}");
+            }
+
+            if (excludes?.InfoExclude is { } info)
+            {
+                InScratch(scratch, () =>
+                {
+                    _fileSystem.CreateDirectory(Path.Combine(repository, ".git", "info"));
+                    _fileSystem.WriteAllTextAtomic(Path.Combine(repository, ".git", "info", "exclude"), info);
+                });
+            }
+
+            if (excludes?.ExcludesFile is { } file)
+            {
+                var set = await _git.RunAsync(repository, ["config", "core.excludesFile", file], cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!set.Succeeded)
+                {
+                    throw new HarnessException(
+                        HarnessExit.CommandFailed,
+                        $"Could not give a scratch repository the tree's excludes file '{file}': {set.FailureMessage}");
+                }
+            }
         }
 
         InScratch(scratch, () => _fileSystem.WriteAllTextAtomic(Path.Combine(repository, GitIgnoreFileName), gitIgnore));
@@ -362,4 +555,13 @@ public sealed class ManagedIgnoreCheck(IGitClient git, IFileSystem fileSystem, I
             yield return probe[..slash];
         }
     }
+
+    /// <summary>The tree's ignore files beside its <c>.gitignore</c> files.</summary>
+    /// <param name="InfoExclude">What its <c>.git/info/exclude</c> holds; <see langword="null"/> where it has none.</param>
+    /// <param name="ExcludesFile">
+    /// The excludes file its configuration names, as an absolute path; empty where its configuration sets
+    /// the name to nothing, so git reads none; <see langword="null"/> where the name is not set, so git
+    /// reads its default one.
+    /// </param>
+    private sealed record TreeExcludes(string? InfoExclude, string? ExcludesFile);
 }

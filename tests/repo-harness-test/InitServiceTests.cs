@@ -286,6 +286,7 @@ public sealed class InitServiceTests
             harness.VerifyGitService,
             harness.AnchorRegistryLocator,
             harness.ToolProvisionService,
+            git,
             new ManagedIgnoreCheck(git, harness.FileSystem, harness.Platform, harness.Output),
             harness.Platform);
 
@@ -448,7 +449,7 @@ public sealed class InitServiceTests
 
         Assert.Equal(
             "note    .gitignore line 3 ('!/.harness-config/sshItems/*') re-includes '.harness-config/sshItems/<any>', "
-            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; a later rule decides them, so this "
+            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; another rule decides them, so this "
             + "one does nothing there",
             note);
 

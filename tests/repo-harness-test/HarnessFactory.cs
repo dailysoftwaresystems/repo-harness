@@ -68,6 +68,7 @@ public sealed class HarnessFactory
             VerifyGitService,
             AnchorRegistryLocator,
             ToolProvisionService,
+            GitClient,
             new ManagedIgnoreCheck(GitClient, FileSystem, Platform, Output),
             Platform);
     }
