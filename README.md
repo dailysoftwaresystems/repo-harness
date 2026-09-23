@@ -31,7 +31,9 @@ DssHarness help           # reference material: exit codes, config, legs, layout
 
 Every CMake configure is asked which compilers it resolved, and each leg's line names them —
 `compiler: MSVC 19.51.36231 (C, CXX)` — so every verdict says which compiler produced it; a
-toolchain's `compilerId` fails a leg CMake configured with another.
+toolchain's `compilerId` fails a leg CMake configured with another. A language only a dependency's
+`project()` enables — C, where a C++ project fetches googletest — is identified from CMake's own
+record of it, because CMake's answer gives it no id.
 
 `init`'s `msvc` toolchain names the `visualStudio` developer environment, so an MSVC leg builds from
 a plain shell: the host that runs it runs Visual Studio's own `vcvarsall.bat` for the leg's processor

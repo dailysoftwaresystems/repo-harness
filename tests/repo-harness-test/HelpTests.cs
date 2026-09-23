@@ -196,7 +196,9 @@ public sealed partial class HelpTests
         foreach (var text in new[]
         {
             "block on later runs and leaving every other rule untouched. It then asks git which",
-            "overrules does nothing there.",
+            "overrules does nothing there - named only where taking it out would take from git",
+            "configuration, a placeholder, an action's files, an anchor registry - and no",
+            "the slot a placeholder is kept in is overruled for the slot's contents and needed",
             "init writes the tree it runs in, a worktree's own included",
         })
         {
@@ -205,8 +207,9 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
-    /// The legs topic says a toolchain names its compiler, and that a build directory is held to the
-    /// compiler it was configured with by the file it starts, not by its name.
+    /// The legs topic says a toolchain names its compiler, that a build directory is held to the
+    /// compiler it was configured with by the file it starts, not by its name, and where a language
+    /// only a subproject enables is identified.
     /// </summary>
     [Fact]
     public async Task LegsTopic_SaysAToolchainNamesItsCompiler_AndHowABuildDirectoryIsHeldToIt()
@@ -219,6 +222,8 @@ public sealed partial class HelpTests
         Assert.Contains("and by its name only where that PATH holds", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("A build CMake configured with another compiler fails before anything is built with", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("loaded: CMakeFiles/<version>/CMake<language>Compiler.cmake - where the record names", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("the compiler the answer names and is no newer than the answer", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]

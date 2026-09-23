@@ -136,8 +136,36 @@ at once, with the line it concerns where the parser knows it:
   leg a host ran is named once on the machine that reports it. A toolchain's `compilerId` -
   `{"C": "MSVC", "CXX": "MSVC"}`, in CMake's own ids - holds the build to it: a compiler CMake
   configured that contradicts it fails the leg before anything is built, and a declared language
-  CMake named no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
-  answer, and a misspelled language is never answered. `test --no-build` names what its build
+  CMake identified no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
+  answer, and a misspelled language is never answered. The answer holds what the top-level
+  directory holds, so a language only a subdirectory enables - C, where a C++ project fetches
+  googletest, whose own `project()` declares C and C++ - comes with no id: with its compiler's
+  path where CMake caches one, and under a Visual Studio generator, which caches none, with no
+  path either. A leg declaring the C it built with was left `unwitnessed` while its configure log
+  named that compiler. CMake keeps each language's identification once for the whole build
+  directory, in `CMakeFiles/<version>/CMake<language>Compiler.cmake`, which enabling the language
+  in any directory loads, and the language is identified from that record. The record is held to
+  the answer, because it can be a later configure's: one that identifies the compiler again -
+  given another, or run with `--fresh` - rewrites it, and one that then fails writes no answer,
+  which leaves the last one's beside a record of a compiler that built nothing there. Read that
+  way, `test --no-build` named a compiler its binaries were not built with. So the record must name
+  the compiler the answer names, where the answer names one, and must have been written no later
+  than the answer, which a configure writes after every record it writes; a record nothing ties to
+  the answer identifies nothing, and the language is `unwitnessed`, with why. The answer keeps a
+  toolchain file's value as written, where the record holds what CMake's
+  `Modules/CMakeDetermineCompiler.cmake` made of it, so the two are compared as that: a list's
+  first item - `gcc.exe;-m64` names `gcc.exe` - a path tidied of `.`, `..` and doubled separators,
+  with forward slashes, and a name alone found as a program, with `.com` or `.exe` after it on
+  Windows. Each tie leaves a case to the other: the time alone tells a later record apart where the
+  answer names no compiler, as under Visual Studio, where it names one by its name alone, which a
+  program of that name elsewhere answers to, and where the same file was replaced in place; the
+  compiler alone does where a clock stepped back since the answer was written. Measured with CMake
+  3.29 and 4.3: MSVC through Ninja and through Visual Studio 18 2026, gcc on Windows and on Linux,
+  toolchain files naming the compiler each of those ways, and a configure that failed after
+  identifying the compiler again. A language
+  CMake identified nowhere, such as the resource compiler it lists on Windows, is left out of the
+  compilers, and a toolchain declaring one is told what CMake's answer named for it and why that
+  is no id, never that CMake named none. `test --no-build` names what its build
   directory was last configured with, and holds it to the same `compilerId`: binaries a compiler
   nobody chose produced are failed rather than tested. A runner that does not build names none.
 - **A toolchain may name a developer environment**, declared once under `developerEnvironments`,
@@ -218,7 +246,26 @@ block, a nested `.gitignore`, or a whole-directory rule such as `.env` - which t
 `runner/.env` directory, from which git re-includes no placeholder. The same paths are then asked of
 the tree's own `.gitignore` with the block blanked out, in a scratch repository holding nothing
 else; a hand-written rule that would decide one the other way, where the tree's answer is the
-block's, is named as doing nothing there. A rule agreeing with the block is not named at all: it
+block's, is named as doing nothing there - but only where nothing the harness keeps in git rests
+on it. Taken out of the tree's ignore files - its `.gitignore` files, its `.git/info/exclude` and
+the excludes file its configuration names - in scratch repositories asked with and without it, such
+a rule must turn from kept to ignored no path the block rules on, none of the harness's own files -
+its configuration, each placeholder, each file git keeps in an action and a name standing for any
+action's, the anchor registries git tracks - and no directory one of those is in; where it would, it
+is not named. An action's own files are listed as git keeps them, because a rule can rest on how one
+is named: a re-include of the actions directory after the `[Bb]in/` Visual Studio's template
+ignores keeps an action's helper in its `bin`, which no name made up for an action's file shows. An allowlist that excludes
+`/.harness-config/*`, or everything, re-includes each slot the block keeps a placeholder in - by the
+slot's name, or by `!*/` - and git never looks inside an excluded directory for the placeholder:
+that re-include is overruled for the slot's contents and needed for the placeholder, and the note
+once told a consumer to delete it, which loses the placeholder the block itself re-includes. A rule
+keeping an action's files, or the configuration, counts the same way, whatever the block rules on
+beside them, and so does one needed only because `.git/info/exclude` excludes what it re-includes.
+Only what taking a rule out removes from git counts: a file `*` hid, which taking it out would put
+in git, rests on nothing. A re-include of a directory nothing excludes changes nothing, and is
+named. No path the check asks about is made a directory in a scratch repository unless git takes
+it for one in the tree too - a directory above a probe - so a rule ending in `/` matches there only
+what it matches in the tree. A rule agreeing with the block is not named at all: it
 changes nothing, and a broad rule covering a managed path is not a copy of the block's rule. The
 spelling comparison this replaced named rules that match nothing as overriding the block, and
 could not see a rule reaching a managed path through a wildcard.
@@ -249,6 +296,16 @@ with and warned about on every command; a default in its place would drop every 
 runner main declares. What git ignores - connection data, runner values and secrets, the lock - is
 read from the main checkout whichever tree asks, and `init` in a worktree says so rather than
 creating any of it there.
+
+The main checkout is the one git's `worktree list` names first, which it names for the git
+directory its worktrees share: that directory's parent, where it is called `.git`, and the directory
+itself otherwise - no checkout at all. A submodule's is named so, kept under its superproject's
+`.git/modules`, and `init` in a submodule once took it for a worktree of that directory, where its
+connection data, runs and worktrees would have been looked for. Where git names a git directory, the
+main checkout is the one that directory's configuration records, as a submodule's `core.worktree`
+does; one made with `--separate-git-dir` records none, and is then the tree asked from, where git
+lists that as no linked worktree. From a linked worktree of such a checkout, nothing says which
+checkout is the main one, and the command is refused, saying how to record it.
 
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
