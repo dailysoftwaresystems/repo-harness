@@ -264,23 +264,16 @@ public sealed class PhaseRunnerTests
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
-        var wallBefore = DateTimeOffset.UtcNow;
-        var clock = Stopwatch.StartNew();
+        using var clock = new ClockWatch();
 
         var result = await Runner(factory).RunAsync(
             Child("echo-args", temp.Combine("clock.log"), "quick") with { ClockStepToleranceMilliseconds = 2000 },
             TestContext.Current.CancellationToken);
 
-        // What this machine's own clock did around the phase, read as the phase reads it. A virtual
-        // machine's is not always honest: WSL's wall clock counts the time its VM was paused and its
-        // monotonic clock does not - measured, a run of this test that took 26 seconds instead of a
-        // fraction of one, whose phase rightly recorded the step. On such a clock this case is not the
-        // one under test.
-        var around = (DateTimeOffset.UtcNow - wallBefore - clock.Elapsed).Duration();
-
-        Assert.SkipWhen(
-            around >= TimeSpan.FromSeconds(1),
-            $"This machine's clock moved by {around} while the phase ran, so the phase did not run on an honest clock.");
+        // What this machine's own clock did while the phase ran. On a clock that stepped, the phase
+        // rightly records the step - measured in WSL, a run that took 26 seconds instead of a fraction of
+        // one - and this case is not the one under test.
+        Assert.SkipUnless(clock.Held, $"The phase did not run on an honest clock: {clock.Seen}.");
 
         // Both readings cover the same window, so on a machine whose clock is honest they agree. The
         // other side of this rule, a clock that steps mid-phase, is the next test, which steps the

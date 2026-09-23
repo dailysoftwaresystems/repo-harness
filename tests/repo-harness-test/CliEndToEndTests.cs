@@ -1073,6 +1073,11 @@ public sealed partial class CliEndToEndTests
         using var temp = new TempDirectory();
         var token = TestContext.Current.CancellationToken;
 
+        // Real builds, which a build system orders by the times of the files they write, and records
+        // held to answers by theirs: on a clock that steps, what they do proves nothing here. Watched
+        // from before the files they build from are written.
+        using var clock = new ClockWatch();
+
         await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
         {
             Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Generator = "Ninja", Env = { ["CC"] = compiler } } },
@@ -1096,36 +1101,43 @@ public sealed partial class CliEndToEndTests
         temp.WriteFile("main.c", "int main(void) { return 0; }\n");
         temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"), "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
 
-        var build = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
-        var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
-
-        // The runner builds again, asking the compiler its version first: what it says, put together as
-        // CMake puts a version together, is what CMake recorded, or the directory would start from clean
-        // for a compiler that never changed.
-        AskedEachCompiler(run.StandardError, RecordsOf(run), "native", "C");
-
-        // A record marked unordered, as an earlier version marked one, starts the next build from clean,
-        // and a runner that built first says so on its leg's line, as a build's own line does.
-        Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
-
-        var rerun = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
-
-        using (var rerunDocument = JsonDocument.Parse(rerun.StandardOutput))
+        try
         {
-            Assert.Contains(
-                Assert.Single(rerunDocument.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("timingNotes").EnumerateArray(),
-                note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
+            var build = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+            var run = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            // The runner builds again, asking the compiler its version first: what it says, put together as
+            // CMake puts a version together, is what CMake recorded, or the directory would start from clean
+            // for a compiler that never changed.
+            AskedEachCompiler(run.StandardError, RecordsOf(run), "native", "C");
+
+            // A record marked unordered, as an earlier version marked one, starts the next build from clean,
+            // and a runner that built first says so on its leg's line, as a build's own line does.
+            Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
+
+            var rerun = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            using (var rerunDocument = JsonDocument.Parse(rerun.StandardOutput))
+            {
+                Assert.Contains(
+                    Assert.Single(rerunDocument.RootElement.GetProperty("legs").EnumerateArray()).GetProperty("timingNotes").EnumerateArray(),
+                    note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
+            }
+
+            foreach (var result in new[] { build, run })
+            {
+                using var document = JsonDocument.Parse(result.StandardOutput);
+                var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+                var configured = Assert.Single(leg.GetProperty("compilers").EnumerateArray());
+
+                Assert.Equal("C", configured.GetProperty("language").GetString());
+                Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
+                Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
+            }
         }
-
-        foreach (var result in new[] { build, run })
+        catch (Exception ex) when (!clock.Held)
         {
-            using var document = JsonDocument.Parse(result.StandardOutput);
-            var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
-            var configured = Assert.Single(leg.GetProperty("compilers").EnumerateArray());
-
-            Assert.Equal("C", configured.GetProperty("language").GetString());
-            Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
-            Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
+            Assert.Skip($"Its builds did not run on an honest clock - {clock.Seen}: {ex.Message}");
         }
     }
 
@@ -1153,6 +1165,11 @@ public sealed partial class CliEndToEndTests
 
         using var temp = new TempDirectory();
         var token = TestContext.Current.CancellationToken;
+
+        // Real builds, which a build system orders by the times of the files they write, and records
+        // held to answers by theirs: on a clock that steps, what they do proves nothing here. Watched
+        // from before the files they build from are written.
+        using var clock = new ClockWatch();
 
         HarnessConfig Config(params (string Language, string Id)[] declared)
         {
@@ -1207,70 +1224,77 @@ public sealed partial class CliEndToEndTests
         temp.WriteFile(Path.Combine("dependency", "CMakeLists.txt"), "project(dependency)\nadd_library(dependency STATIC dependency.cpp)\n");
         temp.WriteFile(Path.Combine("dependency", "dependency.cpp"), "int dependency() { return 0; }\n");
 
-        var (named, said, _) = await BuildAsync();
-        var ids = named.GetProperty("compilers").EnumerateArray().ToDictionary(
-            compiler => compiler.GetProperty("language").GetString()!,
-            compiler => compiler.GetProperty("id").GetString()!);
+        try
+        {
+            var (named, said, _) = await BuildAsync();
+            var ids = named.GetProperty("compilers").EnumerateArray().ToDictionary(
+                compiler => compiler.GetProperty("language").GetString()!,
+                compiler => compiler.GetProperty("id").GetString()!);
 
-        Assert.Equal("passed", named.GetProperty("verdict").GetString());
-        Assert.True(ids.ContainsKey("C") && ids.ContainsKey("CXX"), said);
-        Assert.All(ids.Values, id => Assert.False(string.IsNullOrEmpty(id)));
+            Assert.Equal("passed", named.GetProperty("verdict").GetString());
+            Assert.True(ids.ContainsKey("C") && ids.ContainsKey("CXX"), said);
+            Assert.All(ids.Values, id => Assert.False(string.IsNullOrEmpty(id)));
 
-        harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
+            harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
 
-        var (held, heldSaid, heldRecords) = await BuildAsync();
+            var (held, heldSaid, heldRecords) = await BuildAsync();
 
-        // Both compilers asked their versions as this build began, C's from the record alone: each is
-        // what CMake recorded, or the build would have started from clean for a compiler that never changed.
-        AskedEachCompiler(heldSaid, heldRecords, "native", "C", "CXX");
+            // Both compilers asked their versions as this build began, C's from the record alone: each is
+            // what CMake recorded, or the build would have started from clean for a compiler that never changed.
+            AskedEachCompiler(heldSaid, heldRecords, "native", "C", "CXX");
 
-        Assert.True(held.GetProperty("verdict").GetString() == "passed", heldSaid);
+            Assert.True(held.GetProperty("verdict").GetString() == "passed", heldSaid);
 
-        harness.WriteConfig(temp.Path, Config(("C", "NoSuchCompiler"), ("CXX", ids["CXX"])));
+            harness.WriteConfig(temp.Path, Config(("C", "NoSuchCompiler"), ("CXX", ids["CXX"])));
 
-        var (contradicted, _, _) = await BuildAsync();
+            var (contradicted, _, _) = await BuildAsync();
 
-        Assert.Equal("failed", contradicted.GetProperty("verdict").GetString());
-        Assert.Contains($"C with {ids["C"]}", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
-        Assert.Contains("not NoSuchCompiler", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            Assert.Equal("failed", contradicted.GetProperty("verdict").GetString());
+            Assert.Contains($"C with {ids["C"]}", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            Assert.Contains("not NoSuchCompiler", contradicted.GetProperty("detail").GetString(), StringComparison.Ordinal);
 
-        harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
+            harness.WriteConfig(temp.Path, Config(("C", ids["C"]), ("CXX", ids["CXX"])));
 
-        // A record marked unordered starts the next build from clean, and a test run that built first
-        // says so on its leg's line, as a build's own line does.
-        Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
+            // A record marked unordered starts the next build from clean, and a test run that built first
+            // says so on its leg's line, as a build's own line does.
+            Unordered(temp.Combine("build", $"{platform.Processor}-cc-debug"));
 
-        var (rebuiltTested, rebuiltSaid, _) = await RunAsync("test");
+            var (rebuiltTested, rebuiltSaid, _) = await RunAsync("test");
 
-        Assert.True(rebuiltTested.GetProperty("verdict").GetString() == "passed", rebuiltSaid);
-        Assert.Contains(
-            rebuiltTested.GetProperty("timingNotes").EnumerateArray(),
-            note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
+            Assert.True(rebuiltTested.GetProperty("verdict").GetString() == "passed", rebuiltSaid);
+            Assert.Contains(
+                rebuiltTested.GetProperty("timingNotes").EnumerateArray(),
+                note => note.GetString()!.StartsWith("rebuilt from clean: an unordered build", StringComparison.Ordinal));
 
-        var (tested, testedSaid, _) = await RunAsync("test", "--no-build");
+            var (tested, testedSaid, _) = await RunAsync("test", "--no-build");
 
-        Assert.True(tested.GetProperty("verdict").GetString() == "passed", testedSaid);
-        Assert.Contains(
-            tested.GetProperty("compilers").EnumerateArray(),
-            compiler => compiler.GetProperty("language").GetString() == "C" && compiler.GetProperty("id").GetString() == ids["C"]);
+            Assert.True(tested.GetProperty("verdict").GetString() == "passed", testedSaid);
+            Assert.Contains(
+                tested.GetProperty("compilers").EnumerateArray(),
+                compiler => compiler.GetProperty("language").GetString() == "C" && compiler.GetProperty("id").GetString() == ids["C"]);
 
-        var failed = await harness.ProcessRunner.RunAsync(
-            new ProcessRequest
-            {
-                FileName = programs["cmake"]!,
-                Arguments = ["--fresh", "-S", temp.Path, "-B", temp.Combine("build", $"{platform.Processor}-cc-debug"), "-G", "Ninja", $"-DCMAKE_MAKE_PROGRAM={programs["ninja"]}", "-DFAIL=ON"],
-                Environment = new Dictionary<string, string?>(StringComparer.Ordinal) { ["CC"] = c, ["CXX"] = cxx },
-                AppendToPath = [.. programs.Values.Select(found => Path.GetDirectoryName(found)!).Distinct(StringComparer.Ordinal)],
-            },
-            token);
+            var failed = await harness.ProcessRunner.RunAsync(
+                new ProcessRequest
+                {
+                    FileName = programs["cmake"]!,
+                    Arguments = ["--fresh", "-S", temp.Path, "-B", temp.Combine("build", $"{platform.Processor}-cc-debug"), "-G", "Ninja", $"-DCMAKE_MAKE_PROGRAM={programs["ninja"]}", "-DFAIL=ON"],
+                    Environment = new Dictionary<string, string?>(StringComparer.Ordinal) { ["CC"] = c, ["CXX"] = cxx },
+                    AppendToPath = [.. programs.Values.Select(found => Path.GetDirectoryName(found)!).Distinct(StringComparer.Ordinal)],
+                },
+                token);
 
-        Assert.True(failed.ExitCode != 0, $"the configure meant to fail passed: {failed.StandardOutput}");
+            Assert.True(failed.ExitCode != 0, $"the configure meant to fail passed: {failed.StandardOutput}");
 
-        var (untied, untiedSaid, _) = await RunAsync("test", "--no-build");
+            var (untied, untiedSaid, _) = await RunAsync("test", "--no-build");
 
-        Assert.True(untied.GetProperty("verdict").GetString() == "unwitnessed", untiedSaid);
-        Assert.Contains("CMake identified none for it", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
-        Assert.Contains("was written after that answer", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            Assert.True(untied.GetProperty("verdict").GetString() == "unwitnessed", untiedSaid);
+            Assert.Contains("CMake identified none for it", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
+            Assert.Contains("was written after that answer", untied.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (!clock.Held)
+        {
+            Assert.Skip($"Its builds did not run on an honest clock - {clock.Seen}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -1312,6 +1336,11 @@ public sealed partial class CliEndToEndTests
             "This machine has no CMake or no Ninja in the environment Visual Studio sets up.");
 
         using var temp = new TempDirectory();
+
+        // Real builds, which a build system orders by the times of the files they write, and records
+        // held to answers by theirs: on a clock that steps, what they do proves nothing here. Watched
+        // from before the files they build from are written.
+        using var clock = new ClockWatch();
 
         await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
         {
@@ -1374,46 +1403,53 @@ public sealed partial class CliEndToEndTests
         temp.WriteFile("stub.cpp", "static_assert(sizeof(int) >= 2, \"int is wide enough\");\n");
         temp.WriteFile("holds.cpp", "#include \"held.h\"\nint holds_too() { return HELD; }\n");
 
-        var build = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
-
-        Assert.True(build.ExitCode == HarnessExit.Success, build.StandardError);
-
-        using var document = JsonDocument.Parse(build.StandardOutput);
-        var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
-        var environment = leg.GetProperty("developerEnvironment");
-
-        Assert.Equal("passed", leg.GetProperty("verdict").GetString());
-
-        // Ten objects: three of the program, and a precompiled header's object and its units in each
-        // language. Seven record nothing, each legitimately: two include nothing ninja keeps, and five
-        // are built from a precompiled header.
-        Assert.Equal("10 object(s) read, 7 excused", leg.GetProperty("detail").GetString());
-        Assert.All(leg.GetProperty("compilers").EnumerateArray(), compiler => Assert.Equal("MSVC", compiler.GetProperty("id").GetString()));
-        Assert.Equal(["C", "CXX"], leg.GetProperty("compilers").EnumerateArray().Select(compiler => compiler.GetProperty("language").GetString()).Order());
-        Assert.Equal("visualStudio", environment.GetProperty("name").GetString());
-        Assert.Equal(found.InstallationPath, environment.GetProperty("installationPath").GetString());
-        Assert.Equal(setUp.Fact!.ToolsVersion, environment.GetProperty("toolsVersion").GetString());
-        Assert.Contains("developer environment: visualStudio (Visual Studio ", build.StandardError, StringComparison.Ordinal);
-
-        // Built again, each compiler asked its version first through the environment Visual Studio sets
-        // up: what cl says, put together as CMake puts MSVC's version together, is what CMake recorded, or
-        // the directory would start from clean for a compiler that never changed.
-        var again = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
-
-        Assert.True(again.ExitCode == HarnessExit.Success, again.StandardError);
-        AskedEachCompiler(again.StandardError, RecordsOf(again), "msvc", "C", "CXX");
-
-        foreach (var command in new[] { new[] { "test", "--no-build" }, ["run", "probe"] })
+        try
         {
-            var result = await CliRunner.RunAsync([.. command, "--legs", "msvc", "--json", "-C", temp.Path], token);
+            var build = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
 
-            Assert.True(result.ExitCode == HarnessExit.Success, result.StandardError);
+            Assert.True(build.ExitCode == HarnessExit.Success, build.StandardError);
 
-            using var answered = JsonDocument.Parse(result.StandardOutput);
-            var line = Assert.Single(answered.RootElement.GetProperty("legs").EnumerateArray());
+            using var document = JsonDocument.Parse(build.StandardOutput);
+            var leg = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+            var environment = leg.GetProperty("developerEnvironment");
 
-            Assert.Equal("passed", line.GetProperty("verdict").GetString());
-            Assert.Equal("visualStudio", line.GetProperty("developerEnvironment").GetProperty("name").GetString());
+            Assert.Equal("passed", leg.GetProperty("verdict").GetString());
+
+            // Ten objects: three of the program, and a precompiled header's object and its units in each
+            // language. Seven record nothing, each legitimately: two include nothing ninja keeps, and five
+            // are built from a precompiled header.
+            Assert.Equal("10 object(s) read, 7 excused", leg.GetProperty("detail").GetString());
+            Assert.All(leg.GetProperty("compilers").EnumerateArray(), compiler => Assert.Equal("MSVC", compiler.GetProperty("id").GetString()));
+            Assert.Equal(["C", "CXX"], leg.GetProperty("compilers").EnumerateArray().Select(compiler => compiler.GetProperty("language").GetString()).Order());
+            Assert.Equal("visualStudio", environment.GetProperty("name").GetString());
+            Assert.Equal(found.InstallationPath, environment.GetProperty("installationPath").GetString());
+            Assert.Equal(setUp.Fact!.ToolsVersion, environment.GetProperty("toolsVersion").GetString());
+            Assert.Contains("developer environment: visualStudio (Visual Studio ", build.StandardError, StringComparison.Ordinal);
+
+            // Built again, each compiler asked its version first through the environment Visual Studio sets
+            // up: what cl says, put together as CMake puts MSVC's version together, is what CMake recorded, or
+            // the directory would start from clean for a compiler that never changed.
+            var again = await CliRunner.RunAsync(["build", "--legs", "msvc", "--json", "-C", temp.Path], token);
+
+            Assert.True(again.ExitCode == HarnessExit.Success, again.StandardError);
+            AskedEachCompiler(again.StandardError, RecordsOf(again), "msvc", "C", "CXX");
+
+            foreach (var command in new[] { new[] { "test", "--no-build" }, ["run", "probe"] })
+            {
+                var result = await CliRunner.RunAsync([.. command, "--legs", "msvc", "--json", "-C", temp.Path], token);
+
+                Assert.True(result.ExitCode == HarnessExit.Success, result.StandardError);
+
+                using var answered = JsonDocument.Parse(result.StandardOutput);
+                var line = Assert.Single(answered.RootElement.GetProperty("legs").EnumerateArray());
+
+                Assert.Equal("passed", line.GetProperty("verdict").GetString());
+                Assert.Equal("visualStudio", line.GetProperty("developerEnvironment").GetProperty("name").GetString());
+            }
+        }
+        catch (Exception ex) when (!clock.Held)
+        {
+            Assert.Skip($"Its builds did not run on an honest clock - {clock.Seen}: {ex.Message}");
         }
     }
 
