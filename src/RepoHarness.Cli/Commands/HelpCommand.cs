@@ -1052,6 +1052,8 @@ internal static class HelpCommand
         builder.AppendLine("  - the build before it cannot be trusted: a phase spanned a clock step, the inputs");
         builder.AppendLine("    moved while it ran, something else used the directory, or an input could not");
         builder.AppendLine("    be read");
+        builder.AppendLine("  - a compiler CMake identified is not what is at its path now: CMake identifies a");
+        builder.AppendLine("    compiler once, so one updated in place is never identified again");
         builder.AppendLine("  - an input that changed since that build began is dated no later than the newest");
         builder.AppendLine("    file it left, which a build system ordering dates would miss; the line names");
         builder.AppendLine("    the input, that file and both dates");

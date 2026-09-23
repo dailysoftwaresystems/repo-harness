@@ -12,6 +12,27 @@ namespace RepoHarness.Core.Build;
 /// <param name="Version">The compiler's version as CMake reports it; empty where it reported none.</param>
 public sealed record CompilerFact(string Language, string Id, string Version);
 
+/// <summary>
+/// A compiler as CMake's record of identifying it names it: what every configure of the build directory
+/// after the first builds with, since CMake identifies a cached compiler once.
+/// </summary>
+/// <param name="Language">The language, as CMake names it: <c>C</c> or <c>CXX</c>.</param>
+/// <param name="Id">CMake's id for the compiler, such as <c>MSVC</c> or <c>GNU</c>; empty where it identified none.</param>
+/// <param name="Version">The version CMake identified it as; empty where it recorded none.</param>
+/// <param name="Program">The compiler CMake runs: the whole path its record names, or empty where it names none.</param>
+/// <param name="Arguments">
+/// The words CMake runs it with before any of its own - the compiler a launcher such as ccache is given,
+/// where the launcher is what was named - as the record keeps them.
+/// </param>
+/// <param name="MsvcOptions">Whether it takes MSVC's options, as cl and clang-cl do, rather than GCC's.</param>
+public sealed record IdentifiedCompiler(
+    string Language,
+    string Id,
+    string Version,
+    string Program,
+    IReadOnlyList<string> Arguments,
+    bool MsvcOptions);
+
 /// <summary>What CMake said about the compilers it configured a build with.</summary>
 /// <param name="Compilers">One per language it identified a compiler for.</param>
 /// <param name="Unread">
@@ -283,9 +304,7 @@ public sealed partial class CMakeToolchainReader(IFileSystem fileSystem)
             var answeredAt = _fileSystem.LastWriteTimeUtc(indexFile);
 
             // The version that answered, under which CMake keeps its record of each language it identified.
-            var version = indexDocument.RootElement.TryGetProperty("cmake", out var cmake) && cmake.TryGetProperty("version", out var cmakeVersion)
-                ? Text(cmakeVersion, "string")
-                : null;
+            var version = VersionIn(indexDocument);
 
             if (!indexDocument.RootElement.TryGetProperty("reply", out var reply)
                 || !reply.TryGetProperty("toolchains-v1", out var answer))
@@ -359,6 +378,92 @@ public sealed partial class CMakeToolchainReader(IFileSystem fileSystem)
     }
 
     /// <summary>
+    /// The C and C++ compilers the next configure of <paramref name="buildDirectory"/> builds with, as
+    /// CMake's records of identifying them name them, under the version of CMake that last answered
+    /// there; and, for any record that could not be read, why, to end a sentence.
+    /// </summary>
+    /// <param name="buildDirectory">The build directory.</param>
+    /// <remarks>
+    /// CMake identifies a cached compiler once, when the directory is first configured, and every
+    /// configure after that loads the record: what it names is what builds there, whatever is at its
+    /// path now. A directory no configure has answered in comes back with none, as does a language whose
+    /// record is not there: nothing was identified that a configure would load. A compiler CMake could
+    /// not identify comes back as recorded, with an empty id and version: which compilers can be asked
+    /// anything is the asker's to decide, and one of no id it knows is one it never asks, so it is never
+    /// one that could not be read. A record missing a line CMake always writes is one that could not.
+    /// </remarks>
+    public (IReadOnlyList<IdentifiedCompiler> Compilers, IReadOnlyList<string> Unread) Identified(string buildDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(buildDirectory);
+
+        string? version;
+
+        try
+        {
+            version = Answers(buildDirectory)
+                .Where(name => name.StartsWith(IndexPrefix, StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal)
+                .LastOrDefault() is { } index
+                ? VersionThatAnswered(Path.Combine(Relative(buildDirectory, ReplyRelativeDirectory), index))
+                : null;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            return ([], [$"CMake's file API answer could not be read: {ex.Message.TrimEnd('.')}"]);
+        }
+
+        if (version is null)
+        {
+            return ([], []);
+        }
+
+        var compilers = new List<IdentifiedCompiler>();
+        var unread = new List<string>();
+
+        foreach (var language in new[] { "C", "CXX" })
+        {
+            var record = Path.Combine(buildDirectory, "CMakeFiles", version, $"CMake{language}Compiler.cmake");
+
+            try
+            {
+                if (!_fileSystem.FileExists(record))
+                {
+                    continue;
+                }
+
+                var settings = Settings(record);
+
+                string? Setting(string suffix) => settings.GetValueOrDefault($"CMAKE_{language}_COMPILER{suffix}");
+
+                // CMake writes these three lines in every such record, each empty where it identified nothing:
+                // one missing is a record CMake did not write whole, and none of it can be relied on.
+                if (Setting(string.Empty) is not { } program || Setting("_ID") is not { } id || Setting("_VERSION") is not { } identified)
+                {
+                    unread.Add($"'{record}' lacks a line CMake writes in every record of a compiler: its path, id or version, for {language}");
+                    continue;
+                }
+
+                // Recorded from CMake 3.14 on, for every compiler; MSVC's own takes its options before then.
+                var variant = Setting("_FRONTEND_VARIANT") ?? string.Empty;
+
+                compilers.Add(new IdentifiedCompiler(
+                    language,
+                    id,
+                    identified,
+                    program,
+                    (Setting("_ARG1") ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries),
+                    variant.Length > 0 ? variant == "MSVC" : id == "MSVC"));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                unread.Add($"'{record}' could not be read: {ex.Message.TrimEnd('.')}");
+            }
+        }
+
+        return (compilers, unread);
+    }
+
+    /// <summary>
     /// What <paramref name="buildDirectory"/> was last configured with, where <paramref name="project"/>
     /// is built with CMake; <see langword="null"/> otherwise.
     /// </summary>
@@ -391,6 +496,40 @@ public sealed partial class CMakeToolchainReader(IFileSystem fileSystem)
                 .Where(name => (name.StartsWith(IndexPrefix, StringComparison.Ordinal) || name.StartsWith(ErrorPrefix, StringComparison.Ordinal))
                     && Path.GetExtension(name) == ".json")
             : [];
+    }
+
+    /// <summary>The version of CMake that wrote the index at <paramref name="indexFile"/>, or <see langword="null"/> where it names none.</summary>
+    private string? VersionThatAnswered(string indexFile)
+    {
+        using var index = JsonDocument.Parse(_fileSystem.ReadAllText(indexFile));
+
+        return VersionIn(index);
+    }
+
+    /// <summary>The version of CMake an index names, under which CMake keeps its record of each language it identified.</summary>
+    private static string? VersionIn(JsonDocument index)
+        => index.RootElement.TryGetProperty("cmake", out var cmake) && cmake.TryGetProperty("version", out var version)
+            ? Text(version, "string")
+            : null;
+
+    /// <summary>
+    /// The settings a record of identifying a compiler holds, by name: each <c>set(NAME "value")</c> line's
+    /// name and the value between its quotes.
+    /// </summary>
+    private Dictionary<string, string> Settings(string record)
+    {
+        var settings = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var line in _fileSystem.ReadAllText(record).Split('\n'))
+        {
+            // A line CRLF ends keeps its '\r', which the pattern's closing spaces take.
+            if (RecordedSetting.Match(line) is { Success: true } setting)
+            {
+                settings[setting.Groups["name"].Value] = setting.Groups["value"].Value;
+            }
+        }
+
+        return settings;
     }
 
     /// <summary>Why a configure CMake answered with an error index said nothing about the compilers.</summary>
@@ -438,16 +577,7 @@ public sealed partial class CMakeToolchainReader(IFileSystem fileSystem)
                 return (null, $"{of} is not there");
             }
 
-            var settings = new Dictionary<string, string>(StringComparer.Ordinal);
-
-            foreach (var line in _fileSystem.ReadAllText(record).Split('\n'))
-            {
-                // A line CRLF ends keeps its '\r', which the pattern's closing spaces take.
-                if (RecordedSetting.Match(line) is { Success: true } setting)
-                {
-                    settings[setting.Groups["name"].Value] = setting.Groups["value"].Value;
-                }
-            }
+            var settings = Settings(record);
 
             if (settings.GetValueOrDefault($"CMAKE_{language}_COMPILER_ID") is not { Length: > 0 } id)
             {

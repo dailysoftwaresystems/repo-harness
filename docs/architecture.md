@@ -168,6 +168,25 @@ at once, with the line it concerns where the parser knows it:
   is no id, never that CMake named none. `test --no-build` names what its build
   directory was last configured with, and holds it to the same `compilerId`: binaries a compiler
   nobody chose produced are failed rather than tested. A runner that does not build names none.
+- **A compiler updated in place starts its build directory from clean.** CMake identifies a cached
+  compiler once, when a build directory is first configured, and loads that record on every
+  configure after; a build system has no edge on the compiler itself. A Visual Studio update
+  rewrote `cl.exe`, `c1xx.dll` and `c2.dll` in the same toolset directory, taking `cl` from
+  19.51.36257 to 19.51.36260, and a consumer's trees configured before it still recorded the old
+  version: the first build of each failed every precompiled header with C1853, "from a different
+  version of the compiler". So before each build of a CMake project, the C and C++ compilers the
+  directory's records name - under the version of CMake that last answered there - are asked their
+  versions as CMake identified them: a line naming the macros CMake's identification reads is
+  preprocessed, in the leg's own environment, and the values put together by CMake's formula for the
+  id it recorded - `_MSC_VER`, `_MSC_FULL_VER` and `_MSC_BUILD` for MSVC, `__GNUC__` with its minor and
+  patch level for GNU, `__clang_major__` and its fellows for Clang, with `__apple_build_version__` for
+  AppleClang. Never by which are defined: clang defines `__GNUC__` too, as 4.2.1. A version that
+  differs, a compiler that is not there, or one that defines none of its id's macros starts the
+  directory from clean, naming both versions. Preprocessing takes a fraction of a second, where a
+  scratch configure took 19 with MSVC; measured against CMake 4.3's records, MSVC 19.51.36260.0
+  through Visual Studio 18, MinGW gcc 13.2.0, Linux gcc 13.3.0 and clang 18.1.3 each came out as CMake
+  wrote it. A compiler that cannot be asked is said and passed over - the question names the cause of
+  a failure the build would show anyway - and one of another id is not asked.
 - **A toolchain may name a developer environment**, declared once under `developerEnvironments`,
   and one naming none that is declared is refused, as is a `visualStudio` one on a toolchain whose
   `platforms` is not `["windows"]`: a leg elsewhere would be turned away on every run for want of it.

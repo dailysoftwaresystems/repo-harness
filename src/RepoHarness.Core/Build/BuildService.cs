@@ -92,6 +92,7 @@ public sealed class BuildService(
     BuildDirectoryGuard buildDirectoryGuard,
     CMakeToolchainReader toolchainReader,
     NinjaDependencyCheck dependencyCheck,
+    CompilerVersionProbe compilerVersions,
     InputFingerprint fingerprints,
     ProcessSampler processSampler,
     Git.IGitClient gitClient,
@@ -105,6 +106,7 @@ public sealed class BuildService(
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
     private readonly CMakeToolchainReader _toolchainReader = toolchainReader;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
+    private readonly CompilerVersionProbe _compilerVersions = compilerVersions;
     private readonly InputFingerprint _fingerprints = fingerprints;
     private readonly ProcessSampler _processSampler = processSampler;
     private readonly Git.IGitClient _gitClient = gitClient;
@@ -146,8 +148,15 @@ public sealed class BuildService(
         // affect this build, or why they could not be listed.
         var (watched, unmeasurable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
 
-        var (rebuilt, taken) = await DecideCleanRebuildAsync(request, buildDirectory, watched, unmeasurable, cancellationToken)
-            .ConfigureAwait(false);
+        // A compiler changed since CMake identified it comes first: no record of the tree can answer
+        // for it, since CMake never identifies a cached compiler again.
+        var replaced = adapter is CMakeAdapter
+            ? await CompilerReplacedAsync(request, buildDirectory, environment, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        var (rebuilt, taken) = replaced is not null
+            ? (replaced, null)
+            : await DecideCleanRebuildAsync(request, buildDirectory, watched, unmeasurable, cancellationToken).ConfigureAwait(false);
 
         if (rebuilt is not null)
         {
@@ -469,6 +478,81 @@ public sealed class BuildService(
         }
 
         return new Left(deepest, newest, null);
+    }
+
+    /// <summary>
+    /// Why this variant must start from clean because a compiler CMake identified for it is not what is
+    /// at its path now, or <see langword="null"/> where each is as CMake identified it or could not be
+    /// asked.
+    /// </summary>
+    /// <param name="request">The leg's build.</param>
+    /// <param name="buildDirectory">Where it builds.</param>
+    /// <param name="environment">The environment its phases start in, a developer environment's among it.</param>
+    /// <param name="cancellationToken">Stops a compiler being asked.</param>
+    /// <remarks>
+    /// CMake identifies a cached compiler once, when the directory is first configured, and loads that
+    /// record on every configure after; a build system has no edge on the compiler itself. So a compiler
+    /// updated in place - the same path, another version, as a Visual Studio update rewrites cl.exe where
+    /// it stands - builds in a directory still recorded as the old one's, and a consumer's first build
+    /// after one failed every precompiled header it had with C1853, "from a different version of the
+    /// compiler". Only a directory configured afresh identifies it again. A compiler that cannot be asked
+    /// is said and passed over: the question exists to name the cause of a failure the build would show
+    /// anyway, and one that cannot be put is no reason to discard a warm directory.
+    /// </remarks>
+    private async Task<string?> CompilerReplacedAsync(
+        BuildRequest request,
+        string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
+        CancellationToken cancellationToken)
+    {
+        var (identified, unread) = _toolchainReader.Identified(buildDirectory);
+
+        foreach (var why in unread)
+        {
+            _output.Warn(CommandName, $"{request.Leg}: whether a compiler changed since CMake identified it could not be asked: {why}");
+        }
+
+        foreach (var compiler in identified)
+        {
+            var answer = await _compilerVersions
+                .AskAsync(compiler, Path.Combine(request.RunDirectory, request.Leg), environment, request.ProgramDirectories, cancellationToken)
+                .ConfigureAwait(false);
+
+            // An id whose version this build does not know how to put together, as CMake's own formula does,
+            // or no id at all, as CMake records a compiler it could not identify.
+            if (answer is null)
+            {
+                continue;
+            }
+
+            // The id and the version, where CMake recorded one: a record may identify a kind and leave its version out.
+            var identity = string.Join(' ', new[] { compiler.Id, compiler.Version }.Where(part => part.Length > 0));
+            var identifiedAs = $"CMake identified {compiler.Language}'s compiler, '{compiler.Program}', as {identity}";
+
+            if (answer.Replaced is { } replaced)
+            {
+                return $"a changed compiler: {identifiedAs}, and {replaced}; CMake identifies a cached compiler once, so "
+                    + "only a directory configured afresh builds with what is there now";
+            }
+
+            if (answer.Unanswered is { } unanswered)
+            {
+                _output.Warn(
+                    CommandName,
+                    $"{request.Leg}: whether {compiler.Language}'s compiler is still the {identity} CMake identified could not "
+                    + $"be asked: {unanswered}");
+
+                continue;
+            }
+
+            if (!string.Equals(answer.Version, compiler.Version, StringComparison.Ordinal))
+            {
+                return $"a changed compiler: {identifiedAs}, and it is {answer.Version} now; CMake identifies a cached "
+                    + "compiler once, so only a directory configured afresh builds with it";
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

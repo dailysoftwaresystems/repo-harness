@@ -141,6 +141,7 @@ public sealed partial class HelpTests
         foreach (var text in new[]
         {
             "A combination's directory is kept between builds, and its build system decides",
+            "  - a compiler CMake identified is not what is at its path now: CMake identifies a",
             "  - an input that changed since that build began is dated no later than the newest",
             "  - nothing can say: no record of what it was built from, the files git tracks",
             "DEPENDS is not remade. A project's rebuildableFormats says which files are inputs,",

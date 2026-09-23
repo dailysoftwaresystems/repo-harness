@@ -580,6 +580,129 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A compiler updated in place - the same path, another version, as a Visual Studio update rewrites
+    /// cl.exe where it stands - starts the directory from clean, naming both versions: CMake loads its
+    /// record of the old one on every configure, and a consumer's first build after one failed every
+    /// precompiled header it had. The version CMake recorded keeps the directory.
+    /// </summary>
+    [Theory]
+    [InlineData("195136260", true)]
+    [InlineData("195136257", false)]
+    public async Task ACompilerUpdatedInPlace_StartsTheDirectoryFromClean_NamingBothVersions(string fullVersion, bool rebuilds)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var cl = temp.WriteFile(Path.Combine(ToolchainDirectory, "cl.exe"), "a compiler").Replace('\\', '/');
+
+        await BuildOnceAsync(factory, request, token);
+        IdentifiedAs(request, temp, cl, "19.51.36257.0");
+
+        var answering = new VersionAnswering($"1951 {fullVersion} 0");
+        var built = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, compilers: answering));
+
+        Assert.Equal(rebuilds, built.RebuiltFromClean is not null);
+        Assert.True(
+            !rebuilds || built.RebuiltFromClean!.StartsWith(
+                $"a changed compiler: CMake identified CXX's compiler, '{cl}', as MSVC 19.51.36257.0, and it is 19.51.36260.0 now",
+                StringComparison.Ordinal),
+            built.RebuiltFromClean);
+
+        // Asked as CMake runs it, in the build's environment, over a line written beside the leg's logs.
+        var asked = Assert.Single(answering.Requests);
+        Assert.Equal(cl, asked.FileName);
+        Assert.Equal(["/nologo", "/EP", Path.Combine(request.RunDirectory, Leg, "compiler-version-CXX.cpp")], asked.Arguments);
+    }
+
+    /// <summary>
+    /// A compiler CMake identified that is not there now - its toolset removed, or moved - starts the
+    /// directory from clean too, since every configure would load a record of a program that is gone.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerThatIsGone_StartsTheDirectoryFromClean()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var gone = temp.Combine(ToolchainDirectory, "removed", "cl.exe").Replace('\\', '/');
+
+        await BuildOnceAsync(factory, request, token);
+        IdentifiedAs(request, temp, gone, "19.51.36257.0");
+
+        var built = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, compilers: new VersionAnswering("unused")));
+
+        Assert.NotNull(built.RebuiltFromClean);
+        Assert.StartsWith($"a changed compiler: CMake identified CXX's compiler, '{gone}', as MSVC 19.51.36257.0, and it is not there now", built.RebuiltFromClean, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A compiler that cannot be asked is said and passed over: the question names the cause of a failure
+    /// the build would show anyway, and one that cannot be put is no reason to discard a warm directory.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerThatCannotBeAsked_IsSaid_AndKeepsTheDirectory()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var cl = temp.WriteFile(Path.Combine(ToolchainDirectory, "cl.exe"), "a compiler").Replace('\\', '/');
+
+        await BuildOnceAsync(factory, request, token);
+        IdentifiedAs(request, temp, cl, "19.51.36257.0");
+
+        var built = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, compilers: new QuietRunner(2)));
+
+        Assert.Null(built.RebuiltFromClean);
+        Assert.Contains("whether CXX's compiler is still the MSVC 19.51.36257.0 CMake identified could not be asked", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A compiler CMake could not identify - recorded with no id and no version - is neither asked nor
+    /// said: nothing it answered could be held to what CMake recorded, and a warning on every build would
+    /// be about a question nobody puts.
+    /// </summary>
+    [Fact]
+    public async Task ACompilerCMakeCouldNotIdentify_IsNeitherAskedNorSaid()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+        var cl = temp.WriteFile(Path.Combine(ToolchainDirectory, "cl.exe"), "a compiler").Replace('\\', '/');
+
+        await BuildOnceAsync(factory, request, token);
+        IdentifiedAs(request, temp, cl, version: string.Empty, id: string.Empty);
+
+        var answering = new VersionAnswering("1951 195136260 0");
+        var built = await BuildOnceAsync(factory, request, token, Service(factory, exitCode: 0, compilers: answering));
+
+        Assert.Null(built.RebuiltFromClean);
+        Assert.Empty(answering.Requests);
+        Assert.DoesNotContain("could not be asked", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Only a project CMake configures is asked: nothing else keeps a record of a compiler it will not
+    /// identify again, and a record lying in another kind's directory says nothing about its build.
+    /// </summary>
+    [Fact]
+    public async Task AProjectCMakeDoesNotConfigure_NeverAsksAnyCompiler()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        var (_, factory) = await TrackedWithFactoryAsync(temp, token);
+        var cl = temp.WriteFile(Path.Combine(ToolchainDirectory, "cl.exe"), "a compiler").Replace('\\', '/');
+
+        IdentifiedAs(request, temp, cl, "19.51.36257.0");
+
+        var answering = new VersionAnswering("1951 195136260 0");
+
+        await Service(factory, exitCode: 0, compilers: answering).BuildAsync(Config(), request, token);
+
+        Assert.Empty(answering.Requests);
+    }
+
+    /// <summary>
     /// A build during one of whose phases the wall clock stepped stamped objects that cannot be
     /// ordered against anything since, and the next build starts from clean, naming the phase.
     /// </summary>
@@ -995,6 +1118,30 @@ public sealed class BuildServiceTests
             () => Service(factory, exitCode: 0, phases: new ScriptedPhases(building: limit.Cancel)).BuildAsync(Config(), request, limit.Token));
     }
 
+    /// <summary>
+    /// Writes what CMake 4.3 leaves in a build directory it identified a C++ compiler for: the index of
+    /// its answer, naming the version, and its record of identifying the compiler at
+    /// <paramref name="program"/> as <paramref name="id"/> <paramref name="version"/> - both empty, as CMake
+    /// records a compiler it could not identify.
+    /// </summary>
+    private static void IdentifiedAs(BuildRequest request, TempDirectory temp, string program, string version, string id = "MSVC")
+    {
+        var build = request.Variant.DirectoryUnder(temp.Path);
+        var reply = Path.Combine(build, ".cmake", "api", "v1", "reply", "index-2026-09-23T08-00-00-0000.json");
+        var record = Path.Combine(build, "CMakeFiles", "4.3.0", "CMakeCXXCompiler.cmake");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(reply)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(record)!);
+        File.WriteAllText(reply, """{ "cmake": { "version": { "string": "4.3.0" } }, "reply": {} }""");
+        File.WriteAllText(record, $"""
+            set(CMAKE_CXX_COMPILER "{program}")
+            set(CMAKE_CXX_COMPILER_ARG1 "")
+            set(CMAKE_CXX_COMPILER_ID "{id}")
+            set(CMAKE_CXX_COMPILER_VERSION "{version}")
+            set(CMAKE_CXX_COMPILER_FRONTEND_VARIANT "{id}")
+            """);
+    }
+
     /// <summary>The record a build leaves beside itself, which the next build reads.</summary>
     private static string RecordOf(BuildRequest request, TempDirectory temp)
         => Path.Combine(request.Variant.DirectoryUnder(temp.Path), ".harness-build");
@@ -1243,7 +1390,8 @@ public sealed class BuildServiceTests
     /// <paramref name="leaves"/> - <see cref="App"/> unless told otherwise - below the directory it
     /// builds; <paramref name="fileSystem"/> is what the service and its fingerprints read the tree and
     /// the build directory through, <paramref name="wallClock"/> the clock its phases are timed against,
-    /// and <paramref name="processTable"/> the machine its guards find - a quiet one unless told otherwise.
+    /// <paramref name="compilers"/> what answers a compiler asked its version, and
+    /// <paramref name="processTable"/> the machine its guards find - a quiet one unless told otherwise.
     /// </summary>
     private static BuildService Service(
         HarnessFactory factory,
@@ -1253,12 +1401,14 @@ public sealed class BuildServiceTests
         IProcessTable? processTable = null,
         IFileSystem? fileSystem = null,
         TimeProvider? wallClock = null,
+        IProcessRunner? compilers = null,
         IReadOnlyList<string>? leaves = null)
         => new(
             new PhaseRunner(new Leaving(phases ?? new QuietRunner(exitCode), leaves ?? [App]), factory.FileSystem, factory.Output, wallClock),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
+            new CompilerVersionProbe(compilers ?? new QuietRunner(exitCode), fileSystem ?? factory.FileSystem),
             new InputFingerprint(fileSystem ?? factory.FileSystem, factory.Platform),
             new ProcessSampler(processTable ?? new QuietProcessTable(), factory.Platform, factory.Output),
             factory.GitClient,
@@ -1747,6 +1897,32 @@ public sealed class BuildServiceTests
             => path.Replace('\\', '/').EndsWith(input, StringComparison.Ordinal)
                 ? throw new IOException(Refusal)
                 : base.LastWriteTimeUtc(path);
+    }
+
+    /// <summary>
+    /// A compiler that preprocesses the probed line into MSVC's <paramref name="msvc"/> - _MSC_VER,
+    /// _MSC_FULL_VER and _MSC_BUILD - defining nothing else, and remembers every request.
+    /// </summary>
+    private sealed class VersionAnswering(string msvc) : IProcessRunner
+    {
+        private readonly List<ProcessRequest> _requests = [];
+
+        /// <summary>Every request it was given.</summary>
+        public IReadOnlyList<ProcessRequest> Requests => _requests;
+
+        public Task<ProcessResult> RunAsync(ProcessRequest request, CancellationToken cancellationToken = default)
+        {
+            _requests.Add(request);
+
+            return Task.FromResult(new ProcessResult(
+                0,
+                $"repo_harness_compiler_version {msvc} __GNUC__ __GNUG__ __GNUC_MINOR__ __GNUC_PATCHLEVEL__ __clang_major__ __clang_minor__ __clang_patchlevel__ __apple_build_version__\n",
+                "compiler-version-CXX.cpp\n",
+                TimeSpan.Zero,
+                TimedOut: false));
+        }
+
+        public string? FindExecutable(string command) => command;
     }
 
     /// <summary>A process table this machine will not let anybody read.</summary>
