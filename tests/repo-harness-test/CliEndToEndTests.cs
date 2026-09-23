@@ -840,6 +840,94 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A label given to <c>test</c> reaches the leg's runner through its labelArg, end to end. One no
+    /// labelArg can carry is refused rather than dropped: dropped, the leg would run every test and
+    /// report the result as the labelled subset's.
+    /// </summary>
+    [Theory]
+    [InlineData("-L", HarnessExit.Success)]
+    [InlineData(null, HarnessExit.UsageError)]
+    public async Task ALabel_ReachesTheLegsRunner_OrIsRefusedWhereNothingCanCarryIt(string? labelArg, int exitCode)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs =
+            {
+                ["native"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig
+                    {
+                        All = new TestInvocation
+                        {
+                            Runner = TestHost.DotnetExecutable,
+                            Args = ["exec", TestHost.AssemblyPath],
+                            Env = new Dictionary<string, string>(StringComparer.Ordinal) { [TestHost.ChildModeVariable] = "echo-args" },
+                            LabelArg = labelArg,
+                            SuccessPattern = @"\[-L\]\s+\[unit\]",
+                        },
+                    },
+                },
+            },
+        });
+
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "--label", "unit", "-C", temp.Path], token);
+
+        Assert.True(exitCode == test.ExitCode, $"exit {test.ExitCode}: {test.StandardError}");
+
+        if (labelArg is null)
+        {
+            Assert.Contains("declare no labelArg", test.StandardError, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A test run the runner could not be given as asked is refused before the leg builds: everything its
+    /// command is made from is known then. Here the build would fail - the tree holds no project file - so
+    /// a refusal that came after it would never be reached, and the leg would say its build failed.
+    /// </summary>
+    [Fact]
+    public async Task ATestThatCannotBeGivenAsAsked_IsRefusedBeforeTheLegBuilds()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "dotnet",
+                    Path = ".",
+                    Test = new TestConfig
+                    {
+                        All = new TestInvocation { Runner = "dotnet", Args = ["--version"], ExcludeArg = "--exclude", SuccessPattern = @"^\d+\.\d+" },
+                    },
+                },
+            },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" } },
+        });
+
+        var test = await CliRunner.RunAsync(["test", "--legs", "native", "--exclude", "", "-C", temp.Path], token);
+
+        Assert.True(test.ExitCode == HarnessExit.UsageError, $"exit {test.ExitCode}: {test.StandardError}");
+        Assert.Contains("given empty, or as spaces alone", test.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A leg testing a build it does not make names the compilers that build was configured with,
     /// read from what CMake answered then: its verdict is about binaries they produced.
     /// </summary>

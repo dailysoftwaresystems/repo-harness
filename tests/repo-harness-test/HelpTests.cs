@@ -108,6 +108,27 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The config topic says how test --filter, --exclude and --label reach a runner, what each is
+    /// for ctest, that a label can now be chosen as well as left out, and how several exclusions reach
+    /// a runner that would not leave out each of them given apart.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysHowTheTestSelectionReachesTheRunner()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "filterArg, excludeArg and labelArg, so one set of options serves every runner. For",
+            "ctest, '-R' chooses tests by name, '-L' chooses them by label and '-LE' leaves a label",
+            "apart - ctest leaves out only what every -LE matches - declares excludeJoin, and several",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_QuotesTheLimitsFromTheCode()
     {

@@ -1,4 +1,5 @@
 using RepoHarness.Core.Projects;
+using RepoHarness.Core.Testing;
 
 namespace RepoHarness.Core.Configuration;
 
@@ -118,9 +119,15 @@ public static class DefaultConfigFactory
         {
             "cmake" => new TestInvocation
             {
-                Runner = "ctest",
+                Runner = Ctest.Program,
                 Args = ["--output-on-failure", "--no-tests=error"],
-                FilterArg = "-R",
+                FilterArg = Ctest.FilterArg,
+                ExcludeArg = Ctest.ExcludeArg,
+
+                // ctest leaves out only a test matching every -LE it is given, and one regular expression
+                // joined by | leaves out what any of them matches.
+                ExcludeJoin = Ctest.ExcludeJoin,
+                LabelArg = Ctest.LabelArg,
 
                 // ctest reads this itself, so a -j someone adds to args still wins.
                 CoresEnv = ["CTEST_PARALLEL_LEVEL"],

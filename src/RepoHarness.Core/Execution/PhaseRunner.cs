@@ -121,8 +121,7 @@ public sealed class PhaseRunner(
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var success = CompileWitness(request);
-        var timings = request.TimingPatterns.Select(pattern => (Pattern: pattern, Regex: Compile(pattern, "a timing pattern"))).ToList();
+        var (success, timings) = Patterns(request.Leg, request.Phase, request.SuccessPattern, request.TimingPatterns);
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(request.LogFile));
         if (!string.IsNullOrEmpty(directory))
@@ -353,22 +352,35 @@ public sealed class PhaseRunner(
         }
     }
 
-    private static Regex? CompileWitness(PhaseRequest request)
+    /// <summary>
+    /// The success pattern and the timing patterns a phase is read by, compiled, or refused where one cannot
+    /// be: what starting a phase refuses before anything of it starts, for a caller to refuse as well before
+    /// the work the phase would follow.
+    /// </summary>
+    /// <param name="leg">The leg the phase belongs to, named in a refusal.</param>
+    /// <param name="phase">The phase, named in a refusal.</param>
+    /// <param name="successPattern">The success pattern, or <see langword="null"/> where the phase declares none.</param>
+    /// <param name="timingPatterns">The timing patterns.</param>
+    /// <exception cref="HarnessException">The success pattern is empty, or a pattern is not a regular expression.</exception>
+    internal static (Regex? Success, IReadOnlyList<(string Pattern, Regex Regex)> Timings) Patterns(
+        string leg,
+        string phase,
+        string? successPattern,
+        IReadOnlyList<string> timingPatterns)
     {
-        if (request.SuccessPattern is not { } pattern)
-        {
-            return null;
-        }
+        ArgumentNullException.ThrowIfNull(timingPatterns);
 
-        if (string.IsNullOrWhiteSpace(pattern))
+        if (successPattern is not null && string.IsNullOrWhiteSpace(successPattern))
         {
             throw new HarnessException(
                 HarnessExit.ConfigInvalid,
-                $"Phase '{request.Phase}' of leg '{request.Leg}' declares an empty success pattern, which matches anything; "
+                $"Phase '{phase}' of leg '{leg}' declares an empty success pattern, which matches anything; "
                 + "declare the line the command prints when it succeeds, or declare no pattern.");
         }
 
-        return Compile(pattern, "a success pattern");
+        return (
+            successPattern is null ? null : Compile(successPattern, "a success pattern"),
+            [.. timingPatterns.Select(pattern => (pattern, Compile(pattern, "a timing pattern")))]);
     }
 
     private static Regex Compile(string pattern, string what)

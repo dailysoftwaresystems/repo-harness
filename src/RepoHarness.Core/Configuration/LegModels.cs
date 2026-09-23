@@ -130,6 +130,38 @@ public sealed class TestInvocation
     public string? ExcludeArg { get; init; }
 
     /// <summary>
+    /// What joins several exclusions into the one value <see cref="ExcludeArg"/> is given, such as
+    /// <c>|</c> for ctest, for a runner that does not leave out each of them when given the argument
+    /// more than once. Unset or empty, each exclusion is given an <see cref="ExcludeArg"/> of its own;
+    /// empty says so in an operating system's section over a join the shared one declares.
+    /// </summary>
+    /// <remarks>
+    /// Measured with ctest 4.3.2: given <c>-LE slow -LE gpu</c> it leaves out only a test whose labels
+    /// match both, and given <c>-E a -E b</c> only what the last matches, so a test run told to leave
+    /// out slow tests and gpu tests ran the gpu-only ones on a machine with no GPU. One regular expression
+    /// joined by <c>|</c> leaves out what any of them matches.
+    /// <para>
+    /// Exclusions the <see cref="Args"/> already give are kept as ctest reads them: those given are added
+    /// to each <c>-LE</c> value there, and to the last <c>-E</c>, in whatever spelling and form it was
+    /// written. Another runner's values there are joined with those given. Where none is given, the args
+    /// run as written. ctest is refused an exclusion beside another given apart with no join; beside a
+    /// test preset that leaves tests out the same way itself, takes a union, or cannot be read; beside
+    /// <c>--rerun-failed</c>; and, by <c>-LE</c>, beside <c>--union</c> in the args, where ctest reads
+    /// <c>-E</c> alone.
+    /// </para>
+    /// </remarks>
+    public string? ExcludeJoin { get; init; }
+
+    /// <summary>
+    /// Argument introducing a label the tests to run must carry, such as <c>-L</c> for ctest, so one
+    /// <c>--label</c> option works everywhere. Beside <see cref="FilterArg"/>, which selects by name,
+    /// and <see cref="ExcludeArg"/>, which a label can already be left out by: a group a runner labels
+    /// could otherwise be left out but never chosen, only matched by a name pattern that happens to
+    /// cover the same tests.
+    /// </summary>
+    public string? LabelArg { get; init; }
+
+    /// <summary>
     /// Cores this invocation uses, replacing both the host's <c>testCores</c> and
     /// <c>defaults.testCores</c>.
     /// </summary>

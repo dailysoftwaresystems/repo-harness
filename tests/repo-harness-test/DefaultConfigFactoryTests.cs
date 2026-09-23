@@ -44,6 +44,14 @@ public sealed class DefaultConfigFactoryTests
         Assert.Equal("clang", project.DefaultToolchain["macos"]);
         Assert.Equal("ctest", project.Test?.All?.Runner);
 
+        // A test is chosen by name with -R, and by the label ctest groups it under with -L; a label is
+        // left out with -LE, as the help for all three says, and several joined into one, which ctest
+        // otherwise reads as leaving out only a test that carries every one.
+        Assert.Equal("-R", project.Test?.All?.FilterArg);
+        Assert.Equal("-L", project.Test?.All?.LabelArg);
+        Assert.Equal("-LE", project.Test?.All?.ExcludeArg);
+        Assert.Equal("|", project.Test?.All?.ExcludeJoin);
+
         Assert.Equal(["linux-x86_64-debug", "linux-x86_64-release"], config.Legs.Keys.Order(StringComparer.Ordinal));
         Assert.All(config.Legs.Values, leg =>
         {

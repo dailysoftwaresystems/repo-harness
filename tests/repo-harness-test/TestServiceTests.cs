@@ -214,21 +214,22 @@ public sealed class TestServiceTests
     }
 
     [Fact]
-    public async Task ALegsOwnFilterAndExclusions_ReachTheRunner()
+    public async Task ALegsOwnFilterExclusionsAndLabels_ReachTheRunner()
     {
         using var temp = new TempDirectory();
         var factory = new HarnessFactory();
         temp.WriteFile(Fixture, "fixture");
 
-        var request = Request(temp, Child("All 1 tests passed"), filterArg: "-R", excludeArg: "-LE") with
+        var request = Request(temp, Child("All 1 tests passed"), filterArg: "-R", excludeArg: "-LE", labelArg: "-L") with
         {
             Filter = "parser",
             Excludes = ["slow"],
+            Labels = ["unit"],
         };
 
         var result = await Service(factory).RunAsync(Config(), request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(["-R", "parser", "-LE", "slow"], result.Command.Arguments.TakeLast(4));
+        Assert.Equal(["-R", "parser", "-LE", "slow", "-L", "unit"], result.Command.Arguments.TakeLast(6));
         Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
     }
 
@@ -246,6 +247,46 @@ public sealed class TestServiceTests
 
         Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
         Assert.False(Directory.Exists(Path.Combine(RunDirectory(temp), Leg)), "the leg ran before its configuration was read");
+    }
+
+    /// <summary>
+    /// The check a leg makes before it builds refuses what the run itself would, as the run refuses it -
+    /// tests that cannot be given as asked, a leg with no tests to run, and a count or success pattern
+    /// that is not a regular expression - and starts nothing to learn it; tests that can be given pass it.
+    /// </summary>
+    [Fact]
+    public async Task TheCheckBeforeABuild_RefusesWhatTheRunWould_AndStartsNothing()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var runner = new ScriptedRunner(() => Task.CompletedTask, 0, "tests passed");
+        var service = Service(factory, runner);
+        var given = Request(temp, Child("All 1 tests passed"), excludeArg: "-LE") with { Excludes = ["slow"] };
+
+        service.Check(Config(), given);
+
+        var untested = new LegConfig { Os = PlatformNames.Windows, Processor = PlatformNames.X64, Config = "release" };
+
+        var refusals = new[]
+        {
+            given with { Excludes = [""] },
+            given with { LegSettings = untested },
+            Request(temp, Child("All 1 tests passed"), countPattern: "All (?<total>"),
+            Request(temp, Child("All 1 tests passed"), successPattern: "tests (passed"),
+        };
+
+        foreach (var refused in refusals)
+        {
+            var check = Assert.Throws<HarnessException>(() => service.Check(Config(), refused));
+            var run = await Assert.ThrowsAsync<HarnessException>(() => service.RunAsync(Config(), refused, TestContext.Current.CancellationToken));
+
+            Assert.Equal(run.ExitCode, check.ExitCode);
+            Assert.Equal(run.Message, check.Message);
+        }
+
+        Assert.Null(runner.Started);
     }
 
     [Fact]
@@ -393,7 +434,8 @@ public sealed class TestServiceTests
         string? countPattern = null,
         string? filterArg = null,
         string? excludeArg = null,
-        TestInvocation? windows = null)
+        TestInvocation? windows = null,
+        string? labelArg = null)
     {
         var all = new TestInvocation
         {
@@ -405,6 +447,7 @@ public sealed class TestServiceTests
             CountPattern = countPattern,
             FilterArg = filterArg,
             ExcludeArg = excludeArg,
+            LabelArg = labelArg,
         };
 
         return new TestRequest
@@ -446,18 +489,5 @@ public sealed class TestServiceTests
         }
 
         public string? FindExecutable(string command) => command;
-    }
-
-    /// <summary>
-    /// A process table that reads, and finds a machine running nothing but this test. It reports no
-    /// degradation, which is what makes these tests about the suite's verdict: a table that could
-    /// not be read is a verdict of its own.
-    /// </summary>
-    private sealed class QuietProcessTable : IProcessTable
-    {
-        public Task<ProcessTableReading> ReadAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(new ProcessTableReading(
-                [new SampledProcess(Environment.ProcessId, null, "repo-harness-test", DateTimeOffset.UnixEpoch, "repo-harness-test")],
-                null));
     }
 }
