@@ -410,6 +410,128 @@ public sealed class GitClientTests
         Assert.Empty(await IndexedAsync());
     }
 
+    /// <summary>
+    /// A directory inside another repository's work tree is part of that repository, so nothing is
+    /// staged there: its files would go into that repository's index, and what it tracks below the
+    /// directory would come out.
+    /// </summary>
+    [Fact]
+    public async Task IndexExactlyAsync_RefusesADirectoryInsideAnotherRepositorysWorkTree()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+        temp.WriteFile(Path.Combine("copy", "src", "a.c"), "a\n");
+
+        var refused = await Assert.ThrowsAsync<HarnessException>(
+            () => harness.GitClient.IndexExactlyAsync(temp.Combine("copy"), ["src/a.c"], cancellationToken));
+
+        Assert.Contains("not the top of a git repository of its own", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(await harness.GitClient.ListIndexAsync(temp.Path, cancellationToken));
+    }
+
+    /// <summary>
+    /// Each file's bytes are read as they stand, through none of the filters and conversions the
+    /// repository's attributes name: a required filter the machine cannot run, and a line ending
+    /// conversion the configuration refuses, each failed staging - and with it every sync to that host.
+    /// </summary>
+    [Fact]
+    public async Task IndexExactlyAsync_ReadsBytesAsTheyStand_WhateverTheRepositoryWouldFilterThemThrough()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        foreach (var (key, value) in new[]
+        {
+            ("filter.unreachable.clean", "false"),
+            ("filter.unreachable.required", "true"),
+            ("core.autocrlf", "false"),
+            ("core.safecrlf", "true"),
+            ("core.eol", "lf"),
+        })
+        {
+            var set = await harness.GitClient.RunAsync(temp.Path, ["config", key, value], cancellationToken: cancellationToken);
+            Assert.True(set.Succeeded, set.FailureMessage);
+        }
+
+        temp.WriteFile(".gitattributes", "*.bin filter=unreachable\n*.txt text=auto\n");
+        temp.WriteFile("asset.bin", "large object\n");
+        temp.WriteFile("windows.txt", "one\r\ntwo\r\n");
+
+        await harness.GitClient.IndexExactlyAsync(temp.Path, [".gitattributes", "asset.bin", "windows.txt"], cancellationToken);
+
+        Assert.Equal(
+            [".gitattributes", "asset.bin", "windows.txt"],
+            (await harness.GitClient.ListIndexAsync(temp.Path, cancellationToken)).Select(entry => entry.Path).Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// A lock another git left on the index, and what a staging of this tool's own left when it was
+    /// stopped part way, stop nothing: a sync dropped while it staged left the lock behind, and every
+    /// sync after it that changed a file failed until somebody removed it by hand.
+    /// </summary>
+    [Fact]
+    public async Task IndexExactlyAsync_IsNotStoppedByWhatAStoppedGitLeftBehind()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+        temp.WriteFile("a.c", "a\n");
+
+        var index = await harness.GitClient.GetIndexFileAsync(temp.Path, cancellationToken);
+        await File.WriteAllTextAsync(index + ".lock", string.Empty, cancellationToken);
+        await File.WriteAllTextAsync(index + ".harness-sync", "not an index", cancellationToken);
+        await File.WriteAllTextAsync(index + ".harness-sync.lock", string.Empty, cancellationToken);
+
+        await harness.GitClient.IndexExactlyAsync(temp.Path, ["a.c"], cancellationToken);
+
+        Assert.Equal(["a.c"], (await harness.GitClient.ListIndexAsync(temp.Path, cancellationToken)).Select(entry => entry.Path));
+        Assert.False(File.Exists(index + ".harness-sync"));
+        Assert.False(File.Exists(index + ".harness-sync.lock"));
+    }
+
+    /// <summary>
+    /// Each file's mode is the one git itself would record: executable as its execute bit says where the
+    /// repository trusts file modes, as git sets it wherever the file system keeps them, and never where
+    /// it does not - there every file has an execute bit to ask about, and none is one git would mark.
+    /// </summary>
+    [Fact]
+    public async Task IndexExactlyAsync_RecordsEachFilesModeAsGitWould()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+        temp.WriteFile("run.sh", "#!/bin/sh\n");
+        temp.WriteFile("plain.txt", "text\n");
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(temp.Combine("run.sh"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var trusted = await harness.GitClient.RunAsync(temp.Path, ["config", "--bool", "--get", "core.filemode"], cancellationToken: cancellationToken);
+        var trustsModes = !trusted.Succeeded || trusted.StandardOutput.Trim() != "false";
+
+        await harness.GitClient.IndexExactlyAsync(temp.Path, ["plain.txt", "run.sh"], cancellationToken);
+
+        var modes = (await harness.GitClient.ListIndexAsync(temp.Path, cancellationToken)).ToDictionary(entry => entry.Path, entry => entry.Mode);
+        Assert.Equal("100644", modes["plain.txt"]);
+        Assert.Equal(trustsModes ? "100755" : "100644", modes["run.sh"]);
+    }
+
     [Fact]
     public async Task ReadFilesAtCommitAsync_ReadsEveryFile_ThroughOneProcess()
     {

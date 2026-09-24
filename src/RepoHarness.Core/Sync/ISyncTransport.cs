@@ -63,7 +63,8 @@ public interface ISyncTransport
 
     /// <summary>
     /// Makes the copy a git repository, because the DssHarness on that host finds everything through
-    /// git. Does nothing when it already is one.
+    /// git. Does nothing when it already is the top of one of its own; a copy inside another
+    /// repository's work tree is given one of its own.
     /// </summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="cancellationToken">Stops the work.</param>

@@ -1,13 +1,20 @@
 using System.Globalization;
 using System.Text;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Git;
 
 /// <inheritdoc cref="IGitClient"/>
-public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput output) : IGitClient
+/// <param name="processRunner">Runs git.</param>
+/// <param name="output">Where git's own output is echoed, for the commands that echo it.</param>
+/// <param name="filePermissions">
+/// Says whether a file has an execute bit, for the mode an index entry records; this platform's own
+/// where none is given.
+/// </param>
+public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput output, IFilePermissions? filePermissions = null) : IGitClient
 {
     private const string GitExecutable = "git";
 
@@ -23,8 +30,15 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
     private static readonly string[] InheritedGitEnvironment =
         ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
 
+    /// <summary>
+    /// What the index a copy's staging builds is called, beside the index git reads. Nothing else writes
+    /// a file of this name, so one a stopped sync left, and the lock git took on it, are this tool's own.
+    /// </summary>
+    private const string StagingIndexSuffix = ".harness-sync";
+
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHarnessOutput _output = output;
+    private readonly IFilePermissions _filePermissions = filePermissions ?? FilePermissionsFactory.Create();
 
     public bool IsInstalled() => _processRunner.FindExecutable(GitExecutable) is not null;
 
@@ -236,49 +250,207 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentNullException.ThrowIfNull(paths);
 
-        var wanted = new HashSet<string>(paths, StringComparer.Ordinal);
+        // Its own index and no other. A directory inside another repository's work tree is part of that
+        // repository: staging there puts these files into a history that is not theirs, and takes out
+        // whatever that repository tracks below the directory.
+        if (await GetLocationAsync(directory, cancellationToken).ConfigureAwait(false) is not { Prefix.Length: 0 })
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{directory}' is not the top of a git repository of its own, so nothing was staged there: git "
+                + "finds it inside another repository's work tree, or in none, and staging would write that "
+                + "repository's index.");
+        }
 
-        // What the index holds that the set does not name, removed first: a file the tree no longer has,
-        // or never had from whoever placed it, is not one of its own.
-        var stale = (await ListIndexAsync(directory, cancellationToken).ConfigureAwait(false))
-            .Select(entry => entry.Path)
-            .Where(path => !wanted.Contains(path))
+        var index = await GetIndexFileAsync(directory, cancellationToken).ConfigureAwait(false);
+        var staging = index + StagingIndexSuffix;
+
+        Remove(staging);
+        Remove(staging + ".lock");
+
+        var wanted = paths
             .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .Where(path => File.Exists(Path.Combine(directory, path)))
             .ToList();
 
-        // The paths travel on standard input, NUL-separated, so no list of them outgrows a command line
-        // and no name is read as an option or a pathspec.
-        if (stale.Count > 0)
+        var ids = await HashAsync(directory, wanted, cancellationToken).ConfigureAwait(false);
+        var modes = await ModesAsync(directory, wanted, cancellationToken).ConfigureAwait(false);
+
+        // Built afresh in an index of this tool's own, and put in place whole. Staging into the index git
+        // reads took its lock, and a sync stopped part way - a dropped connection kills git where it
+        // stands - left that lock behind for good: every sync after it that changed a file failed. What is
+        // left of this one is removed above, and what git reads is only ever a finished index.
+        var emptied = await RunWithIndexAsync(directory, staging, ["read-tree", "--empty"], null, cancellationToken)
+            .ConfigureAwait(false);
+
+        Ensure(emptied, "start the index afresh");
+
+        if (wanted.Count > 0)
         {
-            var removed = await RunCoreAsync(
+            // The paths travel on standard input, NUL-separated, so no list of them outgrows a command
+            // line and no name is read as an option or a pathspec.
+            var entries = new StringBuilder();
+
+            for (var at = 0; at < wanted.Count; at++)
+            {
+                entries.Append(modes[at]).Append(' ').Append(ids[at]).Append(" 0\t").Append(wanted[at]).Append('\0');
+            }
+
+            var written = await RunWithIndexAsync(
+                    directory,
+                    staging,
+                    ["update-index", "-z", "--index-info"],
+                    entries.ToString(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            Ensure(written, "write the index");
+        }
+
+        try
+        {
+            File.Move(staging, index, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"The index built for '{directory}' could not replace '{index}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The object each of <paramref name="paths"/> holds, written to the repository, in the same order:
+    /// its bytes as they stand, through no filter and no line-ending conversion.
+    /// </summary>
+    /// <remarks>
+    /// Staging a file runs it through the filters and conversions the repository's attributes name,
+    /// under whatever git configuration the machine has, and a filter that fails fails the whole
+    /// staging. A host that set Git LFS up where a non-interactive shell cannot find it, or one that
+    /// refuses a line ending conversion it cannot undo, then failed every sync. Nothing here needs what
+    /// a filter makes of a file: the index names the files a tree holds, and a build reads each one's
+    /// bytes itself.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> HashAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var ids = new Dictionary<string, string>(StringComparer.Ordinal);
+        var together = paths.Where(path => !NeedsAHashOfItsOwn(path)).ToList();
+
+        if (together.Count > 0)
+        {
+            var hashed = await RunCoreAsync(
+                    directory,
+                    ["hash-object", "-w", "--no-filters", "--stdin-paths"],
+                    echoOutput: false,
+                    untranslated: false,
+                    indexFile: null,
+                    string.Join('\n', together) + '\n',
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            Ensure(hashed, "read what the tree holds");
+
+            var answers = hashed.StandardOutput
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.TrimEnd('\r'))
+                .ToList();
+
+            if (answers.Count != together.Count)
+            {
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"git named {answers.Count} object(s) for the {together.Count} file(s) it was given to read.");
+            }
+
+            for (var at = 0; at < together.Count; at++)
+            {
+                ids[together[at]] = answers[at];
+            }
+        }
+
+        foreach (var path in paths.Where(NeedsAHashOfItsOwn))
+        {
+            var hashed = await RunCoreAsync(
+                    directory,
+                    ["hash-object", "-w", "--no-filters", "--", path],
+                    echoOutput: false,
+                    untranslated: false,
+                    indexFile: null,
+                    standardInput: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            Ensure(hashed, "read what the tree holds");
+            ids[path] = hashed.StandardOutput.Trim();
+        }
+
+        return [.. paths.Select(path => ids[path])];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> cannot travel as a line of <c>--stdin-paths</c>: one holding a
+    /// line break, or starting with the quote that makes git unquote the line.
+    /// </summary>
+    private static bool NeedsAHashOfItsOwn(string path)
+        => path.Contains('\n', StringComparison.Ordinal)
+            || path.Contains('\r', StringComparison.Ordinal)
+            || path.StartsWith('"');
+
+    /// <summary>The mode git itself would record for each of <paramref name="paths"/>, in the same order.</summary>
+    /// <remarks>
+    /// Where the repository trusts file modes - <c>core.filemode</c>, which git sets false where the
+    /// file system keeps none - a file is executable as its execute bit says. Where it does not, an entry
+    /// the index already holds keeps its mode, and a file new to it is not executable.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> ModesAsync(
+        string directory,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        var trusted = await RunQueryAsync(
                 directory,
-                ["update-index", "--force-remove", "-z", "--stdin"],
-                echoOutput: false,
-                untranslated: false,
-                indexFile: null,
-                string.Join('\0', stale) + '\0',
-                cancellationToken).ConfigureAwait(false);
+                ["config", "--bool", "--get", "core.filemode"],
+                cancellationToken)
+            .ConfigureAwait(false);
 
-            Ensure(removed, "remove from the index what the tree does not hold");
-        }
+        // Unset is git's own default, which trusts them.
+        var trustsModes = !trusted.Succeeded || !string.Equals(trusted.StandardOutput.Trim(), "false", StringComparison.Ordinal);
 
-        if (wanted.Count == 0)
+        var held = trustsModes
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : (await ListIndexAsync(directory, cancellationToken).ConfigureAwait(false))
+                .Where(entry => entry.Stage == 0 && entry.IsRegularFile)
+                .GroupBy(entry => entry.Path, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First().Mode, StringComparer.Ordinal);
+
+        return
+        [
+            .. paths.Select(path => trustsModes
+                ? _filePermissions.IsExecutable(Path.Combine(directory, path)) ? "100755" : "100644"
+                : held.GetValueOrDefault(path, "100644")),
+        ];
+    }
+
+    /// <summary>Removes <paramref name="path"/> where it is there.</summary>
+    private static void Remove(string path)
+    {
+        try
         {
-            return;
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
-
-        // Each staged as it stands on disk: added where the index lacks it, refreshed where it holds an
-        // older version, and removed where the file is not there after all.
-        var staged = await RunCoreAsync(
-            directory,
-            ["update-index", "--add", "--remove", "-z", "--stdin"],
-            echoOutput: false,
-            untranslated: false,
-            indexFile: null,
-            string.Join('\0', wanted.Order(StringComparer.Ordinal)) + '\0',
-            cancellationToken).ConfigureAwait(false);
-
-        Ensure(staged, "stage what the tree holds");
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{path}', left by a staging that stopped part way, could not be removed: {ex.Message}");
+        }
     }
 
     public async Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(

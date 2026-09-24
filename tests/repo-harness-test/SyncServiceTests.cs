@@ -122,6 +122,75 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A copy placed inside another repository's work tree is made a repository of its own, and the other
+    /// one's index is never written: git found that repository from the copy, so staging what the sync
+    /// carried put every file into it, and took out whatever it tracked below the copy.
+    /// </summary>
+    [Fact]
+    public async Task ACopyInsideAnotherRepository_IsARepositoryOfItsOwn_AndTheOtherIndexIsLeftAlone()
+    {
+        using var temp = new TempDirectory();
+        using var outer = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+
+        var created = await harness.GitClient.RunAsync(outer.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        var copy = outer.Combine("hosts", "copy");
+
+        await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+        Assert.Empty(await harness.GitClient.ListIndexAsync(outer.Path, cancellationToken));
+        Assert.Equal(string.Empty, (await harness.GitClient.GetLocationAsync(copy, cancellationToken))?.Prefix);
+        Assert.Contains(
+            "src/a.c",
+            (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+    }
+
+    /// <summary>
+    /// A file the sync writes where the copy held a link is a file of the copy like any other - the write
+    /// replaced the link - and its index holds it. Taken for one beyond a link, it was left out, and every
+    /// build and guard there passed over it until the next sync.
+    /// </summary>
+    [Fact]
+    public async Task AFileWrittenWhereTheCopyHeldALink_IsInItsIndex()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var replaced = Path.Combine(copy, "src", "a.c");
+            File.Delete(replaced);
+
+            try
+            {
+                File.CreateSymbolicLink(replaced, "b.c");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                Assert.Skip($"This machine cannot make a link: {ex.Message}");
+            }
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.Null(new FileInfo(replaced).LinkTarget);
+            Assert.Contains(
+                "src/a.c",
+                (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
     /// A sync carries its writes in batches, so the far side is asked once for many files rather than once
     /// for each. Over a connection one asking is one session, and a session costs a connection, an
     /// authentication and whatever the host's login profile does: a file at a time, a consumer's first sync

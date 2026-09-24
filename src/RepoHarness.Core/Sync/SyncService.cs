@@ -725,12 +725,16 @@ public sealed class SyncService(
             .Where(path => path.Length > 0)];
     }
 
-    /// <summary>Whether <paramref name="path"/> is a link of the copy, or under one.</summary>
+    /// <summary>Whether <paramref name="path"/> is under one of the copy's links.</summary>
     /// <param name="path">A path relative to the copy's root, with forward separators.</param>
-    /// <param name="links">The copy's links, as its manifest names them.</param>
+    /// <param name="links">The copy's links, as its manifest names them before the sync wrote anything.</param>
+    /// <remarks>
+    /// Under one, and not at one: a file written at a link's own name replaces the link, and is then a
+    /// file of the copy like any other. Left out of the index, it went unwatched by every build and
+    /// guard there until the next sync.
+    /// </remarks>
     private static bool BeyondALink(string path, IReadOnlyList<string> links)
-        => links.Any(link => string.Equals(path, link, StringComparison.Ordinal)
-            || path.StartsWith(link + "/", StringComparison.Ordinal));
+        => links.Any(link => path.StartsWith(link + "/", StringComparison.Ordinal));
 
     /// <summary>
     /// Puts the <c>config.json</c> this command read into the copy.

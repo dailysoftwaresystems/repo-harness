@@ -74,17 +74,23 @@ public interface IGitClient
     Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(string directory, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Makes the index of the repository at <paramref name="directory"/> hold exactly <paramref name="paths"/>,
-    /// each as it is on disk: every one staged as it stands, and every entry they do not name removed.
+    /// Makes the index of the repository at <paramref name="directory"/> hold exactly <paramref name="paths"/>:
+    /// each one's bytes as they stand on disk, and no entry they do not name. A path with no file at it is
+    /// not held.
     /// </summary>
-    /// <param name="directory">The repository's work tree.</param>
+    /// <param name="directory">The top of the repository's own work tree.</param>
     /// <param name="paths">The files the index is to hold, relative to <paramref name="directory"/>, with forward separators.</param>
     /// <param name="cancellationToken">Cancels the git processes.</param>
-    /// <exception cref="HarnessException">git could not read or write the index.</exception>
+    /// <exception cref="HarnessException">
+    /// <paramref name="directory"/> is not the top of a repository of its own, or git could not read the
+    /// files or write the index.
+    /// </exception>
     /// <remarks>
     /// For a tree whose files some other process placed, and whose index is its record of which files
     /// are its own: a copy a sync made has its files written and none of them staged, and everything that
-    /// reads "the files git tracks" there then reads none.
+    /// reads "the files git tracks" there then reads none. The bytes are read through no filter and no
+    /// line-ending conversion, and the index is built whole beside the one git reads and then put in its
+    /// place, so neither a filter the machine cannot run nor a lock a stopped git left behind stops it.
     /// </remarks>
     Task IndexExactlyAsync(string directory, IReadOnlyCollection<string> paths, CancellationToken cancellationToken = default);
 
