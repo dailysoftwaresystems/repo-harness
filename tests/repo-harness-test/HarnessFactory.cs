@@ -43,7 +43,13 @@ public sealed class HarnessFactory
 
         PathBudget = new PathBudget(Platform);
         ContextLoader = new HarnessContextLoader(
-            RepositoryLocator, ConfigStore, GitClient, FileSystem, Platform, Output);
+            RepositoryLocator,
+            ConfigStore,
+            GitClient,
+            FileSystem,
+            Platform,
+            Output,
+            new SyncedCopyToolCheck(PublishedVersions, RunningTool, new CommandOrigin(ServesAnotherMachine: false), Output));
         WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform, Output, HostCopies);
 
         AnchorRegistryLocator = new AnchorRegistryLocator(GitClient);
@@ -109,6 +115,15 @@ public sealed class HarnessFactory
     public IHostCopyRemover HostCopies { get; } = new NoHostCopies();
 
     public IHarnessContextLoader ContextLoader { get; }
+
+    /// <summary>
+    /// What nuget.org is taken to publish: nothing, until a test says, so no command typed in a synced
+    /// copy warns unless the test is about that.
+    /// </summary>
+    public PublishedVersionsDouble PublishedVersions { get; } = new();
+
+    /// <summary>The build taken to be running.</summary>
+    public RunningToolDouble RunningTool { get; } = new();
 
     public IWorktreeService WorktreeService { get; }
 

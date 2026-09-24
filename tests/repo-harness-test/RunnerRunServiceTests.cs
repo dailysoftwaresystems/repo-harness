@@ -1188,6 +1188,249 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A step asking for its inputs to be held still, in a tree git tracks nothing in - as a copy a sync
+    /// made was, its files written and none staged - is told its guard watches nothing, rather than having
+    /// it pass over in silence: a guard that is off must never be off quietly.
+    /// </summary>
+    [Fact]
+    public async Task AGuardWithNothingToWatch_IsSaidAsThat()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                requireInputsUnmoved: true
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Contains(
+            $"run: WARN - {Leg}: git tracks no file in '{temp.Path}', so requireInputsUnmoved watches nothing",
+            factory.StandardError.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A run that names no step leaves a manual one out before anything reads it - here a program nobody
+    /// declared, which the policy refuses the whole file over where the step runs - and says so as it runs
+    /// and on the leg's line, so a plain run is never read as having done the manual work.
+    /// </summary>
+    [Fact]
+    public async Task APlainRun_LeavesAManualStepOut_AndSaysSo()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  dotnet --version
+              - name: bench
+                manual: true
+                successPattern: '^done'
+                run: |
+                  curl https://example.invalid
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(["build"], result.Entry.RanSteps);
+        Assert.Equal(["bench"], result.Entry.UnselectedSteps);
+        Assert.Empty(result.Entry.ManualSteps);
+        Assert.Contains(
+            $"run: {Leg}: skipped manual step 'bench', which this run did not name",
+            factory.StandardOutput.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A manual step named runs with only what it needs - never the steps a plain run runs, here one no
+    /// policy would let start - and reads its own input, given for this run over its default. Marked
+    /// manual on the leg's line, beside the steps the run left out.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AManualStepNamed_RunsWithWhatItNeeds_ReadingItsOwnInput(bool namedOnTheCommandLine)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, $$"""
+            name: corpus
+            steps:
+              - name: prepare
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" prepared
+              - name: build
+                run: |
+                  curl https://example.invalid
+              - name: bench
+                manual: true
+                needs: [prepare]
+                inputs:
+                  size:
+                    default: '25'
+                successPattern: '^\[markdown : 7\]$'
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "markdown : {size}"
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        // Named on the command line, or declared as the runner's own steps: the same selection either way.
+        var runner = new RunnerConfig
+        {
+            Action = "corpus/corpus.yml",
+            Steps = namedOnTheCommandLine ? null : ["bench"],
+            Env = new Dictionary<string, string> { [TestHost.ChildModeVariable] = "echo-args" },
+        };
+
+        var request = Request(temp, runner) with
+        {
+            ManualSteps = namedOnTheCommandLine ? ["bench"] : [],
+            Inputs = new Dictionary<string, string>(StringComparer.Ordinal) { ["size"] = "7" },
+        };
+
+        var result = await Service(factory).RunAsync(config, request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(["prepare", "bench"], result.Entry.Phases.Select(phase => phase.Phase));
+        Assert.Equal(["prepare", "bench"], result.Entry.RanSteps);
+        Assert.Equal(["bench"], result.Entry.ManualSteps);
+        Assert.Equal(["build"], result.Entry.UnselectedSteps);
+        Assert.Contains($"run: {Leg}: skipped 'build', which this run did not select", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A step's own input is its alone: another step naming it names something nothing fills in, and is
+    /// refused before the first step runs rather than handed the text as written.
+    /// </summary>
+    [Fact]
+    public async Task AStepsOwnInput_IsNotAnotherSteps()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, $$"""
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "{size}"
+              - name: bench
+                inputs:
+                  size:
+                    default: '25'
+                run: |
+                  "{{Child}}" "{{Exec}}" "{{Assembly}}" "{size}"
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = Path.GetFileNameWithoutExtension(Child) });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("'build' run line", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("{size}", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A step's required input with no value anywhere is refused before anything runs, named with its step -
+    /// but only where the run runs that step: a plain run leaving it out owes it nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ARequiredStepInput_IsOwedOnlyByARunThatRunsTheStep(bool runsIt)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  dotnet --version
+              - name: bench
+                manual: true
+                inputs:
+                  size:
+                    required: true
+                successPattern: '^done'
+                run: |
+                  dotnet --info
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var request = Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with
+        {
+            ManualSteps = runsIt ? ["bench"] : [],
+        };
+
+        if (!runsIt)
+        {
+            var result = await Service(factory).RunAsync(config, request, TestContext.Current.CancellationToken);
+
+            Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+            return;
+        }
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(
+            () => Service(factory).RunAsync(config, request, TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("requires input(s) size (step 'bench')", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A runner of phases has no step that could be manual, so a manual step named for it is refused, not ignored.</summary>
+    [Fact]
+    public async Task AManualStepNamed_ForARunnerOfPhases_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        var runner = new RunnerConfig { Phases = [Phase("go", "exit", ["0"])] };
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            Config(),
+            Request(temp, runner) with { ManualSteps = ["bench"] },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Contains("only an action's steps can be manual", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A leg on whose system no step runs would pass having run nothing, so it is refused with
     /// nothing run, naming the leg and its system. <c>run</c> refuses it before any host is
     /// measured; this is the same refusal where a leg reaches the runner anyway.
@@ -1219,6 +1462,86 @@ public sealed class RunnerRunServiceTests
         Assert.Contains($"leg '{Leg}' (linux)", refusal.Message, StringComparison.Ordinal);
         Assert.Contains("would run nothing and pass", refusal.Message, StringComparison.Ordinal);
         Assert.False(Directory.Exists(temp.Combine(".harness-config", "runs", RunId)));
+    }
+
+    /// <summary>
+    /// A leg on which none of the steps the run named runs is refused with nothing run, naming the leg:
+    /// it would run only what they need and pass, with the step named run nowhere. <c>run</c> refuses it
+    /// before any host is measured; this is the same refusal where a leg reaches the runner anyway.
+    /// </summary>
+    [Fact]
+    public async Task ALegOnWhichNoNamedStepRuns_IsRefused_NotPassed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  dotnet --version
+              - name: bench
+                manual: true
+                runOn: [windows]
+                needs: [build]
+                successPattern: '^done'
+                run: |
+                  dotnet --info
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with { Identity = Identity("linux"), ManualSteps = ["bench"] },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"leg '{Leg}' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("would run only what they need there and pass", refusal.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(temp.Combine(".harness-config", "runs", RunId)));
+    }
+
+    /// <summary>
+    /// Two steps of one name that both run on a leg are refused as that, naming them, before anything
+    /// keys the steps by their names: with inputs of their own, they ended the run as a defect in this
+    /// tool - an item already added - rather than as the mistake in the file it was.
+    /// </summary>
+    [Fact]
+    public async Task TwoStepsOfOneNameOnALeg_WithInputsOfTheirOwn_AreRefusedAsTheFilesMistake()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: bench
+                inputs:
+                  size:
+                    default: '1'
+                run: |
+                  dotnet --version
+              - name: bench
+                inputs:
+                  size:
+                    default: '2'
+                run: |
+                  dotnet --info
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("names step(s) bench more than once", refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

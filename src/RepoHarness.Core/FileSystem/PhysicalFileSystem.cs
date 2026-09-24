@@ -261,6 +261,25 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         throw new FileNotFoundException($"'{path}' is not there to be asked when it was last written.", path);
     }
 
+    public DateTime CreationTimeUtc(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var info = new FileInfo(path);
+
+        // Asked as LastWriteTimeUtc asks, so it raises what that raises rather than answering 1601.
+        info.Refresh();
+
+        if (info.Exists)
+        {
+            return info.CreationTimeUtc;
+        }
+
+        _ = info.CreationTimeUtc;
+
+        throw new FileNotFoundException($"'{path}' is not there to be asked when it was created.", path);
+    }
+
     public Stream OpenRead(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);

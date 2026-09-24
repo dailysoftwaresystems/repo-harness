@@ -105,6 +105,13 @@ public interface IFileSystem
     /// </remarks>
     DateTime LastWriteTimeUtc(string path);
 
+    /// <summary>When the file at <paramref name="path"/> was created, in UTC.</summary>
+    /// <param name="path">The file.</param>
+    /// <exception cref="FileNotFoundException">Nothing is there, or what is there is a directory.</exception>
+    /// <exception cref="UnauthorizedAccessException">This process may not look the path up, whether or not a file is there.</exception>
+    /// <remarks>Raised and dated as <see cref="LastWriteTimeUtc"/> is, and for the same reasons.</remarks>
+    DateTime CreationTimeUtc(string path);
+
     /// <summary>
     /// Writes bytes to a sibling temporary file and renames it over the target, so a reader never
     /// observes a half-written file and an interruption never truncates one.

@@ -81,6 +81,22 @@ public static class CommandLineInputs
     /// default while the command line said otherwise.
     /// </remarks>
     public static void RequireDeclared(string runnerName, ActionFile? file, IReadOnlyDictionary<string, string> given)
+        => RequireRead(runnerName, file is null ? null : new SelectedSteps(file, [], []) { Declared = file }, given);
+
+    /// <summary>
+    /// Refuses a value given to an input no step of <paramref name="selected"/> reads: neither one the
+    /// action declares for every step, nor one a step this run runs declares for itself.
+    /// </summary>
+    /// <param name="runnerName">The runner, as the refusal names it.</param>
+    /// <param name="selected">The steps the run runs, or <see langword="null"/> for a runner of phases.</param>
+    /// <param name="given">What <see cref="Parse"/> read.</param>
+    /// <exception cref="HarnessException">A name is not an input a step this run runs reads.</exception>
+    /// <remarks>
+    /// An input of a step the run leaves out is refused as surely as a mistyped one, and said as that:
+    /// given on a plain run, a manual step's input would change nothing while the command line read as
+    /// though the step had run with it.
+    /// </remarks>
+    public static void RequireRead(string runnerName, SelectedSteps? selected, IReadOnlyDictionary<string, string> given)
     {
         ArgumentNullException.ThrowIfNull(given);
 
@@ -89,24 +105,61 @@ public static class CommandLineInputs
             return;
         }
 
-        if (file is null)
+        if (selected is null)
         {
             throw new HarnessException(
                 HarnessExit.UsageError,
                 $"Runner '{runnerName}' runs phases of its own, which declare no inputs, so {Option} has nothing to give a value to.");
         }
 
-        var declared = file.Inputs.Select(input => input.Name).ToList();
+        var file = selected.File;
+        var declared = file.Inputs.Select(input => input.Name)
+            .Concat(file.Steps.SelectMany(step => step.Inputs).Select(input => input.Name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
         var unknown = given.Keys.Where(name => !declared.Contains(name, StringComparer.Ordinal)).ToList();
 
-        if (unknown.Count > 0)
+        if (unknown.Count == 0)
         {
-            throw new HarnessException(
-                HarnessExit.UsageError,
-                $"{Option} names {string.Join(", ", unknown.Select(name => $"'{name}'"))}, which '{file.Path}' does not "
-                + "declare under inputs; "
-                + (declared.Count == 0 ? "it declares none." : $"it declares {string.Join(", ", declared)}."));
+            return;
         }
+
+        // An input of a step this run leaves out, said as that, and apart from a name nothing declares.
+        var leftOut = unknown
+            .Select(name => (Name: name, Steps: selected.Declared.Steps
+                .Where(step => !file.Steps.Contains(step) && step.Inputs.Any(input => string.Equals(input.Name, name, StringComparison.Ordinal)))
+                .Select(step => step.Name)
+                .ToList()))
+            .Where(entry => entry.Steps.Count > 0)
+            .ToList();
+
+        var unread = unknown.Where(name => leftOut.All(entry => entry.Name != name)).ToList();
+        var said = new List<string>();
+
+        if (unread.Count > 0)
+        {
+            said.Add($"{Option} names {string.Join(", ", unread.Select(name => $"'{name}'"))}, which '{file.Path}' does not "
+                + "declare under inputs");
+        }
+
+        foreach (var (name, steps) in leftOut)
+        {
+            said.Add($"{Option} names '{name}', which only step(s) {string.Join(", ", steps.Select(step => $"'{step}'"))} "
+                + $"read{(steps.Count == 1 ? "s" : string.Empty)}, and this run of runner '{runnerName}' does not run "
+                + $"{(steps.Count == 1 ? "it" : "them")}");
+        }
+
+        // Said as the file declares them where no step declares its own, as it always was; where one does,
+        // what this run's steps read, since that is what a value can reach.
+        var stepsDeclareTheirOwn = selected.Declared.Steps.Any(step => step.Inputs.Count > 0);
+
+        throw new HarnessException(
+            HarnessExit.UsageError,
+            $"{string.Join("; ", said)}; "
+            + (stepsDeclareTheirOwn
+                ? declared.Count == 0 ? "the steps this run runs read none." : $"the steps this run runs read {string.Join(", ", declared)}."
+                : declared.Count == 0 ? "it declares none." : $"it declares {string.Join(", ", declared)}."));
     }
 
     /// <summary>The arguments that give <paramref name="given"/> again, for a host running one of this run's legs.</summary>

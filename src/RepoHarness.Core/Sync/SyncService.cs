@@ -1,4 +1,5 @@
 using System.Globalization;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
@@ -306,7 +307,28 @@ public sealed class SyncService(
 
         if (hosts.Count == 0)
         {
-            return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+            // A host is measured only for a leg this machine cannot take, so one measured and unreachable is
+            // a copy some leg needed and nothing made. Counting the runnable hosts alone read that as no
+            // host needing one: inside a host's own copy - which reaches no other machine - every leg
+            // warned it could not run, and the sync still concluded OK.
+            var unreached = report.Hosts
+                .Where(host => host.Host.Kind != Hosts.HostKind.Local && !host.Available)
+                .Select(host => host.Host.ToString())
+                .ToList();
+
+            if (unreached.Count == 0)
+            {
+                return FailedCheck(report, "no host was reached", context, [])
+                    ?? CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+            }
+
+            // Each host's own reason was warned with the legs it stopped, so it is named here and not said
+            // again; in a copy, where that reason is the same for every host, the conclusion says it once.
+            var conclusion = $"no host a leg is placed on could be reached, so nothing was copied: {string.Join(", ", unreached)}";
+
+            return CommandOutcome.Failed(
+                HarnessExit.HostUnavailable,
+                context.IsSyncedCopy ? Hosts.HostConnector.InACopy(conclusion) : conclusion);
         }
 
         var details = new List<string>();
@@ -410,7 +432,46 @@ public sealed class SyncService(
         // only the tree sync makes good on. A carry writes one run's artifacts and a pull reads a
         // handful of named files; either reported as "in step" tells somebody their host matches
         // this tree, which is the one thing neither of them did.
-        return CommandOutcome.Ok(Summary(options, hosts.Count, pull.Count), details);
+        return FailedCheck(report, Summary(options, hosts.Count, pull.Count), context, details)
+            ?? CommandOutcome.Ok(Summary(options, hosts.Count, pull.Count), details);
+    }
+
+    /// <summary>
+    /// The sync's conclusion where the check <c>legs</c> makes fails - a leg named with <c>--legs</c> that
+    /// no host could take, no selected leg any host could take, or a leg turned away through a defect of
+    /// this tool - after whatever the sync could do; <see langword="null"/> where the check passes.
+    /// </summary>
+    /// <param name="report">Where each selected leg was placed, or why it could not be.</param>
+    /// <param name="done">What the sync did, as its conclusion would otherwise have said.</param>
+    /// <param name="context">The tree the sync was typed in.</param>
+    /// <param name="details">What it did, host by host.</param>
+    /// <remarks>
+    /// Failed as <c>legs</c> fails, and for its reason: a leg asked for by name is a copy the command was
+    /// asked to make, and a host put in step does not answer for one nothing could reach. Such a sync said
+    /// how many hosts it had put in step, and exited 0, with the leg's warning the only word of what it
+    /// did not do. A leg merely declared on a machine that is switched off is normal, and fails nothing.
+    /// </remarks>
+    private static CommandOutcome? FailedCheck(
+        Legs.LegsReport report,
+        string done,
+        HarnessContext context,
+        IReadOnlyList<string> details)
+    {
+        var unplaced = report.Placements.Where(placement => !placement.Runnable).Select(placement => placement.Leg.Name).ToList();
+
+        // A tree that declares no leg has nothing to copy, and is done: the check fails a survey that found
+        // no leg to run, and a sync with no leg to place has placed everything it was given.
+        if (report.Passed || unplaced.Count == 0)
+        {
+            return null;
+        }
+        var conclusion = $"{done}; {unplaced.Count} leg(s) could not be placed on any host, so no copy was made for "
+            + $"them: {string.Join(", ", unplaced)}";
+
+        return CommandOutcome.Failed(
+            report.Defect is not null ? Verdicts.ExitCodeFor(LegVerdict.Poisoned) : Legs.LegsExit.Unavailable,
+            context.IsSyncedCopy ? HostConnector.InACopy(conclusion) : conclusion,
+            details);
     }
 
     /// <summary>What this run did, in one line, as the direction it ran in.</summary>
@@ -628,6 +689,23 @@ public sealed class SyncService(
         await PlaceConfigurationAsync(context, transport, destinationRoot, cancellationToken)
             .ConfigureAwait(false);
 
+        // The copy's own record of which files are its own: every file this sync carried, and the
+        // configuration it placed. Written without staging one, a copy's index named nothing, so a build
+        // there fingerprinted no inputs and started every build after the first from clean, and every
+        // guard watching the inputs watched nothing. On every sync, so a copy made before this is put
+        // right by the next, whatever that one carries. A file written through a link in the copy is
+        // outside it, where git cannot hold it; that write was warned of above, and the verification
+        // below says the copy does not hold it.
+        await transport
+            .IndexAsync(
+                destinationRoot,
+                [
+                    .. source.Paths.Where(path => !BeyondALink(path, destination.Links)),
+                    $"{HarnessLayout.DirectoryName}/{HarnessLayout.ConfigFileName}",
+                ],
+                cancellationToken)
+            .ConfigureAwait(false);
+
         // Throws when the copy does not match, so reaching the next line is what verified means.
         await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
@@ -687,6 +765,17 @@ public sealed class SyncService(
             .Select(path => path.TrimEnd('/'))
             .Where(path => path.Length > 0)];
     }
+
+    /// <summary>Whether <paramref name="path"/> is under one of the copy's links.</summary>
+    /// <param name="path">A path relative to the copy's root, with forward separators.</param>
+    /// <param name="links">The copy's links, as its manifest names them before the sync wrote anything.</param>
+    /// <remarks>
+    /// Under one, and not at one: a file written at a link's own name replaces the link, and is then a
+    /// file of the copy like any other. Left out of the index, it went unwatched by every build and
+    /// guard there until the next sync.
+    /// </remarks>
+    private static bool BeyondALink(string path, IReadOnlyList<string> links)
+        => links.Any(link => path.StartsWith(link + "/", StringComparison.Ordinal));
 
     /// <summary>
     /// Puts the <c>config.json</c> this command read into the copy.

@@ -711,8 +711,9 @@ public sealed class BuildService(
             // Either the record predates fingerprinting or nothing could be fingerprinted when it
             // was written. Neither says the tree held still, and reading it as though it did is how
             // a stepped clock gets to hand the tests yesterday's object.
-            return ("no record to compare: the previous build recorded no input fingerprint, so "
-                + "nothing here can say the tree held still", null);
+            return ("no record to compare: the previous build recorded no input fingerprint - git tracked "
+                + "none of its inputs, or it predates fingerprinting - so nothing here can say the tree held "
+                + "still", null);
         }
 
         if (unlistable is not null)
@@ -792,6 +793,19 @@ public sealed class BuildService(
             // them means the tree can be said to have held still.
             _output.Warn(CommandName, $"{request.Leg}: the files git tracks could not be listed: {ex.Message}");
             return ([], $"the files git tracks in '{request.TreeRoot}' could not be listed: {ex.Message}");
+        }
+
+        // A tree git tracks nothing in is said, not passed over: nothing is watched while this builds,
+        // and the record it leaves holds no fingerprint, so the next build of this variant starts from
+        // clean. A copy a sync made was exactly such a tree, until each sync staged what it carried -
+        // and every build there rebuilt from clean with no word about why.
+        if (tracked.Count == 0)
+        {
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: git tracks no file in '{request.TreeRoot}', so nothing is watched while this builds "
+                + "and nothing it records lets the next build keep this directory: nothing here can say the "
+                + "tree held still. A host's copy has what each sync carries staged by that sync.");
         }
 
         // What the project says replaces what its type reads, and only when it says something:

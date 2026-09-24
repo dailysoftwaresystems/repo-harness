@@ -64,6 +64,10 @@ public sealed class RemoteSyncTransport(
         => AskAsync<object>(root, [SyncServe.InitRepository, root], cancellationToken);
 
     /// <inheritdoc/>
+    public Task IndexAsync(string root, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+        => AskAsync<object>(root, [SyncServe.Index, root, SyncServe.CarryPaths(paths)], cancellationToken);
+
+    /// <inheritdoc/>
     /// <remarks>
     /// Asked from the home directory, not from the directory the copy is kept in: a removal is asked where that
     /// directory may be gone - a repositoryPath changed since, a distribution reinstalled - and a copy whose

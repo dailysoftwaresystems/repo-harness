@@ -68,22 +68,25 @@ public sealed class HostSecretsStoreTests
 
     /// <summary>
     /// In a copy the harness synced to a host, connection data is absent by design: it is gitignored and never
-    /// transferred, so the host holds no key of its own. The refusal says that, rather than telling the reader to
-    /// create it there - which would have the host reach a machine over ssh to run work it was dispatched.
+    /// transferred, so the host holds no key of its own. The store says only that it is absent - never to
+    /// create it there, which would have the host reach a machine over ssh to run work it was dispatched.
+    /// Why it is absent is the connector's to say, as it says it for every kind of host a copy cannot reach.
     /// </summary>
-    [Fact]
-    public void AnItemDirectoryMissingFromAHostsOwnCopy_SaysWhyItIsAbsent_NotToCreateIt()
+    [Theory]
+    [InlineData("ssh")]
+    [InlineData("wsl")]
+    public void AnItemDirectoryMissingFromAHostsOwnCopy_IsSaidAsAbsent_NeverAsSomethingToCreate(string kind)
     {
         using var repository = new TempDirectory();
         var fixture = new Fixture(repository);
         repository.WriteFile(Path.Combine(".harness-config", HarnessLayout.SyncedCopyMarkerName), """{"Adopted":false,"Completed":true}""");
 
-        var read = fixture.Store.ReadSshItem(fixture.Layout, Item);
+        var problem = kind == "ssh"
+            ? fixture.Store.ReadSshItem(fixture.Layout, Item).Problem
+            : fixture.Store.ReadWslItem(fixture.Layout, Item).Problem;
 
-        Assert.Null(read.Item);
-        Assert.Contains("this tree is a copy the harness synced to a host", read.Problem, StringComparison.Ordinal);
-        Assert.Contains("Run this from the machine that syncs to this one", read.Problem, StringComparison.Ordinal);
-        Assert.DoesNotContain("create it", read.Problem, StringComparison.Ordinal);
+        var directory = kind == "ssh" ? "sshItems" : "wslDistros";
+        Assert.Equal($"'.harness-config/{directory}/{Item}' does not exist", problem);
     }
 
     [Fact]

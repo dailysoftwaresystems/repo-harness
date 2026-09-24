@@ -1142,6 +1142,30 @@ public static partial class HarnessConfigValidator
                 problems.Add($"predefined runner '{name}' action {actionProblem}");
             }
 
+            // Which steps it names is checked against the action when the file is read; here, what can
+            // be said without reading it.
+            if (runner.Steps is { } steps)
+            {
+                if (!hasAction)
+                {
+                    problems.Add($"predefined runner '{name}' names steps, which only an action file has; its phases all run");
+                }
+                else if (steps.Count == 0)
+                {
+                    problems.Add($"predefined runner '{name}' names no step under steps, so it would run nothing; leave the key out to run every step that is not manual");
+                }
+
+                if (steps.Any(string.IsNullOrWhiteSpace))
+                {
+                    problems.Add($"predefined runner '{name}' names a blank step under steps");
+                }
+
+                foreach (var repeated in steps.GroupBy(step => step, StringComparer.Ordinal).Where(group => group.Count() > 1))
+                {
+                    problems.Add($"predefined runner '{name}' names step '{repeated.Key}' more than once under steps");
+                }
+            }
+
             if (runner.StallSeconds is { } runnerStall && runnerStall < 0)
             {
                 problems.Add($"predefined runner '{name}' has a negative stallSeconds");

@@ -1053,6 +1053,18 @@ not be taken makes it `unmeasured`: an unreadable snapshot is never reported as 
 There is no escape hatch. A command that rewrites its own inputs is a build step, not
 a test.
 
+Between the two readings the inputs are watched, since two snapshots cannot see an edit
+undone before the second. A watch reports what happens once it exists, except on macOS,
+which numbers file events as it reads them: a write made a moment before a watch began
+is sometimes delivered to it. There, each file the watch is told of is looked at as it
+is told: one that stands as the tests found it - the same size, and written and created
+when it was - was told of late, and counts for nothing; any other counts. Looked at then,
+not once the tests are done, because a file moved aside and put back reads the same at
+both ends and was something else while they ran. What goes unseen on macOS is a change
+undone before word of it is looked at, and one of the same size undone in place by a
+tool that also puts the old time back. The times are compared for equality alone, never
+ordered.
+
 ### Clocks are never trusted to order anything
 
 One host this tool must serve has a wall clock that steps forward by about 25 seconds,
@@ -1406,6 +1418,17 @@ directory here cannot drift apart.
 - **The copy is a git repository,** because the DssHarness on that host finds everything through
   git. It is made one after the transfer, so a copy that failed part way is never left looking
   complete.
+- **The copy's index holds what the sync carried,** and nothing else: every file of the transfer and
+  the configuration placed with it, staged as they stand, and anything the index held that the sync
+  did not carry removed - on every sync, so a copy made before this is put right by the next one,
+  whatever that carries. Everything on the host that reads "the files git tracks" reads the index: a
+  build's input fingerprint, which lets the next build keep its directory, and the guards that hold
+  a build's or a step's inputs still. Written without staging one, a copy's index named nothing, so
+  every build there after the first started from clean and every such guard watched nothing,
+  without a word. A file written through a link in the copy is outside it and is not staged; the
+  write is warned of, and the verification refuses the copy. A tree git tracks nothing in is now
+  said, by a build and by a step that asked for its inputs held still. The copy's history stays its
+  own.
 - **Content, never timestamps.** A file is written only when its content differs. An unchanged
   file is not touched, so its modification time does not move and an incremental build on that
   host stays correct; a changed file is rewritten now, so its time advances. Nothing compares two
@@ -1529,15 +1552,42 @@ sibling directory whose name merely starts the same way is outside, not inside.
   nothing there; the two take the same `runOn`. A run in which some leg's system runs no step at
   all is refused before any host is measured, naming every such leg: it would pass having run
   nothing.
+- **A step can run only where a run names it.** `manual: true` keeps a step out of a run that
+  names no step, for work that belongs with an action and is not part of what running it means - a
+  benchmark sharing modules with the build and test beside it, which one action per directory would
+  otherwise leave nowhere to live. `run <runner> --manual-step <step>` runs only the manual steps it
+  names; a runner may name its own steps in `config.json` (`"steps": [...]`), manual or not, and
+  becomes a runner with legs of its own that a gate names like any other; the command line wins over
+  the runner. Whichever chose them, the steps chosen are the file from then on: selection runs
+  before `runOn`'s, and the tool policy, the names a step may use, the inputs a run may be given,
+  the programs a host is asked for and the refusal of a leg that would run nothing all read only
+  what will run. A step lists under `needs` the steps declared before it that run first whenever it
+  does - one declared after it could not have run by then, one that does not run on every system the
+  step runs on would leave a leg there running the step without it, and a step every run runs
+  needing a manual one would make a plain run run it, so each is refused when the file is read.
+  Steps of one name are one step to whatever names them, narrowed by a leg's system to the one it
+  runs, so a manual step cannot share its name with one that is not. A manual step declares a
+  `successPattern`, since it is the step whose green line is read as having done the work it was
+  named for; a predefined action cannot be manual. A run says of every step it did not select that
+  it did not run it, as it goes and as `unselectedSteps` on each leg's line in `--json`, and lists
+  the steps a leg ran as `ranSteps` and the manual ones among them as `manualSteps`, so a plain run
+  is never read as having benchmarked. A `--manual-step` naming a step the action lacks or one that
+  is not manual, a runner naming a step its action lacks, and a leg on whose system none of the
+  steps a run names runs - it would run only what they need, and pass, with the step named run
+  nowhere - are refused before any host is measured, naming the steps there are.
 - **An input's value comes from `run --input name=value` first**, the runner value directories
-  second and the input's own `default` last. `--input` takes one pair each time it is given, for an
-  input the action declares, and only for the runner the command line names - a runner a run check
+  second and the input's own `default` last. A step may declare inputs of its own beside the
+  action's, resolved the same way and read by that step alone: another step naming one names
+  nothing, and a name the action already declares is refused, since one value could not mean both.
+  `--input` takes one pair each time it is given, for an input the action declares or a step the
+  run runs declares, and only for the runner the command line names - a runner a run check
   starts reads its own values. Any other name, a runner of phases, an empty value and a name given
   twice are refused before a host is measured: an unset shell variable is not a request to run
   with nothing, and a value for a name the file never reads changes nothing while the command line
-  says it did. A host running one of the run's legs is handed the same pairs, so no leg there runs
-  a default where the command line gave a value. The value is a plain one, on a command line and
-  so in the process table; a secret stays in `.secrets`.
+  says it did. A host running one of the run's legs is handed the same pairs, and the same
+  `--manual-step`s, so no leg there runs a default where the command line gave a value, or the
+  runner's own steps where it named others. The value is a plain one, on a command line and so in
+  the process table; a secret stays in `.secrets`.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

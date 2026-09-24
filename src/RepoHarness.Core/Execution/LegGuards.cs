@@ -230,13 +230,22 @@ public sealed class LegGuards : IAsyncDisposable
         // Before, during and after. Two snapshots alone cannot see an edit that was undone before
         // the work ended, which is the shape the measured failure took: a configuration file
         // rewritten while a suite ran and restored before it finished.
-        var watch = watching ? fingerprints.Watch(request.TreeRoot, request.Inputs.Paths) : null;
+        var watch = watching ? fingerprints.Watch(request.TreeRoot, request.Inputs.Paths, before!) : null;
 
-        var sampling = request.Contention is null
-            ? null
-            : await sampler.StartAsync(request.Contention, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var sampling = request.Contention is null
+                ? null
+                : await sampler.StartAsync(request.Contention, cancellationToken).ConfigureAwait(false);
 
-        return new LegGuards(fingerprints, request, before, watch, sampling);
+            return new LegGuards(fingerprints, request, before, watch, sampling);
+        }
+        catch
+        {
+            // Nobody holds the guards yet to dispose of them, so the watch is closed here.
+            watch?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

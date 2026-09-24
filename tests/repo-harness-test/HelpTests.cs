@@ -125,8 +125,9 @@ public sealed partial class HelpTests
             "filterArg, excludeArg and labelArg, so one set of options serves every runner. For",
             "ctest, '-R' chooses tests by name, '-L' chooses them by label and '-LE' leaves a label",
             "apart - ctest leaves out only what every -LE matches - declares excludeJoin, and several",
-            "one the sync made, or one it took over - whose index and history are not this",
-            "copy, so an invocation's remoteExcludes are given to every leg a host runs, beside",
+            "one the sync made, or one it took over - whose history is not this checkout's. Each",
+            "sync makes its index hold the files it carried, so a build there fingerprints its",
+            "remoteExcludes are given to every leg a host runs, beside --exclude's, and to none",
         })
         {
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
@@ -377,7 +378,7 @@ public sealed partial class HelpTests
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
         }
 
-        Assert.Contains($"{LegsExit.Unavailable,3}  legs:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains($"{LegsExit.Unavailable,3}  legs, sync:", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains($"{HarnessExit.HostUnavailable,3}  host-exec:", result.StandardOutput, StringComparison.Ordinal);
     }
 

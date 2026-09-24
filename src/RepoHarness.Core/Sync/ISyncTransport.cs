@@ -63,11 +63,28 @@ public interface ISyncTransport
 
     /// <summary>
     /// Makes the copy a git repository, because the DssHarness on that host finds everything through
-    /// git. Does nothing when it already is one.
+    /// git. Does nothing when it already is the top of one of its own; a copy inside another
+    /// repository's work tree is given one of its own.
     /// </summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="cancellationToken">Stops the work.</param>
     Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Makes the copy's git index hold exactly <paramref name="paths"/>: the files the sync placed there, so
+    /// that what the harness there reads as "the files git tracks" is what the copy was given.
+    /// </summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="paths">Every file the copy holds from the sync, relative to its root, with forward separators.</param>
+    /// <param name="cancellationToken">Stops the work.</param>
+    /// <remarks>
+    /// A copy is a git repository the sync made, and the sync wrote its files without staging one, so its
+    /// index named nothing. Everything that reads the tracked files there read none: a build fingerprinted
+    /// no inputs, so each after the first started from clean, and every guard that watches the inputs
+    /// watched nothing - silently. Asked on every sync, rather than only of a new copy, so a copy made
+    /// before this is put right by the next sync, whatever that sync carries.
+    /// </remarks>
+    Task IndexAsync(string root, IReadOnlyList<string> paths, CancellationToken cancellationToken = default);
 
     /// <summary>Reads what the copy currently holds, by content.</summary>
     /// <param name="root">The copy's root.</param>

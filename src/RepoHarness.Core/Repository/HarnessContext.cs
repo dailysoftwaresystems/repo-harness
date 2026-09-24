@@ -21,6 +21,18 @@ public sealed record HarnessContext(HarnessLayout Layout, HarnessConfig Config)
     /// worktree's remote legs came to run with the main checkout's configuration.
     /// </remarks>
     public string ConfigFile { get; init; } = Layout.ConfigFile;
+
+    /// <summary>
+    /// Whether this tree is a copy the harness synced to a host, rather than a checkout somebody works in:
+    /// whether it holds the marker a sync leaves (<see cref="HarnessLayout.SyncedCopyMarkerFile"/>).
+    /// </summary>
+    /// <remarks>
+    /// Read once, where the context is, because more than one answer turns on it. A leg naming another
+    /// host is placed by the machine that syncs here, not from here; a sync from here reaches nothing,
+    /// for want of connection data that is never synced; and the DssHarness running here is updated by
+    /// that machine, on its next dispatch, and may trail it until then.
+    /// </remarks>
+    public bool IsSyncedCopy { get; init; }
 }
 
 /// <summary>
@@ -46,7 +58,8 @@ public sealed class HarnessContextLoader(
     IGitClient gitClient,
     IFileSystem fileSystem,
     Platform.IHostPlatform platform,
-    Output.IHarnessOutput output) : IHarnessContextLoader
+    Output.IHarnessOutput output,
+    SyncedCopyToolCheck copyTool) : IHarnessContextLoader
 {
     private readonly IRepositoryLocator _repositoryLocator = repositoryLocator;
     private readonly IConfigStore _configStore = configStore;
@@ -54,6 +67,7 @@ public sealed class HarnessContextLoader(
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly Platform.IHostPlatform _platform = platform;
     private readonly Output.IHarnessOutput _output = output;
+    private readonly SyncedCopyToolCheck _copyTool = copyTool;
 
     public async Task<HarnessContext> LoadAsync(
         string startDirectory,
@@ -105,7 +119,14 @@ public sealed class HarnessContextLoader(
                     + $"so the main checkout's is being used: '{fallback}'. Anything this tree changes "
                     + "about its configuration is not what is running.");
 
-                return new HarnessContext(layout, _configStore.Load(fallback)) { ConfigFile = fallback };
+                return await CheckedAsync(
+                        new HarnessContext(layout, _configStore.Load(fallback))
+                        {
+                            ConfigFile = fallback,
+                            IsSyncedCopy = _fileSystem.FileExists(layout.SyncedCopyMarkerFile),
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             throw new HarnessException(
@@ -113,6 +134,22 @@ public sealed class HarnessContextLoader(
                 $"No harness configuration at '{configFile}'. Run '{ToolPackage.Command} init' first.");
         }
 
-        return new HarnessContext(layout, _configStore.Load(configFile));
+        return await CheckedAsync(
+                new HarnessContext(layout, _configStore.Load(configFile))
+                {
+                    IsSyncedCopy = _fileSystem.FileExists(layout.SyncedCopyMarkerFile),
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <paramref name="context"/>, once a command typed in a synced copy has been told whether the
+    /// DssHarness running it trails the newest one published.
+    /// </summary>
+    private async Task<HarnessContext> CheckedAsync(HarnessContext context, CancellationToken cancellationToken)
+    {
+        await _copyTool.WarnWhenBehindAsync(context, cancellationToken).ConfigureAwait(false);
+        return context;
     }
 }

@@ -69,6 +69,21 @@ public sealed class HostConnector(
     /// <summary>Longest one probe of a connected host may take.</summary>
     public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// What is said, after why, of a host a command typed in a copy the harness synced to a host could not
+    /// reach: that it is such a copy, and where the command belongs.
+    /// </summary>
+    /// <remarks>
+    /// Said for every kind of host, because inside a copy every kind is refused for the same underlying
+    /// reason. Connection data is gitignored and never synced, and a copy on Linux or macOS has no WSL to
+    /// reach at all; either way a leg naming another host is placed by the machine that syncs here. Each
+    /// kind's own refusal is still said first: what is missing is true, only not the whole of it.
+    /// </remarks>
+    public const string SyncedCopyNotice =
+        "This tree is a copy the harness synced to a host: connection data is never synced, so nothing here "
+        + "reaches another machine. Run this from the machine that syncs to this one, which places the legs it "
+        + "dispatches here";
+
     private readonly IHostPlatform _platform = platform;
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
@@ -89,9 +104,39 @@ public sealed class HostConnector(
         return host.Kind switch
         {
             HostKind.Local => LocalAsync(programs, cancellationToken),
-            HostKind.Wsl => ReachedAsync(WslAsync(context, host, programs, cancellationToken)),
-            _ => ReachedAsync(SshAsync(context, host, programs, cancellationToken)),
+            HostKind.Wsl => FromACopyAsync(context, ReachedAsync(WslAsync(context, host, programs, cancellationToken))),
+            _ => FromACopyAsync(context, ReachedAsync(SshAsync(context, host, programs, cancellationToken))),
         };
+    }
+
+    /// <summary>
+    /// <paramref name="connecting"/>'s result, with <see cref="SyncedCopyNotice"/> after the refusal of a
+    /// host that a command typed in a synced copy could not reach.
+    /// </summary>
+    /// <remarks>
+    /// Here, where every kind of host is reached, rather than in each refusal: the ssh kind's missing item
+    /// once said it alone, and a WSL leg in the same copy was refused only as WSL existing solely on Windows
+    /// - true, and no help to a reader who had typed the command in the wrong tree.
+    /// </remarks>
+    private static async Task<HostConnectionResult> FromACopyAsync(HarnessContext context, Task<HostConnectionResult> connecting)
+    {
+        var result = await connecting.ConfigureAwait(false);
+
+        return context.IsSyncedCopy && result is { Connection: null, Problem.Length: > 0 }
+            ? result with { Problem = InACopy(result.Problem) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="refusal"/>, then <see cref="SyncedCopyNotice"/>: why a host could not be reached from a
+    /// synced copy, in its own words, then where the command belongs.
+    /// </summary>
+    /// <param name="refusal">Why the host could not be reached, with or without a full stop of its own.</param>
+    public static string InACopy(string refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+
+        return $"{refusal.TrimEnd().TrimEnd('.')}. {SyncedCopyNotice}";
     }
 
     /// <summary>

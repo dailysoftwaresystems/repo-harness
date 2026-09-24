@@ -118,6 +118,26 @@ public sealed record LegEntry
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
     /// <summary>
+    /// The steps this leg ran - its runner's action's, or the runner's own phases - by name, in the order
+    /// they ran: each one whose work began, in this attempt or an earlier one of the same run, and none
+    /// after the one that stopped it.
+    /// </summary>
+    public IReadOnlyList<string> RanSteps { get; init; } = [];
+
+    /// <summary>
+    /// The manual steps this leg ran, by name, in the order they are declared: work that runs only where a
+    /// run names it, marked so, so a line that measured something says which of its steps did.
+    /// </summary>
+    public IReadOnlyList<string> ManualSteps { get; init; } = [];
+
+    /// <summary>
+    /// The steps of the runner's action this run did not select, by name, in the order they are declared:
+    /// a manual step a plain run leaves out, or a step a run naming others does not reach. Listed, so a
+    /// run that left a step out is never read as having run it.
+    /// </summary>
+    public IReadOnlyList<string> UnselectedSteps { get; init; } = [];
+
+    /// <summary>
     /// The compilers CMake configured the leg's build with, as it reported them: named on its line
     /// with whatever verdict it reached, so every verdict says which compiler produced what it judged.
     /// </summary>

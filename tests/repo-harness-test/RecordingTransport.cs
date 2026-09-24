@@ -87,6 +87,15 @@ internal sealed class RecordingTransport(
     public Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default)
         => inner.InitialiseRepositoryAsync(root, cancellationToken);
 
+    /// <summary>Every set of paths the copy's index was made to hold, in the order asked.</summary>
+    public List<IReadOnlyList<string>> Indexed { get; } = [];
+
+    public Task IndexAsync(string root, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        Indexed.Add(paths);
+        return inner.IndexAsync(root, paths, cancellationToken);
+    }
+
     public async Task<SyncManifest> ReadManifestAsync(
         string root,
         IReadOnlyList<string> withheld,

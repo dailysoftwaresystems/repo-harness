@@ -110,6 +110,31 @@ public sealed class RemoteLegRunnerTests
     }
 
     /// <summary>
+    /// The manual steps a host ran, and the steps its run did not select, travel on the leg's line read
+    /// from the document the host writes: a leg run there is no less marked than one run here.
+    /// </summary>
+    [Fact]
+    public async Task TheManualStepsAHostRan_AndTheStepsItLeftOut_AreCarriedOnTheLegsLine()
+    {
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, RanSteps = ["prepare", "bench"], ManualSteps = ["bench"], UnselectedSteps = ["build"] }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("run", Leg(), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(["prepare", "bench"], entry.RanSteps);
+        Assert.Equal(["bench"], entry.ManualSteps);
+        Assert.Equal(["build"], entry.UnselectedSteps);
+    }
+
+    /// <summary>
     /// The last lines the phase that failed on a host printed travel on the leg's line, read from the very
     /// document the host writes: its log stays on that host, and a reader here has nothing else.
     /// </summary>

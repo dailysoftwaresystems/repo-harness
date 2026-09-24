@@ -75,6 +75,50 @@ public sealed class CommandLineInputsTests
         Assert.EndsWith("it declares none.", none.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A step's own inputs are read by that step alone, so a run that does not run it gives them nowhere
+    /// to go: named on a plain run, a manual step's input is refused, and said as that step's. The
+    /// action's own inputs, which every step reads, and the inputs of a step the run does run, are taken.
+    /// </summary>
+    [Fact]
+    public void AnInputOfAStepTheRunLeavesOut_IsRefused_NamingTheStep()
+    {
+        var file = new ActionFile(
+            "actions/corpus/corpus.yml",
+            "corpus",
+            null,
+            [new ActionInput("root", "corpus", Required: false, null)],
+            [
+                new ActionStep { Name = "build", Commands = [new ActionCommand("dotnet --version", 4, ["dotnet", "--version"])] },
+                new ActionStep
+                {
+                    Name = "bench",
+                    Manual = true,
+                    SuccessPattern = "^done",
+                    Inputs = [new ActionInput("size", "25", Required: false, null)],
+                    Commands = [new ActionCommand("dotnet --info", 8, ["dotnet", "--info"])],
+                },
+            ]);
+
+        var plain = StepSelection.Default.Apply("corpus", file);
+        var benchmarking = new StepSelection { ManualSteps = ["bench"] }.Apply("corpus", file);
+
+        CommandLineInputs.RequireRead("corpus", plain, new Dictionary<string, string> { ["root"] = "x" });
+        CommandLineInputs.RequireRead("corpus", benchmarking, new Dictionary<string, string> { ["root"] = "x", ["size"] = "5" });
+
+        var refusal = Assert.Throws<HarnessException>(() => CommandLineInputs.RequireRead(
+            "corpus",
+            plain,
+            new Dictionary<string, string> { ["size"] = "5", ["depth"] = "3" }));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.Equal(
+            "--input names 'depth', which 'actions/corpus/corpus.yml' does not declare under inputs; "
+            + "--input names 'size', which only step(s) 'bench' reads, and this run of runner 'corpus' does not run it; "
+            + "the steps this run runs read root.",
+            refusal.Message);
+    }
+
     /// <summary>A runner of phases has no file, so no inputs: a value given for one is refused, not dropped.</summary>
     [Fact]
     public void RequireDeclared_Refuses_AnyInput_ForARunnerOfPhases()
@@ -101,7 +145,7 @@ public sealed class CommandLineInputsTests
     {
         var given = CommandLineInputs.Parse(["root=corpus", "filter=a=b c"]);
 
-        var forwarded = RunnerRunService.RemoteArguments("probe", time, given);
+        var forwarded = RunnerRunService.RemoteArguments("probe", time, given, manualSteps: null);
 
         Assert.Equal(
             ["probe", .. time ? new[] { "--time" } : [], "--input", "root=corpus", "--input", "filter=a=b c"],
@@ -114,5 +158,28 @@ public sealed class CommandLineInputsTests
             .ToList();
 
         Assert.Equal(given, CommandLineInputs.Parse(pairs));
+    }
+
+    /// <summary>
+    /// A host running one of the run's legs is handed the manual steps too, one option each - which it
+    /// reads back to the same steps. A leg there running the runner's own steps where the command line
+    /// named others would report on work nobody asked it to do.
+    /// </summary>
+    [Fact]
+    public void AHostIsHandedTheManualStepsNamed()
+    {
+        var named = StepSelection.Names(["bench,profile"]);
+
+        var forwarded = RunnerRunService.RemoteArguments("probe", time: false, CommandLineInputs.Parse(["size=5"]), named);
+
+        Assert.Equal(["probe", "--input", "size=5", "--manual-step", "bench", "--manual-step", "profile"], forwarded);
+
+        var steps = forwarded
+            .Select((argument, index) => (argument, index))
+            .Where(item => item.index > 0 && forwarded[item.index - 1] == StepSelection.Option)
+            .Select(item => item.argument)
+            .ToList();
+
+        Assert.Equal(named, StepSelection.Names(steps));
     }
 }

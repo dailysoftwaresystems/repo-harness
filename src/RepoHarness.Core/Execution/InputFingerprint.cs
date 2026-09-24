@@ -9,11 +9,27 @@ namespace RepoHarness.Core.Execution;
 /// <param name="Length">Its size in bytes, or <see cref="InputFingerprint.AbsentLength"/> when it was not there.</param>
 /// <param name="Content">A hash of its bytes, or <see cref="InputFingerprint.AbsentContent"/> when it was not there.</param>
 /// <remarks>
-/// Content and size, never a timestamp. Change is detected by equality, which a clock cannot
-/// distort because both readings carry the same distortion; one host's wall clock steps forward by
-/// about 25 seconds every few seconds, and those steps reach file modification times.
+/// Content and size decide whether it changed, never a timestamp. Change is detected by equality,
+/// which a clock cannot distort because both readings carry the same distortion; one host's wall
+/// clock steps forward by about 25 seconds every few seconds, and those steps reach file
+/// modification times. The times it was last written and created are read with it, and compared
+/// for equality alone: a watch that can be told of a write made before it began asks them whether a
+/// file still stands as the work found it.
 /// </remarks>
-public sealed record FileFingerprint(string Path, long Length, string Content);
+public sealed record FileFingerprint(string Path, long Length, string Content)
+{
+    /// <summary>
+    /// When it was last written, as read with it; <see langword="null"/> where it was not there or
+    /// the time could not be read.
+    /// </summary>
+    public DateTime? Written { get; init; }
+
+    /// <summary>
+    /// When it was created, as read with it; <see langword="null"/> where it was not there or the
+    /// time could not be read.
+    /// </summary>
+    public DateTime? Created { get; init; }
+}
 
 /// <summary>An input file that could not be fingerprinted, and why.</summary>
 /// <param name="Path">The file, relative to the tree.</param>
@@ -151,12 +167,24 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
     /// </summary>
     /// <param name="root">The tree the paths are relative to.</param>
     /// <param name="inputs">The inputs, relative to the tree.</param>
-    public InputWatch Watch(string root, IReadOnlyList<string> inputs)
+    /// <param name="found">The inputs as the work found them: the snapshot the work is compared against.</param>
+    /// <remarks>
+    /// A watch on macOS can be told of a write made before it began, and a file it is told of there
+    /// counts only where it no longer stands as <paramref name="found"/> read it: see
+    /// <see cref="InputWatch.ReportsEarlierWrites"/>.
+    /// </remarks>
+    public InputWatch Watch(string root, IReadOnlyList<string> inputs, InputSnapshot found)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(inputs);
+        ArgumentNullException.ThrowIfNull(found);
 
-        return new InputWatch(root, inputs.Select(Normalize), Comparer);
+        return new InputWatch(
+            root,
+            inputs.Select(Normalize),
+            Comparer,
+            reportsEarlierWrites: _platform.Current == PlatformId.MacOs,
+            found.Files);
     }
 
     /// <summary>
@@ -240,7 +268,27 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
         // places that ask — what to transfer, and whether the inputs held still — would disagree.
         var content = await FileContentHash.OfAsync(_fileSystem, full, cancellationToken).ConfigureAwait(false);
 
-        return new FileFingerprint(relative, content.Length, content.Content);
+        return new FileFingerprint(relative, content.Length, content.Content)
+        {
+            Written = TimeOf(_fileSystem.LastWriteTimeUtc, full),
+            Created = TimeOf(_fileSystem.CreationTimeUtc, full),
+        };
+    }
+
+    /// <summary>
+    /// What <paramref name="read"/> says of <paramref name="path"/>, or <see langword="null"/> where it
+    /// cannot say: a reading without a time confirms nothing, and is never taken for one that held still.
+    /// </summary>
+    private static DateTime? TimeOf(Func<string, DateTime> read, string path)
+    {
+        try
+        {
+            return read(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static string Describe(int count, string noun) => count == 1 ? $"1 {noun}" : $"{count} {noun}s";
@@ -284,13 +332,23 @@ public sealed class InputWatch : IDisposable
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, string> _tracked;
+    private readonly Dictionary<string, FileFingerprint> _found;
     private readonly HashSet<string> _changed = new(StringComparer.Ordinal);
     private readonly string _root;
     private readonly List<FileSystemWatcher> _watchers = [];
     private string? _failure;
 
-    internal InputWatch(string root, IEnumerable<string> inputs, StringComparer comparer)
+    internal InputWatch(
+        string root,
+        IEnumerable<string> inputs,
+        StringComparer comparer,
+        bool reportsEarlierWrites = false,
+        IReadOnlyList<FileFingerprint>? found = null)
     {
+        ReportsEarlierWrites = reportsEarlierWrites;
+        _found = (found ?? [])
+            .GroupBy(file => file.Path, comparer)
+            .ToDictionary(group => group.Key, group => group.First(), comparer);
         _root = Path.GetFullPath(root);
         _tracked = new Dictionary<string, string>(comparer);
 
@@ -404,6 +462,22 @@ public sealed class InputWatch : IDisposable
         }
     }
 
+    /// <summary>Whether this watch can be told of a write made before it began, as one on macOS can.</summary>
+    /// <remarks>
+    /// macOS delivers file events through a service that numbers each one as it reads it, and a watch
+    /// takes the events numbered after the one current when it started, so a write made a moment before
+    /// is sometimes delivered to a watch that did not exist when it was made. Counted, it read as an
+    /// input moving under work that had not begun: on a CI run, a test leg whose fixture was written
+    /// just before it ran. So each file such a watch is told of is looked at as it is told: one that
+    /// stands as the work found it - there, the same size, and written and created when it was - is one
+    /// it was told of late, and counts for nothing; any other counts. Looked at then, and not once the
+    /// work is done: a file moved aside and put back reads the same at both ends, and was something else
+    /// while the work ran. What goes unseen is a change undone before word of it is looked at, and one of
+    /// the same size undone in place by a tool that also puts the old time back. A file the work found
+    /// absent, or whose times could not be read, is never taken for one that stands as it was found.
+    /// </remarks>
+    public bool ReportsEarlierWrites { get; }
+
     /// <summary>The inputs seen changing, in the spelling the configuration declared them in.</summary>
     public IReadOnlyList<string> Changed
     {
@@ -462,7 +536,13 @@ public sealed class InputWatch : IDisposable
         }
     }
 
-    private void Record(string fullPath)
+    /// <summary>
+    /// Counts the input at <paramref name="fullPath"/> as changed, as word of any change to it does: where
+    /// the watch can be told of a write made before it began, only once the file no longer stands as the
+    /// work found it.
+    /// </summary>
+    /// <param name="fullPath">The file the platform said changed.</param>
+    internal void Record(string fullPath)
     {
         string relative;
 
@@ -475,12 +555,53 @@ public sealed class InputWatch : IDisposable
             return;
         }
 
+        string? declared;
+
         lock (_gate)
         {
-            if (_tracked.TryGetValue(relative, out var declared))
+            if (!_tracked.TryGetValue(relative, out declared) || _changed.Contains(declared))
             {
-                _changed.Add(declared);
+                return;
             }
+        }
+
+        if (ReportsEarlierWrites && AsFound(declared))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            _changed.Add(declared);
+        }
+    }
+
+    /// <summary>
+    /// Whether the input <paramref name="declared"/> stands now as the work found it: there, the same
+    /// size, and written and created when it was.
+    /// </summary>
+    private bool AsFound(string declared)
+    {
+        if (!_found.TryGetValue(declared, out var found)
+            || found.Length == InputFingerprint.AbsentLength
+            || found.Written is not { } written
+            || found.Created is not { } created)
+        {
+            return false;
+        }
+
+        try
+        {
+            var now = new FileInfo(Path.Combine(_root, declared));
+
+            return now.Exists
+                && now.Length == found.Length
+                && now.LastWriteTimeUtc == written
+                && now.CreationTimeUtc == created;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 }

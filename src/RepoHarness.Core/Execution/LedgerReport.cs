@@ -46,6 +46,15 @@ public sealed record LedgerLine(
     /// <summary>The steps the leg's operating system does not run, by name.</summary>
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
+    /// <summary>The steps the leg ran - its runner's action's, or the runner's own phases - by name, in the order they ran.</summary>
+    public IReadOnlyList<string> RanSteps { get; init; } = [];
+
+    /// <summary>The manual steps the leg ran, by name.</summary>
+    public IReadOnlyList<string> ManualSteps { get; init; } = [];
+
+    /// <summary>The steps of the runner's action the run did not select, by name.</summary>
+    public IReadOnlyList<string> UnselectedSteps { get; init; } = [];
+
     /// <summary>The last lines the leg's last phase that did not pass printed, as <see cref="LegEntry.LogTail"/> says.</summary>
     public IReadOnlyList<string> LogTail { get; init; } = [];
 
@@ -261,6 +270,9 @@ public sealed class LedgerReport
                 {
                     RunDirectory = entry.RunDirectory,
                     SkippedSteps = entry.SkippedSteps,
+                    RanSteps = entry.RanSteps,
+                    ManualSteps = entry.ManualSteps,
+                    UnselectedSteps = entry.UnselectedSteps,
                     LogTail = entry.LogTail,
                     Compilers = entry.Compilers,
                     DeveloperEnvironment = entry.DeveloperEnvironment,
@@ -485,6 +497,13 @@ public sealed class LedgerReport
 
                 // Only where a step was left out for the leg's operating system.
                 SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
+
+                // Each only where it names something: the steps the leg began, the manual ones among
+                // them, and the steps the run left out - a plain run lists the manual steps it did not
+                // run, so it is never read as having run them.
+                RanSteps = line.RanSteps.Count > 0 ? line.RanSteps : null,
+                ManualSteps = line.ManualSteps.Count > 0 ? line.ManualSteps : null,
+                UnselectedSteps = line.UnselectedSteps.Count > 0 ? line.UnselectedSteps : null,
 
                 // Only for a leg that has one: a phase of its own did not pass.
                 LogTail = line.LogTail.Count > 0 ? line.LogTail : null,

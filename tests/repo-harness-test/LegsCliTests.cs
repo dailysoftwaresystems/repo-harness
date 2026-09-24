@@ -4,6 +4,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -170,6 +171,62 @@ public sealed class LegsCliTests
             HostAgentProtocol.CompletionLine(nonce, HarnessExit.Success),
             result.StandardError.TrimEnd(),
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// In a synced copy, a command somebody types asks nuget.org which DssHarness is newest, and the same
+    /// command the host agent runs for another machine never does: that runs after an inspection has just
+    /// made this build that machine's own, and a leg would otherwise ask once for every run. Asserted through
+    /// the real parser and host agent, because what tells the two apart has to flow from the agent into the
+    /// command it starts - and with every request sent to a proxy that is not there, so no test reaches
+    /// nuget.org whatever this machine's network is.
+    /// </summary>
+    [Fact]
+    public async Task InASyncedCopy_ATypedCommandAsksWhichReleaseIsNewest_AndOneTheHostAgentRunsNeverDoes()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await new HarnessFactory().InitializeHarnessAsync(temp.Path, cancellationToken);
+        File.WriteAllText(
+            Path.Combine(temp.Path, HarnessLayout.DirectoryName, HarnessLayout.SyncedCopyMarkerName),
+            """{"Adopted":false,"Completed":true}""");
+
+        var nowhere = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["HTTPS_PROXY"] = "http://127.0.0.1:9",
+            ["https_proxy"] = "http://127.0.0.1:9",
+            ["ALL_PROXY"] = null,
+            ["all_proxy"] = null,
+            ["NO_PROXY"] = null,
+            ["no_proxy"] = null,
+        };
+
+        var asked = $"nuget.org is asked which {ToolPackage.Id} is newest";
+
+        var typed = await CliRunner.RunAsync(
+            ["list-worktree", "--verbose"],
+            cancellationToken,
+            workingDirectory: temp.Path,
+            environment: nowhere);
+
+        Assert.Equal(HarnessExit.Success, typed.ExitCode);
+        Assert.Contains(asked, typed.StandardOutput + typed.StandardError, StringComparison.Ordinal);
+
+        var nonce = HostAgentProtocol.NewNonce();
+        var request = JsonSerializer.Serialize(
+            new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = temp.Path, Arguments = ["list-worktree", "--verbose"], Nonce = nonce },
+            HostAgentProtocol.JsonOptions);
+
+        var served = await CliRunner.RunAsync(
+            [HostAgentProtocol.CommandName, HostAgentProtocol.VerboseOption],
+            cancellationToken,
+            standardInput: request + "\n",
+            environment: nowhere);
+
+        // The command ran, and loaded the same copy's context: without that, asking nothing proves nothing.
+        Assert.EndsWith(HostAgentProtocol.CompletionLine(nonce, HarnessExit.Success), served.StandardError.TrimEnd(), StringComparison.Ordinal);
+        Assert.Contains("list-worktree:", served.StandardOutput + served.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain(asked, served.StandardOutput + served.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]

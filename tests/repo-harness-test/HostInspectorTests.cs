@@ -72,7 +72,38 @@ public sealed class HostInspectorTests
 
         Assert.Contains("WSL exists only on Windows", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.Calls);
+
+        // Nothing about a copy, in a checkout somebody works in: there the machine is simply the wrong one.
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, report.Reason, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A host of any kind that a command typed in a synced copy cannot reach is refused in its own words,
+    /// then with where the command belongs. Only the ssh kind's missing item once said so: a WSL leg in the
+    /// same copy - on Linux, where there is no WSL - was refused as WSL existing solely on Windows, true
+    /// and no help to somebody who had typed the command in the wrong tree.
+    /// </summary>
+    [Theory]
+    [InlineData("wsl", "WSL exists only on Windows, and this machine runs linux")]
+    [InlineData("ssh", $"'.harness-config/sshItems/{SshName}' does not exist")]
+    public async Task AHostACopyCannotReach_IsRefusedWithWhereTheCommandBelongs(string kind, string own)
+    {
+        using var fixture = new Fixture(PlatformId.Linux, writeItems: false, syncedCopy: true);
+
+        var report = await fixture.InspectAsync(kind == "wsl" ? HostId.Wsl(Distro) : HostId.Ssh(SshName));
+
+        Assert.Equal($"{own}. {HostConnector.SyncedCopyNotice}", report.Reason);
+        Assert.DoesNotContain("create it", report.Reason, StringComparison.Ordinal);
+        Assert.Empty(fixture.Commands.Calls);
+    }
+
+    /// <summary>A refusal that ends its own sentence is joined to the notice with one full stop, not two.</summary>
+    [Theory]
+    [InlineData("the host could not be reached")]
+    [InlineData("the host could not be reached.")]
+    [InlineData("the host could not be reached. ")]
+    public void ARefusalFromACopy_MeetsTheNoticeWithOneFullStop(string refusal)
+        => Assert.Equal($"the host could not be reached. {HostConnector.SyncedCopyNotice}", HostConnector.InACopy(refusal));
 
     [Fact]
     public async Task Wsl_IsUnavailable_WhenNoItemDeclaresWhichDistributionItIs()
@@ -972,9 +1003,15 @@ public sealed class HostInspectorTests
             Func<HostConnection, HostCommand, ProcessResult>? respond = null,
             bool writeItems = true,
             bool resolves = true,
-            string address = "host.invalid")
+            string address = "host.invalid",
+            bool syncedCopy = false)
         {
             Repository = new TempDirectory();
+
+            if (syncedCopy)
+            {
+                Repository.WriteFile(Path.Combine(".harness-config", HarnessLayout.SyncedCopyMarkerName), """{"Adopted":false,"Completed":true}""");
+            }
 
             var platform = HostDoubles.Platform(platformId);
 
@@ -1010,7 +1047,7 @@ public sealed class HostInspectorTests
                 },
             };
 
-            _context = new HarnessContext(new HarnessLayout(Repository.Path, Repository.Path), config);
+            _context = new HarnessContext(new HarnessLayout(Repository.Path, Repository.Path), config) { IsSyncedCopy = syncedCopy };
 
             var fileSystem = new PhysicalFileSystem(FilePermissionsFactory.Create());
             var agent = new HostAgentService(

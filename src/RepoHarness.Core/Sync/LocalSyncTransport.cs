@@ -105,7 +105,11 @@ public sealed class LocalSyncTransport(
     /// <inheritdoc/>
     public async Task InitialiseRepositoryAsync(string root, CancellationToken cancellationToken = default)
     {
-        if (await _gitClient.IsRepositoryAsync(Home(root), cancellationToken).ConfigureAwait(false))
+        // The top of a repository of its own, as a copy a sync made or a clone it took over is. Inside
+        // another repository's work tree is not that: git would find that repository from the copy, and
+        // everything the harness there asks of git - the files it tracks, its index - would be answered
+        // by, and written to, a repository that is not the copy's.
+        if (await _gitClient.GetLocationAsync(Home(root), cancellationToken).ConfigureAwait(false) is { Prefix.Length: 0 })
         {
             return;
         }
@@ -121,6 +125,14 @@ public sealed class LocalSyncTransport(
                 $"'{root}' could not be made a git repository, which the harness there needs to find "
                 + $"anything: {result.FailureMessage}");
         }
+    }
+
+    /// <inheritdoc/>
+    public Task IndexAsync(string root, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        return _gitClient.IndexExactlyAsync(Home(root), paths, cancellationToken);
     }
 
     /// <inheritdoc/>

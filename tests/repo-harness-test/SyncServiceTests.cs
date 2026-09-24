@@ -43,6 +43,154 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A copy's git index holds every file the sync carried and the configuration it placed, and nothing
+    /// else: a file the tree drops leaves it on the next sync. Written without staging one, a copy's index
+    /// named nothing, so every build there fingerprinted no input and each after the first started from
+    /// clean, while every guard watching the inputs watched nothing.
+    /// </summary>
+    [Fact]
+    public async Task ACopysIndex_HoldsExactlyWhatTheSyncCarried()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        async Task<IReadOnlyList<string>> IndexedAsync()
+            => [.. (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path).Order(StringComparer.Ordinal)];
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var indexed = await IndexedAsync();
+            Assert.Contains("src/a.c", indexed);
+            Assert.Contains("src/b.c", indexed);
+            Assert.Contains(".gitignore", indexed);
+            Assert.Contains(".harness-config/config.json", indexed);
+
+            // Nothing the copy holds that the sync did not carry: the marker is the harness's own.
+            Assert.DoesNotContain($".harness-config/{HarnessLayout.SyncedCopyMarkerName}", indexed);
+
+            File.Delete(Path.Combine(temp.Path, "src", "a.c"));
+            await harness.CommitAllAsync(temp.Path, "drop a", cancellationToken);
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.DoesNotContain("src/a.c", await IndexedAsync());
+            Assert.Contains("src/b.c", await IndexedAsync());
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A copy made before its index was kept - one whose index names nothing - is put right by the next
+    /// sync, even one that carries nothing: the consumer's copies are all such copies, and waiting for a
+    /// file to change before a build can keep its directory would leave them rebuilding from clean.
+    /// </summary>
+    [Fact]
+    public async Task ACopyWhoseIndexNamesNothing_IsPutRightByASyncThatCarriesNothing()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            // As every copy made before this was: its files there, and its index naming none of them.
+            var emptied = await harness.GitClient.RunAsync(copy, ["read-tree", "--empty"], cancellationToken: cancellationToken);
+            Assert.True(emptied.Succeeded, emptied.FailureMessage);
+            Assert.Empty(await harness.GitClient.ListIndexAsync(copy, cancellationToken));
+
+            var again = await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.Empty(again.Plan.Writes);
+            Assert.Contains(
+                "src/a.c",
+                (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A copy placed inside another repository's work tree is made a repository of its own, and the other
+    /// one's index is never written: git found that repository from the copy, so staging what the sync
+    /// carried put every file into it, and took out whatever it tracked below the copy.
+    /// </summary>
+    [Fact]
+    public async Task ACopyInsideAnotherRepository_IsARepositoryOfItsOwn_AndTheOtherIndexIsLeftAlone()
+    {
+        using var temp = new TempDirectory();
+        using var outer = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+
+        var created = await harness.GitClient.RunAsync(outer.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        var copy = outer.Combine("hosts", "copy");
+
+        await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+        Assert.Empty(await harness.GitClient.ListIndexAsync(outer.Path, cancellationToken));
+        Assert.Equal(string.Empty, (await harness.GitClient.GetLocationAsync(copy, cancellationToken))?.Prefix);
+        Assert.Contains(
+            "src/a.c",
+            (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+    }
+
+    /// <summary>
+    /// A file the sync writes where the copy held a link is a file of the copy like any other - the write
+    /// replaced the link - and its index holds it. Taken for one beyond a link, it was left out, and every
+    /// build and guard there passed over it until the next sync.
+    /// </summary>
+    [Fact]
+    public async Task AFileWrittenWhereTheCopyHeldALink_IsInItsIndex()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var replaced = Path.Combine(copy, "src", "a.c");
+            File.Delete(replaced);
+
+            try
+            {
+                File.CreateSymbolicLink(replaced, "b.c");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                Assert.Skip($"This machine cannot make a link: {ex.Message}");
+            }
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.Null(new FileInfo(replaced).LinkTarget);
+            Assert.Contains(
+                "src/a.c",
+                (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
     /// A sync carries its writes in batches, so the far side is asked once for many files rather than once
     /// for each. Over a connection one asking is one session, and a session costs a connection, an
     /// authentication and whatever the host's login profile does: a file at a time, a consumer's first sync
@@ -1165,6 +1313,212 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A sync that could reach none of the hosts its legs need copied nothing it was asked to, and fails
+    /// naming them - a real run and a dry run alike, since a dry run answers for the real one. Counting
+    /// the reachable hosts alone read this as no host needing a copy: inside a host's own copy, which
+    /// reaches no other machine, every leg warned it could not run and the sync still concluded OK.
+    /// Inside a copy the conclusion also says where the command belongs, once, whatever the host count.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ASyncThatCanReachNoHostItsLegsNeed_FailsNamingThem_RatherThanConcludingOk(bool syncedCopy, bool dryRun)
+    {
+        var factory = Substitute.For<ISyncTransportFactory>();
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig
+            {
+                Ssh =
+                {
+                    ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" },
+                    ["mac"] = new SshHostConfig { RepositoryPath = "/Users/harness/repo" },
+                },
+            },
+            Legs = { ["arm"] = HostDoubles.Leg("linux", "arm64"), ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "mac" } },
+        };
+
+        var loader = HostDoubles.Loader(config, here, syncedCopy: syncedCopy);
+
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : new HostReport { Host = host, Reason = "the host could not be reached" });
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            factory,
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(
+            here, null, new SyncOptions(DryRun: dryRun), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+        Assert.StartsWith("no host a leg is placed on could be reached, so nothing was copied", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh pi", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh mac", outcome.Message, StringComparison.Ordinal);
+
+        var notices = outcome.Message.Split(HostConnector.SyncedCopyNotice).Length - 1;
+        Assert.Equal(syncedCopy ? 1 : 0, notices);
+
+        factory.DidNotReceive().For(Arg.Any<HostReport>());
+    }
+
+    /// <summary>
+    /// A sync whose every leg runs on this machine needed no copy anywhere, and says so as the success it
+    /// is - the conclusion the failure above must not be mistaken for, and must not replace.
+    /// </summary>
+    [Fact]
+    public async Task ASyncWhoseLegsAllRunHere_SaysNoHostNeedsACopy()
+    {
+        var factory = Substitute.For<ISyncTransportFactory>();
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" } } },
+            Legs = { ["here"] = HostDoubles.Leg("linux", "x86_64") },
+        };
+
+        var loader = HostDoubles.Loader(config, here, syncedCopy: true);
+
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : throw new InvalidOperationException($"{host} was measured, though no leg needs it"));
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            factory,
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(here, null, new SyncOptions(), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.Equal("no host needs a copy: every runnable leg runs on this machine", outcome.Message);
+    }
+
+    /// <summary>
+    /// A leg named with --legs that no host could take fails the sync, as it fails 'legs', though another
+    /// host was reached and done: the leg was asked for, and its copy was not made. Such a sync said how
+    /// many hosts it had done, and exited 0. A leg merely declared on a machine that is off is normal, and
+    /// fails nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ALegNamedWithLegsThatNoHostCouldTake_FailsTheSync_ThoughAnotherHostWasReached(bool named)
+    {
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig
+            {
+                Ssh =
+                {
+                    ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" },
+                    ["mac"] = new SshHostConfig { RepositoryPath = "/Users/harness/repo" },
+                },
+            },
+            Legs = { ["arm"] = HostDoubles.Leg("linux", "arm64"), ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "mac" } },
+        };
+
+        var loader = HostDoubles.Loader(config, here);
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : host == HostId.Ssh("pi")
+                ? new HostReport { Host = host, Reason = "the host could not be reached" }
+                : new HostReport { Host = host, Os = "macos", Processor = "arm64" });
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            Substitute.For<ISyncTransportFactory>(),
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(
+            here, named ? ["arm", "mac"] : null, new SyncOptions(DryRun: true), ["build/report.txt"], TestContext.Current.CancellationToken);
+
+        // The host that was reached is done either way.
+        Assert.Equal(["ssh mac: would bring back 1 named file(s) from '/Users/harness/repo'"], outcome.Details);
+
+        if (named)
+        {
+            Assert.Equal(LegsExit.Unavailable, outcome.ExitCode);
+            Assert.Contains("1 leg(s) could not be placed on any host, so no copy was made for them: arm", outcome.Message, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        }
+    }
+
+    /// <summary>
+    /// A sync where no selected leg could be placed on any host, and no host was out of reach - no host
+    /// runs the system its legs name - fails as 'legs' fails. It said that no host needed a copy, and that
+    /// every runnable leg ran on this machine, when no leg could run anywhere.
+    /// </summary>
+    [Fact]
+    public async Task ASyncWhereNoLegCouldBePlaced_Fails_RatherThanSayingNoHostNeedsACopy()
+    {
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs = { ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug" } },
+        };
+
+        var loader = HostDoubles.Loader(config, here);
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : throw new InvalidOperationException($"{host} was measured, though no host is declared"));
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            Substitute.For<ISyncTransportFactory>(),
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(here, null, new SyncOptions(), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegsExit.Unavailable, outcome.ExitCode);
+        Assert.Equal("no host was reached; 1 leg(s) could not be placed on any host, so no copy was made for them: mac", outcome.Message);
+    }
+
+    /// <summary>
     /// A name no host answers to is refused before a transport is made for any host, so a typo
     /// cannot be learned about after another host's directory has already been taken over.
     /// </summary>
@@ -2140,6 +2494,46 @@ public sealed class SyncServiceTests
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// The far side makes a copy's index hold what it is told, through the real parser: what the asking
+    /// machine's sync carried is what a build there fingerprints. A list it cannot read - null, naming a
+    /// blank path, or not a list at all - is refused and touches nothing: read as none, it would unstage
+    /// every file the copy has.
+    /// </summary>
+    [Fact]
+    public async Task TheAgentIndexesExactlyWhatItIsTold_AndRefusesAListItCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var harness = new HarnessFactory();
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: token);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        temp.WriteFile(Path.Combine("src", "a.c"), "a\n");
+        temp.WriteFile("notes.txt", "n\n");
+
+        async Task<IReadOnlyList<string>> IndexedAsync()
+            => [.. (await harness.GitClient.ListIndexAsync(temp.Path, token)).Select(entry => entry.Path)];
+
+        var result = await CliRunner.RunAsync(
+            ["sync-serve", SyncServe.Index, temp.Path, SyncServe.CarryPaths(["src/a.c"])],
+            token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Equal(["src/a.c"], await IndexedAsync());
+
+        foreach (var unreadable in new[] { "null", """["src/a.c", " "]""", "not a list" })
+        {
+            var refused = await CliRunner.RunAsync(["sync-serve", SyncServe.Index, temp.Path, unreadable], token);
+
+            Assert.Equal(HarnessExit.UsageError, refused.ExitCode);
+            Assert.Contains("The files to index arrived in a shape this build cannot read", refused.StandardError, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(["src/a.c"], await IndexedAsync());
     }
 
     /// <summary>
