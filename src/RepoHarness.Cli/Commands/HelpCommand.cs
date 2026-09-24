@@ -1315,6 +1315,14 @@ internal static class HelpCommand
         builder.AppendLine("A host running a leg another machine sent it reads the section that machine");
         builder.AppendLine("names it by, never 'local', which in their shared file is the machine that sent it.");
         builder.AppendLine();
+        builder.AppendLine("An ssh host's holdAwakeSeconds holds it awake between commands, and never during");
+        builder.AppendLine("one: as each command finishes with it, the host starts a DssHarness of its own that");
+        builder.AppendLine("runs its keepAwake - {pid} filled in with that process - for that many seconds, and");
+        builder.AppendLine("goes on once the connection has ended. The next command's own keepAwake ends it");
+        builder.AppendLine("there, and a newer hold replaces an older one. It needs keepAwake, which it runs; a");
+        builder.AppendLine("hold that cannot be left is said and fails nothing. On a Windows host, OpenSSH may");
+        builder.AppendLine("end that process with the connection.");
+        builder.AppendLine();
         builder.AppendLine("A host's keepAwake - [\"caffeinate\", \"-dimsu\", \"-w\", \"{pid}\"] on macOS - runs on that");
         builder.AppendLine("host while a leg's own work does, {pid} filled in with the DssHarness process");
         builder.AppendLine("running the leg, and is stopped when the work ends. One that cannot start, or");

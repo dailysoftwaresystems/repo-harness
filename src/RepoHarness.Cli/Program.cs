@@ -44,6 +44,9 @@ root.Subcommands.Add(SyncServeCommand.Create());
 // through this same parser, in the host's copy of the repository, which is why it is wired here.
 root.Subcommands.Add(HostAgentCommand.Create(RunInAsync));
 
+// Started by a host agent asked to hold its machine awake between commands, detached, and never typed.
+root.Subcommands.Add(HostHoldCommand.Create());
+
 return await RunAsync(args, CancellationToken.None).ConfigureAwait(false);
 
 async Task<int> RunAsync(string[] arguments, CancellationToken cancellationToken)

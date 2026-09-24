@@ -477,3 +477,37 @@ internal static class HostDoubles
     /// <summary>A leg that needs <paramref name="os"/> on <paramref name="processor"/>, built in the "debug" configuration.</summary>
     public static LegConfig Leg(string os, string processor) => new() { Os = os, Processor = processor, Config = "debug" };
 }
+
+/// <summary>Records what this tool was asked to start detached, and starts nothing.</summary>
+internal sealed class RecordingLauncher : IDetachedProcessLauncher
+{
+    private readonly List<IReadOnlyList<string>> _started = [];
+
+    /// <summary>What was started, in order.</summary>
+    public IReadOnlyList<IReadOnlyList<string>> Started
+    {
+        get
+        {
+            lock (_started)
+            {
+                return [.. _started];
+            }
+        }
+    }
+
+    /// <summary>What starting raises, where a test scripts it.</summary>
+    public Exception? Raises { get; init; }
+
+    public void StartSelf(IReadOnlyList<string> arguments)
+    {
+        if (Raises is { } raised)
+        {
+            throw raised;
+        }
+
+        lock (_started)
+        {
+            _started.Add(arguments);
+        }
+    }
+}

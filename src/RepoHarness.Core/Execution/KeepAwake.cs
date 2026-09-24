@@ -32,11 +32,22 @@ public sealed class KeepAwake
     private readonly IProcessRunner _processRunner;
     private readonly IHarnessOutput _output;
     private readonly TimeSpan _stopBudget;
+    private readonly HoldAwakeStore? _holds;
 
     /// <summary>Holds machines awake with <paramref name="processRunner"/>, saying what goes wrong through <paramref name="output"/>.</summary>
     public KeepAwake(IProcessRunner processRunner, IHarnessOutput output)
         : this(processRunner, output, StopBudget)
     {
+    }
+
+    /// <summary>The same, ending the hold <paramref name="holds"/> keeps when a command of its own starts.</summary>
+    /// <param name="processRunner">Starts the command.</param>
+    /// <param name="output">Says what goes wrong.</param>
+    /// <param name="holds">Where this machine's hold between commands is kept.</param>
+    public KeepAwake(IProcessRunner processRunner, IHarnessOutput output, HoldAwakeStore holds)
+        : this(processRunner, output, StopBudget)
+    {
+        _holds = holds;
     }
 
     /// <summary>The same, waiting <paramref name="stopBudget"/> for a stopped command.</summary>
@@ -64,12 +75,22 @@ public sealed class KeepAwake
     /// <param name="host">What the machine the leg runs on declares for itself.</param>
     /// <param name="programDirectories">The directories the survey found this machine's programs in.</param>
     /// <param name="cancellationToken">Stops the command with the run.</param>
+    /// <param name="endsHold">
+    /// Whether starting the command ends the hold that keeps this machine awake between commands: always, but
+    /// for that hold's own command.
+    /// </param>
+    /// <remarks>
+    /// A hold exists between commands, and never during one: the command a leg or a request starts here holds
+    /// the machine itself, so the hold ends the moment it starts, and a command that holds nothing - one that
+    /// declares no keepAwake - leaves it standing.
+    /// </remarks>
     public IAsyncDisposable Hold(
         string commandName,
         string leg,
         HostSettings host,
         IReadOnlyList<string> programDirectories,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool endsHold = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
         ArgumentException.ThrowIfNullOrWhiteSpace(leg);
@@ -79,6 +100,11 @@ public sealed class KeepAwake
         if (host.KeepAwake is not [var program, .. var arguments])
         {
             return Released.Instance;
+        }
+
+        if (endsHold)
+        {
+            _holds?.End();
         }
 
         // The process running the leg, which a command such as caffeinate -w waits on: should this

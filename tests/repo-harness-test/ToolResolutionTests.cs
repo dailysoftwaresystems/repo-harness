@@ -2,6 +2,7 @@ using RepoHarness.Core.Output;
 using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
@@ -1005,7 +1006,9 @@ public sealed class ToolResolutionTests
             new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, Permissions(), () => onPath),
-            new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
+            new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)),
+                new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), Path.Combine(TestHost.TemporaryRoot, "holds", Guid.NewGuid().ToString("N") + ".json")),
+                new RecordingLauncher());
 
         // An emulator for another kind of host, so the witness never runs: only the search is measured.
         var emulators = new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase)

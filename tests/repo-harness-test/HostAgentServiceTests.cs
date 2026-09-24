@@ -240,6 +240,7 @@ public sealed class HostAgentServiceTests
     [Theory]
     [InlineData(HostExecService.CommandName)]
     [InlineData(HostAgentProtocol.CommandName)]
+    [InlineData(HoldAwakeService.CommandName)]
     public async Task Run_RefusesToPassTheWorkOnToAnotherHost(string command)
     {
         using var temp = new TempDirectory();
@@ -427,6 +428,8 @@ public sealed class HostAgentServiceTests
             new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
-            new KeepAwake(keepingAwake ?? processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
+            new KeepAwake(keepingAwake ?? processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)),
+                new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), Path.Combine(TestHost.TemporaryRoot, "holds", Guid.NewGuid().ToString("N") + ".json")),
+                new RecordingLauncher());
     }
 }

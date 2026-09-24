@@ -404,6 +404,21 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
+    /// The config topic says a hold between commands runs the host's keepAwake, ends when a command's own starts,
+    /// and needs keepAwake.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysAHoldBetweenCommandsEndsWhenACommandsOwnKeepAwakeStarts()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("holdAwakeSeconds holds it awake between commands, and never during one", text, StringComparison.Ordinal);
+        Assert.Contains("The next command's own keepAwake ends it there", text, StringComparison.Ordinal);
+        Assert.Contains("It needs keepAwake, which it runs", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The legs topic says what a wake window retries and what it never does, with the delay the code uses.
     /// </summary>
     [Fact]

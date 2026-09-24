@@ -100,6 +100,12 @@ public sealed record HostReport
     /// <summary>What each build directory it was asked about holds, as its record says, and the room where it is.</summary>
     public IReadOnlyList<BuildDirectoryRoom> Builds { get; init; } = [];
 
+    /// <summary>
+    /// How long it is to be held awake as a command finishes with it, until the next command's own keepAwake
+    /// takes over, as its <c>holdAwakeSeconds</c> says; zero for none.
+    /// </summary>
+    public int HoldAwakeSeconds { get; init; }
+
     /// <summary>How to reach DssHarness there; <see langword="null"/> for this machine and for a host that is unavailable.</summary>
     public HostSession? Session { get; init; }
 }
@@ -166,7 +172,8 @@ public sealed class HostInspector(
     IHostCommandRunner hostCommands,
     IHostConnector connector,
     IToolIdentityProvider identity,
-    HostAgentService agent) : IHostInspector
+    HostAgentService agent,
+    HoldAwakeRegistry holds) : IHostInspector
 {
     /// <summary>The program every host needs before DssHarness can be installed or run there.</summary>
     public const string DotnetProgram = "dotnet";
@@ -181,6 +188,7 @@ public sealed class HostInspector(
     private readonly IHostConnector _connector = connector;
     private readonly IToolIdentityProvider _identity = identity;
     private readonly HostAgentService _agent = agent;
+    private readonly HoldAwakeRegistry _holds = holds;
 
     public Task<HostReport> InspectAsync(
         HarnessContext context,
@@ -239,6 +247,9 @@ public sealed class HostInspector(
             // Said with what inspection did there, so how long a host took to wake is seen beside the window
             // it was given.
             Actions = opened.Woke is { } woke ? [woke] : [],
+            HoldAwakeSeconds = context.Config.Hosts.Ssh.GetValueOrDefault(host.Name) is { } ssh && host.Kind == HostKind.Ssh
+                ? ssh.HoldAwakeSeconds
+                : 0,
         };
 
         if (opened.Connection is not { } connection)
@@ -248,7 +259,13 @@ public sealed class HostInspector(
 
         try
         {
-            return await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+            var prepared = await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+
+            // Reached here, and nowhere else, so a host is held when the command ends however the command
+            // then ended - a sibling host whose measuring failed included.
+            _holds.Reached(prepared);
+
+            return prepared;
         }
         catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
         {

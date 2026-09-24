@@ -92,6 +92,14 @@ internal static class HarnessServices
             provider.GetRequiredService<INameLookup>(),
             TimeProvider.System,
             HostAddressResolver.DefaultRetryDelay));
+        services.AddSingleton(provider => new HoldAwakeStore(provider.GetRequiredService<IFileSystem>(), HoldAwakeStore.DefaultPath));
+        services.AddSingleton<IDetachedProcessLauncher, DetachedProcessLauncher>();
+        services.AddSingleton<HoldAwakeRegistry>();
+        services.AddSingleton(provider => new HoldAwakeService(
+            provider.GetRequiredService<HoldAwakeStore>(),
+            provider.GetRequiredService<KeepAwake>(),
+            TimeProvider.System,
+            HoldAwakeService.PollInterval));
         services.AddSingleton(provider => new SshWakeWindow(
             provider.GetRequiredService<INameLookup>(),
             TimeProvider.System,

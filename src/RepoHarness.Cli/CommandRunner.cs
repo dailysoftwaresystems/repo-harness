@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -92,6 +93,13 @@ internal static class CommandRunner
             catch (Exception ex)
             {
                 return Fail(output, commandName, ex, answersWithLedger);
+            }
+            finally
+            {
+                // However the command ended, a host it reached that asks to be held awake between commands is
+                // held: the next command's own keepAwake ends the hold there. Asked apart from the command's
+                // own token, so an interrupted command still leaves its holds.
+                await services.GetRequiredService<HoldAwakeRegistry>().LeaveHoldsAsync(commandName, CancellationToken.None).ConfigureAwait(false);
             }
         };
     }

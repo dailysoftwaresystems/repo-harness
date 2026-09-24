@@ -4,6 +4,7 @@ using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Hosts;
@@ -20,7 +21,9 @@ public sealed class HostAgentService(
     DeveloperEnvironmentProbe developerEnvironmentProbe,
     IFileSystem fileSystem,
     LocalProgramResolver programs,
-    KeepAwake keepAwake)
+    KeepAwake keepAwake,
+    HoldAwakeStore holds,
+    IDetachedProcessLauncher launcher)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
@@ -29,6 +32,8 @@ public sealed class HostAgentService(
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly LocalProgramResolver _programs = programs;
     private readonly KeepAwake _keepAwake = keepAwake;
+    private readonly HoldAwakeStore _holds = holds;
+    private readonly IDetachedProcessLauncher _launcher = launcher;
 
     /// <summary>Reads one request from <paramref name="input"/> and serves it.</summary>
     /// <param name="input">
@@ -124,7 +129,65 @@ public sealed class HostAgentService(
             return HarnessExit.Success;
         }
 
+        if (request.Kind == HostAgentRequestKind.Hold)
+        {
+            return await HoldAsync(request, output, error).ConfigureAwait(false);
+        }
+
         return await RunAsync(request, output, error, run, abandoned.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Serves a hold request: makes it the hold that stands on this machine, replacing any before it, starts the
+    /// process that holds the machine awake - detached, so it goes on once this request's connection has ended -
+    /// and answers at once, with the completion line last, as a run request answers.
+    /// </summary>
+    private async Task<int> HoldAsync(HostAgentRequest request, TextWriter output, TextWriter error)
+    {
+        if (string.IsNullOrWhiteSpace(request.Nonce))
+        {
+            return await RefuseAsync(error, HarnessExit.UsageError, "the hold request carries no nonce to mark its answer with").ConfigureAwait(false);
+        }
+
+        await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
+
+        var exitCode = await ServeHoldAsync(request, error).ConfigureAwait(false);
+
+        await error.WriteLineAsync(HostAgentProtocol.CompletionLine(request.Nonce, exitCode)).ConfigureAwait(false);
+        await error.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+
+        return exitCode;
+    }
+
+    private async Task<int> ServeHoldAsync(HostAgentRequest request, TextWriter error)
+    {
+        if (request.KeepAwake.Count == 0 || request.HoldAwakeSeconds < 1)
+        {
+            return await RefuseAsync(error, HarnessExit.UsageError, "the hold request names no keepAwake command to hold this host with, or no seconds to hold it for").ConfigureAwait(false);
+        }
+
+        var generation = HostAgentProtocol.NewNonce();
+
+        try
+        {
+            _holds.Write(new HoldAwakeState(
+                generation,
+                DateTimeOffset.UtcNow.AddSeconds(request.HoldAwakeSeconds),
+                [.. request.KeepAwake],
+                new Dictionary<string, string>(request.KeepAwakeEnvironment, StringComparer.OrdinalIgnoreCase),
+                [.. request.KeepAwakeDirectories]));
+
+            _launcher.StartSelf([HoldAwakeService.CommandName, generation]);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ProgramStartException)
+        {
+            // Nothing holds the host: a state written for a process that never started is ended with it.
+            _holds.End();
+
+            return await RefuseAsync(error, HarnessExit.HostUnavailable, $"this host could not be held awake: {ex.Message.TrimEnd('.')}").ConfigureAwait(false);
+        }
+
+        return HarnessExit.Success;
     }
 
     /// <summary>

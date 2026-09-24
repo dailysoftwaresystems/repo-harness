@@ -58,7 +58,7 @@ public static class HostAgentProtocol
     /// Commands a host is never asked to run. A host that passed the work on to another host would leave
     /// the machine that asked unable to say where anything ran.
     /// </summary>
-    public static IReadOnlyList<string> NotForwardable { get; } = [CommandName, HostExecService.CommandName];
+    public static IReadOnlyList<string> NotForwardable { get; } = [CommandName, HostExecService.CommandName, Execution.HoldAwakeService.CommandName];
 
     /// <summary>Whether <paramref name="command"/> is one a host is never asked to run, in whatever case it is typed.</summary>
     public static bool IsNotForwardable(string command) => NotForwardable.Contains(command, StringComparer.OrdinalIgnoreCase);
@@ -160,6 +160,12 @@ public enum HostAgentRequestKind
 
     /// <summary>Run one DssHarness command in a directory on the host.</summary>
     Run,
+
+    /// <summary>
+    /// Hold the host awake until the next command's own keepAwake takes over, or the hold's seconds are up:
+    /// started, detached, and answered at once.
+    /// </summary>
+    Hold,
 }
 
 /// <summary>A request to the DssHarness on a host.</summary>
@@ -204,9 +210,13 @@ public sealed class HostAgentRequest
     /// </summary>
     public List<string> Builds { get; init; } = [];
 
+    /// <summary>How long a hold keeps the host awake, at most, in seconds. Hold only.</summary>
+    public int HoldAwakeSeconds { get; init; }
+
     /// <summary>
     /// The command that keeps the host awake while this request is served, as the configuration declares it
-    /// for that host, or empty where it declares none. Run only for a <see cref="HostAgentRequestKind.Run"/>.
+    /// for that host, or empty where it declares none: for a <see cref="HostAgentRequestKind.Run"/>, and the
+    /// command a <see cref="HostAgentRequestKind.Hold"/> holds the host with.
     /// </summary>
     /// <remarks>
     /// Carried rather than read there, because the host's copy has no configuration until a first sync has

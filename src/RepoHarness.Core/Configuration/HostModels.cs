@@ -141,4 +141,18 @@ public sealed class SshHostConfig : RemoteHostConfig
     /// host answering, and is never tried again.
     /// </remarks>
     public int WakeWaitSeconds { get; init; }
+
+    /// <summary>
+    /// Seconds to hold this host awake as each command finishes with it, with its <c>keepAwake</c>, until the
+    /// next command's own keepAwake takes over there - which ends the hold - or the seconds are up. Zero, the
+    /// default, holds nothing between commands.
+    /// </summary>
+    /// <remarks>
+    /// For a machine that sleeps: every keepAwake a command starts ends with the connection that started it,
+    /// and a personal Mac falls back asleep in the seconds before the next command. Held by a DssHarness the
+    /// host starts on its own, which goes on once the connection has ended; one hold per user there, whichever
+    /// repository or worktree asked, and a newer hold replaces an older one. On a Windows host, OpenSSH may end
+    /// that process with the connection.
+    /// </remarks>
+    public int HoldAwakeSeconds { get; init; }
 }

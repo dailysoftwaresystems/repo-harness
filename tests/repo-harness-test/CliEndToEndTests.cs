@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
@@ -640,6 +641,84 @@ public sealed partial class CliEndToEndTests
         var leg = Assert.Single(root.GetProperty("legs").EnumerateArray());
         Assert.Equal("elsewhere", leg.GetProperty("leg").GetString());
         Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString());
+    }
+
+    /// <summary>
+    /// A hold asked of the DssHarness on a host, served by the real binary as a host agent serves it, goes on once
+    /// the agent has answered and ended - a process of its own - holding the machine with its keepAwake, given that
+    /// process; and it ends when it is ended, as a command's own keepAwake ends it there, taking its keepAwake with it.
+    /// </summary>
+    [Fact]
+    public async Task AHold_OutlivesTheAgentThatStartedIt_AndEndsWhenItIsEnded()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsWindows(),
+            "Windows keeps a user's application data where no environment can move it, so a test cannot keep a hold apart from the machine's own.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var home = temp.Combine("home");
+        var watched = temp.Combine("watched.txt");
+        Directory.CreateDirectory(home);
+
+        var environment = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["HOME"] = home,
+            ["XDG_DATA_HOME"] = Path.Combine(home, ".local", "share"),
+        };
+
+        var request = JsonSerializer.Serialize(
+            new HostAgentRequest
+            {
+                Kind = HostAgentRequestKind.Hold,
+                HoldAwakeSeconds = 60,
+                KeepAwake = [TestHost.DotnetExecutable, "exec", TestHost.AssemblyPath, watched, "{pid}"],
+                KeepAwakeEnvironment = new() { [TestHost.ChildModeVariable] = "watch-process" },
+                Nonce = "0123456789abcdef0123456789abcdef",
+            },
+            HostAgentProtocol.JsonOptions);
+
+        var served = await CliRunner.RunAsync(["host-agent"], token, standardInput: request + "\n", environment: environment);
+
+        Assert.Equal(HarnessExit.Success, served.ExitCode);
+
+        // The agent has answered and ended; the hold it started holds the machine on.
+        await EventuallyAsync(() => File.Exists(watched) && File.ReadAllText(watched).StartsWith("started ", StringComparison.Ordinal), token);
+
+        var holder = int.Parse(File.ReadAllText(watched)["started ".Length..].Trim(), CultureInfo.InvariantCulture);
+        Assert.NotEqual(Environment.ProcessId, holder);
+
+        await Task.Delay(TimeSpan.FromSeconds(1), token);
+        Assert.True(Running(holder), "the hold ended before anything ended it");
+
+        var state = Assert.Single(Directory.EnumerateFiles(home, "hold-awake.json", SearchOption.AllDirectories));
+        new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), state).End();
+
+        await EventuallyAsync(() => !Running(holder), token);
+
+        static bool Running(int id)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(id);
+                return !process.HasExited;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Waits, a little at a time, for <paramref name="done"/>, and fails the test when it never comes.</summary>
+    private static async Task EventuallyAsync(Func<bool> done, CancellationToken cancellationToken)
+    {
+        for (var waited = 0; waited < 600 && !done(); waited++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+
+        Assert.True(done(), "what was waited for did not happen within a minute");
     }
 
     /// <summary>

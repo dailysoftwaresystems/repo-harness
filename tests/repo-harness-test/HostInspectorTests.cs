@@ -652,6 +652,46 @@ public sealed class HostInspectorTests
         Assert.Equal(calls, wakeLookup.Calls);
     }
 
+    /// <summary>
+    /// An ssh host that asks to be held awake between commands is held once it has been reached, with its
+    /// keepAwake and its seconds, as the command ends; one that could not be reached is asked nothing.
+    /// </summary>
+    [Fact]
+    public async Task AReachedHostThatAsksForAHold_IsHeldAsTheCommandEnds_AndOneNeverReachedIsNot()
+    {
+        var holds = new List<HostAgentRequest>();
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        {
+            var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions)!;
+
+            if (request.Kind != HostAgentRequestKind.Hold)
+            {
+                return HostResults.Ok(JsonSerializer.Serialize(
+                    new HostAgentInfo { Version = Root.Version, AssemblySha256 = Root.AssemblySha256, Os = "linux", Processor = "x86_64" },
+                    HostAgentProtocol.JsonOptions));
+            }
+
+            holds.Add(request);
+            command.OnErrorLine?.Invoke(HostAgentProtocol.CompletionLine(request.Nonce!, HarnessExit.Success));
+            return HostResults.Ok(string.Empty);
+        }), holdAwakeSeconds: 600);
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        await fixture.Holds.LeaveHoldsAsync("test", TestContext.Current.CancellationToken);
+
+        Assert.True(report.Available, report.Reason);
+        var hold = Assert.Single(holds);
+        Assert.Equal(600, hold.HoldAwakeSeconds);
+        Assert.Equal(["caffeinate", "-w", "{pid}"], hold.KeepAwake);
+
+        using var unreached = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, holdAwakeSeconds: 600);
+        await unreached.InspectAsync(HostId.Ssh(SshName));
+        await unreached.Holds.LeaveHoldsAsync("test", TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(unreached.Commands.Calls, call => call.Command.StandardInput.Contains("\"hold\"", StringComparison.Ordinal));
+    }
+
     /// <summary>A name that answers from a given lookup on, each lookup taking the time it is told to.</summary>
     private sealed class WakingLookup(int answersOnCall, TimeSpan takes = default) : INameLookup
     {
@@ -1109,7 +1149,8 @@ public sealed class HostInspectorTests
             string address = "host.invalid",
             bool syncedCopy = false,
             int wakeWaitSeconds = 0,
-            INameLookup? wakeLookup = null)
+            INameLookup? wakeLookup = null,
+            int holdAwakeSeconds = 0)
         {
             Repository = new TempDirectory();
 
@@ -1148,7 +1189,17 @@ public sealed class HostInspectorTests
                 Hosts = new HostsConfig
                 {
                     Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } },
-                    Ssh = { [SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5, WakeWaitSeconds = wakeWaitSeconds } },
+                    Ssh =
+                    {
+                        [SshName] = new SshHostConfig
+                        {
+                            RepositoryPath = "/srv/repo",
+                            ConnectTimeoutSeconds = 5,
+                            WakeWaitSeconds = wakeWaitSeconds,
+                            HoldAwakeSeconds = holdAwakeSeconds,
+                            KeepAwake = holdAwakeSeconds > 0 ? ["caffeinate", "-w", "{pid}"] : null,
+                        },
+                    },
                 },
             };
 
@@ -1162,7 +1213,9 @@ public sealed class HostInspectorTests
                 new DeveloperEnvironmentProbe(platform, processRunner),
                 fileSystem,
                 new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
-                new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
+                new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)),
+                new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), Path.Combine(TestHost.TemporaryRoot, "holds", Guid.NewGuid().ToString("N") + ".json")),
+                new RecordingLauncher());
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
             _lookup = new FixedLookup(resolves);
             var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);
@@ -1176,12 +1229,16 @@ public sealed class HostInspectorTests
                 programs,
                 new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero));
 
-            _inspector = new HostInspector(Commands, connector, identity, agent);
+            Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false));
+            _inspector = new HostInspector(Commands, connector, identity, agent, Holds);
         }
 
         public TempDirectory Repository { get; }
 
         public ScriptedHostCommands Commands { get; }
+
+        /// <summary>The hosts reached that are to be held awake between commands.</summary>
+        public HoldAwakeRegistry Holds { get; }
 
         /// <summary>Every name this machine looked up, in order, each once: the resolver keeps its answers.</summary>
         public IReadOnlyList<string> LookedUp => _lookup.Names;

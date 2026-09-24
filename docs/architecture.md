@@ -1207,6 +1207,19 @@ while a gate ran turned a green suite red, with four test processes live at once
   wall time outrunning the monotonic clock, and marks the phase it interrupted suspect, as it
   does on a host that declares no command at all. The survey asks about the command, so a
   directory it is found in reaches its PATH, and turns no leg away for it.
+- `holdAwakeSeconds` holds an ssh host awake between commands, and never during one. Every
+  keepAwake a command starts on a host ends with the connection that started it, and a personal
+  Mac falls back asleep in the seconds before the next command, which then cannot find it. So a
+  host that declares it is recorded as each command reaches it, and asked, as the command ends -
+  however it ended - to hold itself awake that long. The DssHarness there records the hold and
+  starts a process of its own, detached from the connection, which runs the host's keepAwake with
+  `{pid}` filled in with itself and goes on once the connection has ended. The next command's own
+  keepAwake ends the hold there, as it starts; a newer hold replaces an older one; and a hold
+  ends by itself when its seconds are up. The hold's process watches its record rather than being
+  stopped by an id, which a process started since could have been given, and the record is kept
+  among the user's own application data, one per user of the host. A hold that cannot be left is
+  said, and fails nothing. On a Windows host, OpenSSH may end the hold's process with the
+  connection.
 - A host's compiler cache is that cache's own variable in the host's `env` - `CCACHE_DIR` for
   ccache - so two hosts never share one store, and a build keys it against the leg's own tree.
   The `compilerCacheDirectory` key that once said the same is retired, and refused where it is

@@ -698,6 +698,15 @@ public static partial class HarnessConfigValidator
             {
                 problems.Add($"{owner} wakeWaitSeconds cannot be negative, found {host.WakeWaitSeconds}");
             }
+
+            if (host.HoldAwakeSeconds < 0)
+            {
+                problems.Add($"{owner} holdAwakeSeconds cannot be negative, found {host.HoldAwakeSeconds}");
+            }
+            else if (host.HoldAwakeSeconds > 0 && host.KeepAwake is not { Count: > 0 })
+            {
+                problems.Add($"{owner} holdAwakeSeconds holds the host awake with its keepAwake, and it declares none");
+            }
         }
     }
 
