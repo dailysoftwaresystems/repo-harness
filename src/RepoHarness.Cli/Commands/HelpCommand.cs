@@ -564,7 +564,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} help verdicts           What each leg verdict means, and what to do about it");
         builder.AppendLine($"  {ToolPackage.Command} help ci                 How check-ci-legs finds a workflow's legs and budgets");
         builder.AppendLine();
-        builder.AppendLine("Use 'DssHarness <command> --help' for a command's own options.");
+        builder.AppendLine($"Use '{ToolPackage.Command} <command> --help' for a command's own options.");
 
         return builder.ToString();
     }

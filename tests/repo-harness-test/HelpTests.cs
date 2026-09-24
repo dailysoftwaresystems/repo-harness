@@ -432,6 +432,10 @@ public sealed partial class HelpTests
     /// as the package installs it, lower case: a Linux filesystem is case-sensitive, and the product's name,
     /// capitalised, runs nothing there. The product's name in prose is no command, and stays as it is.
     /// </summary>
+    /// <remarks>
+    /// A line that stands in for a verb rather than naming one tells the reader to type the product's name just as
+    /// surely: 'DssHarness &lt;command&gt;' is a command line, and was missed while only literal verbs were looked for.
+    /// </remarks>
     [Fact]
     public async Task EveryCommandTheHelpSaysToType_IsSpeltAsTheToolInstallsIt()
     {
@@ -452,7 +456,7 @@ public sealed partial class HelpTests
         Assert.Contains("help", commands);
         Assert.All(texts, text => Assert.DoesNotContain(
             ProductNamePattern().Matches(text).Select(match => match.Groups["verb"].Value),
-            commands.Contains));
+            word => commands.Contains(word) || word.StartsWith('<')));
     }
 
     [Fact]
@@ -556,7 +560,8 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}" + ToolPackage.Command + @" (?<verb>[a-z-]+)", RegexOptions.Multiline)]
     private static partial Regex InstalledCommandPattern();
 
-    [GeneratedRegex(ToolPackage.Id + @" (?<verb>[a-z-]+)\b")]
+    /// <summary>The product's name followed by a verb, or by something standing in for one.</summary>
+    [GeneratedRegex(ToolPackage.Id + @" (?<verb><[a-z-]+>|[a-z-]+\b)")]
     private static partial Regex ProductNamePattern();
 
     [GeneratedRegex(@"""legJobPattern"": (?<pattern>""(?:[^""\\]|\\.)*"")")]
