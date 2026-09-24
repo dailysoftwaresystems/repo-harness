@@ -432,11 +432,15 @@ internal static class HostDoubles
     /// A loader that hands every command <paramref name="config"/>, for a tree at <paramref name="root"/>:
     /// a worktree of the main checkout at <paramref name="mainCheckoutRoot"/> when one is given.
     /// </summary>
-    public static IHarnessContextLoader Loader(HarnessConfig config, string root, string? mainCheckoutRoot = null)
+    /// <param name="config">The configuration every load answers with.</param>
+    /// <param name="root">The tree the context is for.</param>
+    /// <param name="mainCheckoutRoot">The main checkout, where it is not <paramref name="root"/>.</param>
+    /// <param name="syncedCopy">Whether the tree is a copy the harness synced to a host.</param>
+    public static IHarnessContextLoader Loader(HarnessConfig config, string root, string? mainCheckoutRoot = null, bool syncedCopy = false)
     {
         var loader = Substitute.For<IHarnessContextLoader>();
         loader.LoadAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, mainCheckoutRoot ?? root), config)));
+            .Returns(Task.FromResult(new HarnessContext(new HarnessLayout(root, mainCheckoutRoot ?? root), config) { IsSyncedCopy = syncedCopy }));
         return loader;
     }
 

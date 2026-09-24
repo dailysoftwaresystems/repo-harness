@@ -341,6 +341,26 @@ public sealed class HostExecServiceTests
             () => Create(platform: HostDoubles.Platform(PlatformId.Linux)).Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Asked for WSL's default distribution inside a synced copy on Linux, where there is no WSL at all,
+    /// the refusal says where the command belongs, as every host a copy cannot reach does. WSL is asked
+    /// before any connection is opened, so the connector - which says it for every other refusal - never
+    /// sees this one.
+    /// </summary>
+    [Fact]
+    public async Task TheDefaultDistribution_AskedForInASyncedCopy_SaysWhereTheCommandBelongs()
+    {
+        var exception = await Assert.ThrowsAsync<HarnessException>(
+            () => Create(
+                    platform: HostDoubles.Platform(PlatformId.Linux),
+                    loader: HostDoubles.Loader(Config, Root, syncedCopy: true))
+                .Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
+        Assert.Equal($"WSL exists only on Windows, and this machine runs linux. {HostConnector.SyncedCopyNotice}", exception.Message);
     }
 
     /// <summary>

@@ -83,7 +83,19 @@ public sealed class HostExecService(
         }
         else
         {
-            var distribution = wsl!.Length > 0 ? wsl : await DefaultDistributionAsync(cancellationToken).ConfigureAwait(false);
+            string distribution;
+
+            try
+            {
+                distribution = wsl!.Length > 0 ? wsl : await DefaultDistributionAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (HarnessException ex) when (context.IsSyncedCopy && ex.ExitCode == HarnessExit.HostUnavailable)
+            {
+                // Asked of WSL before any connection is opened, so the connector never sees it: said here as
+                // it says every host a synced copy cannot reach - WSL's own words, then where this belongs.
+                throw new HarnessException(ex.ExitCode, HostConnector.InACopy(ex.Message), ex);
+            }
+
             target = Resolve(hosts.Wsl, "wsl", distribution, HostId.Wsl);
         }
 
