@@ -1056,13 +1056,14 @@ a test.
 Between the two readings the inputs are watched, since two snapshots cannot see an edit
 undone before the second. A watch reports what happens once it exists, except on macOS,
 which numbers file events as it reads them: a write made a moment before a watch began
-is sometimes delivered to it. There, what the watch reports of a file counts only where
-the file's own readings confirm it: its content, its size, or the time it was last
-written or created differs between them. A file whose readings all agree was not
-written in between, and the report came from before. An edit made and undone while the
-tests ran leaves a new time of writing, and still counts; what goes unseen on macOS is
-an edit undone in place by a tool that also puts the old time back. The times are
-compared for equality alone, never ordered.
+is sometimes delivered to it. There, each file the watch is told of is looked at as it
+is told: one that stands as the tests found it - the same size, and written and created
+when it was - was told of late, and counts for nothing; any other counts. Looked at then,
+not once the tests are done, because a file moved aside and put back reads the same at
+both ends and was something else while they ran. What goes unseen on macOS is a change
+undone before word of it is looked at, and one of the same size undone in place by a
+tool that also puts the old time back. The times are compared for equality alone, never
+ordered.
 
 ### Clocks are never trusted to order anything
 

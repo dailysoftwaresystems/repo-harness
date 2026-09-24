@@ -137,7 +137,7 @@ public sealed class InputFingerprintTests
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
-        using var watch = fingerprint.Watch(temp.Path, Inputs);
+        using var watch = fingerprint.Watch(temp.Path, Inputs, before);
 
         if (watch.Failure is { } failure)
         {
@@ -172,21 +172,22 @@ public sealed class InputFingerprintTests
 
         // A directory that does not exist cannot be watched, which stands in here for the machine
         // that runs out of watches mid-run: either way the question was never answered.
-        using var broken = fingerprint.Watch(temp.Combine("gone"), Inputs);
+        using var broken = fingerprint.Watch(temp.Combine("gone"), Inputs, before);
 
         Assert.NotNull(broken.Failure);
         Assert.Equal(InputChange.Unmeasured, InputFingerprint.Compare(before, after, broken).Change);
     }
 
     /// <summary>
-    /// A watch that can report a write made before it began - as one on macOS can - has what it
-    /// reports confirmed by the file's own readings: a write the first reading already holds came from
-    /// before, and moved nothing. A watch that cannot report one counts every report, as it always did.
+    /// A watch that can be told of a write made before it began - as one on macOS can - counts a file it
+    /// is told of only where the file no longer stands as the work found it: told late of the write the
+    /// first reading already holds, it counts nothing. A watch that cannot be told of one counts every
+    /// report, as it always did.
     /// </summary>
     [Theory]
     [InlineData(true, InputChange.Unchanged)]
     [InlineData(false, InputChange.Moved)]
-    public async Task AReportOfAWriteTheFirstReadingHolds_CountsOnlyWhereTheWatchCannotReportEarlierWrites(
+    public async Task WordOfAWriteTheWorkFoundDone_CountsOnlyWhereTheWatchCannotBeToldOfEarlierWrites(
         bool reportsEarlierWrites,
         InputChange expected)
     {
@@ -194,30 +195,64 @@ public sealed class InputFingerprintTests
         var fingerprint = Create();
         Seed(temp);
 
-        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites);
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites, before.Files);
 
         if (watch.Failure is { } failure)
         {
             Assert.Skip($"This machine cannot watch the tree: {failure}");
         }
 
-        // Written, and seen, before the first reading: what macOS delivers late to a watch begun after
-        // the write, in an order every platform can be made to show.
-        temp.WriteFile("config/c.lang.json", "{\"rewritten\": true}");
-        await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+        // What macOS delivers late: word of the write that made the file, after the first reading held it.
+        watch.Record(temp.Combine("config/c.lang.json"));
 
-        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
         var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
         Assert.Equal(expected, InputFingerprint.Compare(before, after, watch).Change);
     }
 
     /// <summary>
-    /// Where what the watch reports is confirmed by readings, an edit made and undone while the work
-    /// ran still counts: its content reads the same afterwards, and its time of writing does not.
+    /// A file moved aside while the work ran, and put back before it ended, still counts where the watch
+    /// can be told of earlier writes: put back, it reads as it did at both ends, while the work read
+    /// something else in between. Judged by the two readings alone, it passed as clean.
     /// </summary>
     [Fact]
-    public async Task AnEditUndoneWhileTheWorkRan_StillCounts_WhereReportsAreConfirmedByReadings()
+    public async Task AFileMovedAsideAndPutBack_StillCounts_WhereTheWatchCanBeToldOfEarlierWrites()
+    {
+        using var temp = new TempDirectory();
+        var fingerprint = Create();
+        Seed(temp);
+        var path = temp.Combine("config/c.lang.json");
+
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true, before.Files);
+
+        if (watch.Failure is { } failure)
+        {
+            Assert.Skip($"This machine cannot watch the tree: {failure}");
+        }
+
+        File.Move(path, path + ".aside");
+        await File.WriteAllTextAsync(path, "{\"for this run\": true}", TestContext.Current.CancellationToken);
+        await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+        File.Move(path + ".aside", path, overwrite: true);
+
+        var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(InputChange.Unchanged, InputFingerprint.Compare(before, after).Change);
+
+        var comparison = InputFingerprint.Compare(before, after, watch);
+        Assert.Equal(InputChange.Moved, comparison.Change);
+        Assert.Contains("config/c.lang.json", comparison.Changed);
+    }
+
+    /// <summary>
+    /// An edit of the same size, made in place and undone while the work ran, still counts where the
+    /// watch can be told of earlier writes: the file is the same size and the same file, and was written
+    /// since the work found it.
+    /// </summary>
+    [Fact]
+    public async Task AnEditUndoneInPlaceWhileTheWorkRan_StillCounts_WhereTheWatchCanBeToldOfEarlierWrites()
     {
         using var temp = new TempDirectory();
         var fingerprint = Create();
@@ -230,14 +265,15 @@ public sealed class InputFingerprintTests
         File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(-1));
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
-        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true, before.Files);
 
         if (watch.Failure is { } failure)
         {
             Assert.Skip($"This machine cannot watch the tree: {failure}");
         }
 
-        temp.WriteFile("config/c.lang.json", "{\"rewritten\": true}");
+        await File.WriteAllTextAsync(path, "{\"rewrite!\": true}", TestContext.Current.CancellationToken);
+        Assert.Equal(original.Length, (await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken)).Length);
         await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(path, original, TestContext.Current.CancellationToken);
 
@@ -251,12 +287,12 @@ public sealed class InputFingerprintTests
     }
 
     /// <summary>
-    /// A file absent from both readings has no times to confirm anything, so what the watch saw of it
-    /// counts even where reports are confirmed by readings: made and removed while the work ran, it
-    /// may have been read.
+    /// A file the work found absent has no times to stand as it was found, so word of it counts even
+    /// where the watch can be told of earlier writes, and even once it is gone again: made and removed
+    /// while the work ran, it may have been read.
     /// </summary>
     [Fact]
-    public async Task AFileMadeAndRemovedWhileTheWorkRan_StillCounts_WhereReportsAreConfirmedByReadings()
+    public async Task AFileMadeAndRemovedWhileTheWorkRan_StillCounts_WhereTheWatchCanBeToldOfEarlierWrites()
     {
         using var temp = new TempDirectory();
         var fingerprint = Create();
@@ -264,16 +300,15 @@ public sealed class InputFingerprintTests
         File.Delete(temp.Combine("corpus/sample.txt"));
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
-        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true, before.Files);
 
         if (watch.Failure is { } failure)
         {
             Assert.Skip($"This machine cannot watch the tree: {failure}");
         }
 
-        temp.WriteFile("corpus/sample.txt", "briefly");
-        await WaitForAsync(watch, "corpus/sample.txt", TestContext.Current.CancellationToken);
-        File.Delete(temp.Combine("corpus/sample.txt"));
+        // Word of the file, looked at only once it has gone again: absent then and absent now.
+        watch.Record(temp.Combine("corpus/sample.txt"));
 
         var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
@@ -284,11 +319,11 @@ public sealed class InputFingerprintTests
 
     /// <summary>
     /// A file replaced while the work ran by one holding the same bytes and dated as it was - as a copy
-    /// that keeps times puts one back - still counts where reports are confirmed by readings: the file
-    /// in its place was created since.
+    /// that keeps times puts one back - still counts where the watch can be told of earlier writes: the
+    /// file in its place was created since.
     /// </summary>
     [Fact]
-    public async Task AFileReplacedByItsOwnBytesAndTime_StillCounts_WhereReportsAreConfirmedByReadings()
+    public async Task AFileReplacedByItsOwnBytesAndTime_StillCounts_WhereTheWatchCanBeToldOfEarlierWrites()
     {
         Assert.SkipWhen(
             OperatingSystem.IsWindows(),
@@ -302,7 +337,7 @@ public sealed class InputFingerprintTests
         var written = File.GetLastWriteTimeUtc(path);
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
-        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true, before.Files);
 
         if (watch.Failure is { } failure)
         {
@@ -332,12 +367,12 @@ public sealed class InputFingerprintTests
         Assert.Equal(InputChange.Moved, InputFingerprint.Compare(before, after, watch).Change);
     }
 
-    /// <summary>Only a watch on macOS can report a write made before it began.</summary>
+    /// <summary>Only a watch on macOS can be told of a write made before it began.</summary>
     [Theory]
     [InlineData(PlatformId.MacOs, true)]
     [InlineData(PlatformId.Linux, false)]
     [InlineData(PlatformId.Windows, false)]
-    public void OnlyAWatchOnMacOs_HasItsReportsConfirmedByReadings(PlatformId platform, bool confirmed)
+    public async Task OnlyAWatchOnMacOs_LooksAtWhatItIsToldOfAgainstWhatTheWorkFound(PlatformId platform, bool looks)
     {
         using var temp = new TempDirectory();
         Seed(temp);
@@ -346,9 +381,17 @@ public sealed class InputFingerprintTests
         host.Current.Returns(platform);
         host.PathComparison.Returns(new HostPlatform().PathComparison);
 
-        using var watch = new InputFingerprint(new HarnessFactory().FileSystem, host).Watch(temp.Path, Inputs);
+        var fingerprint = new InputFingerprint(new HarnessFactory().FileSystem, host);
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
-        Assert.Equal(confirmed, watch.ReportsEarlierWrites);
+        using var watch = fingerprint.Watch(temp.Path, Inputs, before);
+
+        Assert.Equal(looks, watch.ReportsEarlierWrites);
+
+        // And looks at it against the readings it was handed: late word of a file standing as it was
+        // found counts on macOS for nothing, and elsewhere as every word does.
+        watch.Record(temp.Combine("config/c.lang.json"));
+        Assert.Equal(looks ? Array.Empty<string>() : ["config/c.lang.json"], watch.Changed);
     }
 
     private static InputFingerprint Create()
