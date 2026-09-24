@@ -1055,12 +1055,14 @@ a test.
 
 Between the two readings the inputs are watched, since two snapshots cannot see an edit
 undone before the second. A watch reports what happens once it exists, except on macOS,
-which numbers file events as it reads them: a change made a moment before a watch began
-is sometimes delivered to it. There the watch is given 250 milliseconds before the work
-starts, and whatever it delivered by then is set aside. That is sound because the work
-has not begun: a change made earlier is in the snapshot the work starts from, or makes
-the one taken after it differ, or was undone before anything read it. A change
-delivered later than that still reads as `inputs-moved`, the side the guard errs on.
+which numbers file events as it reads them: a write made a moment before a watch began
+is sometimes delivered to it. There, what the watch reports of a file counts only where
+the file's own readings confirm it: its content, its size, or the time it was last
+written or created differs between them. A file whose readings all agree was not
+written in between, and the report came from before. An edit made and undone while the
+tests ran leaves a new time of writing, and still counts; what goes unseen on macOS is
+an edit undone in place by a tool that also puts the old time back. The times are
+compared for equality alone, never ordered.
 
 ### Clocks are never trusted to order anything
 

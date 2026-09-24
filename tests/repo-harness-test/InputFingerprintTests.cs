@@ -137,7 +137,7 @@ public sealed class InputFingerprintTests
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
-        using var watch = await fingerprint.WatchAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = fingerprint.Watch(temp.Path, Inputs);
 
         if (watch.Failure is { } failure)
         {
@@ -172,26 +172,65 @@ public sealed class InputFingerprintTests
 
         // A directory that does not exist cannot be watched, which stands in here for the machine
         // that runs out of watches mid-run: either way the question was never answered.
-        using var broken = await fingerprint.WatchAsync(temp.Combine("gone"), Inputs, TestContext.Current.CancellationToken);
+        using var broken = fingerprint.Watch(temp.Combine("gone"), Inputs);
 
         Assert.NotNull(broken.Failure);
         Assert.Equal(InputChange.Unmeasured, InputFingerprint.Compare(before, after, broken).Change);
     }
 
     /// <summary>
-    /// What a watch saw change before it settled is set aside, and what it sees afterwards is not. The
-    /// settling is what keeps a change macOS delivers late - made before the work began - from reading
-    /// as an input that moved under the work.
+    /// A watch that can report a write made before it began - as one on macOS can - has what it
+    /// reports confirmed by the file's own readings: a write the first reading already holds came from
+    /// before, and moved nothing. A watch that cannot report one counts every report, as it always did.
     /// </summary>
-    [Fact]
-    public async Task WhatAWatchSawBeforeItSettled_IsSetAside_AndWhatItSeesAfterIsNot()
+    [Theory]
+    [InlineData(true, InputChange.Unchanged)]
+    [InlineData(false, InputChange.Moved)]
+    public async Task AReportOfAWriteTheFirstReadingHolds_CountsOnlyWhereTheWatchCannotReportEarlierWrites(
+        bool reportsEarlierWrites,
+        InputChange expected)
     {
         using var temp = new TempDirectory();
+        var fingerprint = Create();
         Seed(temp);
 
-        // Made directly, so it has not settled on any platform: the change below stands in for one
-        // macOS delivers to a watch that began after it was made.
-        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites);
+
+        if (watch.Failure is { } failure)
+        {
+            Assert.Skip($"This machine cannot watch the tree: {failure}");
+        }
+
+        // Written, and seen, before the first reading: what macOS delivers late to a watch begun after
+        // the write, in an order every platform can be made to show.
+        temp.WriteFile("config/c.lang.json", "{\"rewritten\": true}");
+        await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, InputFingerprint.Compare(before, after, watch).Change);
+    }
+
+    /// <summary>
+    /// Where what the watch reports is confirmed by readings, an edit made and undone while the work
+    /// ran still counts: its content reads the same afterwards, and its time of writing does not.
+    /// </summary>
+    [Fact]
+    public async Task AnEditUndoneWhileTheWorkRan_StillCounts_WhereReportsAreConfirmedByReadings()
+    {
+        using var temp = new TempDirectory();
+        var fingerprint = Create();
+        Seed(temp);
+        var path = temp.Combine("config/c.lang.json");
+        var original = await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
+
+        // Dated well back, so the edit's own time differs from it however coarse the clock that
+        // stamps files is.
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddHours(-1));
+
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
 
         if (watch.Failure is { } failure)
         {
@@ -200,27 +239,105 @@ public sealed class InputFingerprintTests
 
         temp.WriteFile("config/c.lang.json", "{\"rewritten\": true}");
         await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(path, original, TestContext.Current.CancellationToken);
 
-        // Long enough for anything else the one write raises to arrive before it is set aside.
-        await watch.SettleAsync(TimeSpan.FromMilliseconds(250), TestContext.Current.CancellationToken);
+        var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
-        Assert.Empty(watch.Changed);
+        Assert.Equal(InputChange.Unchanged, InputFingerprint.Compare(before, after).Change);
 
-        temp.WriteFile("corpus/sample.txt", "moved");
-        await WaitForAsync(watch, "corpus/sample.txt", TestContext.Current.CancellationToken);
-
-        Assert.Contains("corpus/sample.txt", watch.Changed);
+        var comparison = InputFingerprint.Compare(before, after, watch);
+        Assert.Equal(InputChange.Moved, comparison.Change);
+        Assert.Contains("config/c.lang.json", comparison.Changed);
     }
 
     /// <summary>
-    /// Only macOS delivers changes made before a watch began, so only a watch there waits for them
-    /// before it is handed back.
+    /// A file absent from both readings has no times to confirm anything, so what the watch saw of it
+    /// counts even where reports are confirmed by readings: made and removed while the work ran, it
+    /// may have been read.
     /// </summary>
+    [Fact]
+    public async Task AFileMadeAndRemovedWhileTheWorkRan_StillCounts_WhereReportsAreConfirmedByReadings()
+    {
+        using var temp = new TempDirectory();
+        var fingerprint = Create();
+        Seed(temp);
+        File.Delete(temp.Combine("corpus/sample.txt"));
+
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
+
+        if (watch.Failure is { } failure)
+        {
+            Assert.Skip($"This machine cannot watch the tree: {failure}");
+        }
+
+        temp.WriteFile("corpus/sample.txt", "briefly");
+        await WaitForAsync(watch, "corpus/sample.txt", TestContext.Current.CancellationToken);
+        File.Delete(temp.Combine("corpus/sample.txt"));
+
+        var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+
+        var comparison = InputFingerprint.Compare(before, after, watch);
+        Assert.Equal(InputChange.Moved, comparison.Change);
+        Assert.Contains("corpus/sample.txt", comparison.Changed);
+    }
+
+    /// <summary>
+    /// A file replaced while the work ran by one holding the same bytes and dated as it was - as a copy
+    /// that keeps times puts one back - still counts where reports are confirmed by readings: the file
+    /// in its place was created since.
+    /// </summary>
+    [Fact]
+    public async Task AFileReplacedByItsOwnBytesAndTime_StillCounts_WhereReportsAreConfirmedByReadings()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsWindows(),
+            "NTFS gives a file renamed into a name the creation time of the file that name last held.");
+
+        using var temp = new TempDirectory();
+        var fingerprint = Create();
+        Seed(temp);
+        var path = temp.Combine("config/c.lang.json");
+        var bytes = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
+        var written = File.GetLastWriteTimeUtc(path);
+
+        var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal, reportsEarlierWrites: true);
+
+        if (watch.Failure is { } failure)
+        {
+            Assert.Skip($"This machine cannot watch the tree: {failure}");
+        }
+
+        // Made a while after the original, so a coarse clock that stamps files still tells the two
+        // apart; then dated as the original and moved over it.
+        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        var copy = temp.Combine("config/c.lang.json.copy");
+        await File.WriteAllBytesAsync(copy, bytes, TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(copy, written);
+
+        if (File.GetCreationTimeUtc(copy) <= written)
+        {
+            Assert.Skip("The runtime reads no time of creation here, and gives the file's earliest other time instead.");
+        }
+
+        File.Move(copy, path, overwrite: true);
+        await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+
+        var after = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            before.Files.Single(file => file.Path == "config/c.lang.json").Written,
+            after.Files.Single(file => file.Path == "config/c.lang.json").Written);
+        Assert.Equal(InputChange.Moved, InputFingerprint.Compare(before, after, watch).Change);
+    }
+
+    /// <summary>Only a watch on macOS can report a write made before it began.</summary>
     [Theory]
     [InlineData(PlatformId.MacOs, true)]
     [InlineData(PlatformId.Linux, false)]
     [InlineData(PlatformId.Windows, false)]
-    public async Task OnlyAWatchOnMacOs_WaitsForWhatCameBeforeIt(PlatformId platform, bool waits)
+    public void OnlyAWatchOnMacOs_HasItsReportsConfirmedByReadings(PlatformId platform, bool confirmed)
     {
         using var temp = new TempDirectory();
         Seed(temp);
@@ -229,21 +346,9 @@ public sealed class InputFingerprintTests
         host.Current.Returns(platform);
         host.PathComparison.Returns(new HostPlatform().PathComparison);
 
-        var fingerprint = new InputFingerprint(new HarnessFactory().FileSystem, host);
-        var elapsed = Stopwatch.StartNew();
+        using var watch = new InputFingerprint(new HarnessFactory().FileSystem, host).Watch(temp.Path, Inputs);
 
-        using var watch = await fingerprint.WatchAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
-
-        Assert.Equal(waits, fingerprint.LateDelivery > TimeSpan.Zero);
-
-        if (waits)
-        {
-            // Less a coarse timer's tick, which can end a delay a little before a stopwatch would.
-            Assert.True(
-                elapsed.Elapsed >= fingerprint.LateDelivery - TimeSpan.FromMilliseconds(50),
-                $"The watch was handed back after {elapsed.Elapsed.TotalMilliseconds:F0} ms, before macOS "
-                + $"had {fingerprint.LateDelivery.TotalMilliseconds:F0} ms to deliver what came before it.");
-        }
+        Assert.Equal(confirmed, watch.ReportsEarlierWrites);
     }
 
     private static InputFingerprint Create()

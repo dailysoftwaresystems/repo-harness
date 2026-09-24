@@ -40,6 +40,8 @@ internal class PassThroughFileSystem(IFileSystem inner) : IFileSystem
 
     public virtual DateTime LastWriteTimeUtc(string path) => inner.LastWriteTimeUtc(path);
 
+    public virtual DateTime CreationTimeUtc(string path) => inner.CreationTimeUtc(path);
+
     public virtual Task WriteAllBytesAtomicAsync(string path, byte[] contents, CancellationToken cancellationToken = default)
         => inner.WriteAllBytesAtomicAsync(path, contents, cancellationToken);
 

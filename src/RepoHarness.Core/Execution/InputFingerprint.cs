@@ -9,11 +9,26 @@ namespace RepoHarness.Core.Execution;
 /// <param name="Length">Its size in bytes, or <see cref="InputFingerprint.AbsentLength"/> when it was not there.</param>
 /// <param name="Content">A hash of its bytes, or <see cref="InputFingerprint.AbsentContent"/> when it was not there.</param>
 /// <remarks>
-/// Content and size, never a timestamp. Change is detected by equality, which a clock cannot
-/// distort because both readings carry the same distortion; one host's wall clock steps forward by
-/// about 25 seconds every few seconds, and those steps reach file modification times.
+/// Content and size decide whether it changed, never a timestamp. Change is detected by equality,
+/// which a clock cannot distort because both readings carry the same distortion; one host's wall
+/// clock steps forward by about 25 seconds every few seconds, and those steps reach file
+/// modification times. The times it was last written and created are read with it and compared
+/// for equality alone, to say whether anything wrote the file between two readings.
 /// </remarks>
-public sealed record FileFingerprint(string Path, long Length, string Content);
+public sealed record FileFingerprint(string Path, long Length, string Content)
+{
+    /// <summary>
+    /// When it was last written, as read with it; <see langword="null"/> where it was not there or
+    /// the time could not be read.
+    /// </summary>
+    public DateTime? Written { get; init; }
+
+    /// <summary>
+    /// When it was created, as read with it; <see langword="null"/> where it was not there or the
+    /// time could not be read.
+    /// </summary>
+    public DateTime? Created { get; init; }
+}
 
 /// <summary>An input file that could not be fingerprinted, and why.</summary>
 /// <param name="Path">The file, relative to the tree.</param>
@@ -95,13 +110,6 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
     /// <summary>How many changed inputs the ledger names before it counts the rest.</summary>
     private const int NamedInDetail = 3;
 
-    /// <summary>
-    /// How long a watch on macOS is given to deliver changes made before it began. Generous next to
-    /// the milliseconds such a change takes to arrive: the one this answers was made moments before
-    /// its watch started.
-    /// </summary>
-    private static readonly TimeSpan MacOsLateDelivery = TimeSpan.FromMilliseconds(250);
-
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHostPlatform _platform = platform;
 
@@ -154,56 +162,25 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
 
     /// <summary>
     /// Watches <paramref name="inputs"/> under <paramref name="root"/> for the life of the returned
-    /// object, so that an edit made and undone while the suite ran is still caught; returned once
-    /// what it reports is what happened after it began.
+    /// object, so that an edit made and undone while the suite ran is still caught.
     /// </summary>
     /// <param name="root">The tree the paths are relative to.</param>
     /// <param name="inputs">The inputs, relative to the tree.</param>
-    /// <param name="cancellationToken">Stops the wait for what the platform may still deliver.</param>
     /// <remarks>
-    /// Asked for before the work it watches starts, which is what lets it disregard what this platform
-    /// delivers late: see <see cref="InputWatch.SettleAsync"/>.
+    /// A watch on macOS can report a write made before it began, and what it reports there counts
+    /// only where the file's own readings confirm it: see <see cref="Compare"/>.
     /// </remarks>
-    public async Task<InputWatch> WatchAsync(
-        string root,
-        IReadOnlyList<string> inputs,
-        CancellationToken cancellationToken = default)
+    public InputWatch Watch(string root, IReadOnlyList<string> inputs)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(inputs);
 
-        var watch = new InputWatch(root, inputs.Select(Normalize), Comparer);
-
-        try
-        {
-            await watch.SettleAsync(LateDelivery, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            watch.Dispose();
-            throw;
-        }
-
-        return watch;
+        return new InputWatch(
+            root,
+            inputs.Select(Normalize),
+            Comparer,
+            reportsEarlierWrites: _platform.Current == PlatformId.MacOs);
     }
-
-    /// <summary>
-    /// How long a watch on this platform is given to deliver changes made before it began, which it
-    /// then disregards; zero where a watch reports only what happens once it exists.
-    /// </summary>
-    /// <remarks>
-    /// macOS delivers file events through a service that numbers each one as it reads it, and a watch
-    /// takes the events numbered after the one current when it started. A change made a moment before is
-    /// sometimes numbered after, and delivered to a watch that did not exist when it was made. Counted,
-    /// it reads as an input moving under work that had not begun: on a CI run, a test leg whose fixture
-    /// was written just before it ran was reported as having its inputs move. Linux's and Windows'
-    /// watches report only what happens once they exist, and nothing is waited for there.
-    /// <para>
-    /// A bound, not a proof: nothing the watch exposes says the platform has caught up. A change
-    /// delivered later than this still reads as moved, which is the side a guard errs on.
-    /// </para>
-    /// </remarks>
-    internal TimeSpan LateDelivery => _platform.Current == PlatformId.MacOs ? MacOsLateDelivery : TimeSpan.Zero;
 
     /// <summary>
     /// What <paramref name="before"/>, <paramref name="after"/> and <paramref name="watch"/> say
@@ -243,7 +220,7 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
         }
 
         var moved = Differences(before, after)
-            .Concat(watch?.Changed ?? [])
+            .Concat(Seen(before, after, watch))
             .Distinct(StringComparer.Ordinal)
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
@@ -279,6 +256,49 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
         }
     }
 
+    /// <summary>
+    /// The inputs <paramref name="watch"/> saw change: every one, where it reports only what happened
+    /// while it watched, and otherwise those whose readings say something wrote them between the two.
+    /// </summary>
+    /// <remarks>
+    /// macOS delivers file events through a service that numbers each one as it reads it, and a watch
+    /// takes the events numbered after the one current when it started, so a write made a moment before
+    /// is sometimes delivered to a watch that did not exist when it was made. Counted, it read as an
+    /// input moving under work that had not begun: on a CI run, a test leg whose fixture was written
+    /// just before it ran. A file whose content, size and times of writing and creation all read the
+    /// same before the work and after it was not written between them, so what the watch reported of it
+    /// came from before. An edit made and undone meanwhile leaves a new time of writing and still
+    /// counts; what goes unseen is one undone in place by a tool that also puts the old time back. A
+    /// file absent from both readings has no times to confirm anything, and what the watch saw of it
+    /// counts.
+    /// </remarks>
+    private static IEnumerable<string> Seen(InputSnapshot before, InputSnapshot after, InputWatch? watch)
+    {
+        if (watch is null)
+        {
+            return [];
+        }
+
+        if (!watch.ReportsEarlierWrites)
+        {
+            return watch.Changed;
+        }
+
+        var start = before.Files.ToDictionary(file => file.Path, StringComparer.Ordinal);
+        var end = after.Files.ToDictionary(file => file.Path, StringComparer.Ordinal);
+
+        return watch.Changed.Where(path => !(start.TryGetValue(path, out var first)
+            && end.TryGetValue(path, out var last)
+            && Unwritten(first, last)));
+    }
+
+    /// <summary>Whether two readings of one file say nothing wrote it between them.</summary>
+    private static bool Unwritten(FileFingerprint first, FileFingerprint last)
+        => first.Length == last.Length
+            && string.Equals(first.Content, last.Content, StringComparison.Ordinal)
+            && first.Written is { } written && last.Written == written
+            && first.Created is { } created && last.Created == created;
+
     private async Task<FileFingerprint> FingerprintAsync(string relative, string full, CancellationToken cancellationToken)
     {
         // The same hash a sync compares trees by, so "the same file" means one thing throughout: a
@@ -286,7 +306,27 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
         // places that ask — what to transfer, and whether the inputs held still — would disagree.
         var content = await FileContentHash.OfAsync(_fileSystem, full, cancellationToken).ConfigureAwait(false);
 
-        return new FileFingerprint(relative, content.Length, content.Content);
+        return new FileFingerprint(relative, content.Length, content.Content)
+        {
+            Written = TimeOf(_fileSystem.LastWriteTimeUtc, full),
+            Created = TimeOf(_fileSystem.CreationTimeUtc, full),
+        };
+    }
+
+    /// <summary>
+    /// What <paramref name="read"/> says of <paramref name="path"/>, or <see langword="null"/> where it
+    /// cannot say: a reading without a time confirms nothing, and is never taken for one that held still.
+    /// </summary>
+    private static DateTime? TimeOf(Func<string, DateTime> read, string path)
+    {
+        try
+        {
+            return read(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static string Describe(int count, string noun) => count == 1 ? $"1 {noun}" : $"{count} {noun}s";
@@ -335,8 +375,9 @@ public sealed class InputWatch : IDisposable
     private readonly List<FileSystemWatcher> _watchers = [];
     private string? _failure;
 
-    internal InputWatch(string root, IEnumerable<string> inputs, StringComparer comparer)
+    internal InputWatch(string root, IEnumerable<string> inputs, StringComparer comparer, bool reportsEarlierWrites = false)
     {
+        ReportsEarlierWrites = reportsEarlierWrites;
         _root = Path.GetFullPath(root);
         _tracked = new Dictionary<string, string>(comparer);
 
@@ -450,6 +491,12 @@ public sealed class InputWatch : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether this watch can report a write made before it began, as one on macOS can: what it
+    /// reports then counts only where the file's own readings confirm it.
+    /// </summary>
+    public bool ReportsEarlierWrites { get; }
+
     /// <summary>The inputs seen changing, in the spelling the configuration declared them in.</summary>
     public IReadOnlyList<string> Changed
     {
@@ -471,35 +518,6 @@ public sealed class InputWatch : IDisposable
             {
                 return _failure;
             }
-        }
-    }
-
-    /// <summary>
-    /// Waits <paramref name="lateDelivery"/> for what the platform may still deliver about changes
-    /// made before the watch began, then disregards every change it has seen, so that what it reports
-    /// from then on happened while it watched.
-    /// </summary>
-    /// <param name="lateDelivery">How long to wait; at zero nothing is waited for or disregarded.</param>
-    /// <param name="cancellationToken">Stops the wait.</param>
-    /// <remarks>
-    /// Sound only before the work it watches starts, which is the one place it is asked. A change
-    /// disregarded here was made before the work began: made before the first snapshot, that snapshot
-    /// holds it, and it is what the work read; made after it and left in place, the snapshot taken once
-    /// the work ends differs from the first; undone again, it was never read. A watch that could not be
-    /// trusted stays so.
-    /// </remarks>
-    internal async Task SettleAsync(TimeSpan lateDelivery, CancellationToken cancellationToken)
-    {
-        if (lateDelivery <= TimeSpan.Zero)
-        {
-            return;
-        }
-
-        await Task.Delay(lateDelivery, cancellationToken).ConfigureAwait(false);
-
-        lock (_gate)
-        {
-            _changed.Clear();
         }
     }
 
