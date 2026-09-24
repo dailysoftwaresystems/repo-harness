@@ -106,7 +106,7 @@ public sealed class HostProgramResolverTests
 
         var connection = await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["dotnet"]);
 
         Assert.Equal(ProgramFound.OnPath, connection.Located("dotnet")?.Found);
@@ -285,7 +285,7 @@ public sealed class HostProgramResolverTests
 
         var located = (await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["dotnet"])).Located("dotnet");
 
         Assert.Equal(new ProgramLocation("dotnet", ProgramFound.OffPath, home + "/.dotnet/dotnet"), located);
@@ -363,7 +363,7 @@ public sealed class HostProgramResolverTests
 
         var located = (await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["cmake"],
             [])).Located("cmake");
 

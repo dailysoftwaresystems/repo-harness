@@ -207,10 +207,9 @@ public sealed class BuildService(
 
         // Recorded before the build system runs, from the tree it is about to read and with when each
         // input had last been written, and again as the build ends. A build that fails, or is stopped
-        // by a lane's time limit, still leaves objects compiled from this tree: dated against an
+        // by its caller's time limit, still leaves objects compiled from this tree: dated against an
         // earlier record, every change made before it would look like one a build system could miss,
-        // and a lane whose build is stopped for running long would start from clean every time and
-        // never finish.
+        // and a build stopped for running long would start from clean every time and never finish.
         var recorded = Began(request, guards.Opening);
 
         Record(buildDirectory, recorded);
@@ -588,9 +587,9 @@ public sealed class BuildService(
     /// every build, so what its configure reads is read again. An output made from a file its rule
     /// does not name - a custom command reading a file it lists in no DEPENDS - is outside that
     /// question, and is remade when its rule is. Rebuilding from clean for every change was the first
-    /// answer, and it put a consumer through 1,186 steps from nothing for one edit to a test budget
-    /// table - a build that ran past its lane's time limit and left the directory half built for
-    /// whatever read it next.
+    /// answer, and it put a consumer through 1,186 steps from nothing for one edit to one input - a
+    /// build that ran past its caller's time limit and left the directory half built for whatever
+    /// read it next.
     /// </para>
     /// <para>
     /// A build that finished recorded the newest file it left, and its guards vouched for the tree

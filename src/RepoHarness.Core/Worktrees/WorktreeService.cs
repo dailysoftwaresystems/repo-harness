@@ -31,7 +31,7 @@ public interface IWorktreeService
     /// when it is locked or was moved by hand; and when git does not see it as a worktree of this
     /// repository. Ignored files, and ignored directories with everything in them, are deleted
     /// unchecked, except the evidence roots the configuration declares: one of those holding
-    /// anything is refused unless <paramref name="deleteEvidence"/> is set, because a lane's
+    /// anything is refused unless <paramref name="deleteEvidence"/> is set, because a worktree's
     /// measurements are ignored precisely because they are not source, and losing them is silent.
     /// <paramref name="force"/> skips every check and overrides a lock.
     /// </summary>
@@ -56,8 +56,9 @@ public interface IWorktreeService
 /// <param name="Name">The worktree's name, which is its directory name under the worktrees root.</param>
 /// <param name="BaseCommit">
 /// The commit it was made from, or <see langword="null"/> when none was recorded — a worktree made
-/// before the record existed, or one whose record could not be written. Reported so a lane's tree
-/// can be reproduced from git rather than from the moment it happened to be made: the worktree's own
+/// before the record existed, or one whose record could not be written. Reported so the tree a
+/// worktree began from can be reproduced from git rather than from the moment it happened to be
+/// made: the worktree's own
 /// HEAD moves with every commit in it and stops answering that question after the first one.
 /// </param>
 public sealed record WorktreeListing(string Name, string? BaseCommit)
@@ -251,7 +252,7 @@ public sealed class WorktreeService(
     /// </summary>
     /// <remarks>
     /// A worktree's HEAD moves as work is committed in it, so after the first commit nothing says
-    /// what tree it started from any more, and a lane can only be reproduced from the moment it
+    /// what tree it started from any more, and it can only be reproduced from the moment it
     /// happened to be made. A ref is the record because git keeps it, it survives a clone of the
     /// repository, and it is not one of the refs a deletion counts as keeping a commit alive: the
     /// deletion check reads branches, tags, remote-tracking refs, the newest stash and other
@@ -497,7 +498,7 @@ public sealed class WorktreeService(
         }
 
         // Only what git records as a worktree is one. Every directory under the root was counted, so
-        // a data directory a lane script keeps there read as a sixth worktree beside git's five, and
+        // a data directory a script keeps there read as a sixth worktree beside git's five, and
         // a listing that disagrees with git's own record is one nobody can act on. Read from git's
         // record rather than guessed from a directory's contents, and matched by resolved path, the
         // way git lists them: if the record cannot be read, the command fails rather than listing

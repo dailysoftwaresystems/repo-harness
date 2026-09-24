@@ -514,9 +514,9 @@ public sealed class InitServiceTests
     }
 
     /// <summary>
-    /// A lane adopting the harness adopts it on its own branch: its configuration - the main
+    /// A worktree adopting the harness adopts it on its own branch: its configuration - the main
     /// checkout's, which it was running with - its .gitignore and its placeholders are written in the
-    /// worktree, and the main checkout is left exactly as it was. Written there instead, the lane's
+    /// worktree, and the main checkout is left exactly as it was. Written there instead, the worktree's
     /// .gitignore never changed and main's did.
     /// </summary>
     [Fact]
@@ -529,11 +529,11 @@ public sealed class InitServiceTests
 
         await harness.InitializeGitRepositoryAsync(repository.Path, token);
 
-        // The lane's branch predates the harness; main adopts it afterwards.
-        var worktree = elsewhere.Combine("lane");
+        // The worktree's branch predates the harness; main adopts it afterwards.
+        var worktree = elsewhere.Combine("feature");
         await harness.RunGitAsync(repository.Path, ["worktree", "add", "--detach", worktree], token);
         await harness.InitService.InitializeAsync(repository.Path, token);
-        harness.WriteConfig(repository.Path, new HarnessConfig { Legs = { ["lane-leg"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } }, BuildConfigs = { ["debug"] = new BuildConfiguration() } });
+        harness.WriteConfig(repository.Path, new HarnessConfig { Legs = { ["feature-leg"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } }, BuildConfigs = { ["debug"] = new BuildConfiguration() } });
         await harness.CommitAllAsync(repository.Path, "harness", token);
 
         var mainIgnore = File.ReadAllText(repository.Combine(".gitignore"));

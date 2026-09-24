@@ -1630,7 +1630,7 @@ public sealed class SyncServiceTests
     /// <summary>
     /// A leg placed on a host runs its runner there, from the host's copy: an action that never
     /// crosses is a runner no remote leg can run. Measured before this: every file under the actions
-    /// directory was withheld. A new action nobody has committed crosses too - it is the one a lane
+    /// directory was withheld. A new action nobody has committed crosses too - it is the one a worktree
     /// most needs to try on a remote leg.
     /// </summary>
     [Fact]
@@ -1768,9 +1768,9 @@ public sealed class SyncServiceTests
 
     /// <summary>
     /// A worktree's legs on a host run with the worktree's configuration. The configuration placed
-    /// on a host was read from the main checkout whatever tree was synced, so a lane's remote legs
-    /// ran a configuration the lane did not have - the defect round three fixed for commands run
-    /// here, surviving in the sync.
+    /// on a host was read from the main checkout whatever tree was synced, so a worktree's remote legs
+    /// ran a configuration the worktree did not have - the defect already fixed for commands run here,
+    /// surviving in the sync.
     /// </summary>
     [Fact]
     public async Task AWorktreeSync_PlacesTheWorktreesOwnConfiguration()
@@ -1785,7 +1785,7 @@ public sealed class SyncServiceTests
         {
             await harness.RunGitAsync(temp.Path, ["worktree", "add", "--detach", worktree], cancellationToken);
 
-            // A setting only the lane has, written the way the tool writes its own file.
+            // A setting only the worktree has, written the way the tool writes its own file.
             harness.ConfigStore.Save(
                 Path.Combine(worktree, ".harness-config", "config.json"),
                 new HarnessConfig { Worktrees = new WorktreeSettings { MaxNameLength = 17 } });

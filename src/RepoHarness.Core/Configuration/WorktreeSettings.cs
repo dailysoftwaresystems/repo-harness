@@ -25,10 +25,10 @@ public sealed class WorktreeSettings
     /// </summary>
     /// <remarks>
     /// Ignored files are otherwise deleted unchecked, as git deletes them. That is right for build
-    /// output and wrong for the only copy of a measurement: a lane's numbers live in an ignored
-    /// directory precisely because they are not source, and deleting the lane silently is how they
-    /// are lost. A refusal is preferred to preserving them file by file, which is more machinery and
-    /// more ways to be wrong about what it preserved.
+    /// output and wrong for the only copy of a measurement: a worktree's measurements live in an
+    /// ignored directory precisely because they are not source, and deleting the worktree silently
+    /// is how they are lost. A refusal is preferred to preserving them file by file, which is more
+    /// machinery and more ways to be wrong about what it preserved.
     /// </remarks>
     public List<string> EvidenceRoots { get; init; } = [];
 

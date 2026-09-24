@@ -18,7 +18,7 @@ namespace RepoHarness.Tests;
 /// </summary>
 public sealed class HostInspectorTests
 {
-    private const string Distro = "lane-a";
+    private const string Distro = "wsl-a";
 
     private const string SshName = "build-box";
 

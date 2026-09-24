@@ -33,22 +33,22 @@ public sealed class WorktreeRootAndEvidenceTests
             PathBudgetMargin = Margin,
         });
 
-        var outcome = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var outcome = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
-        PathAssert.Same(Path.Combine(temp.Path, ".wt", "lane"), outcome.Path);
-        Assert.True(Directory.Exists(Path.Combine(temp.Path, ".wt", "lane")));
+        PathAssert.Same(Path.Combine(temp.Path, ".wt", "feature"), outcome.Path);
+        Assert.True(Directory.Exists(Path.Combine(temp.Path, ".wt", "feature")));
 
         // Listed and deleted through the same root, so the three commands cannot disagree about
         // where a worktree is.
         var listed = await harness.WorktreeService.ListAsync(temp.Path, cancellationToken);
-        Assert.Single(listed, worktree => worktree.Name == "lane");
+        Assert.Single(listed, worktree => worktree.Name == "feature");
 
         var deleted = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
-        Assert.False(Directory.Exists(Path.Combine(temp.Path, ".wt", "lane")));
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, ".wt", "feature")));
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class WorktreeRootAndEvidenceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp, Settings(evidence: ["scratchpad", ".temp"]));
 
-        var created = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
         Assert.True(created.Succeeded, created.Outcome.Message);
 
         // Ignored by git, so the deletion would take it without a word and git would report
@@ -68,7 +68,7 @@ public sealed class WorktreeRootAndEvidenceTests
             Path.Combine(created.Path, "scratchpad", "run-1", "timings.txt"), "42\n", cancellationToken);
 
         var refused = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.Contains("scratchpad", refused.Outcome.Message, StringComparison.Ordinal);
@@ -79,17 +79,17 @@ public sealed class WorktreeRootAndEvidenceTests
     [Fact]
     public async Task AnEmptyEvidenceDirectory_DoesNotRefuse()
     {
-        // The refusal is about measurements, not about the directory existing. A lane that took no
+        // The refusal is about measurements, not about the directory existing. A worktree that took no
         // measurements must still be deletable without a flag.
         using var temp = new TempDirectory();
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp, Settings(evidence: ["scratchpad"]));
 
-        var created = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
         Directory.CreateDirectory(Path.Combine(created.Path, "scratchpad"));
 
         var deleted = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
     }
@@ -101,7 +101,7 @@ public sealed class WorktreeRootAndEvidenceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp, Settings(evidence: ["scratchpad"]));
 
-        var created = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
         Directory.CreateDirectory(Path.Combine(created.Path, "scratchpad"));
         await File.WriteAllTextAsync(Path.Combine(created.Path, "scratchpad", "timings.txt"), "42\n", cancellationToken);
 
@@ -111,7 +111,7 @@ public sealed class WorktreeRootAndEvidenceTests
         await harness.RunGitAsync(created.Path, ["add", "notes.txt"], cancellationToken);
 
         var stillRefused = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: false, deleteEvidence: true, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: true, cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, stillRefused.Outcome.ExitCode);
 
@@ -123,7 +123,7 @@ public sealed class WorktreeRootAndEvidenceTests
         await harness.RunGitAsync(created.Path, ["rm", "-f", "--quiet", "notes.txt"], cancellationToken);
 
         var deleted = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: true, deleteEvidence: true, cancellationToken);
+            temp.Path, "feature", force: true, deleteEvidence: true, cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.False(Directory.Exists(created.Path));
@@ -139,30 +139,30 @@ public sealed class WorktreeRootAndEvidenceTests
         var head = await harness.GitClient.RunAsync(temp.Path, ["rev-parse", "HEAD"], cancellationToken: cancellationToken);
         var baseCommit = head.StandardOutput.Trim();
 
-        var created = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
         Assert.True(created.Succeeded, created.Outcome.Message);
 
         // A commit inside the worktree moves its HEAD. After it, nothing but the record says what
-        // tree the lane started from, which is the whole reason the record exists.
+        // tree the worktree started from, which is the whole reason the record exists.
         await File.WriteAllTextAsync(Path.Combine(created.Path, "work.txt"), "work\n", cancellationToken);
         await harness.RunGitAsync(created.Path, ["add", "work.txt"], cancellationToken);
         await harness.RunGitAsync(created.Path, ["commit", "-m", "work"], cancellationToken);
 
         var listed = await harness.WorktreeService.ListAsync(temp.Path, cancellationToken);
-        var lane = Assert.Single(listed, worktree => worktree.Name == "lane");
+        var feature = Assert.Single(listed, worktree => worktree.Name == "feature");
 
-        Assert.Equal(baseCommit, lane.BaseCommit);
-        Assert.Contains("base " + baseCommit[..12], lane.ToString(), StringComparison.Ordinal);
+        Assert.Equal(baseCommit, feature.BaseCommit);
+        Assert.Contains("base " + baseCommit[..12], feature.ToString(), StringComparison.Ordinal);
 
         var deleted = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: true, deleteEvidence: false, cancellationToken: cancellationToken);
+            temp.Path, "feature", force: true, deleteEvidence: false, cancellationToken: cancellationToken);
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
 
         // Left behind, the record would answer for a later worktree of the same name with the
         // commit an earlier one started from.
         var record = await harness.GitClient.RunAsync(
             temp.Path,
-            ["rev-parse", "--verify", "--quiet", WorktreeService.BaseCommitRefPrefix + "lane"],
+            ["rev-parse", "--verify", "--quiet", WorktreeService.BaseCommitRefPrefix + "feature"],
             cancellationToken: cancellationToken);
 
         Assert.True(string.IsNullOrWhiteSpace(record.StandardOutput), "The base commit record outlived its worktree.");
@@ -173,18 +173,18 @@ public sealed class WorktreeRootAndEvidenceTests
     {
         // The record is a ref, and the deletion check counts branches, tags, remote-tracking refs,
         // the newest stash and other worktrees' HEADs. If the record counted too, every commit made
-        // in a lane would look safe and the check would pass over all of it.
+        // in a worktree would look safe and the check would pass over all of it.
         using var temp = new TempDirectory();
         var cancellationToken = TestContext.Current.CancellationToken;
         var harness = await PrepareAsync(temp, Settings());
 
-        var created = await harness.WorktreeService.CreateAsync(temp.Path, "lane", useRandomName: false, cancellationToken);
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
         await File.WriteAllTextAsync(Path.Combine(created.Path, "work.txt"), "work\n", cancellationToken);
         await harness.RunGitAsync(created.Path, ["add", "work.txt"], cancellationToken);
         await harness.RunGitAsync(created.Path, ["commit", "-m", "work"], cancellationToken);
 
         var refused = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "lane", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.Contains("on no branch", refused.Outcome.Message, StringComparison.Ordinal);

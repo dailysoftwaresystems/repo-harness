@@ -12,7 +12,7 @@ namespace RepoHarness.Core.Worktrees;
 /// Real work lands in the directories a repository declares. A file loose at the root is a probe
 /// artefact, a redirected output, or a path that leaked from another machine, and every one of them
 /// is invisible in a diff and survives into a commit nobody meant to make. There is no allowlist on
-/// purpose: an allowlist is an escape every lane takes, and the guard this replaces was measured
+/// purpose: an allowlist is an escape everyone takes, and the guard this replaces was measured
 /// letting every one of its subjects through that way.
 /// </remarks>
 public interface IRootLitterService

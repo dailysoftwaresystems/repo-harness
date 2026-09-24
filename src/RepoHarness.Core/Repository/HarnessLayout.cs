@@ -164,7 +164,7 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// </summary>
     /// <remarks>
     /// The one every command reads, a worktree's included: a branch may change its own
-    /// configuration, and a lane runs what its tree says. Only a worktree whose branch has none
+    /// configuration, and each runs what its own tree says. Only a worktree whose branch has none
     /// falls back to the main checkout's, and is warned that it does.
     /// </remarks>
     public string ConfigFile => Path.Combine(HarnessDirectory, ConfigFileName);
@@ -264,8 +264,8 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
         => Path.Combine(MainHarnessDirectory, RunnerDirectoryName, RunnerSecretsDirectoryName);
 
     /// <summary>
-    /// Where a run's records live: in the tree that ran it, a worktree's own included, so a lane
-    /// reads what it judged without leaving its tree.
+    /// Where a run's records live: in the tree that ran it, a worktree's own included, so a worktree
+    /// reads what it judged without leaving it.
     /// </summary>
     /// <remarks>
     /// Resolved against the main checkout instead, a worktree's runs landed beside the main

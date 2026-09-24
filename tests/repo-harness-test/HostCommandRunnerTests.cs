@@ -45,7 +45,7 @@ public sealed class HostCommandRunnerTests
     [Fact]
     public void Wsl_StartsTheProgramWithoutAShell_InTheHomeDirectory()
     {
-        var connection = new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" };
+        var connection = new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" };
 
         var request = HostCommandRunner.BuildRequest(connection, ListSdks);
 
@@ -66,7 +66,7 @@ public sealed class HostCommandRunnerTests
         // Left to wsl.exe, a call with no --distribution reaches whichever distribution is the default,
         // which is a machine nobody selected.
         Assert.Throws<InvalidOperationException>(
-            () => HostCommandRunner.BuildRequest(new HostConnection { Host = HostId.Wsl("lane-a") }, ListSdks));
+            () => HostCommandRunner.BuildRequest(new HostConnection { Host = HostId.Wsl("wsl-a") }, ListSdks));
     }
 
     [Fact]
@@ -154,7 +154,7 @@ public sealed class HostCommandRunnerTests
     public void InputHeldOpen_IsPassedOnHeldOpen()
     {
         var request = HostCommandRunner.BuildRequest(
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             new HostCommand { Program = "DssHarness", Arguments = ["host-agent"], StandardInput = "{}\n", HoldStandardInputOpen = true });
 
         Assert.Equal("{}\n", request.StandardInput);

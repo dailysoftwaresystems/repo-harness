@@ -189,8 +189,8 @@ public sealed class InitService(
     /// <remarks>
     /// Everything git tracks is written in the tree it runs in, a worktree's included: its
     /// configuration, its <c>.gitignore</c> and the placeholders that keep each directory in git. A
-    /// lane adopting the harness adopts it on its own branch; written into the main checkout, the
-    /// lane's own <c>.gitignore</c> never changed and main's did. What git ignores - connection data,
+    /// worktree adopting the harness adopts it on its own branch; written into the main checkout,
+    /// the worktree's own <c>.gitignore</c> never changed and main's did. What git ignores - connection data,
     /// runner values and secrets, the lock - is read from the main checkout whichever tree asks, and
     /// init in a worktree says so rather than creating any of it there.
     /// </remarks>

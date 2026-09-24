@@ -312,9 +312,9 @@ written is a note that git could not be asked; one that cannot be removed afterw
 and the answer stands.
 
 `init` writes the tree it runs in, a worktree's own included: its configuration, its `.gitignore`
-and the placeholders that keep each directory in git. A lane adopting the harness adopts it on its
-own branch; written into the main checkout, the lane's `.gitignore` never changed and main's did. A
-worktree with no configuration of its own gets a copy of the main checkout's, which it was running
+and the placeholders that keep each directory in git. A worktree adopting the harness adopts it on
+its own branch; written into the main checkout, the worktree's `.gitignore` never changed and main's
+did. A worktree with no configuration of its own gets a copy of the main checkout's, which it was running
 with and warned about on every command; a default in its place would drop every leg, host and
 runner main declares. What git ignores - connection data, runner values and secrets, the lock - is
 read from the main checkout whichever tree asks, and `init` in a worktree says so rather than
@@ -332,8 +332,8 @@ checkout is the main one, and the command is refused, saying how to record it.
 
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
-with every commit made in it, so after the first one nothing else says what tree the lane started
-from, and the lane can only be reproduced from the moment it happened to be made. The record is
+with every commit made in it, so after the first one nothing else says what tree the worktree
+started from, and it can only be reproduced from the moment it happened to be made. The record is
 kept under `refs/harness/` rather than among heads, tags or remotes precisely so it can never be
 mistaken for somewhere work is kept: the deletion checks below read branches, tags,
 remote-tracking refs, the newest stash and other worktrees' HEADs, and this record is none of them.
@@ -386,7 +386,7 @@ names everything it found on one line, each with its remedy, and exits 13:
 
 - **Evidence.** The directories `worktrees.evidenceRoots` declares are checked before git is asked
   anything, because they hold files git was never told about. One of them holding anything refuses
-  the deletion and names it. A lane's measurements live in an ignored directory precisely because
+  the deletion and names it. A worktree's measurements live in an ignored directory precisely because
   they are not source, and deleting them is silent: git reports nothing missing afterwards.
   `--delete-evidence` proceeds while every other check still runs; `--force` proceeds too, and
   skips everything else as well. A declared root that cannot be read counts as holding something,
@@ -1054,7 +1054,7 @@ it. So:
   stamped during a forward step looks newer than a source edited just after it. In each
   variant's build directory the harness keeps a record of the build that last ran there:
   a content fingerprint of the inputs the build system was given, and when each had last
-  been written, taken before it runs, so a build that fails or is stopped by a lane's
+  been written, taken before it runs, so a build that fails or is stopped by its caller's
   time limit leaves the record of what it compiled from. A phase that spans a clock step
   marks the record at once; the end of the build writes it again with the newest file the
   build left, and marks it unordered, with why, if anything doubted it: inputs that did
@@ -1078,9 +1078,9 @@ it. So:
   one deleted since, which a build system sees gone without asking its date, and a CMake
   project is configured on every build. What a build system does not know reads a file -
   a custom command's input it names in no `DEPENDS` - is not remade. Rebuilding from clean
-  for every change put a consumer through 1,186 steps from nothing for one edit to a test
-  budget table, and a build stopped for running long would have started from clean again
-  every time. The record keeps `clock-stepped` on its first line for an unordered build,
+  for every change put a consumer through 1,186 steps from nothing for one edit to one
+  input, and a build stopped for running long would have started from clean again every
+  time. The record keeps `clock-stepped` on its first line for an unordered build,
   and each input's fingerprint on a line of its own, as 0.5.8 wrote and reads them.
 
 ### One run per build directory
@@ -1276,7 +1276,7 @@ while their sources are being replaced. A lock is released only by the run that 
 
 A run's records - its logs, and what it has already completed - are kept in
 `.harness-config/runs/<run id>/` of **the tree that ran it**, a worktree's own included, so a
-lane reads what it judged without leaving its tree. Kept in the main checkout instead, as they
+worktree reads what it judged without leaving it. Kept in the main checkout instead, as they
 once were, a worktree's runs landed beside the main checkout's. Nothing in `runs/` is shared
 between runs: each writes only the directory named by its own id. What two runs from different
 trees contend over is the lock above, which stays in the main checkout.

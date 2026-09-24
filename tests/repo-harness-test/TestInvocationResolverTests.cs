@@ -783,16 +783,16 @@ public sealed class TestInvocationResolverTests
             cores: 6,
             filter: "parser",
             excludes: ["slow"],
-            labels: ["repo-guard", "fast"]);
+            labels: ["git-state", "fast"]);
 
-        Assert.Equal(["-R", "parser", "-LE", "slow", "-L", "repo-guard", "-L", "fast"], command.Arguments);
+        Assert.Equal(["-R", "parser", "-LE", "slow", "-L", "git-state", "-L", "fast"], command.Arguments);
     }
 
     [Fact]
     public void ALabelWithNoLabelArg_IsRefused()
     {
         var refusal = Assert.Throws<HarnessException>(
-            () => TestInvocationResolver.CommandFor(Invocation(), cores: 6, filter: null, excludes: null, labels: ["repo-guard"]));
+            () => TestInvocationResolver.CommandFor(Invocation(), cores: 6, filter: null, excludes: null, labels: ["git-state"]));
 
         Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
         Assert.Contains("labelArg", refusal.Message, StringComparison.Ordinal);
@@ -807,8 +807,8 @@ public sealed class TestInvocationResolverTests
     public void AHostRunningALeg_IsGivenTheFilterTheExclusionsAndTheLabels()
     {
         Assert.Equal(
-            ["--filter", "auth", "--exclude", "slow", "--label", "repo-guard", "--label", "fast", "--no-build"],
-            TestService.RemoteArguments("auth", ["slow"], ["repo-guard", "fast"], skipBuild: true, time: false));
+            ["--filter", "auth", "--exclude", "slow", "--label", "git-state", "--label", "fast", "--no-build"],
+            TestService.RemoteArguments("auth", ["slow"], ["git-state", "fast"], skipBuild: true, time: false));
         Assert.Equal(
             ["--filter", "", "--exclude", "", "--label", ""],
             TestService.RemoteArguments("", [""], [""], skipBuild: false, time: false));

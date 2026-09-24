@@ -220,7 +220,7 @@ public sealed class WorktreeServiceTests
 
     /// <summary>
     /// A worktree is what git records as one. Every directory under the root was counted, so a data
-    /// directory a lane script keeps there read as a sixth worktree beside git's five.
+    /// directory a script keeps there read as a sixth worktree beside git's five.
     /// </summary>
     [Fact]
     public async Task ListAsync_CountsWhatGitRecords_NotEveryDirectoryUnderTheRoot()

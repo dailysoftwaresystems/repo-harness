@@ -13,7 +13,7 @@ namespace RepoHarness.Core.Sync;
 /// read from that host's copy, so an action that never crosses is a runner no leg on another host
 /// can run - which is how it was: the whole of this directory was withheld, and a host's copy held
 /// no action file at all. They cross by the rule every other file follows, not by what git has
-/// indexed: not ignored crosses, ignored never does. A new action a lane has not committed yet is
+/// indexed: not ignored crosses, ignored never does. A new action a worktree has not committed yet is
 /// exactly the one it needs to try on a remote leg, and a worktree's own configuration naming it
 /// must not arrive on a host that lacks it.
 /// </para>

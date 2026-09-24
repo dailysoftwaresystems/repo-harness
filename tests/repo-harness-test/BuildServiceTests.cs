@@ -141,8 +141,8 @@ public sealed class BuildServiceTests
     /// <summary>
     /// An edit to something the build reads, dated after the build as an edit is, is the build
     /// system's to act on: newer than every output the build left, it rebuilds whatever reads it, and
-    /// the warm directory is kept. Rebuilt from clean instead, one edit to a consumer's test budget
-    /// table cost 1,186 steps from nothing, and ran past its lane's time limit.
+    /// the warm directory is kept. Rebuilt from clean instead, one edit to one input cost a consumer
+    /// 1,186 steps from nothing, and ran past its caller's time limit.
     /// </summary>
     [Theory]
     [InlineData("src/app.cpp")]
@@ -328,12 +328,12 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
-    /// A build stopped part way - by a lane's time limit, or anything else that ends it - reaches no
+    /// A build stopped part way - by its caller's time limit, or anything else that ends it - reaches no
     /// verdict and leaves only what it compiled. The record written as it began is what the next
     /// build dates its changes from, so that build carries on from what the stopped one compiled,
     /// and still starts from clean for a change dated before it. Dated from the build before it
-    /// instead, a lane whose build is stopped for running long would start from clean every time,
-    /// and never finish.
+    /// instead, a build stopped for running long would start from clean every time, and never
+    /// finish.
     /// </summary>
     [Theory]
     [InlineData(3, false)]
@@ -1107,7 +1107,7 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
-    /// A build stopped as its build phase starts, as a lane's time limit stops one: it leaves the record
+    /// A build stopped as its build phase starts, as its caller's time limit stops one: it leaves the record
     /// it began with, and no newest file.
     /// </summary>
     private static async Task StopPartWayAsync(HarnessFactory factory, BuildRequest request, CancellationToken cancellationToken)
@@ -1782,7 +1782,7 @@ public sealed class BuildServiceTests
     /// <summary>
     /// Every phase starts nothing. As configure starts, <paramref name="configuring"/> happens, and as
     /// the build starts, <paramref name="building"/> - an input rewritten, as an editor saving mid-build
-    /// does; an object compiled; the clock stepped; the run stopped, as a lane's time limit stops one -
+    /// does; an object compiled; the clock stepped; the run stopped, as its caller's time limit stops one -
     /// and each goes on only if the run still wants it, configure exiting 0 and the build
     /// <paramref name="buildExitCode"/>.
     /// </summary>

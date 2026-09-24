@@ -21,10 +21,10 @@ namespace RepoHarness.Tests;
 /// </summary>
 public sealed class ToolProvisionServiceTests
 {
-    private const string Distro = "lane-a";
+    private const string Distro = "wsl-a";
 
     /// <summary>A second distribution, so two hosts that each need a password can be told apart.</summary>
-    private const string OtherDistro = "lane-b";
+    private const string OtherDistro = "wsl-b";
 
     /// <summary>The ssh host a fixture declares when asked to reach its leg over ssh.</summary>
     private const string SshName = "build-box";

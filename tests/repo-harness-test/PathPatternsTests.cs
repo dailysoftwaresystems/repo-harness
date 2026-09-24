@@ -83,7 +83,7 @@ public sealed class PathPatternsTests
     /// </summary>
     [Theory]
     [InlineData(".harness-config/./worktrees", ".harness-config/worktrees")]
-    [InlineData("wt//lanes", "wt/lanes")]
+    [InlineData("wt//trees", "wt/trees")]
     [InlineData("**/./x", "**/x")]
     public void APathSpelledTwoWays_IsNamedWithTheOneSpelling(string path, string spelling)
     {
@@ -188,11 +188,11 @@ public sealed class SyncExclusionsReachTests
         var harness = new HarnessFactory();
 
         Directory.CreateDirectory(temp.Combine(".harness-config", "sshItems", "vps", ".secrets"));
-        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane", "node_modules"));
+        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "feature", "node_modules"));
 
         for (var index = 0; index < 20; index++)
         {
-            Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane", $"src{index}"));
+            Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "feature", $"src{index}"));
         }
 
         var exclusions = new SyncExclusions(
@@ -254,7 +254,7 @@ public sealed class SyncExclusionsReachTests
         var harness = new HarnessFactory();
 
         temp.WriteFile(Path.Combine("services", "api", ".env"), "KEY=value\n");
-        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "lane"));
+        Directory.CreateDirectory(temp.Combine(".harness-config", "worktrees", "feature"));
 
         var exclusions = new SyncExclusions(
             new SyncConfig { NeverTransfer = [".env", "**/.env", "worktrees"] },
