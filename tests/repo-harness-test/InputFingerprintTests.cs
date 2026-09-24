@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using NSubstitute;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Platform;
 
 namespace RepoHarness.Tests;
 
@@ -135,7 +137,7 @@ public sealed class InputFingerprintTests
 
         var before = await fingerprint.TakeAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
-        using var watch = fingerprint.Watch(temp.Path, Inputs);
+        using var watch = await fingerprint.WatchAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
 
         if (watch.Failure is { } failure)
         {
@@ -170,10 +172,78 @@ public sealed class InputFingerprintTests
 
         // A directory that does not exist cannot be watched, which stands in here for the machine
         // that runs out of watches mid-run: either way the question was never answered.
-        using var broken = fingerprint.Watch(temp.Combine("gone"), Inputs);
+        using var broken = await fingerprint.WatchAsync(temp.Combine("gone"), Inputs, TestContext.Current.CancellationToken);
 
         Assert.NotNull(broken.Failure);
         Assert.Equal(InputChange.Unmeasured, InputFingerprint.Compare(before, after, broken).Change);
+    }
+
+    /// <summary>
+    /// What a watch saw change before it settled is set aside, and what it sees afterwards is not. The
+    /// settling is what keeps a change macOS delivers late - made before the work began - from reading
+    /// as an input that moved under the work.
+    /// </summary>
+    [Fact]
+    public async Task WhatAWatchSawBeforeItSettled_IsSetAside_AndWhatItSeesAfterIsNot()
+    {
+        using var temp = new TempDirectory();
+        Seed(temp);
+
+        // Made directly, so it has not settled on any platform: the change below stands in for one
+        // macOS delivers to a watch that began after it was made.
+        using var watch = new InputWatch(temp.Path, Inputs, StringComparer.Ordinal);
+
+        if (watch.Failure is { } failure)
+        {
+            Assert.Skip($"This machine cannot watch the tree: {failure}");
+        }
+
+        temp.WriteFile("config/c.lang.json", "{\"rewritten\": true}");
+        await WaitForAsync(watch, "config/c.lang.json", TestContext.Current.CancellationToken);
+
+        // Long enough for anything else the one write raises to arrive before it is set aside.
+        await watch.SettleAsync(TimeSpan.FromMilliseconds(250), TestContext.Current.CancellationToken);
+
+        Assert.Empty(watch.Changed);
+
+        temp.WriteFile("corpus/sample.txt", "moved");
+        await WaitForAsync(watch, "corpus/sample.txt", TestContext.Current.CancellationToken);
+
+        Assert.Contains("corpus/sample.txt", watch.Changed);
+    }
+
+    /// <summary>
+    /// Only macOS delivers changes made before a watch began, so only a watch there waits for them
+    /// before it is handed back.
+    /// </summary>
+    [Theory]
+    [InlineData(PlatformId.MacOs, true)]
+    [InlineData(PlatformId.Linux, false)]
+    [InlineData(PlatformId.Windows, false)]
+    public async Task OnlyAWatchOnMacOs_WaitsForWhatCameBeforeIt(PlatformId platform, bool waits)
+    {
+        using var temp = new TempDirectory();
+        Seed(temp);
+
+        var host = Substitute.For<IHostPlatform>();
+        host.Current.Returns(platform);
+        host.PathComparison.Returns(new HostPlatform().PathComparison);
+
+        var fingerprint = new InputFingerprint(new HarnessFactory().FileSystem, host);
+        var elapsed = Stopwatch.StartNew();
+
+        using var watch = await fingerprint.WatchAsync(temp.Path, Inputs, TestContext.Current.CancellationToken);
+
+        Assert.Equal(waits, fingerprint.LateDelivery > TimeSpan.Zero);
+
+        if (waits)
+        {
+            // Less a coarse timer's tick, which can end a delay a little before a stopwatch would.
+            Assert.True(
+                elapsed.Elapsed >= fingerprint.LateDelivery - TimeSpan.FromMilliseconds(50),
+                $"The watch was handed back after {elapsed.Elapsed.TotalMilliseconds:F0} ms, before macOS "
+                + $"had {fingerprint.LateDelivery.TotalMilliseconds:F0} ms to deliver what came before it.");
+        }
     }
 
     private static InputFingerprint Create()

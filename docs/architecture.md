@@ -1053,6 +1053,15 @@ not be taken makes it `unmeasured`: an unreadable snapshot is never reported as 
 There is no escape hatch. A command that rewrites its own inputs is a build step, not
 a test.
 
+Between the two readings the inputs are watched, since two snapshots cannot see an edit
+undone before the second. A watch reports what happens once it exists, except on macOS,
+which numbers file events as it reads them: a change made a moment before a watch began
+is sometimes delivered to it. There the watch is given 250 milliseconds before the work
+starts, and whatever it delivered by then is set aside. That is sound because the work
+has not begun: a change made earlier is in the snapshot the work starts from, or makes
+the one taken after it differ, or was undone before anything read it. A change
+delivered later than that still reads as `inputs-moved`, the side the guard errs on.
+
 ### Clocks are never trusted to order anything
 
 One host this tool must serve has a wall clock that steps forward by about 25 seconds,

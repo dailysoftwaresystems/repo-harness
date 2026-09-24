@@ -95,6 +95,13 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
     /// <summary>How many changed inputs the ledger names before it counts the rest.</summary>
     private const int NamedInDetail = 3;
 
+    /// <summary>
+    /// How long a watch on macOS is given to deliver changes made before it began. Generous next to
+    /// the milliseconds such a change takes to arrive: the one this answers was made moments before
+    /// its watch started.
+    /// </summary>
+    private static readonly TimeSpan MacOsLateDelivery = TimeSpan.FromMilliseconds(250);
+
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHostPlatform _platform = platform;
 
@@ -147,17 +154,56 @@ public sealed class InputFingerprint(IFileSystem fileSystem, IHostPlatform platf
 
     /// <summary>
     /// Watches <paramref name="inputs"/> under <paramref name="root"/> for the life of the returned
-    /// object, so that an edit made and undone while the suite ran is still caught.
+    /// object, so that an edit made and undone while the suite ran is still caught; returned once
+    /// what it reports is what happened after it began.
     /// </summary>
     /// <param name="root">The tree the paths are relative to.</param>
     /// <param name="inputs">The inputs, relative to the tree.</param>
-    public InputWatch Watch(string root, IReadOnlyList<string> inputs)
+    /// <param name="cancellationToken">Stops the wait for what the platform may still deliver.</param>
+    /// <remarks>
+    /// Asked for before the work it watches starts, which is what lets it disregard what this platform
+    /// delivers late: see <see cref="InputWatch.SettleAsync"/>.
+    /// </remarks>
+    public async Task<InputWatch> WatchAsync(
+        string root,
+        IReadOnlyList<string> inputs,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentNullException.ThrowIfNull(inputs);
 
-        return new InputWatch(root, inputs.Select(Normalize), Comparer);
+        var watch = new InputWatch(root, inputs.Select(Normalize), Comparer);
+
+        try
+        {
+            await watch.SettleAsync(LateDelivery, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            watch.Dispose();
+            throw;
+        }
+
+        return watch;
     }
+
+    /// <summary>
+    /// How long a watch on this platform is given to deliver changes made before it began, which it
+    /// then disregards; zero where a watch reports only what happens once it exists.
+    /// </summary>
+    /// <remarks>
+    /// macOS delivers file events through a service that numbers each one as it reads it, and a watch
+    /// takes the events numbered after the one current when it started. A change made a moment before is
+    /// sometimes numbered after, and delivered to a watch that did not exist when it was made. Counted,
+    /// it reads as an input moving under work that had not begun: on a CI run, a test leg whose fixture
+    /// was written just before it ran was reported as having its inputs move. Linux's and Windows'
+    /// watches report only what happens once they exist, and nothing is waited for there.
+    /// <para>
+    /// A bound, not a proof: nothing the watch exposes says the platform has caught up. A change
+    /// delivered later than this still reads as moved, which is the side a guard errs on.
+    /// </para>
+    /// </remarks>
+    internal TimeSpan LateDelivery => _platform.Current == PlatformId.MacOs ? MacOsLateDelivery : TimeSpan.Zero;
 
     /// <summary>
     /// What <paramref name="before"/>, <paramref name="after"/> and <paramref name="watch"/> say
@@ -425,6 +471,35 @@ public sealed class InputWatch : IDisposable
             {
                 return _failure;
             }
+        }
+    }
+
+    /// <summary>
+    /// Waits <paramref name="lateDelivery"/> for what the platform may still deliver about changes
+    /// made before the watch began, then disregards every change it has seen, so that what it reports
+    /// from then on happened while it watched.
+    /// </summary>
+    /// <param name="lateDelivery">How long to wait; at zero nothing is waited for or disregarded.</param>
+    /// <param name="cancellationToken">Stops the wait.</param>
+    /// <remarks>
+    /// Sound only before the work it watches starts, which is the one place it is asked. A change
+    /// disregarded here was made before the work began: made before the first snapshot, that snapshot
+    /// holds it, and it is what the work read; made after it and left in place, the snapshot taken once
+    /// the work ends differs from the first; undone again, it was never read. A watch that could not be
+    /// trusted stays so.
+    /// </remarks>
+    internal async Task SettleAsync(TimeSpan lateDelivery, CancellationToken cancellationToken)
+    {
+        if (lateDelivery <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        await Task.Delay(lateDelivery, cancellationToken).ConfigureAwait(false);
+
+        lock (_gate)
+        {
+            _changed.Clear();
         }
     }
 
