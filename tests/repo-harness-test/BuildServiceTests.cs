@@ -1393,6 +1393,13 @@ public sealed class BuildServiceTests
     /// <paramref name="compilers"/> what answers a compiler asked its version, and
     /// <paramref name="processTable"/> the machine its guards find - a quiet one unless told otherwise.
     /// </summary>
+    /// <remarks>
+    /// The phases are timed against a clock that steps only when a test steps it, never this machine's
+    /// own. Every test here but the two about a step is about some other reason to start a build
+    /// directory from clean, and on a host whose wall clock steps - WSL's stepped back 24.8 seconds and
+    /// forward again every five - a phase is recorded as having spanned a step, which starts the next
+    /// build from clean for that reason and tells the test nothing about the one it is checking.
+    /// </remarks>
     private static BuildService Service(
         HarnessFactory factory,
         int exitCode,
@@ -1404,7 +1411,7 @@ public sealed class BuildServiceTests
         IProcessRunner? compilers = null,
         IReadOnlyList<string>? leaves = null)
         => new(
-            new PhaseRunner(new Leaving(phases ?? new QuietRunner(exitCode), leaves ?? [App]), factory.FileSystem, factory.Output, wallClock),
+            new PhaseRunner(new Leaving(phases ?? new QuietRunner(exitCode), leaves ?? [App]), factory.FileSystem, factory.Output, wallClock ?? new SteppingClock()),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
