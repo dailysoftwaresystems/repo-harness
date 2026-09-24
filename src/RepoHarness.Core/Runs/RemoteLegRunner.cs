@@ -292,6 +292,9 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             LogTail = [.. entry.LogTail ?? []],
             Compilers = [.. entry.Compilers ?? []],
             DeveloperEnvironment = entry.DeveloperEnvironment,
+
+            // Measured there, of the directory there: the host's own path and filesystem.
+            Space = entry.Space,
         };
     }
 
@@ -318,5 +321,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         IReadOnlyList<string>? LogTail = null,
         IReadOnlyList<string>? ManualSteps = null,
         IReadOnlyList<string>? UnselectedSteps = null,
-        IReadOnlyList<string>? RanSteps = null);
+        IReadOnlyList<string>? RanSteps = null,
+        BuildSpace? Space = null);
 }

@@ -119,6 +119,81 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         }
     }
 
+    public void MoveDirectory(string source, string destination) => Directory.Move(source, destination);
+
+    public bool IsLink(string path) => new FileInfo(path).LinkTarget is not null;
+
+    public long DirectorySize(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return 0;
+        }
+
+        var total = 0L;
+
+        foreach (var length in Walk(path, recursive: true, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.Length))
+        {
+            total += length;
+        }
+
+        return total;
+    }
+
+    public DiskSpace SpaceAt(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        // A directory not made yet will be made on the filesystem of the nearest one above it that exists,
+        // which is the room it has: a copy a first sync has still to create, the build directory of a leg
+        // that never built.
+        var existing = Path.GetFullPath(path);
+
+        while (!Directory.Exists(existing) && Path.GetDirectoryName(existing) is { } parent)
+        {
+            existing = parent;
+        }
+
+        try
+        {
+            // Windows measures a volume through its root, and refuses a longer path; elsewhere the call
+            // answers for any path on the filesystem.
+            var drive = new DriveInfo(OperatingSystem.IsWindows() ? Path.GetPathRoot(existing) ?? existing : existing);
+
+            return new DiskSpace(drive.AvailableFreeSpace, drive.TotalSize, MountOf(existing));
+        }
+        catch (ArgumentException ex)
+        {
+            throw new IOException($"The room on the filesystem of '{path}' cannot be asked: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Where the filesystem <paramref name="path"/> is on is mounted, as a reader would look it up: its
+    /// drive on Windows, and elsewhere the deepest mount point above it.
+    /// </summary>
+    private static string MountOf(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Path.GetPathRoot(path) ?? path;
+        }
+
+        try
+        {
+            return DriveInfo.GetDrives()
+                .Select(drive => Path.TrimEndingDirectorySeparator(drive.RootDirectory.FullName))
+                .Where(root => root == "/" || path == root || path.StartsWith(root + "/", StringComparison.Ordinal))
+                .OrderByDescending(root => root.Length)
+                .FirstOrDefault() ?? path;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Named by the path itself where the mounts cannot be listed: the room is still measured.
+            return path;
+        }
+    }
+
     public IEnumerable<string> EnumerateFiles(string path, bool recursive)
         => Walk(path, recursive, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath());
 

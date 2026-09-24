@@ -386,6 +386,7 @@ public sealed partial class HelpTests
     [InlineData("exit-codes")]
     [InlineData("config")]
     [InlineData("legs")]
+    [InlineData("space")]
     [InlineData("worktrees")]
     [InlineData("anchors")]
     [InlineData("layout")]
@@ -400,6 +401,24 @@ public sealed partial class HelpTests
         Assert.Equal(0, result.ExitCode);
         Assert.True(result.StandardOutput.Length > 200, $"topic '{topic}' produced little output");
         Assert.DoesNotContain("Unknown topic", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The space topic says what clean leaves alone and why it frees a full disk: nothing is written first,
+    /// a build of the leg holds it off, and a host behind this machine's build needs room to be updated.
+    /// </summary>
+    [Fact]
+    public async Task SpaceTopic_SaysCleanWritesNothingFirst_AndWhatItLeavesAlone()
+    {
+        var result = await CliRunner.RunAsync(["help", "space"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("It writes nothing where it removes before it has removed", text, StringComparison.Ordinal);
+        Assert.Contains("refused-locked", text, StringComparison.Ordinal);
+        Assert.Contains("--dry-run", text, StringComparison.Ordinal);
+        Assert.Contains("A build directory that is a link is left alone", text, StringComparison.Ordinal);
+        Assert.Contains("both full and behind has to be freed by hand once", text, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -1355,6 +1355,39 @@ with it; and a run is resumed from the tree it was started in. A caller never wo
 line names that host's directory, as `logs of <leg> on <host>: <directory>` and as the leg's own
 `runDirectory`.
 
+## Disk space
+
+### Removing a build directory
+
+`clean` removes each selected leg's build directory where the leg runs: in this machine's
+tree, or in the copy of the tree a WSL distribution or an ssh host holds. It is for a disk a
+build filled, where nothing else helped: a build that starts from clean fills it again as it
+goes, and deleting a worktree takes its local tree too. So it writes nothing on the machine it
+removes from before it has removed - no sync, no lock entry, no run records.
+
+- **The lock is read, never written.** A leg is kept from a build of it by the lock that build
+  takes, keyed the same way - host, tree there, variant - on the machine the command runs on and,
+  for a leg on a host, by the DssHarness there in that copy's own lock file. It is read under the
+  machine-wide mutex a run needs to write it, and while nothing holds it the directory is renamed
+  aside, so no run can take the lock between the reading and the renaming. A held lock refuses the
+  leg, `refused-locked`, naming the holder. An entry of a run that has ended is passed over and
+  left in the file: taking it back would write the file.
+- **Renamed, then removed.** A rename writes no file's contents, so it needs no room the disk
+  does not have, and it takes the directory out of a build's way at once; the removal, which
+  can take minutes, happens outside the mutex. A build started meanwhile starts in a new
+  directory. What an interrupted removal left aside, hidden beside the build directory, the next
+  clean of that leg removes first.
+- **A link is left alone.** A build directory that is a link was put somewhere on purpose, and
+  removing the link would free nothing and have the next build fill this disk instead.
+- **Said per leg.** Each leg's line says what was removed and the room left on its filesystem,
+  or, with `--dry-run`, what it holds, removing nothing; `--json` carries both as the leg's
+  `space`. A leg on a host is asked of the DssHarness there, in the copy - once the copy is known
+  to be there, so a tree never synced to a host has nothing removed rather than a host refusing it.
+
+A host whose DssHarness is older than this machine's is brought to this build first, as it is by
+every command that asks it anything, and that write needs room. A host that is both full and
+behind is freed by hand, once.
+
 ## Syncing a tree
 
 `sync` puts a host's copy of the repository in step with this tree. It is the same code path

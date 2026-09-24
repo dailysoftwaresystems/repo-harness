@@ -471,6 +471,123 @@ public sealed class RunLockTests
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
     }
 
+    /// <summary>
+    /// Asking which run holds a lock writes nothing - no lock file, no directory for one - and does what
+    /// it was given to do while nothing holds it: what removes a build directory from a full disk asks this.
+    /// </summary>
+    [Fact]
+    public void AskingWhoHoldsALock_WritesNothing_AndDoesTheWork_WhereNothingHoldsIt()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+        var done = false;
+
+        Assert.Null(runLock.HeldBy(layout, Building("x86_64-gcc-debug"), () => done = true));
+
+        Assert.True(done);
+        Assert.False(File.Exists(layout.LockFile));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(layout.LockFile)));
+    }
+
+    /// <summary>
+    /// A variant a run holds is named as a refusal names it, and nothing is done under it; another variant
+    /// of the same tree is free. The lock file is left exactly as it was.
+    /// </summary>
+    [Fact]
+    public async Task AskingWhoHoldsALock_NamesTheRunHoldingIt_AndDoesNothingUnderIt()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        await using var held = await runLock.AcquireAsync(layout, Building("x86_64-gcc-debug") with { Command = "build" }, TestContext.Current.CancellationToken);
+        var before = File.ReadAllText(layout.LockFile);
+        var done = false;
+
+        var holder = runLock.HeldBy(layout, Building("x86_64-gcc-debug"), () => done = true);
+
+        Assert.NotNull(holder);
+        Assert.Contains(held.Entry.Holder.RunId, holder, StringComparison.Ordinal);
+        Assert.Contains("'build'", holder, StringComparison.Ordinal);
+        Assert.False(done);
+
+        Assert.Null(runLock.HeldBy(layout, Building("x86_64-gcc-release"), () => done = true));
+        Assert.True(done);
+        Assert.Equal(before, File.ReadAllText(layout.LockFile));
+    }
+
+    /// <summary>
+    /// The entry of a run that has ended holds nothing, and is passed over without a word and left in the
+    /// file: taking it back, as a run taking the lock does, would write the file.
+    /// </summary>
+    [Fact]
+    public void AskingWhoHoldsALock_PassesOverADeadHoldersEntry_AndLeavesIt()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+
+        Write(layout, Entry(Environment.MachineName, int.MaxValue - 1, "a-process-that-has-gone"));
+        var before = File.ReadAllText(layout.LockFile);
+
+        Assert.Null(runLock.HeldBy(layout, Building("x86_64-gcc-debug")));
+
+        Assert.Equal(before, File.ReadAllText(layout.LockFile));
+        Assert.DoesNotContain("Reclaimed", factory.StandardOutput.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// What is done while nothing holds the lock is done before any run can take it: a run asking for it
+    /// meanwhile waits for the work to end, and takes it after.
+    /// </summary>
+    [Fact]
+    public async Task ARunAskingForALock_WaitsForWhatIsDoneWhileNothingHoldsIt()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+        var layout = Layout(temp);
+        Task<LockAttempt>? taking = null;
+
+        Assert.Null(runLock.HeldBy(layout, Building("x86_64-gcc-debug"), () =>
+        {
+            taking = Task.Run(() => runLock.TryAcquireAsync(layout, Building("x86_64-gcc-debug"), CancellationToken.None));
+
+            // Held off for as long as the work runs.
+            Assert.False(taking.Wait(TimeSpan.FromMilliseconds(500)), "a run took the lock while the work under it ran");
+        }));
+
+        var attempt = await taking!;
+
+        Assert.NotNull(attempt.Handle);
+        await attempt.Handle.ReleaseAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>Nothing is taken, so there is nothing to take over: a forced request is a mistake of the caller's.</summary>
+    [Fact]
+    public void AskingWhoHoldsALock_CannotBeForced()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        var runLock = new RunLock(factory.FileSystem, factory.Output, factory.Identity);
+
+        Assert.Throws<ArgumentException>(() => runLock.HeldBy(Layout(temp), Building("x86_64-gcc-debug") with { Force = true }));
+    }
+
+    private static LockRequest Building(string variant) => new()
+    {
+        Host = "local",
+        Tree = "/repo",
+        Variant = variant,
+        Scope = LockScope.TreeShared,
+        RunId = RunId.New(),
+        Command = "clean",
+    };
+
     private static HarnessLayout Layout(TempDirectory temp) => new(temp.Path, temp.Path);
 
     private static LockRequest Request(LockScope scope, string command) => new()

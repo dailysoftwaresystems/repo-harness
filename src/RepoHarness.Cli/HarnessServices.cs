@@ -120,6 +120,7 @@ internal static class HarnessServices
         services.AddSingleton<RemoteLegRunner>();
         services.AddSingleton<KeepAwake>();
         services.AddSingleton<LegRunService>();
+        services.AddSingleton<CleanService>();
 
         services.AddSingleton<BuildDirectoryGuard>();
         services.AddSingleton<CMakeToolchainReader>();

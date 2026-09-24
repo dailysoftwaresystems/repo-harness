@@ -30,7 +30,7 @@ internal static class HelpCommand
 
     private static readonly Argument<string?> TopicArgument = new("topic")
     {
-        Description = "Topic to explain: exit-codes, config, legs, worktrees, anchors, layout, secrets, tools, runners, verdicts. Omit for an overview.",
+        Description = "Topic to explain: exit-codes, config, legs, space, worktrees, anchors, layout, secrets, tools, runners, verdicts. Omit for an overview.",
         Arity = ArgumentArity.ZeroOrOne,
     };
 
@@ -80,8 +80,9 @@ internal static class HelpCommand
         "runners" or "runner" or "actions" => RenderRunners(),
         "verdicts" or "verdict" => RenderVerdicts(),
         "ci" or "check-ci-legs" => RenderCi(),
+        "space" or "disk" or "clean" => RenderSpace(),
         null or "" => RenderOverview(),
-        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
+        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, space, worktrees, anchors, layout, "
             + $"secrets, tools, runners, verdicts, ci.{Environment.NewLine}",
     };
 
@@ -188,6 +189,7 @@ internal static class HelpCommand
         builder.AppendLine("  test    those, and the test runner; with --no-build, the runner alone");
         builder.AppendLine("  run     what the runner's steps start, and the build's too with requireBuild");
         builder.AppendLine("  sync    nothing: a copy starts no program");
+        builder.AppendLine("  clean   nothing: removing a directory starts no program");
         builder.AppendLine("  legs    what build and test start");
         builder.AppendLine();
         builder.AppendLine("A missing program never moves a leg to another host: that would measure a machine");
@@ -575,6 +577,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} build                   Build every selected leg");
         builder.AppendLine($"  {ToolPackage.Command} test                    Build and test every selected leg");
         builder.AppendLine($"  {ToolPackage.Command} run <runner>            Run a predefined runner across its legs");
+        builder.AppendLine($"  {ToolPackage.Command} clean                   Remove selected legs' build directories where they run");
         builder.AppendLine($"  {ToolPackage.Command} list-worktree           Show existing worktrees");
         builder.AppendLine($"  {ToolPackage.Command} read-anchors            List the deferred work recorded as anchors");
         builder.AppendLine();
@@ -586,6 +589,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} help exit-codes         What each exit code means");
         builder.AppendLine($"  {ToolPackage.Command} help config             What config.json declares");
         builder.AppendLine($"  {ToolPackage.Command} help legs               Hosts, emulators, and how a leg finds where it runs");
+        builder.AppendLine($"  {ToolPackage.Command} help space              Freeing a full disk, and the room a build needs");
         builder.AppendLine($"  {ToolPackage.Command} help worktrees          Naming rules, the path budget, and when deleting refuses");
         builder.AppendLine($"  {ToolPackage.Command} help anchors            Anchor registries and the commands that change them");
         builder.AppendLine($"  {ToolPackage.Command} help layout             What init creates, and what git tracks");
@@ -911,6 +915,35 @@ internal static class HelpCommand
         builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the tree it is typed in,");
         builder.AppendLine("       or the command never reported how it finished, so it may have run only in part");
         builder.AppendLine("       host-exec otherwise returns the exit code of the command it ran");
+
+        return builder.ToString();
+    }
+
+    private static string RenderSpace()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Disk space");
+        builder.AppendLine();
+        builder.AppendLine("clean removes each selected leg's build directory where the leg runs: in this");
+        builder.AppendLine("machine's tree, or in a WSL distribution's or an ssh host's copy of the tree it is");
+        builder.AppendLine("typed in.");
+        builder.AppendLine();
+        builder.AppendLine($"  {ToolPackage.Command} clean --legs linux-arm64-debug,linux-arm64-release");
+        builder.AppendLine($"  {ToolPackage.Command} clean --legs linux-arm64-debug --dry-run");
+        builder.AppendLine();
+        builder.AppendLine("It writes nothing where it removes before it has removed - no sync, no lock entry,");
+        builder.AppendLine("no run records - so it frees a disk a build filled. A leg a run is building is");
+        builder.AppendLine("refused-locked, naming the run: the lock file is read, never written. The directory");
+        builder.AppendLine("is renamed aside, then removed, so a build started meanwhile starts in a new one; what");
+        builder.AppendLine("an interrupted removal left aside, the next clean of that leg removes. A build");
+        builder.AppendLine("directory that is a link is left alone: what it holds is wherever it points. Each");
+        builder.AppendLine("leg's line says what was removed and the room left on its filesystem; --dry-run says");
+        builder.AppendLine("what each holds and removes nothing; --json carries both as each leg's 'space'.");
+        builder.AppendLine();
+        builder.AppendLine("A host whose DssHarness is older than this machine's is updated first, as for any");
+        builder.AppendLine("command, and the update needs room: a host that is both full and behind has to be");
+        builder.AppendLine("freed by hand once.");
 
         return builder.ToString();
     }

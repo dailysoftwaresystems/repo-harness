@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Git;
@@ -639,6 +640,37 @@ public sealed partial class CliEndToEndTests
         var leg = Assert.Single(root.GetProperty("legs").EnumerateArray());
         Assert.Equal("elsewhere", leg.GetProperty("leg").GetString());
         Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString());
+    }
+
+    /// <summary>
+    /// clean, through the real binary, removes a leg's build directory in the tree it is typed in and says
+    /// what it removed as data; a leg no host can take is said as that, and nothing of it is touched.
+    /// </summary>
+    [Fact]
+    public async Task Clean_RemovesALegsBuildDirectory_AndSaysWhatItRemoved()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var platform = new HarnessFactory().Platform;
+        var leg = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" };
+        var directory = VariantKey
+            .For(new HarnessConfig { BuildConfigs = { ["debug"] = new BuildConfiguration() }, Legs = { ["native"] = leg } }, leg, platform.PlatformKey)
+            .DirectoryUnder(temp.Path);
+
+        temp.WriteFile(Path.Combine(Path.GetRelativePath(temp.Path, directory), "obj", "a.o"), new string('a', 300));
+
+        var result = await CliRunner.RunAsync(["clean", "--legs", "native", "--json", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var line = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal("passed", line.GetProperty("verdict").GetString());
+        Assert.Equal(300, line.GetProperty("space").GetProperty("buildBytes").GetInt64());
+        Assert.True(line.GetProperty("space").GetProperty("removed").GetBoolean());
+        Assert.False(Directory.Exists(directory));
     }
 
     /// <summary>
