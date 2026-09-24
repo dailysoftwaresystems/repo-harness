@@ -140,6 +140,54 @@ public sealed class RemoteSyncTransport(
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// One request, and so one session: the cost of reaching this host is paid once for the batch rather
+    /// than once per file. Each file is refused here if it alone is too large to carry, before anything is
+    /// encoded, so the reader is told which file rather than left with this machine out of memory.
+    /// </remarks>
+    public async Task WriteFilesAsync(
+        string root,
+        IReadOnlyList<SyncFileContent> files,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        if (files.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var file in files)
+        {
+            SyncServe.RefuseAFileTooLargeToCarry(file.Contents.LongLength, file.Path, Host.ToString());
+        }
+
+        try
+        {
+            var carried = files
+                .Select(file => new SyncFileWrite(file.Path, Convert.ToBase64String(file.Contents)))
+                .ToList();
+
+            await AskAsync<object>(
+                    root,
+                    [SyncServe.WriteMany, root, SyncServe.Carry(carried)],
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OutOfMemoryException)
+        {
+            // As one file's own write reports it: the batch is bounded by what the caller grouped, and
+            // this is the other ceiling - whatever this machine had free. Reported as the transfer being
+            // too large for this machine rather than as a defect in the tool, which is where an
+            // OutOfMemoryException otherwise arrives.
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"{files.Count} files could not be carried to {Host} in one request: this machine ran out "
+                + "of memory holding them. Nothing in the batch was written.");
+        }
+    }
+
+    /// <inheritdoc/>
     public Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
         => AskAsync<object>(root, [SyncServe.Delete, root, relativePath], cancellationToken);
 

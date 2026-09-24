@@ -1131,6 +1131,12 @@ public sealed class SyncService(
         // only under --verbose, where a write that costs nothing belongs.
         var overwritten = new HashSet<string>(plan.Overwrites, StringComparer.Ordinal);
 
+        // Carried in batches, because over a connection one exchange is one session, and a session costs
+        // what opening one costs rather than what its bytes cost. A file at a time, a consumer's first
+        // sync of a worktree's copy opened a session per file and outlasted the host's wake.
+        var batch = new List<SyncFileContent>();
+        var held = 0L;
+
         foreach (var entry in plan.Writes)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1139,18 +1145,46 @@ public sealed class SyncService(
                 .ReadFileAsync(sourceRoot, entry.Path, cancellationToken)
                 .ConfigureAwait(false);
 
-            await transport
-                .WriteFileAsync(destinationRoot, entry.Path, contents, cancellationToken)
-                .ConfigureAwait(false);
+            // Sent before this file joins it, so a batch never holds more than the budget: a file larger
+            // than the budget on its own then crosses in a batch of its own, which is what carrying it at
+            // all requires.
+            if (batch.Count > 0
+                && (held + contents.LongLength > SyncServe.LargestBatch || batch.Count >= SyncServe.MostFilesInABatch))
+            {
+                await CarryBatchAsync().ConfigureAwait(false);
+            }
 
-            if (overwritten.Contains(entry.Path))
+            batch.Add(new SyncFileContent(entry.Path, contents));
+            held += contents.LongLength;
+        }
+
+        await CarryBatchAsync().ConfigureAwait(false);
+
+        // Said once the files are there, and in the order they were carried: a line saying a file was
+        // written before the write is answered for would outlive a batch that failed part way.
+        async Task CarryBatchAsync()
+        {
+            if (batch.Count == 0)
             {
-                _output.Info(CommandName, $"{transport.Host}: overwrote {entry.Path}");
+                return;
             }
-            else
+
+            await transport.WriteFilesAsync(destinationRoot, batch, cancellationToken).ConfigureAwait(false);
+
+            foreach (var file in batch)
             {
-                _output.Detail(CommandName, $"{transport.Host}: wrote {entry.Path}");
+                if (overwritten.Contains(file.Path))
+                {
+                    _output.Info(CommandName, $"{transport.Host}: overwrote {file.Path}");
+                }
+                else
+                {
+                    _output.Detail(CommandName, $"{transport.Host}: wrote {file.Path}");
+                }
             }
+
+            batch.Clear();
+            held = 0;
         }
 
         foreach (var path in plan.Deletes)

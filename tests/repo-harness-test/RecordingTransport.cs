@@ -115,6 +115,24 @@ internal sealed class RecordingTransport(
         Written.Add(relativePath);
     }
 
+    /// <summary>
+    /// How many batched writes were asked for. Over a connection one of these is one session, so it is what
+    /// a sync's cost in sessions is counted by.
+    /// </summary>
+    public int Batches { get; private set; }
+
+    public async Task WriteFilesAsync(string root, IReadOnlyList<SyncFileContent> files, CancellationToken cancellationToken = default)
+    {
+        Batches++;
+
+        // Through the same write as a file of its own, so a batch counts each file it carries and
+        // FailsWrite still names the file to fail rather than the batch.
+        foreach (var file in files)
+        {
+            await WriteFileAsync(root, file.Path, file.Contents, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public async Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
     {
         if (RefusesToDelete)

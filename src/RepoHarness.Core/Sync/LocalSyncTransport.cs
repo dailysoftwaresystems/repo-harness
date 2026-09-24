@@ -173,6 +173,26 @@ public sealed class LocalSyncTransport(
 
     /// <inheritdoc/>
     /// <remarks>
+    /// Written one after another. Nothing here opens a session, so a batch costs exactly what the files
+    /// cost; it exists so that the far side of a connection is asked once rather than once per file, and
+    /// this side answers the same question the same way.
+    /// </remarks>
+    public async Task WriteFilesAsync(
+        string root,
+        IReadOnlyList<SyncFileContent> files,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await WriteFileAsync(root, file.Path, file.Contents, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
     /// Told apart by the copy's marker, which a copy the harness made or took over carries, and the marker goes
     /// last. A removal that stops part way - a file held open, an interruption - then leaves a directory still
     /// marked as the harness's, which asking again finishes; removed in whatever order the disk lists it, it could
