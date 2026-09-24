@@ -367,10 +367,15 @@ public sealed class HostInspector(
         var toolPath = ToolPackage.PathFromHome(windowsHost, connection.Shell);
         var shownTool = $"~/{toolPath.Replace('\\', '/')}";
 
+        // Carried so the host marks where its own answer begins: an inspection that fails quotes what the
+        // host said into this host's reason, and unmarked that quotation is whatever its login shell printed.
+        var nonce = HostAgentProtocol.NewNonce();
+
         var request = JsonSerializer.Serialize(
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Info,
+                Nonce = nonce,
                 Emulators = new Dictionary<string, EmulatorConfig>(emulators, StringComparer.OrdinalIgnoreCase),
                 DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentConfig>(questions.DeveloperEnvironments, StringComparer.OrdinalIgnoreCase),
                 Programs = [.. questions.Programs],
@@ -388,6 +393,15 @@ public sealed class HostInspector(
         // which ends the input there and stops any witness still running.
         var answer = await RunAsync(connection, toolPath, [HostAgentProtocol.CommandName], budget, cancellationToken, request + "\n", holdOpen: true)
             .ConfigureAwait(false);
+
+        // From the host's own marker on, on each stream, before any of this is quoted or read: a host that
+        // never reached its agent wrote no marker, and then the whole of what it said is all there is to go
+        // on. A profile that prints a '{' would otherwise be read as the start of the answer, too.
+        answer = answer with
+        {
+            StandardOutput = HostAgentProtocol.SinceServing(answer.StandardOutput, nonce),
+            StandardError = HostAgentProtocol.SinceServing(answer.StandardError, nonce),
+        };
 
         if (!answer.Succeeded)
         {

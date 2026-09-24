@@ -233,8 +233,14 @@ public sealed class HostAgentRequest
 
     /// <summary>
     /// A value the machine that asked chose for this request, repeated in the host's completion line so
-    /// that nothing the command prints can be taken for that line. Run only.
+    /// that nothing the command prints can be taken for that line, and in the line that marks where the
+    /// host's own answer begins.
     /// </summary>
+    /// <remarks>
+    /// A run request is refused without one, because how its command finished could not then be reported.
+    /// An info request answers without one, from a build that sent none: only the marker is lost, and with
+    /// it the trimming of whatever the host's login shell printed first.
+    /// </remarks>
     public string? Nonce { get; init; }
 }
 

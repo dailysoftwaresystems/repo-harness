@@ -102,6 +102,15 @@ public sealed class HostAgentService(
 
         if (request.Kind == HostAgentRequestKind.Info)
         {
+            // Marked as a run request's output is, and for the same reason: an inspection that fails quotes
+            // what the host said into that host's reason, which reaches the reader, --json and every leg
+            // reported unavailable. Without the marker that quotation is whatever the login shell printed
+            // first. A request from a build that sends no nonce is answered all the same, unmarked.
+            if (!string.IsNullOrWhiteSpace(request.Nonce))
+            {
+                await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
+            }
+
             var info = await DescribeAsync(request.Emulators, request.DeveloperEnvironments, request.Programs, request.ToolSearchDirectories, abandoned.Token)
                 .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);

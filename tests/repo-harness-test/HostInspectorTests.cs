@@ -164,6 +164,65 @@ public sealed class HostInspectorTests
         Assert.Equal(reason.StartsWith("DssHarness", StringComparison.Ordinal), report.Reason!.Contains("did not answer", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A host whose login profile writes before its agent does: what it wrote reaches neither the answer nor
+    /// the reason, both of which are read from the agent's own marker on.
+    /// </summary>
+    /// <remarks>
+    /// An inspection's reason is quoted into the host's report, which reaches the reader, <c>--json</c> and
+    /// every leg reported unavailable on that host - so a profile printing the account's home layout
+    /// published it there, exactly as a relayed leg line did. A profile that prints a brace would also have
+    /// been read as the start of the answer.
+    /// </remarks>
+    [Fact]
+    public async Task AProfileThatPrintsBeforeTheAgent_ReachesNeitherTheAnswerNorTheReason()
+    {
+        const string profile = "PATH += /Users/someone/Library/emsdk {not a document}";
+
+        using var answered = new Fixture(PlatformId.Windows, respond: HostThat(agent: command => HostResults.Ok(
+            profile + "\n" + Marker(command) + "\n" + JsonSerializer.Serialize(
+                new HostAgentInfo { Version = Root.Version, AssemblySha256 = "roothash", Os = "linux", Processor = "x86_64" },
+                HostAgentProtocol.JsonOptions))));
+
+        var reached = await answered.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(reached.Available, reached.Reason);
+
+        using var refused = new Fixture(PlatformId.Windows, respond: HostThat(agent: command => HostResults.Failed(
+            3,
+            profile + "\n" + Marker(command) + "\nhost-agent: this host holds no copy of the repository")));
+
+        var stopped = await refused.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(stopped.Available);
+        Assert.Contains("this host holds no copy of the repository", stopped.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", stopped.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that never reached its agent wrote no marker, so the whole of what it said is quoted: it is
+    /// all the reader has to go on.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatNeverReachedItsAgent_IsQuotedWhole()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(
+            agent: _ => HostResults.Failed(127, "sh: dssharness: command not found")));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("sh: dssharness: command not found", report.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>The line the host's agent writes to mark where its own answer begins, for the nonce it was sent.</summary>
+    private static string Marker(HostCommand command)
+    {
+        var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput!, HostAgentProtocol.JsonOptions);
+
+        return HostAgentProtocol.StartedLine(request!.Nonce!);
+    }
+
     [Fact]
     public async Task AHostThatNeverAnsweredTheLookup_IsNotReportedAsMissingTheSdk()
     {
