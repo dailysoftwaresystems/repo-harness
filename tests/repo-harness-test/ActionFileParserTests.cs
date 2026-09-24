@@ -818,6 +818,231 @@ public sealed class ActionFileParserTests
         Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A step may be manual, need steps declared before it, and declare inputs of its own, beside the
+    /// action's; each is read as written.
+    /// </summary>
+    [Fact]
+    public void AManualStep_WithWhatItNeeds_AndInputsOfItsOwn_IsRead()
+    {
+        var action = Parse("""
+            name: compile
+            inputs:
+              root:
+                default: corpus
+            steps:
+              - name: build
+                run: |
+                  cmake --build build
+              - name: bench
+                manual: true
+                needs: [build]
+                inputs:
+                  size:
+                    description: how large a run
+                    default: '25'
+                  repeats:
+                    required: true
+                successPattern: '^markdown : '
+                run: |
+                  python3 bench.py --size {size}
+            """);
+
+        var build = action.Steps[0];
+        Assert.False(build.Manual);
+        Assert.Empty(build.Needs);
+        Assert.Empty(build.Inputs);
+
+        var bench = action.Steps[1];
+        Assert.True(bench.Manual);
+        Assert.Equal(["build"], bench.Needs);
+        Assert.Equal(
+            [new ActionInput("size", "25", false, "how large a run"), new ActionInput("repeats", null, true, null)],
+            bench.Inputs);
+
+        // The action's own inputs are the action's alone; a step's are not added to them.
+        Assert.Equal(["root"], action.Inputs.Select(input => input.Name));
+    }
+
+    /// <summary>
+    /// What a manual step, its needs and its inputs cannot say, refused when the file is read and with
+    /// nothing run: each a way for a run to run what nobody named, or to pass on work it never witnessed.
+    /// </summary>
+    [Theory]
+    [InlineData("manual-without-witness", "step 'bench' is manual and declares no 'successPattern'")]
+    [InlineData("manual-predefined", "step 'fetch' is 'harness/checkout', which cannot be manual")]
+    [InlineData("inputs-on-predefined", "'inputs' applies only to a step's 'run' block")]
+    [InlineData("needs-unknown", "step 'bench' needs 'biuld', and no step declared before it has that name")]
+    [InlineData("needs-later", "step 'build' needs 'bench', and no step declared before it has that name")]
+    [InlineData("needs-itself", "step 'bench' needs itself")]
+    [InlineData("needs-empty", "step 'bench' 'needs' names no step")]
+    [InlineData("needs-scalar", "step 'bench' 'needs' is a list")]
+    [InlineData("needs-twice", "step 'bench' names 'build' under 'needs' more than once")]
+    [InlineData("automatic-needs-manual", "step 'report' runs in every run of the action and needs 'bench', which is manual")]
+    [InlineData("input-shadows-action", "step 'bench' declares input 'root', which the action declares too")]
+    public void WhatAManualStepCannotSay_IsRefused(string shape, string expected)
+    {
+        var steps = shape switch
+        {
+            "manual-without-witness" => """
+                  - name: bench
+                    manual: true
+                    run: |
+                      python3 bench.py
+                """,
+            "manual-predefined" => """
+                  - name: fetch
+                    uses: harness/checkout
+                    ref: main
+                    manual: true
+                """,
+            "inputs-on-predefined" => """
+                  - name: fetch
+                    uses: harness/checkout
+                    ref: main
+                    inputs:
+                      size:
+                        default: '1'
+                """,
+            "needs-unknown" => """
+                  - name: build
+                    run: |
+                      cmake --build build
+                  - name: bench
+                    manual: true
+                    needs: [biuld]
+                    successPattern: '^done'
+                    run: |
+                      python3 bench.py
+                """,
+            "needs-later" => """
+                  - name: build
+                    needs: [bench]
+                    run: |
+                      cmake --build build
+                  - name: bench
+                    run: |
+                      python3 bench.py
+                """,
+            "needs-itself" => """
+                  - name: bench
+                    needs: [bench]
+                    run: |
+                      python3 bench.py
+                """,
+            "needs-empty" => """
+                  - name: bench
+                    needs: []
+                    run: |
+                      python3 bench.py
+                """,
+            "needs-scalar" => """
+                  - name: build
+                    run: |
+                      cmake --build build
+                  - name: bench
+                    needs: build
+                    run: |
+                      python3 bench.py
+                """,
+            "needs-twice" => """
+                  - name: build
+                    run: |
+                      cmake --build build
+                  - name: bench
+                    needs: [build, build]
+                    run: |
+                      python3 bench.py
+                """,
+            "automatic-needs-manual" => """
+                  - name: bench
+                    manual: true
+                    successPattern: '^done'
+                    run: |
+                      python3 bench.py
+                  - name: report
+                    needs: [bench]
+                    run: |
+                      python3 report.py
+                """,
+            "input-shadows-action" => """
+                  - name: bench
+                    inputs:
+                      root:
+                        default: other
+                    run: |
+                      python3 bench.py
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, null),
+        };
+
+        var refusal = Refused($"""
+            name: compile
+            inputs:
+              root:
+                default: corpus
+            steps:
+            {steps}
+            """);
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A step's inputs read the same in YAML's flow style as in its block style - one line each, as a step
+    /// with several is most readably written - and a value holding spaces reaches the step whole.
+    /// </summary>
+    [Fact]
+    public void AStepsInputs_ReadTheSameInFlowStyle()
+    {
+        var action = Parse("""
+            name: compile
+            steps:
+              - name: bench
+                manual: true
+                workingDirectoryRoot: action
+                inputs:
+                  size:     { description: 'how large a run', default: '25' }
+                  repeats:  { description: 'timed runs per arm', default: '5' }
+                  arms:     { description: 'worker counts, space-separated', default: '1 4' }
+                run: |
+                  python3 ./bench.py --size {size} --repeats {repeats} --arms "{arms}" --out "{stepBuild}"
+                outputs: [bench.md, bench.json]
+                persist: true
+                successPattern: '^markdown : '
+            """);
+
+        var bench = Assert.Single(action.Steps);
+
+        Assert.True(bench.Manual);
+        Assert.Equal(["size", "repeats", "arms"], bench.Inputs.Select(input => input.Name));
+        Assert.Equal("1 4", bench.Inputs[2].Default);
+        Assert.Equal(["bench.md", "bench.json"], bench.Outputs);
+        Assert.Equal(
+            ["python3", "./bench.py", "--size", "{size}", "--repeats", "{repeats}", "--arms", "{arms}", "--out", "{stepBuild}"],
+            Assert.Single(bench.Commands).Arguments);
+    }
+
+    /// <summary>A step's input is named with its step when it is wrong, so it is never taken for the action's.</summary>
+    [Fact]
+    public void AProblemInAStepsInput_NamesItsStep()
+    {
+        var refusal = Refused("""
+            name: compile
+            steps:
+              - name: bench
+                inputs:
+                  size:
+                    default: '1'
+                    shape: wide
+                run: |
+                  python3 bench.py
+            """);
+
+        Assert.Contains("key of step 'bench' inputs.size", refusal.Message, StringComparison.Ordinal);
+    }
+
     private static ActionFileParser CreateParser()
         => new(
             new PhysicalFileSystem(FilePermissionsFactory.Create()),

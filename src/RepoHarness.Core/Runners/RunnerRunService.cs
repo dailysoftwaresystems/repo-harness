@@ -37,6 +37,13 @@ public sealed record RunnerRunRequest
     /// </summary>
     public IReadOnlyDictionary<string, string> Inputs { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The manual steps <c>run --manual-step</c> named, which this run runs in place of the ones a run of
+    /// the runner runs; empty for that run. Only the runner the command line named is given them: a runner
+    /// a run check starts runs its own steps.
+    /// </summary>
+    public IReadOnlyList<string> ManualSteps { get; init; } = [];
+
     /// <summary>The leg, as the configuration names it and as the ledger shows it.</summary>
     public required string Leg { get; init; }
 
@@ -319,6 +326,10 @@ public sealed class RunnerRunService(
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                // Ran, whether in this attempt or one it resumes: the step's work began, and the leg's
+                // line says so however it ends. A step of several lines is one step.
+                state.Ran(phase);
+
                 if (!remaining.Contains(phase.Name))
                 {
                     // Already carried to an outcome by an earlier segment. Skipped rather than repeated,
@@ -330,7 +341,7 @@ public sealed class RunnerRunService(
 
                 _output.Info(CommandName, $"{request.Leg}: '{values.Redact(phase.Name)}' started");
 
-                var result = await RunPhaseAsync(config, request, phase, values, steps.Inputs, scratch, cancellationToken)
+                var result = await RunPhaseAsync(config, request, phase, values, steps.InputsFor(phase.StepName), scratch, cancellationToken)
                     .ConfigureAwait(false);
 
                 result = WithDeclaredOutputs(result, phase, scratch);
@@ -442,6 +453,12 @@ public sealed class RunnerRunService(
             // On the leg's own line, so a step this operating system left out is never simply absent.
             SkippedSteps = steps.SkippedSteps,
 
+            // On the leg's own line too: the manual steps that ran, marked so, and every step the run left
+            // out, so a plain run is never read as having run the manual work it did not.
+            RanSteps = state.RanSteps,
+            ManualSteps = [.. steps.ManualSteps.Where(state.RanSteps.Contains)],
+            UnselectedSteps = steps.UnselectedSteps,
+
             // The last step that did not pass, for a leg that did not: one whose failure was excused, or
             // that went on past its failure, is the last only where nothing after it failed.
             LogTail = decided.Verdict.Verdict == LegVerdict.Passed ? [] : PhaseResult.TailOf(state.Phases),
@@ -477,17 +494,29 @@ public sealed class RunnerRunService(
     /// <param name="runnerName">The runner, a positional argument rather than an option.</param>
     /// <param name="time">Whether <c>--time</c> was given.</param>
     /// <param name="inputs">What <c>--input</c> gave, each handed over as it was read.</param>
+    /// <param name="manualSteps">What <c>--manual-step</c> named, each handed over by name.</param>
     /// <remarks>
     /// <c>--legs</c> and <c>--json</c> are the dispatch's own; the lock and the staging are this
     /// machine's decisions about its own state. The inputs are not: a leg on another machine running
     /// an input's default where the command line gave a value is a verdict about a run nobody asked
-    /// for.
+    /// for. Nor are the manual steps: a leg there running the runner's own steps where the command line
+    /// named others would report on work nobody asked it to do.
     /// </remarks>
-    public static IReadOnlyList<string> RemoteArguments(string runnerName, bool time, IReadOnlyDictionary<string, string> inputs)
+    public static IReadOnlyList<string> RemoteArguments(
+        string runnerName,
+        bool time,
+        IReadOnlyDictionary<string, string> inputs,
+        IReadOnlyList<string>? manualSteps = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runnerName);
 
-        return [runnerName, .. time ? ["--time"] : Array.Empty<string>(), .. CommandLineInputs.Arguments(inputs)];
+        return
+        [
+            runnerName,
+            .. time ? ["--time"] : Array.Empty<string>(),
+            .. CommandLineInputs.Arguments(inputs),
+            .. (manualSteps ?? []).SelectMany(step => new[] { StepSelection.Option, step }),
+        ];
     }
 
     /// <summary>
@@ -535,7 +564,11 @@ public sealed class RunnerRunService(
         IReadOnlyList<RunnerPhase> phases;
         IReadOnlyList<string> performed = [];
         IReadOnlyDictionary<string, string> inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepInputs =
+            new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         IReadOnlyList<string> skipped = [];
+        IReadOnlyList<string> unselected = [];
+        IReadOnlyList<string> manual = [];
         string? actionDirectory = null;
 
         if (runner.Action is { Length: > 0 } action)
@@ -544,14 +577,33 @@ public sealed class RunnerRunService(
                 .LoadAsync(request.Layout.RunnerActionsDirectory, action, cancellationToken)
                 .ConfigureAwait(false);
 
+            // The steps this run runs, chosen first: every step that is not manual, the runner's own
+            // steps, or the manual steps the command line named, each with what it needs. Everything
+            // after this reads only those, as everything after the next line reads only the steps
+            // this leg's operating system runs.
+            var chosen = StepSelection.For(runner, request.ManualSteps).Apply(request.RunnerName, declared);
+
             // 'run' refuses these before anything starts; refused here as well, so a value given for
-            // an input the file never reads cannot reach a leg as though it had been used.
-            CommandLineInputs.RequireDeclared(request.RunnerName, declared, request.Inputs);
+            // an input no step this run runs reads cannot reach a leg as though it had been used.
+            CommandLineInputs.RequireRead(request.RunnerName, chosen, request.Inputs);
+
+            // Said as the run goes and on the leg's line, so a step left out is never simply absent - a
+            // manual one above all, since a plain run that listed nothing would read as having run it.
+            foreach (var name in chosen.Unselected)
+            {
+                _output.Info(
+                    CommandName,
+                    declared.Steps.Any(step => step.Manual && string.Equals(step.Name, name, StringComparison.Ordinal))
+                        ? $"{request.Leg}: skipped manual step '{name}', which this run did not name"
+                        : $"{request.Leg}: skipped '{name}', which this run did not select");
+            }
+
+            unselected = chosen.Unselected;
 
             // The steps this leg's operating system runs, taken before anything else reads the file:
             // the policy vets, the names are demanded and the phases are made from what will run, so
             // a step for another system never refuses this leg over a program it never starts.
-            var (file, left) = OnThisLeg(declared, request);
+            var (file, left) = OnThisLeg(chosen.File, request);
 
             foreach (var step in left)
             {
@@ -559,7 +611,8 @@ public sealed class RunnerRunService(
             }
 
             skipped = [.. left.Select(step => step.Name)];
-            inputs = ResolveInputs(file, values, request.Inputs);
+            manual = [.. file.Steps.Where(step => step.Manual).Select(step => step.Name)];
+            (inputs, stepInputs) = ResolveInputs(file, values, request.Inputs);
 
             var supplied = Supplied(values, inputs);
             var scratch = ScratchFor(request, file.DirectoryName);
@@ -578,14 +631,15 @@ public sealed class RunnerRunService(
                     command.Program,
                     step.WorkingPath(file.DirectoryName),
                     PathsFor(request, scratch, step.Name),
-                    supplied,
+                    Supplied(values, WithStepInputs(inputs, stepInputs, step.Name)),
                     step.Name),
                 values.Redact);
 
             // The names the expansion will actually have, not a subset of them. Handed the declared
             // inputs alone this refused a run line naming a runner value directory's own value — the
-            // same check-against-a-different-set defect as before, inverted.
-            RefuseUnknownNames(file, supplied.Keys);
+            // same check-against-a-different-set defect as before, inverted. Each step's own inputs
+            // are its alone: a run line naming another step's is refused as naming nothing.
+            RefuseUnknownNames(file, step => Supplied(values, WithStepInputs(inputs, stepInputs, step.Name)).Keys);
 
             // Performed before the first program starts: one settles what the steps read, the other
             // settles which tree they read it from, and a run that discovered either halfway through
@@ -603,6 +657,17 @@ public sealed class RunnerRunService(
         else
         {
             CommandLineInputs.RequireDeclared(request.RunnerName, file: null, request.Inputs);
+
+            // Refused as 'run' refuses it before anything starts, and here as well, so no leg runs the
+            // runner's phases while the command line said to run a step of an action it does not have.
+            if (request.ManualSteps.Count > 0)
+            {
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"Runner '{request.RunnerName}' runs phases of its own, and only an action's steps can be manual, "
+                    + $"so {StepSelection.Option} names nothing it could run.");
+            }
+
             Clean(request);
             phases = runner.Phases;
         }
@@ -635,7 +700,13 @@ public sealed class RunnerRunService(
             _output.Detail(CommandName, $"{request.Leg}: performed '{name}'");
         }
 
-        return new RunnerSteps(phases, performed, inputs, actionDirectory) { SkippedSteps = skipped };
+        return new RunnerSteps(phases, performed, inputs, actionDirectory)
+        {
+            SkippedSteps = skipped,
+            UnselectedSteps = unselected,
+            ManualSteps = manual,
+            StepInputs = stepInputs,
+        };
     }
 
     /// <summary>
@@ -674,8 +745,9 @@ public sealed class RunnerRunService(
     /// </summary>
     /// <param name="file">The action as it was read.</param>
     /// <param name="fillable">
-    /// The names this run can supply beyond the built-in vocabulary: the action's declared inputs,
-    /// already resolved, so the check refuses exactly what the expansion would not fill in.
+    /// The names this run can supply a step beyond the built-in vocabulary: the action's declared inputs
+    /// and the step's own, already resolved, so the check refuses exactly what the expansion would not
+    /// fill in.
     /// </param>
     /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
     /// <remarks>
@@ -689,12 +761,12 @@ public sealed class RunnerRunService(
     /// and is never touched, and a brace meant literally is written <c>{{</c>.
     /// </para>
     /// </remarks>
-    private static void RefuseUnknownNames(ActionFile file, IEnumerable<string> fillable)
+    private static void RefuseUnknownNames(ActionFile file, Func<ActionStep, IEnumerable<string>> fillable)
     {
-        var declared = fillable.ToList();
-
         foreach (var step in file.Steps)
         {
+            var declared = fillable(step).ToList();
+
             foreach (var argument in step.Commands.SelectMany(command => command.Arguments))
             {
                 LegPathNames.RefuseUnknown(argument, $"'{step.Name}' run line", extra: declared);
@@ -1034,10 +1106,10 @@ public sealed class RunnerRunService(
     /// </exception>
     private static void Refuse(RunnerRunRequest request, RunnerSteps steps, ActionValues values, ActionScratch? scratch)
     {
-        var supplied = Supplied(values, steps.Inputs);
-
         foreach (var phase in steps.Phases)
         {
+            var supplied = Supplied(values, steps.InputsFor(phase.StepName));
+
             if (phase.Command.Count == 0)
             {
                 throw new HarnessException(
@@ -1398,6 +1470,45 @@ public sealed class RunnerRunService(
     {
         /// <summary>The steps this leg's operating system does not run, by name, in declared order.</summary>
         public IReadOnlyList<string> SkippedSteps { get; init; } = [];
+
+        /// <summary>The steps the run did not select, by name, in declared order.</summary>
+        public IReadOnlyList<string> UnselectedSteps { get; init; } = [];
+
+        /// <summary>The manual steps this leg runs, by name, in declared order.</summary>
+        public IReadOnlyList<string> ManualSteps { get; init; } = [];
+
+        /// <summary>Each step's own inputs, resolved, by step name; a step that declares none is absent.</summary>
+        public IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> StepInputs { get; init; } =
+            new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+
+        /// <summary>What the step <paramref name="stepName"/> can name: the action's inputs, and its own.</summary>
+        public IReadOnlyDictionary<string, string> InputsFor(string stepName)
+            => WithStepInputs(Inputs, StepInputs, stepName);
+    }
+
+    /// <summary>
+    /// <paramref name="inputs"/>, with the step <paramref name="stepName"/>'s own over them; the action's
+    /// alone for a step that declares none. The parser refuses a step input named like one of the
+    /// action's, so neither ever hides the other.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> WithStepInputs(
+        IReadOnlyDictionary<string, string> inputs,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepInputs,
+        string stepName)
+    {
+        if (!stepInputs.TryGetValue(stepName, out var own) || own.Count == 0)
+        {
+            return inputs;
+        }
+
+        var merged = new Dictionary<string, string>(inputs, StringComparer.Ordinal);
+
+        foreach (var (name, value) in own)
+        {
+            merged[name] = value;
+        }
+
+        return merged;
     }
 
     /// <summary>
@@ -1524,7 +1635,7 @@ public sealed class RunnerRunService(
     /// <param name="file">The action as it was read.</param>
     /// <param name="values">What the runner value directories hold.</param>
     /// <param name="given">What <c>run --input</c> gave, every name one the file declares.</param>
-    /// <exception cref="HarnessException">A required input has no value anywhere.</exception>
+    /// <exception cref="HarnessException">A required input - the action's or a step's - has no value anywhere.</exception>
     /// <remarks>
     /// Resolved once, here, and handed to everything that needs it: the run lines that name an input
     /// and the environment a <c>harness/read-inputs</c> step fills. Resolved twice they drift, which
@@ -1537,15 +1648,50 @@ public sealed class RunnerRunService(
     /// environment, which is what <c>.secrets</c> is for.
     /// </para>
     /// </remarks>
-    private static IReadOnlyDictionary<string, string> ResolveInputs(
+    private static (IReadOnlyDictionary<string, string> Action, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> Steps) ResolveInputs(
         ActionFile file,
         ActionValues values,
         IReadOnlyDictionary<string, string> given)
     {
-        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
         var missing = new List<string>();
+        var resolved = Resolve(file.Inputs, values, given, missing, step: null);
 
-        foreach (var input in file.Inputs)
+        // Each step's own, by the same rule - only the steps this run runs are in the file by now, so a
+        // step left out never refuses a run over an input nothing gave it.
+        var steps = file.Steps
+            .Where(step => step.Inputs.Count > 0)
+            .ToDictionary(
+                step => step.Name,
+                step => Resolve(step.Inputs, values, given, missing, step.Name),
+                StringComparer.Ordinal);
+
+        if (missing.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"'{file.Path}' requires input(s) {string.Join(", ", missing)}, and none was given with "
+                + $"{CommandLineInputs.Option}, found in the runner value directories or declared as a "
+                + "default, so its steps would run with nothing where a value belongs.");
+        }
+
+        return (resolved, steps);
+    }
+
+    /// <summary>
+    /// The value of every input in <paramref name="declared"/>: what <c>run --input</c> gave it, else what
+    /// the runner value directories supply under that name, else its default. A required one with none is
+    /// added to <paramref name="missing"/>, named with its step where it is one.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> Resolve(
+        IEnumerable<ActionInput> declared,
+        ActionValues values,
+        IReadOnlyDictionary<string, string> given,
+        List<string> missing,
+        string? step)
+    {
+        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var input in declared)
         {
             if (given.TryGetValue(input.Name, out var typed))
             {
@@ -1567,17 +1713,8 @@ public sealed class RunnerRunService(
 
             if (input.Required)
             {
-                missing.Add(input.Name);
+                missing.Add(step is null ? input.Name : $"{input.Name} (step '{step}')");
             }
-        }
-
-        if (missing.Count > 0)
-        {
-            throw new HarnessException(
-                HarnessExit.ConfigInvalid,
-                $"'{file.Path}' requires input(s) {string.Join(", ", missing)}, and none was given with "
-                + $"{CommandLineInputs.Option}, found in the runner value directories or declared as a "
-                + "default, so its steps would run with nothing where a value belongs.");
         }
 
         return resolved;
@@ -1611,6 +1748,20 @@ public sealed class RunnerRunService(
         public List<string> PassedOver { get; } = [];
 
         public List<string> Skipped { get; } = [];
+
+        /// <summary>The steps whose work began, by name, each once, in the order they began.</summary>
+        public List<string> RanSteps { get; } = [];
+
+        /// <summary>Records <paramref name="phase"/>'s step as one whose work began: a runner's own phase is its own step.</summary>
+        public void Ran(RunnerPhase phase)
+        {
+            var step = phase.StepName.Length > 0 ? phase.StepName : phase.Name;
+
+            if (!RanSteps.Contains(step, StringComparer.Ordinal))
+            {
+                RanSteps.Add(step);
+            }
+        }
 
         public TimeSpan CommandTime { get; set; }
 

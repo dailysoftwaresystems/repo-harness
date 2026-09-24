@@ -284,6 +284,9 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             // caller is told where, as it is for a leg this machine ran.
             RunDirectory = ledger?.RunDirectory,
             SkippedSteps = [.. entry.SkippedSteps ?? []],
+            RanSteps = [.. entry.RanSteps ?? []],
+            ManualSteps = [.. entry.ManualSteps ?? []],
+            UnselectedSteps = [.. entry.UnselectedSteps ?? []],
 
             // What the phase that failed there printed last: its log stays on that host.
             LogTail = [.. entry.LogTail ?? []],
@@ -312,5 +315,8 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         DeveloperEnvironmentFact? DeveloperEnvironment = null,
         string? Project = null,
         string? TestSet = null,
-        IReadOnlyList<string>? LogTail = null);
+        IReadOnlyList<string>? LogTail = null,
+        IReadOnlyList<string>? ManualSteps = null,
+        IReadOnlyList<string>? UnselectedSteps = null,
+        IReadOnlyList<string>? RanSteps = null);
 }

@@ -118,6 +118,30 @@ public sealed record ActionStep
     /// </summary>
     public bool RequireInputsUnmoved { get; init; }
 
+    /// <summary>
+    /// Whether the step runs only where a run names it, from <c>manual</c>: with <c>run --manual-step</c>,
+    /// or in the <c>steps</c> a runner declares. A run that names no step runs every step but these.
+    /// </summary>
+    /// <remarks>
+    /// For work that belongs with an action and is not part of what running it means - a benchmark
+    /// beside the build and test it shares its modules with. One action per directory, so that work
+    /// could otherwise not live beside the modules it reads at all.
+    /// </remarks>
+    public bool Manual { get; init; }
+
+    /// <summary>
+    /// The steps declared before this one that run first whenever it runs, from <c>needs</c>, as they
+    /// were written. A run that names only this step runs these too, in the order they are declared.
+    /// </summary>
+    public IReadOnlyList<string> Needs { get; init; } = [];
+
+    /// <summary>
+    /// The values this step alone reads, from its own <c>inputs</c>: beside the action's, which every
+    /// step reads. A run that does not run this step reads none of them, so <c>--input</c> naming one
+    /// is refused there rather than accepted and never used.
+    /// </summary>
+    public IReadOnlyList<ActionInput> Inputs { get; init; } = [];
+
 
     /// <summary>
     /// The directory this step runs in, relative to the directory the leg's run works in - its tree

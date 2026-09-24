@@ -928,6 +928,44 @@ public sealed class ConfigStoreTests
     }
 
     /// <summary>
+    /// What a runner's own steps cannot say, refused when the file is read: steps on a runner of phases,
+    /// which has no step to name; none at all, which would run nothing; and a step named blank or twice.
+    /// Which steps its action declares is asked when that file is read.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "phases": [ { "name": "go", "command": ["dotnet", "--info"] } ], "steps": ["go"] }""", "names steps, which only an action file has")]
+    [InlineData("""{ "action": "corpus/corpus.yml", "steps": [] }""", "names no step under steps, so it would run nothing")]
+    [InlineData("""{ "action": "corpus/corpus.yml", "steps": [" "] }""", "names a blank step under steps")]
+    [InlineData("""{ "action": "corpus/corpus.yml", "steps": ["bench", "bench"] }""", "names step 'bench' more than once under steps")]
+    public void Load_RejectsARunnersStepsThatCannotBeRun(string runner, string expected)
+    {
+        var exception = LoadInvalid($$"""
+            {
+              "predefinedRunners": { "corpus": {{runner}} }
+            }
+            """);
+
+        Assert.Contains($"predefined runner 'corpus' {expected}", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A runner naming steps of its action loads, and keeps them in the order written.</summary>
+    [Fact]
+    public void Load_ReadsARunnersOwnSteps()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "config.json");
+        File.WriteAllText(path, """
+            {
+              "predefinedRunners": { "bench": { "action": "corpus/corpus.yml", "steps": ["bench", "profile"] } }
+            }
+            """);
+
+        var config = new JsonConfigStore(new PhysicalFileSystem(FilePermissionsFactory.Create())).Load(path);
+
+        Assert.Equal(["bench", "profile"], config.PredefinedRunners["bench"].Steps);
+    }
+
+    /// <summary>
     /// Directories above an action's own group actions and are the author's to arrange. A corpus
     /// large enough to be a harness of its own is unreadable as a flat pile of names carrying their
     /// grouping as a prefix, and what identifies an action is unchanged: the file carries the name

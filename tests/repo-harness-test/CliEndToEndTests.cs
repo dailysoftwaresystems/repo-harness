@@ -428,6 +428,85 @@ public sealed partial class CliEndToEndTests
         Assert.Contains("elsewhere", result.StandardError, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A manual step through the real parser: a plain run leaves it out and lists it; --manual-step runs it
+    /// alone, reading an input only it declares; a runner naming it runs it as its own; and a step name the
+    /// action lacks, or an input of a step the run leaves out, is refused before anything runs.
+    /// </summary>
+    [Fact]
+    public async Task AManualStep_RunsOnlyWhereARunNamesIt()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Tools = { new ToolConfig { Name = "dotnet" } },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" } },
+            PredefinedRunners =
+            {
+                ["probe"] = new RunnerConfig { Action = "probe/probe.yml" },
+                ["bench"] = new RunnerConfig { Action = "probe/probe.yml", Steps = ["bench"] },
+            },
+        });
+
+        temp.WriteFile(
+            Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
+            """
+            name: probe
+            steps:
+              - name: version
+                run: dotnet --version
+              - name: bench
+                manual: true
+                inputs:
+                  runs:
+                    default: '1'
+                successPattern: '^\d+\.\d+'
+                run: dotnet --version
+            """);
+
+        static JsonElement Leg(ProcessResult result)
+            => JsonDocument.Parse(result.StandardOutput).RootElement.GetProperty("legs")[0].Clone();
+
+        static IEnumerable<string?> Names(JsonElement leg, string property)
+            => leg.TryGetProperty(property, out var names) ? names.EnumerateArray().Select(name => name.GetString()) : [];
+
+        var plain = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, plain.ExitCode);
+        Assert.Equal(["version"], Names(Leg(plain), "ranSteps"));
+        Assert.Equal(["bench"], Names(Leg(plain), "unselectedSteps"));
+        Assert.Empty(Names(Leg(plain), "manualSteps"));
+
+        var named = await CliRunner.RunAsync(
+            ["run", "probe", "--legs", "native", "--manual-step", "bench", "--input", "runs=2", "--json", "-C", temp.Path],
+            token);
+
+        Assert.Equal(HarnessExit.Success, named.ExitCode);
+        Assert.Equal(["bench"], Names(Leg(named), "ranSteps"));
+        Assert.Equal(["bench"], Names(Leg(named), "manualSteps"));
+        Assert.Equal(["version"], Names(Leg(named), "unselectedSteps"));
+
+        var ownRunner = await CliRunner.RunAsync(["run", "bench", "--legs", "native", "--json", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Success, ownRunner.ExitCode);
+        Assert.Equal(["bench"], Names(Leg(ownRunner), "manualSteps"));
+
+        var mistyped = await CliRunner.RunAsync(["run", "probe", "--manual-step", "bnech", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.UsageError, mistyped.ExitCode);
+        Assert.Contains("its manual steps are bench", mistyped.StandardError, StringComparison.Ordinal);
+
+        var unread = await CliRunner.RunAsync(["run", "probe", "--input", "runs=2", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.UsageError, unread.ExitCode);
+        Assert.Contains("which only step(s) 'bench' reads", unread.StandardError, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARunWhereEveryLegReported_IsStillReportedAsPassed()
     {

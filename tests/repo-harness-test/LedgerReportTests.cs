@@ -177,6 +177,37 @@ public sealed class LedgerReportTests
         Assert.Equal(["msvc", "sign"], legs[1].GetProperty("skippedSteps").EnumerateArray().Select(step => step.GetString()));
     }
 
+    /// <summary>
+    /// A leg's line names the manual steps it ran and the steps the run did not select, each in the order
+    /// declared: a plain run lists the manual steps it left out, so it is never read as having run them,
+    /// and a line that ran one says so. A leg whose run left nothing out and ran nothing manual names none.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesTheManualStepsRun_AndTheStepsLeftOut()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { UnselectedSteps = ["bench"] },
+            Entry("mac", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { RanSteps = ["prepare", "bench"], ManualSteps = ["bench"], UnselectedSteps = ["build"] },
+        ],
+        durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("ranSteps", out _));
+        Assert.False(legs[0].TryGetProperty("manualSteps", out _));
+        Assert.False(legs[0].TryGetProperty("unselectedSteps", out _));
+
+        Assert.False(legs[1].TryGetProperty("manualSteps", out _));
+        Assert.Equal(["bench"], legs[1].GetProperty("unselectedSteps").EnumerateArray().Select(step => step.GetString()));
+
+        Assert.Equal(["prepare", "bench"], legs[2].GetProperty("ranSteps").EnumerateArray().Select(step => step.GetString()));
+        Assert.Equal(["bench"], legs[2].GetProperty("manualSteps").EnumerateArray().Select(step => step.GetString()));
+        Assert.Equal(["build"], legs[2].GetProperty("unselectedSteps").EnumerateArray().Select(step => step.GetString()));
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

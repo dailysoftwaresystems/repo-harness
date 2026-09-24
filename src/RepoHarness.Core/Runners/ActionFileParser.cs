@@ -91,6 +91,9 @@ public sealed class ActionFileParser(
         "requireInputsUnmoved",
         "outputs",
         "persist",
+        "manual",
+        "needs",
+        "inputs",
     ];
 
     private readonly IFileSystem _fileSystem = fileSystem;
@@ -163,7 +166,7 @@ public sealed class ActionFileParser(
                     break;
 
                 case "inputs":
-                    inputs.AddRange(ReadInputs(valueNode, problems));
+                    inputs.AddRange(ReadInputs(valueNode, "inputs", problems));
                     break;
 
                 case "steps":
@@ -174,6 +177,17 @@ public sealed class ActionFileParser(
                 default:
                     problems.Add(Unknown(keyNode, key, "top-level key", FileKeys));
                     break;
+            }
+        }
+
+        foreach (var step in steps)
+        {
+            foreach (var input in step.Inputs.Where(input => inputs.Any(declared => string.Equals(declared.Name, input.Name, StringComparison.Ordinal))))
+            {
+                problems.Add($"step '{step.Name}' declares input '{input.Name}', which the action declares too: "
+                    + $"{CommandLineInputs.Option} {input.Name}=... would give both one value, and a run line naming "
+                    + "it could only mean one of them. Name it once: under the action's inputs for every step, or "
+                    + "under the step's for that step alone.");
             }
         }
 
@@ -279,11 +293,17 @@ public sealed class ActionFileParser(
         return null;
     }
 
-    private static IEnumerable<ActionInput> ReadInputs(YamlNode node, List<string> problems)
+    /// <param name="node">The <c>inputs</c> mapping.</param>
+    /// <param name="owner">
+    /// Whose inputs these are, as a problem names them: <c>inputs</c> for the action's own, or a step's,
+    /// so that a problem in one step's inputs is never read as one in the action's.
+    /// </param>
+    /// <param name="problems">Where problems are collected.</param>
+    private static IEnumerable<ActionInput> ReadInputs(YamlNode node, string owner, List<string> problems)
     {
         if (node is not YamlMappingNode mapping)
         {
-            problems.Add(At(node, "'inputs' is not a mapping of name to declaration."));
+            problems.Add(At(node, $"'{owner}' is not a mapping of name to declaration."));
             yield break;
         }
 
@@ -298,7 +318,7 @@ public sealed class ActionFileParser(
 
             if (valueNode is not YamlMappingNode declaration)
             {
-                problems.Add(At(valueNode, $"input '{inputName}' is not a mapping; it declares "
+                problems.Add(At(valueNode, $"{Named(owner, inputName)} is not a mapping; it declares "
                     + $"'{string.Join("', '", InputKeys)}'."));
                 continue;
             }
@@ -317,23 +337,23 @@ public sealed class ActionFileParser(
                         break;
 
                     case "default":
-                        fallback = RequireScalar(declarationValueNode, $"inputs.{inputName}.default", problems);
+                        fallback = RequireScalar(declarationValueNode, $"{owner}.{inputName}.default", problems);
                         break;
 
                     case "required":
-                        required = RequireBoolean(declarationValueNode, $"inputs.{inputName}.required", problems)
+                        required = RequireBoolean(declarationValueNode, $"{owner}.{inputName}.required", problems)
                             ?? false;
                         break;
 
                     case "description":
                         inputDescription = RequireScalar(
                             declarationValueNode,
-                            $"inputs.{inputName}.description",
+                            $"{owner}.{inputName}.description",
                             problems);
                         break;
 
                     default:
-                        problems.Add(Unknown(declarationKeyNode, key, $"key of input '{inputName}'", InputKeys));
+                        problems.Add(Unknown(declarationKeyNode, key, $"key of {Named(owner, inputName)}", InputKeys));
                         break;
                 }
             }
@@ -343,6 +363,10 @@ public sealed class ActionFileParser(
             yield return new ActionInput(inputName, fallback, required, inputDescription);
         }
     }
+
+    /// <summary>How a problem names one declared input: the action's as it always has, a step's under its step.</summary>
+    private static string Named(string owner, string inputName)
+        => owner == "inputs" ? $"input '{inputName}'" : $"{owner}.{inputName}";
 
     private static IEnumerable<ActionStep> ReadSteps(YamlNode node, List<string> problems)
     {
@@ -359,18 +383,23 @@ public sealed class ActionFileParser(
             yield break;
         }
 
+        // The steps read so far, which a step's 'needs' may name: steps run in the order declared, so
+        // a step can only need one that has already run by the time it starts.
+        var earlier = new List<ActionStep>();
+
         foreach (var child in sequence.Children)
         {
-            var step = ReadStep(child, problems);
+            var step = ReadStep(child, earlier, problems);
 
             if (step is not null)
             {
+                earlier.Add(step);
                 yield return step;
             }
         }
     }
 
-    private static ActionStep? ReadStep(YamlNode node, List<string> problems)
+    private static ActionStep? ReadStep(YamlNode node, IReadOnlyList<ActionStep> earlier, List<string> problems)
     {
         if (node is not YamlMappingNode mapping)
         {
@@ -397,6 +426,9 @@ public sealed class ActionFileParser(
         var continueOnError = false;
         var outputs = (IReadOnlyList<string>)[];
         var persist = false;
+        var manual = false;
+        YamlNode? needsNode = null;
+        YamlNode? inputsNode = null;
         var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (keyNode, valueNode) in mapping.Children)
@@ -447,6 +479,19 @@ public sealed class ActionFileParser(
 
                 case "persist":
                     persist = ReadFlag(valueNode, "persist", problems);
+                    break;
+
+                case "manual":
+                    manual = ReadFlag(valueNode, "manual", problems);
+                    break;
+
+                // Read once the step's name is known, which a problem in either names.
+                case "needs":
+                    needsNode = valueNode;
+                    break;
+
+                case "inputs":
+                    inputsNode = valueNode;
                     break;
 
                 case "workingDirectoryRoot":
@@ -502,6 +547,35 @@ public sealed class ActionFileParser(
             ? []
             : ReadCommands(runNode ?? node, run, problems);
 
+        var needs = needsNode is null ? [] : ReadNeeds(needsNode, name, manual, earlier, problems);
+        IReadOnlyList<ActionInput> stepInputs = inputsNode is null ? [] : [.. ReadInputs(inputsNode, $"step '{name}' inputs", problems)];
+
+        // A predefined action is performed by the harness to settle what the steps after it read: it
+        // starts no program, so it has nothing of its own to read and no output to witness. A step
+        // that must have it first names it under 'needs'.
+        if (action != PredefinedAction.None && manual)
+        {
+            problems.Add(At(node, $"step '{name}' is '{PredefinedActions.Spell(action)}', which cannot be manual: the "
+                + "harness performs it to settle what later steps read. A manual step that must have it first "
+                + "names it under 'needs'."));
+        }
+
+        if (action != PredefinedAction.None && inputsNode is not null)
+        {
+            problems.Add(At(inputsNode, $"'inputs' applies only to a step's 'run' block; '{PredefinedActions.Spell(action)}' "
+                + "is performed by the harness rather than run as a program, so it reads none of its own."));
+        }
+
+        // Witnessed like any other step, and more to the point than most: a step that runs only when a
+        // run names it is the one whose green line is read as having done that work, so it may not pass
+        // on an exit code alone.
+        if (action == PredefinedAction.None && manual && successPattern is null)
+        {
+            problems.Add(At(node, $"step '{name}' is manual and declares no 'successPattern'. A manual step is "
+                + "witnessed like any other: it runs only when a run names it, and a line of its own output is "
+                + "what says it did the work it was named for."));
+        }
+
         if (action != PredefinedAction.Checkout && reference is not null)
         {
             problems.Add(At(referenceNode ?? node, $"'ref' applies only to '{PredefinedActions.Checkout}'."));
@@ -536,7 +610,80 @@ public sealed class ActionFileParser(
             ContinueOnError = continueOnError,
             Outputs = outputs,
             Persist = persist,
+            Manual = manual,
+            Needs = needs,
+            Inputs = stepInputs,
         };
+    }
+
+    /// <summary>
+    /// The steps <paramref name="node"/> says <paramref name="name"/> needs, each one declared before it.
+    /// </summary>
+    /// <param name="node">The step's <c>needs</c>.</param>
+    /// <param name="name">The step, as a problem names it.</param>
+    /// <param name="manual">Whether the step is manual.</param>
+    /// <param name="earlier">Every step declared before it.</param>
+    /// <param name="problems">Where problems are collected.</param>
+    private static IReadOnlyList<string> ReadNeeds(
+        YamlNode node,
+        string name,
+        bool manual,
+        IReadOnlyList<ActionStep> earlier,
+        List<string> problems)
+    {
+        if (node is not YamlSequenceNode sequence)
+        {
+            problems.Add(At(node, $"step '{name}' 'needs' is a list of the steps declared before it that run first."));
+            return [];
+        }
+
+        if (sequence.Children.Count == 0)
+        {
+            problems.Add(At(node, $"step '{name}' 'needs' names no step. Leave the key out for a step that needs none."));
+            return [];
+        }
+
+        var before = earlier.Select(step => step.Name).ToList();
+        var needs = new List<string>();
+
+        foreach (var item in sequence.Children)
+        {
+            if (RequireScalar(item, $"a step '{name}' needs", problems) is not { Length: > 0 } needed)
+            {
+                continue;
+            }
+
+            if (needs.Contains(needed, StringComparer.Ordinal))
+            {
+                problems.Add(At(item, $"step '{name}' names '{needed}' under 'needs' more than once."));
+                continue;
+            }
+
+            needs.Add(needed);
+
+            // Steps run in the order declared, so a step can need only one that has run by the time it
+            // starts: itself, or one declared after it, would have to run before it had.
+            if (earlier.FirstOrDefault(step => string.Equals(step.Name, needed, StringComparison.Ordinal)) is not { } step)
+            {
+                problems.Add(At(item, string.Equals(needed, name, StringComparison.Ordinal)
+                    ? $"step '{name}' needs itself; a step can need only one declared before it."
+                    : $"step '{name}' needs '{needed}', and no step declared before it has that name: steps run in "
+                        + "the order declared, so a step can need only one declared before it. "
+                        + (before.Count == 0 ? "No step is declared before it." : $"Declared before it: {string.Join(", ", before)}.")));
+                continue;
+            }
+
+            // A run that names no step runs every step that is not manual. One of those needing a manual
+            // step would have that run run it too - the very thing 'manual' says a plain run never does.
+            if (!manual && step.Manual)
+            {
+                problems.Add(At(item, $"step '{name}' runs in every run of the action and needs '{needed}', which is "
+                    + $"manual: a run that names no step would have to run '{needed}' too. Make '{name}' manual, or "
+                    + $"'{needed}' not."));
+            }
+        }
+
+        return needs;
     }
 
     /// <summary>

@@ -1529,15 +1529,38 @@ sibling directory whose name merely starts the same way is outside, not inside.
   nothing there; the two take the same `runOn`. A run in which some leg's system runs no step at
   all is refused before any host is measured, naming every such leg: it would pass having run
   nothing.
+- **A step can run only where a run names it.** `manual: true` keeps a step out of a run that
+  names no step, for work that belongs with an action and is not part of what running it means - a
+  benchmark sharing modules with the build and test beside it, which one action per directory would
+  otherwise leave nowhere to live. `run <runner> --manual-step <step>` runs only the manual steps it
+  names; a runner may name its own steps in `config.json` (`"steps": [...]`), manual or not, and
+  becomes a runner with legs of its own that a gate names like any other; the command line wins over
+  the runner. Whichever chose them, the steps chosen are the file from then on: selection runs
+  before `runOn`'s, and the tool policy, the names a step may use, the inputs a run may be given,
+  the programs a host is asked for and the refusal of a leg that would run nothing all read only
+  what will run. A step lists under `needs` the steps declared before it that run first whenever it
+  does - one declared after it could not have run by then, and a step every run runs needing a
+  manual one would make a plain run run it, so both are refused when the file is read. A manual step
+  declares a `successPattern`, since it is the step whose green line is read as having done the
+  work it was named for; a predefined action cannot be manual. A run says of every step it did not
+  select that it did not run it, as it goes and as `unselectedSteps` on each leg's line in `--json`,
+  and lists the steps a leg ran as `ranSteps` and the manual ones among them as `manualSteps`, so a
+  plain run is never read as having benchmarked. A `--manual-step` naming a step the action lacks or one that is not manual, and a
+  runner naming a step its action lacks, are refused before any host is measured, naming the steps
+  there are.
 - **An input's value comes from `run --input name=value` first**, the runner value directories
-  second and the input's own `default` last. `--input` takes one pair each time it is given, for an
-  input the action declares, and only for the runner the command line names - a runner a run check
+  second and the input's own `default` last. A step may declare inputs of its own beside the
+  action's, resolved the same way and read by that step alone: another step naming one names
+  nothing, and a name the action already declares is refused, since one value could not mean both.
+  `--input` takes one pair each time it is given, for an input the action declares or a step the
+  run runs declares, and only for the runner the command line names - a runner a run check
   starts reads its own values. Any other name, a runner of phases, an empty value and a name given
   twice are refused before a host is measured: an unset shell variable is not a request to run
   with nothing, and a value for a name the file never reads changes nothing while the command line
-  says it did. A host running one of the run's legs is handed the same pairs, so no leg there runs
-  a default where the command line gave a value. The value is a plain one, on a command line and
-  so in the process table; a secret stays in `.secrets`.
+  says it did. A host running one of the run's legs is handed the same pairs, and the same
+  `--manual-step`s, so no leg there runs a default where the command line gave a value, or the
+  runner's own steps where it named others. The value is a plain one, on a command line and so in
+  the process table; a secret stays in `.secrets`.
 - **Each line is a program and its arguments, never a shell string.** No shell parses it, so no
   shell's word splitting, globbing or process emulation sits between the harness and the program.
 - The splitter honours double quotes only, understands no escape, and strips every `"` from the

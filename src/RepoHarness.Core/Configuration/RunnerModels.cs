@@ -28,6 +28,17 @@ public sealed class RunnerConfig
     public string? Action { get; init; }
 
     /// <summary>
+    /// The steps of <see cref="Action"/> this runner runs, manual or not, each with the steps it needs;
+    /// or <see langword="null"/> for every step that is not manual.
+    /// </summary>
+    /// <remarks>
+    /// So that work belonging to one action - a benchmark beside the build and test it shares its
+    /// modules with - can be a runner of its own, with legs of its own, that a gate or CI names like any
+    /// other. Checked against the action when it is read, before any leg's run has begun.
+    /// </remarks>
+    public List<string>? Steps { get; init; }
+
+    /// <summary>
     /// Whether this runner needs the repository built before it runs. A runner that calls a program
     /// the build produces otherwise runs against whatever was left there.
     /// </summary>

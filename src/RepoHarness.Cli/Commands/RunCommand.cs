@@ -53,6 +53,12 @@ internal static class RunCommand
         Description = "Give one of the action's inputs a value for this run: --input name=value, once per input. Over the runner's .env values and the input's default; never a secret.",
     };
 
+    private static readonly Option<string[]> ManualStepOption = new(StepSelection.Option)
+    {
+        Description = "Run only these manual steps of the runner's action, each after the steps it needs: --manual-step a,b or --manual-step a --manual-step b. Without it, every step that is not manual, or the steps the runner names.",
+        AllowMultipleArgumentsPerToken = true,
+    };
+
     internal static Command Create()
     {
         var command = new Command(
@@ -66,6 +72,7 @@ internal static class RunCommand
         command.Options.Add(ForceLockOption);
         command.Options.Add(UseStagedOption);
         command.Options.Add(InputOption);
+        command.Options.Add(ManualStepOption);
         command.Options.Add(DispatchOptions.Here);
         GlobalOptions.AddTo(command);
 
@@ -79,8 +86,11 @@ internal static class RunCommand
                 : null;
 
             // Read before anything else is: a pair that gives nothing is a mistake on this line
-            // alone, and costs no configuration read to name.
+            // alone, and costs no configuration read to name. So is a --manual-step naming nothing.
             var inputs = CommandLineInputs.Parse(arguments.GetValue(InputOption) ?? []);
+            var manualSteps = StepSelection.Names(arguments.GetResult(ManualStepOption) is { Implicit: false }
+                ? arguments.GetValue(ManualStepOption) ?? []
+                : null);
 
             var runners = context.Get<IRunnerRunService>();
             var builds = context.Get<IBuildService>();
@@ -90,7 +100,7 @@ internal static class RunCommand
                 .ConfigureAwait(false);
 
             var runner = Resolve(harness.Config, runnerName);
-            ActionFile? file = null;
+            SelectedSteps? file = null;
 
             // Before a leg is placed or a host is measured, so that a mistyped action costs nothing
             // and says so in the same terms 'legs' would have.
@@ -107,14 +117,26 @@ internal static class RunCommand
                 // begun and its run directory exists: on an eight-leg gate that is eight started
                 // runs and eight directories for one typo. The file is the same for every leg, so
                 // the question is asked once, where nothing has been created yet.
-                file = await context.Get<IActionFileParser>()
+                var read = await context.Get<IActionFileParser>()
                     .LoadAsync(harness.Layout.RunnerActionsDirectory, action, cancellationToken)
                     .ConfigureAwait(false);
+
+                // Which of its steps this run runs, decided here for the same reason: a manual step
+                // mistyped, or a runner naming a step the file lacks, is refused once, before any
+                // leg's run has begun. Everything below reads only the steps chosen.
+                file = StepSelection.For(runner, manualSteps).Apply(runnerName, read);
+            }
+            else if (manualSteps.Count > 0)
+            {
+                throw new HarnessException(
+                    HarnessExit.UsageError,
+                    $"Runner '{runnerName}' runs phases of its own, and only an action's steps can be manual, "
+                    + $"so {StepSelection.Option} names nothing it could run.");
             }
 
-            // And every value given goes to an input the file declares, asked here for the same
-            // reason: once, before any leg's run has begun.
-            CommandLineInputs.RequireDeclared(runnerName, file, inputs);
+            // And every value given goes to an input a step this run runs reads, asked here for the
+            // same reason: once, before any leg's run has begun.
+            CommandLineInputs.RequireRead(runnerName, file, inputs);
 
             // The runner's own legs when --legs was left out. Resolved here rather than left to the
             // default of every declared leg, because running a benchmark on hosts nobody meant to
@@ -125,7 +147,7 @@ internal static class RunCommand
             // A leg whose operating system no step runs on would run nothing and pass. Refused here,
             // like a mistyped action, before a host is measured and naming every such leg at once,
             // rather than once per leg after each one's run has begun.
-            file?.RequireAStepOn(
+            file?.File.RequireAStepOn(
                 runnerName,
                 LegSelection.Resolve(harness.Config, selected).Legs.Select(leg => (leg.Name, leg.Leg.Os)));
 
@@ -140,14 +162,14 @@ internal static class RunCommand
                         arguments.GetValue(UseStagedOption),
                         arguments.GetValue(TimeOption),
                         arguments.GetValue(DispatchOptions.Here),
-                        RunnerRunService.RemoteArguments(runnerName, arguments.GetValue(TimeOption), inputs))
+                        RunnerRunService.RemoteArguments(runnerName, arguments.GetValue(TimeOption), inputs, manualSteps))
                     {
                         // Built only where the runner requires it, and never tested: a host needs
                         // cmake for a runner that measures a build product, and not for one that
                         // only runs a script.
-                        Workload = LegWorkload.ForRunner(runner, file),
+                        Workload = LegWorkload.ForRunner(runner, file?.File),
                     },
-                    (work, token) => RunLegAsync(runners, builds, runnerName, inputs, work, token),
+                    (work, token) => RunLegAsync(runners, builds, runnerName, inputs, manualSteps, work, token),
                     cancellationToken)
                 .ConfigureAwait(false);
         }, JsonOption));
@@ -172,6 +194,7 @@ internal static class RunCommand
         IBuildService builds,
         string runnerName,
         IReadOnlyDictionary<string, string> inputs,
+        IReadOnlyList<string> manualSteps,
         LegWork work,
         CancellationToken cancellationToken)
     {
@@ -221,8 +244,10 @@ internal static class RunCommand
                     Time = work.Time,
 
                     // Only the runner the command line named: the values were checked against its
-                    // action's inputs, and a runner a check starts reads its own.
+                    // action's inputs, and a runner a check starts reads its own. So were the manual
+                    // steps, and a runner a check starts runs its own steps.
                     Inputs = inputs,
+                    ManualSteps = manualSteps,
 
                     // One level deep by construction: the runner a check names carries no checks of
                     // its own, and this delegate reaches the service only for that one.
