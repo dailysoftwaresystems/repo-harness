@@ -121,7 +121,7 @@ public sealed class HarnessLayoutTests
     }
 
     /// <summary>
-    /// A run's records belong to the tree that ran it, so a lane reads what it judged without leaving
+    /// A run's records belong to the tree that ran it, so a worktree reads what it judged without leaving
     /// its worktree - while the lock two runs contend over stays in the main checkout.
     /// </summary>
     [Fact]

@@ -825,6 +825,10 @@ public sealed class RunnerRunServiceTests
         Assert.DoesNotContain(Secret, result.Outcome.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(Secret, result.Verdict.Detail, StringComparison.Ordinal);
 
+        // Nor the leg's line, whose last lines of the step that did not pass are masked as its log is.
+        Assert.Contains(result.Entry.LogTail, line => line.Contains(ActionValues.Mask, StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Entry.LogTail, line => line.Contains(Secret, StringComparison.Ordinal));
+
         // The child did receive the real value; a masked credential would fail later and somewhere
         // else, where the failure says nothing about what was wrong.
         Assert.DoesNotContain("<unset>", log, StringComparison.Ordinal);
@@ -999,6 +1003,63 @@ public sealed class RunnerRunServiceTests
         // it once per leg on a tree that legs share.
         Assert.True(result.RequireBuild);
         Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+    }
+
+    /// <summary>
+    /// A leg whose step did not pass carries the last lines that step printed - what a reader whose log
+    /// is on another host has - and a leg whose steps passed carries none.
+    /// </summary>
+    [Fact]
+    public async Task AStepThatDidNotPass_LeavesItsLastLinesOnTheLegsLine()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        var runner = new RunnerConfig
+        {
+            Phases =
+            [
+                Phase("prepare", "echo-args", ["prepared"], successPattern: "prepared"),
+                Phase("measure", "echo-args", ["fixture drifted", "3 of 4 checks held"], successPattern: "all checks held"),
+            ],
+        };
+
+        using var another = new TempDirectory();
+
+        var failed = await Service(factory).RunAsync(Config(), Request(temp, runner), TestContext.Current.CancellationToken);
+        var passed = await Service(factory).RunAsync(
+            Config(),
+            Request(another, new RunnerConfig { Phases = [Phase("measure", "echo-args", ["measured"], successPattern: "measured")] }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Unwitnessed, failed.Verdict.Verdict);
+        Assert.Equal(["[fixture drifted]", "[3 of 4 checks held]"], failed.Entry.LogTail);
+        Assert.Empty(passed.Entry.LogTail);
+    }
+
+    /// <summary>
+    /// Of two steps that did not pass - one the runner went on past, then one it stopped at - the leg
+    /// carries the last's lines: where it ended, not where it first stumbled.
+    /// </summary>
+    [Fact]
+    public async Task OfTwoStepsThatDidNotPass_TheLegCarriesTheLastsLines()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        var runner = new RunnerConfig
+        {
+            Phases =
+            [
+                Phase("fixture", "echo-args", ["fixture drifted"], successPattern: "fixture held", continueOnError: true),
+                Phase("measure", "echo-args", ["3 of 4 checks held"], successPattern: "all checks held"),
+            ],
+        };
+
+        var result = await Service(factory).RunAsync(Config(), Request(temp, runner), TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Unwitnessed, result.Verdict.Verdict);
+        Assert.Equal(["[3 of 4 checks held]"], result.Entry.LogTail);
     }
 
     [Fact]
@@ -1409,10 +1470,12 @@ public sealed class RunnerRunServiceTests
         string name,
         string mode,
         IReadOnlyList<string> arguments,
-        string? successPattern = null)
+        string? successPattern = null,
+        bool continueOnError = false)
         => new()
         {
             Name = name,
+            ContinueOnError = continueOnError,
             Command = [TestHost.DotnetExecutable, "exec", TestHost.AssemblyPath, .. arguments],
             Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {

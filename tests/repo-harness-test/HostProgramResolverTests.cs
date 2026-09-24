@@ -84,7 +84,8 @@ public sealed class HostProgramResolverTests
     [Fact]
     public async Task AHostThatDidNotAnswer_IsReportedAsUnreadable_SoNoRefusalClaimsTheToolIsMissing()
     {
-        // ssh's own 255 means the connection never opened, which says nothing about what is installed.
+        // ssh's own 255 means ssh itself failed - here the connection was closed - so the host never
+        // answered, which says nothing about what is installed.
         var commands = new ScriptedHostCommands((_, _) => HostResults.Failed(255, "Connection closed by remote host"));
 
         var connection = await Resolve(commands, SshHost, ["dotnet"]);
@@ -106,7 +107,7 @@ public sealed class HostProgramResolverTests
 
         var connection = await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["dotnet"]);
 
         Assert.Equal(ProgramFound.OnPath, connection.Located("dotnet")?.Found);
@@ -285,7 +286,7 @@ public sealed class HostProgramResolverTests
 
         var located = (await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["dotnet"])).Located("dotnet");
 
         Assert.Equal(new ProgramLocation("dotnet", ProgramFound.OffPath, home + "/.dotnet/dotnet"), located);
@@ -363,7 +364,7 @@ public sealed class HostProgramResolverTests
 
         var located = (await Resolve(
             commands,
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             ["cmake"],
             [])).Located("cmake");
 

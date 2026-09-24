@@ -71,6 +71,8 @@ public sealed class AnchorRegistryServiceTests
     [InlineData(One, "P9", "open", "t")]
     [InlineData(One, "P1", "done", "t")]
     [InlineData(One, "P1", "open", "  ")]
+    [InlineData(One, "P1", "open", "\u001c")]
+    [InlineData(One, "P1", "open", "\u001e\n")]
     [InlineData(One, "P1", "open", @"already \| escaped")]
     public async Task WriteAsync_RefusesAnInvalidValue_AndChangesNothing(string id, string priority, string status, string trigger)
     {
@@ -83,6 +85,30 @@ public sealed class AnchorRegistryServiceTests
             new AnchorWriteRequest(id, priority, trigger) { Status = status },
             dryRun: false,
             TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, exception.ExitCode);
+        Assert.Equal(before, File.ReadAllText(PendingPath(temp)));
+    }
+
+    /// <summary>
+    /// A Trigger is judged as it will be written: one of nothing but line breaks - a file, group or record separator
+    /// among them, which .NET does not count as whitespace - would be written as an empty cell, so set-anchor
+    /// refuses it as write-anchor does.
+    /// </summary>
+    [Theory]
+    [InlineData("\u001c")]
+    [InlineData("\u001e\n")]
+    [InlineData(" \u2028 ")]
+    public async Task SetAsync_RefusesATriggerThatWouldBeWrittenEmpty(string trigger)
+    {
+        using var temp = new TempDirectory();
+        var harness = await PrepareAsync(temp);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await harness.AnchorRegistryService.WriteAsync(temp.Path, Anchor(One), dryRun: false, cancellationToken);
+        var before = File.ReadAllText(PendingPath(temp));
+
+        var exception = await Assert.ThrowsAsync<HarnessException>(() => harness.AnchorRegistryService.SetAsync(
+            temp.Path, new AnchorSetRequest(One) { Trigger = trigger }, dryRun: false, cancellationToken));
 
         Assert.Equal(HarnessExit.UsageError, exception.ExitCode);
         Assert.Equal(before, File.ReadAllText(PendingPath(temp)));
@@ -567,10 +593,92 @@ public sealed class AnchorRegistryServiceTests
         Assert.Equal(("D-OLD-NAME", "✅ CLOSED"), (row.Id, row.Status));
     }
 
-    private static async Task<HarnessFactory> PrepareAsync(TempDirectory temp)
+    /// <summary>
+    /// Where a repository holds a Trigger to its row's verdict, a row whose two cells disagree is refused
+    /// as written - by write-anchor either way, and by set-anchor closing a row whose Trigger does not say
+    /// so - and nothing is written; one that agrees is written as ever.
+    /// </summary>
+    [Fact]
+    public async Task WhereATriggerCarriesTheVerdict_ARowStatingTwo_IsRefused()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, triggerCarriesVerdict: true);
+        var service = harness.AnchorRegistryService;
+
+        var openButClosed = await Assert.ThrowsAsync<HarnessException>(() => service.WriteAsync(
+            temp.Path, new AnchorWriteRequest(One, "P1", "✅ **CLOSED** - fixed"), dryRun: false, cancellationToken));
+        var closedButOpen = await Assert.ThrowsAsync<HarnessException>(() => service.WriteAsync(
+            temp.Path, new AnchorWriteRequest(One, "P1", "tokens expire mid-request") { Status = "closed" }, dryRun: false, cancellationToken));
+
+        Assert.Equal(HarnessExit.UsageError, openButClosed.ExitCode);
+        Assert.Contains("the Trigger opens with the closed mark", openButClosed.Message, StringComparison.Ordinal);
+        Assert.Contains("the Status reads closed", closedButOpen.Message, StringComparison.Ordinal);
+        Assert.Empty(Rows(harness, PendingPath(temp)));
+        Assert.Empty(Rows(harness, DonePath(temp)));
+
+        await service.WriteAsync(temp.Path, new AnchorWriteRequest(One, "P1", "tokens expire mid-request"), dryRun: false, cancellationToken);
+
+        var closing = await Assert.ThrowsAsync<HarnessException>(() => service.SetAsync(
+            temp.Path, new AnchorSetRequest(One) { Status = "closed" }, dryRun: false, cancellationToken));
+
+        Assert.Contains("the Status reads closed", closing.Message, StringComparison.Ordinal);
+        Assert.Equal("🟠 OPEN", Assert.Single(Rows(harness, PendingPath(temp))).Status);
+
+        await service.SetAsync(
+            temp.Path, new AnchorSetRequest(One) { Status = "closed", Trigger = "✅ **CLOSED 2026-09-23** - refreshed before expiry" }, dryRun: false, cancellationToken);
+
+        Assert.Equal("✅ CLOSED", Assert.Single(Rows(harness, DonePath(temp))).Status);
+        Assert.Empty(await service.LintAsync(temp.Path, cancellationToken));
+    }
+
+    /// <summary>
+    /// By default the Status cell is the only verdict: a Trigger opening with the closed mark is prose, and
+    /// written as given. Held to the verdict, the same row written by hand is a finding of the lint.
+    /// </summary>
+    [Fact]
+    public async Task ByDefault_OnlyTheStatusIsAVerdict_AndHeldToIt_TheLintReportsATriggerThatDisagrees()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var loose = await PrepareAsync(temp);
+
+        await loose.AnchorRegistryService.WriteAsync(
+            temp.Path, new AnchorWriteRequest(One, "P1", "✅ **CLOSED** - fixed"), dryRun: false, cancellationToken);
+
+        Assert.Empty(await loose.AnchorRegistryService.LintAsync(temp.Path, cancellationToken));
+
+        using var held = new TempDirectory();
+        var strict = await PrepareAsync(held, triggerCarriesVerdict: true);
+        File.AppendAllText(PendingPath(held), $"| `{One}` | P1 | 🟠 OPEN | ✅ **CLOSED** - fixed | work | refs |\n");
+
+        var finding = Assert.Single(await strict.AnchorRegistryService.LintAsync(held.Path, cancellationToken));
+        Assert.Contains("the Trigger opens with the closed mark", finding.Message, StringComparison.Ordinal);
+        Assert.Contains("anchors.triggerCarriesVerdict", finding.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A cell's runs and tabs are written as given, and read back as given.</summary>
+    [Fact]
+    public async Task ACellsRuns_AreWrittenAndReadBackAsGiven()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+
+        await harness.AnchorRegistryService.WriteAsync(
+            temp.Path, new AnchorWriteRequest(One, "P1", "inputs  : held still\t4  +  38"), dryRun: false, cancellationToken);
+
+        Assert.Contains("| inputs  : held still\t4  +  38 |", File.ReadAllText(PendingPath(temp)), StringComparison.Ordinal);
+        Assert.Equal("inputs  : held still\t4  +  38", Assert.Single(Rows(harness, PendingPath(temp))).Trigger);
+    }
+
+    private static async Task<HarnessFactory> PrepareAsync(TempDirectory temp, bool triggerCarriesVerdict = false)
     {
         var harness = new HarnessFactory();
-        await harness.InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken);
+        await harness.InitializeHarnessAsync(
+            temp.Path,
+            TestContext.Current.CancellationToken,
+            triggerCarriesVerdict ? new HarnessConfig { Anchors = new AnchorSettings { TriggerCarriesVerdict = true } } : null);
         return harness;
     }
 

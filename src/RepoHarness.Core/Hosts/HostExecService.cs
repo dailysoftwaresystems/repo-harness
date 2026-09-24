@@ -5,12 +5,13 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Sync;
 
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// Runs one DssHarness command on a WSL distribution or an ssh host, in that host's copy of the
-/// repository, with its output streamed here as it is written.
+/// Runs one DssHarness command on a WSL distribution or an ssh host, in that host's copy of the tree
+/// it is typed in, with its output streamed here as it is written.
 /// </summary>
 public sealed class HostExecService(
     IHarnessContextLoader contextLoader,
@@ -114,7 +115,7 @@ public sealed class HostExecService(
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Run,
-                Directory = target.RepositoryPath,
+                Directory = HostCopies.For(target.RepositoryPath, context.Layout, context.Layout.RepositoryRoot, _platform.PathComparison),
                 Arguments = [.. arguments],
                 Nonce = nonce,
             },
@@ -156,12 +157,9 @@ public sealed class HostExecService(
         // wsl.exe with codes of its own, when the connection fails, and neither is the command's result.
         if (finished is not { } exitCode)
         {
-            var said = HostProbes.Excerpt(result.StandardError);
-
             return CommandOutcome.Failed(
                 HarnessExit.HostUnavailable,
-                $"{host}: '{shown}' never reported how it finished, so it may not have run, or run only in part; "
-                + $"the connection ended with exit {result.ExitCode}{(said.Length == 0 ? string.Empty : ": " + said)}");
+                $"{host}: {HostProbes.NeverFinished($"'{shown}'", result, session.Connection)}");
         }
 
         return exitCode == HarnessExit.Success
@@ -171,7 +169,8 @@ public sealed class HostExecService(
 
     /// <summary>
     /// The host <paramref name="name"/> selects among <paramref name="hosts"/>, named as the configuration
-    /// declares it: ssh applies a Host entry only to the name spelt as the entry spells it.
+    /// declares it: its item is read from the directory of that name, which a case-sensitive file system
+    /// finds only as spelt, and every record names the host the same way.
     /// </summary>
     private static (HostId Host, string RepositoryPath) Resolve<THost>(
         Dictionary<string, THost> hosts,

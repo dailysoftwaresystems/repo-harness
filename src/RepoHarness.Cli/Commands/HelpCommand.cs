@@ -11,6 +11,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
+using RepoHarness.Core.Sync;
 using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Cli.Commands;
@@ -78,9 +79,10 @@ internal static class HelpCommand
         "tools" => RenderTools(),
         "runners" or "runner" or "actions" => RenderRunners(),
         "verdicts" or "verdict" => RenderVerdicts(),
+        "ci" or "check-ci-legs" => RenderCi(),
         null or "" => RenderOverview(),
         _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
-            + $"secrets, tools, runners, verdicts.{Environment.NewLine}",
+            + $"secrets, tools, runners, verdicts, ci.{Environment.NewLine}",
     };
 
     private static string RenderTools()
@@ -258,7 +260,7 @@ internal static class HelpCommand
         builder.AppendLine("Predefined runners");
         builder.AppendLine();
         builder.AppendLine("A procedure specific to this repository - a corpus run, a benchmark, a round trip");
-        builder.AppendLine("- is declared under predefinedRunners and started with 'DssHarness run <name>'.");
+        builder.AppendLine($"- is declared under predefinedRunners and started with '{ToolPackage.Command} run <name>'.");
         builder.AppendLine("It runs across the legs it declares, with the same isolation, locking, stall");
         builder.AppendLine("bounds, witnesses and reporting build and test get.");
         builder.AppendLine();
@@ -344,6 +346,17 @@ internal static class HelpCommand
         builder.AppendLine("run in which some leg would run no step at all is refused before anything starts,");
         builder.AppendLine("naming the leg: it would pass having run nothing.");
         builder.AppendLine();
+        builder.AppendLine("  successPattern: <regular expression>   what the step's last line must print");
+        builder.AppendLine();
+        builder.AppendLine("A step passes when each of its lines exits 0; one that declares successPattern must");
+        builder.AppendLine("also have its last line print something the pattern matches, since a program that");
+        builder.AppendLine("exits 0 has not shown it did anything. The pattern is a .NET regular expression,");
+        builder.AppendLine("matched with ^ and $ at each line, against that line's standard output and standard");
+        builder.AppendLine("error read together, after secrets are redacted. One that does not compile, or that");
+        builder.AppendLine("is empty and so matches anything, is refused when the file is read. The earlier lines");
+        builder.AppendLine("of a run block answer with their exit codes alone: the witness belongs to the step,");
+        builder.AppendLine("and its last line finishing is its work being done.");
+        builder.AppendLine();
         builder.AppendLine("Names a run line may use");
         builder.AppendLine();
         builder.AppendLine("A run line is written for this tool, so a name in braces it cannot fill in is");
@@ -412,7 +425,7 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("Carrying an artifact to another machine");
         builder.AppendLine();
-        builder.AppendLine("  DssHarness sync --artifact <run id>");
+        builder.AppendLine($"  {ToolPackage.Command} sync --artifact <run id>");
         builder.AppendLine();
         builder.AppendLine("carries exactly that run's kept artifacts to each host, at the same relative path");
         builder.AppendLine("they have here - the run and the producing leg are already in it, so a consuming");
@@ -427,7 +440,7 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("It writes into a copy that is already there and makes none of its own: a host with");
         builder.AppendLine("no copy, or one the harness did not create, is refused before a single file leaves");
-        builder.AppendLine("this machine. Run 'DssHarness sync' first - with '--adopt \"<host>\"' where a");
+        builder.AppendLine($"this machine. Run '{ToolPackage.Command} sync' first - with '--adopt \"<host>\"' where a");
         builder.AppendLine("directory is already at that repositoryPath. Otherwise a mistyped repositoryPath");
         builder.AppendLine("would be filled in rather than noticed.");
         builder.AppendLine();
@@ -523,32 +536,33 @@ internal static class HelpCommand
         builder.AppendLine("nothing about a specific repository or toolchain is built into the tool.");
         builder.AppendLine();
         builder.AppendLine("Getting started");
-        builder.AppendLine("  DssHarness verify-git              Check git is present and this is a repository");
-        builder.AppendLine("  DssHarness init                    Create .harness-config and seed config.json");
-        builder.AppendLine("  DssHarness legs                    Show where each leg can run, or why it cannot");
-        builder.AppendLine("  DssHarness install-missing-tools   Install what each leg's host is missing");
-        builder.AppendLine("  DssHarness sync                    Put each host's copy in step with this tree");
-        builder.AppendLine("  DssHarness build                   Build every selected leg");
-        builder.AppendLine("  DssHarness test                    Build and test every selected leg");
-        builder.AppendLine("  DssHarness run <runner>            Run a predefined runner across its legs");
-        builder.AppendLine("  DssHarness list-worktree           Show existing worktrees");
-        builder.AppendLine("  DssHarness read-anchors            List the deferred work recorded as anchors");
+        builder.AppendLine($"  {ToolPackage.Command} verify-git              Check git is present and this is a repository");
+        builder.AppendLine($"  {ToolPackage.Command} init                    Create .harness-config and seed config.json");
+        builder.AppendLine($"  {ToolPackage.Command} legs                    Show where each leg can run, or why it cannot");
+        builder.AppendLine($"  {ToolPackage.Command} install-missing-tools   Install what each leg's host is missing");
+        builder.AppendLine($"  {ToolPackage.Command} sync                    Put each host's copy in step with this tree");
+        builder.AppendLine($"  {ToolPackage.Command} build                   Build every selected leg");
+        builder.AppendLine($"  {ToolPackage.Command} test                    Build and test every selected leg");
+        builder.AppendLine($"  {ToolPackage.Command} run <runner>            Run a predefined runner across its legs");
+        builder.AppendLine($"  {ToolPackage.Command} list-worktree           Show existing worktrees");
+        builder.AppendLine($"  {ToolPackage.Command} read-anchors            List the deferred work recorded as anchors");
         builder.AppendLine();
         builder.AppendLine("Every command accepts");
         builder.AppendLine("  -C, --directory <dir>              Operate on this directory (default: current)");
         builder.AppendLine("  -v, --verbose                      Show per-phase detail and child process output");
         builder.AppendLine();
         builder.AppendLine("Topics");
-        builder.AppendLine("  DssHarness help exit-codes         What each exit code means");
-        builder.AppendLine("  DssHarness help config             What config.json declares");
-        builder.AppendLine("  DssHarness help legs               Hosts, emulators, and how a leg finds where it runs");
-        builder.AppendLine("  DssHarness help worktrees          Naming rules, the path budget, and when deleting refuses");
-        builder.AppendLine("  DssHarness help anchors            Anchor registries and the commands that change them");
-        builder.AppendLine("  DssHarness help layout             What init creates, and what git tracks");
-        builder.AppendLine("  DssHarness help secrets            Where each host's connection data lives");
-        builder.AppendLine("  DssHarness help tools              What install-missing-tools installs, and where");
-        builder.AppendLine("  DssHarness help runners            Predefined runners, action files and excused failures");
-        builder.AppendLine("  DssHarness help verdicts           What each leg verdict means, and what to do about it");
+        builder.AppendLine($"  {ToolPackage.Command} help exit-codes         What each exit code means");
+        builder.AppendLine($"  {ToolPackage.Command} help config             What config.json declares");
+        builder.AppendLine($"  {ToolPackage.Command} help legs               Hosts, emulators, and how a leg finds where it runs");
+        builder.AppendLine($"  {ToolPackage.Command} help worktrees          Naming rules, the path budget, and when deleting refuses");
+        builder.AppendLine($"  {ToolPackage.Command} help anchors            Anchor registries and the commands that change them");
+        builder.AppendLine($"  {ToolPackage.Command} help layout             What init creates, and what git tracks");
+        builder.AppendLine($"  {ToolPackage.Command} help secrets            Where each host's connection data lives");
+        builder.AppendLine($"  {ToolPackage.Command} help tools              What install-missing-tools installs, and where");
+        builder.AppendLine($"  {ToolPackage.Command} help runners            Predefined runners, action files and excused failures");
+        builder.AppendLine($"  {ToolPackage.Command} help verdicts           What each leg verdict means, and what to do about it");
+        builder.AppendLine($"  {ToolPackage.Command} help ci                 How check-ci-legs finds a workflow's legs and budgets");
         builder.AppendLine();
         builder.AppendLine("Use 'DssHarness <command> --help' for a command's own options.");
 
@@ -608,6 +622,57 @@ internal static class HelpCommand
         return builder.ToString();
     }
 
+    private static string RenderCi()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("CI legs");
+        builder.AppendLine();
+        builder.AppendLine("check-ci-legs reads each leg's CI verdict from the forge's job metadata - through gh,");
+        builder.AppendLine("for GitHub Actions - and tells a real failure from a leg that ran out of its time");
+        builder.AppendLine("budget. It knows no workflow of its own: which jobs are legs, what a leg is called,");
+        builder.AppendLine("and which steps build and test it are what config.json's ci section declares, and");
+        builder.AppendLine($"until they are, it refuses ({HarnessExit.Refused}) and names what to set.");
+        builder.AppendLine();
+        builder.AppendLine("""  "ci": {""");
+        builder.AppendLine("""    "workflows": [".github/workflows/ci.yml"],""");
+        builder.AppendLine("""    "legJobPattern": "^test \\((?<leg>[^,)]+)(?:, (?<budget>[0-9]+)\\))?",""");
+        builder.AppendLine("""    "buildStep": "Build", "testStep": "Test",""");
+        builder.AppendLine("""    "workflowBudgetPattern": "leg: {leg}, minutes: (?<budget>[0-9]+)",""");
+        builder.AppendLine("""    "legBudgetMinutes": 45""");
+        builder.AppendLine("  }");
+        builder.AppendLine();
+        builder.AppendLine("  workflows              the workflow files whose runs are read; left empty, every");
+        builder.AppendLine("                         .yml and .yaml file directly in .github/workflows");
+        builder.AppendLine("  legJobPattern          a .NET regular expression matched against each job's name: a");
+        builder.AppendLine("                         job it matches is a leg, named by its 'leg' group, and a");
+        builder.AppendLine("                         'budget' group, where it has one, is the leg's budget in");
+        builder.AppendLine("                         minutes. GitHub names a matrix job '<job> (<values>)', the");
+        builder.AppendLine("                         values in the order the matrix declares them, and cuts a");
+        builder.AppendLine("                         long name short: keep what follows the leg's name optional,");
+        builder.AppendLine("                         as above, or a leg whose name was cut is not read at all");
+        builder.AppendLine("  buildStep, testStep    the steps a leg builds and tests in, by their exact names");
+        builder.AppendLine("  workflowBudgetPattern  optional: a .NET regular expression matched against each");
+        builder.AppendLine("                         workflow's text, for a leg whose job name gave no budget -");
+        builder.AppendLine("                         one the forge cut short - with {leg} standing for the leg's");
+        builder.AppendLine("                         name and a 'budget' group for the minutes");
+        builder.AppendLine("  legBudgetMinutes       optional: the budget of a leg nothing else gives one");
+        builder.AppendLine();
+        builder.AppendLine("A leg's budget comes from its job's name, then its workflow, then legBudgetMinutes. A");
+        builder.AppendLine("test step that failed at or past its budget is a possible overrun, whose budget is");
+        builder.AppendLine("to be re-derived; one that failed before reaching it is a real failure, to be fixed;");
+        builder.AppendLine("and one with no budget to measure it against is called neither, and counted apart.");
+        builder.AppendLine($"A green leg past {CiLegsService.WarningFraction * 100:0}% of its budget is warned about. A pattern that does not");
+        builder.AppendLine("compile, or lacks its group, is refused when the file is read; one that runs out of");
+        builder.AppendLine("time, or a budget group that captures anything but a whole number of minutes, is");
+        builder.AppendLine($"refused ({HarnessExit.ConfigInvalid}) when it is matched. Neither is ever read as no match.");
+        builder.AppendLine();
+        builder.AppendLine($"It exits {CiExit.LegRed} when a leg is red, and {CiExit.MatrixDidNotRun} when no job is a leg - the matrix did not run,");
+        builder.AppendLine("or legJobPattern matches none of its jobs - which is never read as every leg passing.");
+
+        return builder.ToString();
+    }
+
     private static string RenderLegs()
     {
         var builder = new StringBuilder();
@@ -643,9 +708,14 @@ internal static class HelpCommand
         builder.AppendLine("  \"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }   CMake's own ids, by language");
         builder.AppendLine();
         builder.AppendLine("A build CMake configured with another compiler fails before anything is built with");
-        builder.AppendLine("it; one CMake named no compiler for is unwitnessed, saying why. test --no-build");
-        builder.AppendLine("holds the directory it tests to it the same way. A configure that fails names no");
-        builder.AppendLine("compiler, never the one an earlier configure resolved.");
+        builder.AppendLine("it; one CMake identified no compiler for is unwitnessed, saying why. A language only a");
+        builder.AppendLine("subproject enables - C, where a C++ project fetches googletest - comes with no id in");
+        builder.AppendLine("CMake's answer, and is identified from CMake's own record of it, the one enabling it");
+        builder.AppendLine("loaded: CMakeFiles/<version>/CMake<language>Compiler.cmake - where the record names");
+        builder.AppendLine("the compiler the answer names and is no newer than the answer, since a configure that");
+        builder.AppendLine("identified the compiler again and then failed leaves a record of one nothing built with.");
+        builder.AppendLine("test --no-build holds the directory it tests to it the same way. A configure that");
+        builder.AppendLine("fails names no compiler, never the one an earlier configure resolved.");
         builder.AppendLine();
         builder.AppendLine("A toolchain may name the developer environment its legs start in, declared once");
         builder.AppendLine("under developerEnvironments:");
@@ -688,10 +758,10 @@ internal static class HelpCommand
         builder.AppendLine("program its command starts. A leg that sets \"wsl\" or \"ssh\" runs on that host and");
         builder.AppendLine("nowhere else.");
         builder.AppendLine();
-        builder.AppendLine("  DssHarness legs                          every declared leg");
-        builder.AppendLine("  DssHarness legs --legs a,b gate          legs a and b, and the legs of set gate");
-        builder.AppendLine("  DssHarness host-exec --ssh vps -- verify-git");
-        builder.AppendLine("  DssHarness host-exec --wsl -- list-worktree");
+        builder.AppendLine($"  {ToolPackage.Command} legs                          every declared leg");
+        builder.AppendLine($"  {ToolPackage.Command} legs --legs a,b gate          legs a and b, and the legs of set gate");
+        builder.AppendLine($"  {ToolPackage.Command} host-exec --ssh vps -- verify-git");
+        builder.AppendLine($"  {ToolPackage.Command} host-exec --wsl -- list-worktree");
         builder.AppendLine();
         builder.AppendLine("Every cmake build also has its dependency records read, with 'ninja -t deps'.");
         builder.AppendLine("An object that recorded no header dependencies is never rebuilt when a header it");
@@ -727,7 +797,21 @@ internal static class HelpCommand
         builder.AppendLine("mode, so without ever waiting at a prompt, and DssHarness runs there. An .env other");
         builder.AppendLine("users can change is refused, since whoever can change it can send the harness");
         builder.AppendLine("elsewhere, and a key they can read, ssh ignores; both are checked before connecting.");
-        builder.AppendLine("Run 'DssHarness help secrets' for the layout.");
+        builder.AppendLine($"Run '{ToolPackage.Command} help secrets' for the layout.");
+        builder.AppendLine();
+        builder.AppendLine("The ssh that runs is the first on the PATH. It is asked first what it would do, with");
+        builder.AppendLine("ssh -G, and the name it would look up - the address declared, or a HostName its own");
+        builder.AppendLine("configuration gives it - is looked up here, retrying; a name that does not resolve is");
+        builder.AppendLine("refused before ssh starts. Every call the run makes is then given the address it");
+        builder.AppendLine("resolved to as ssh's HostName, with the host's key still checked under the name, not");
+        builder.AppendLine("the address. Each still goes to the address declared, so every Host block written for");
+        builder.AppendLine("it applies. So a name that answers only now and then - a Mac in a dark wake - or an");
+        builder.AppendLine("ssh that looks names up by other means - Git for Windows' own resolves no mDNS .local");
+        builder.AppendLine("name - fails no run part way while that address keeps answering. Nothing is pinned");
+        builder.AppendLine("where ssh reaches the host through a ProxyJump or a ProxyCommand, which do their own");
+        builder.AppendLine("lookup, or where the address would change anything else ssh does; and an address that");
+        builder.AppendLine("stops taking the connection, or shows a key the name is not known by, is dropped, and");
+        builder.AppendLine("ssh looks the name up itself.");
         builder.AppendLine();
         builder.AppendLine("Every WSL distribution and ssh host runs DssHarness itself, installed as a global");
         builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
@@ -740,8 +824,17 @@ internal static class HelpCommand
         builder.AppendLine("request on standard input, held open while the host works: interrupting host-exec");
         builder.AppendLine("ends it, and the host cancels the command. The command line ssh hands a remote");
         builder.AppendLine("shell holds only fixed words, so no argument is ever reinterpreted by sh, cmd or");
-        builder.AppendLine("PowerShell. host-exec runs in the host's copy of the repository at repositoryPath,");
-        builder.AppendLine("which 'DssHarness sync' creates and keeps in step with this tree.");
+        builder.AppendLine("PowerShell. host-exec runs in the host's copy of the tree it is typed in, which");
+        builder.AppendLine($"'{ToolPackage.Command} sync' creates and keeps in step with that tree.");
+        builder.AppendLine();
+        builder.AppendLine("A host keeps a copy of each tree whose legs it runs: the main checkout's at its");
+        builder.AppendLine($"repositoryPath, and each worktree's beside it, at <repositoryPath>{HostCopies.WorktreeSuffix}<name>,");
+        builder.AppendLine("named for the worktree's directory. So worktrees do not share a copy on a host, or");
+        builder.AppendLine("the lock on it, and their legs there run side by side; each worktree's first sync to");
+        builder.AppendLine("a host carries its whole tree. A worktree made elsewhere, under the name of one that");
+        builder.AppendLine("has a copy, is refused that copy while the other exists. This machine records which");
+        builder.AppendLine($"hosts hold a copy of which worktree, in {HarnessLayout.DirectoryName}/{HarnessLayout.HostCopiesDirectoryName} in the main");
+        builder.AppendLine("checkout, and delete-worktree asks each of them to remove it.");
         builder.AppendLine();
         builder.AppendLine("An emulator declares the hosts it runs on (hostOs, hostProcessor), the processor it");
         builder.AppendLine("runs programs for, the launcher placed in front of each program (such as");
@@ -766,7 +859,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {HarnessExit.InternalError,3}  legs: whether a leg can run was never established, through a defect in this tool");
         builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set, or no name at all");
         builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Id} than this machine");
-        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the repository,");
+        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the tree it is typed in,");
         builder.AppendLine("       or the command never reported how it finished, so it may have run only in part");
         builder.AppendLine("       host-exec otherwise returns the exit code of the command it ran");
 
@@ -832,6 +925,22 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
         builder.AppendLine("running delete-worktree again with --force finishes it.");
+        builder.AppendLine();
+        builder.AppendLine("A worktree synced to a host has a copy there of its own, beside the main checkout's,");
+        builder.AppendLine("and deleting the worktree asks each host that holds one to remove it, where the");
+        builder.AppendLine("harness made it: a copy it took over with --adopt, or a directory with no mark of");
+        builder.AppendLine("the harness's, is left where it is, and said to be. A copy is removed under the lock");
+        builder.AppendLine("a leg this machine runs there takes, and its marker goes last, so a removal that");
+        builder.AppendLine("stops part way leaves the rest still the harness's to remove. A host is reached");
+        builder.AppendLine("through the worktree's own configuration, read before it goes, or else through the");
+        builder.AppendLine("one the command runs in; one neither declares is not asked, and its copy is");
+        builder.AppendLine("forgotten, and named.");
+        builder.AppendLine("A copy that cannot be removed now stays recorded, and the worktree is deleted all the");
+        builder.AppendLine("same, but the command fails, naming each, with the highest code among them:");
+        builder.AppendLine($"{HarnessExit.Refused} where a run holds one or it was refused, {HarnessExit.HostUnavailable} where its host cannot be reached,");
+        builder.AppendLine($"{HarnessExit.CommandFailed} where removing it failed there; or {HarnessExit.Cancelled} when interrupted. Running delete-worktree");
+        builder.AppendLine("again removes what it left. For a name whose worktree is gone, it removes what any");
+        builder.AppendLine("worktree of that name left, and never the copies of one that still exists.");
 
         return builder.ToString();
     }
@@ -858,7 +967,7 @@ internal static class HelpCommand
         builder.AppendLine("tree the command runs in, so a change travels with that branch, and one git");
         builder.AppendLine("ignores is in the main checkout.");
         builder.AppendLine();
-        builder.AppendLine("Statuses. The Status cell is the only verdict a row carries:");
+        builder.AppendLine("Statuses. The Status cell is the only verdict that decides whether a row is closed:");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Open)}       live work that can be picked up now");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Gated)}      live work waiting on a trigger; when it fires, set it to open");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Disclosed)}  live debt that existed before anyone wrote it down");
@@ -866,6 +975,10 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("A row is closed exactly when its Status cell starts with the closed mark. Closing");
         builder.AppendLine("an anchor moves its row to the done registry, and any other status moves it back.");
+        builder.AppendLine("Nothing is read from the prose beside the Status, unless anchors.triggerCarriesVerdict");
+        builder.AppendLine("is true: then a closed row's Trigger opens with the closed mark and no other row's");
+        builder.AppendLine("does, write-anchor and set-anchor refuse a row whose two cells disagree, and");
+        builder.AppendLine("read-anchors --lint reports one.");
         builder.AppendLine("A row is added at the end of its table: rows are never sorted.");
         builder.AppendLine();
         builder.AppendLine($"Rows: {AnchorRegistryDocument.TableHeader}");
@@ -895,8 +1008,12 @@ internal static class HelpCommand
         builder.AppendLine("--pending or --done limits set-anchor, read-anchor and a read-anchors listing to");
         builder.AppendLine("one registry; read-anchors --lint always checks both, and takes no filter.");
         builder.AppendLine("write-anchor and set-anchor write immediately; --anchor-dry-run shows the change");
-        builder.AppendLine("and writes nothing. Pass values as you mean them: pipes are escaped and line breaks");
-        builder.AppendLine("collapse for you, and a pipe you already escaped is refused.");
+        builder.AppendLine("and writes nothing. Pass values as you mean them: pipes are escaped for you, and a");
+        builder.AppendLine("pipe you already escaped is refused. A line break collapses, with the whitespace");
+        builder.AppendLine("either side of it, into one space, since a row is one line; every other character,");
+        builder.AppendLine("a run of spaces or a tab among them, is kept as given, but for whitespace at the");
+        builder.AppendLine("value's very start and end. A --<cell>-file is read as UTF-8: one that is not, or");
+        builder.AppendLine("that opens with a byte-order mark, is refused.");
         builder.AppendLine();
         builder.AppendLine($"check-anchor-balance compares the working tree with --base (default {AnchorBalanceService.DefaultBase}), by id");
         builder.AppendLine("across both registries, so moving a row counts as nothing. It fails when open");
@@ -959,6 +1076,8 @@ internal static class HelpCommand
         builder.AppendLine("  .harness-config/runs/              ignored; one directory of records per run, in");
         builder.AppendLine("                                     the tree that ran it");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");
+        builder.AppendLine($"  {HarnessLayout.DirectoryName}/{HarnessLayout.HostCopiesDirectoryName}/       ignores itself; which hosts hold a copy of");
+        builder.AppendLine("                                     which worktree, in the main checkout");
         builder.AppendLine($"  {AnchorSettings.DefaultPendingAnchorsPath}");
         builder.AppendLine("                                     tracked; live anchors (anchors.pendingAnchorsPath)");
         builder.AppendLine($"  {AnchorSettings.DefaultDoneAnchorsPath}");
@@ -972,14 +1091,21 @@ internal static class HelpCommand
         builder.AppendLine("block on later runs and leaving every other rule untouched. It then asks git which");
         builder.AppendLine("rule decides each path the block rules on, and names in a note any rule that turns");
         builder.AppendLine("one the other way: one git follows undoes the block there, and one the block");
-        builder.AppendLine("overrules does nothing there. A rule agreeing with the block is not named, however");
-        builder.AppendLine("it is spelled. '.env', which many repositories ignore, is named: it takes the whole");
-        builder.AppendLine("runner/.env directory, and git re-includes no placeholder from an excluded one. A");
-        builder.AppendLine("rule re-including a directory, such as each host's under sshItems, is named too,");
-        builder.AppendLine("though git itself names none for the files below it. A path git will not answer");
-        builder.AppendLine("about - one beyond a symbolic link - is named with git's reason, and the rest are");
-        builder.AppendLine("still asked. worktrees and runs are ignored by name, with no trailing slash, so one");
-        builder.AppendLine("kept on another disk through a link is ignored as the link it is.");
+        builder.AppendLine("overrules does nothing there - named only where taking it out would take from git");
+        builder.AppendLine("nothing the harness keeps: no path the block rules on, none of its own files - its");
+        builder.AppendLine("configuration, a placeholder, an action's files, an anchor registry - and no");
+        builder.AppendLine("directory those are in, as git reads every ignore file the tree has, its");
+        builder.AppendLine("info/exclude and configured excludes file among them. An allowlist's re-include of");
+        builder.AppendLine("the slot a placeholder is kept in is overruled for the slot's contents and needed");
+        builder.AppendLine("for the placeholder, since git never looks inside an excluded directory, so it is");
+        builder.AppendLine("not named. A rule agreeing with the block is not named, however it is spelled.");
+        builder.AppendLine("'.env', which many repositories ignore, is named: it takes the whole runner/.env");
+        builder.AppendLine("directory, and git re-includes no placeholder from an excluded one. A rule");
+        builder.AppendLine("re-including a directory the block ignores, such as each host's under sshItems, is");
+        builder.AppendLine("named too, though git itself names none for the files below it. A path git will");
+        builder.AppendLine("not answer about - one beyond a symbolic link - is named with git's reason, and the");
+        builder.AppendLine("rest are still asked. worktrees and runs are ignored by name, with no trailing");
+        builder.AppendLine("slash, so one kept on another disk through a link is ignored as the link it is.");
         builder.AppendLine();
         builder.AppendLine("init writes the tree it runs in, a worktree's own included: its configuration - a");
         builder.AppendLine("copy of the main checkout's, where the worktree was running on that one - its");
@@ -1021,7 +1147,7 @@ internal static class HelpCommand
         builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
         builder.AppendLine("  predefinedRunners  multi-phase procedures such as a corpus test or a benchmark");
-        builder.AppendLine("  exec           named commands to run through 'DssHarness exec'");
+        builder.AppendLine($"  exec           named commands to run through '{ToolPackage.Command} exec'");
         builder.AppendLine("  commit         commit template and sign-off policy");
         builder.AppendLine("  sync           what the tree mirror carries, and what it must never carry");
         builder.AppendLine("  contention     tools that, running against a leg's build directory, void its result");
@@ -1032,6 +1158,28 @@ internal static class HelpCommand
         builder.AppendLine("environment and cache variables, so clang x debug x asan needs no entry of its");
         builder.AppendLine("own. Each combination builds in its own directory, keyed by that combination,");
         builder.AppendLine("so two toolchains never share one build tree.");
+        builder.AppendLine();
+        builder.AppendLine("A combination's directory is kept between builds, and its build system decides");
+        builder.AppendLine("what to rebuild. It starts from clean only where one of these holds, and the");
+        builder.AppendLine("leg's line says which, as 'rebuilt from clean:':");
+        builder.AppendLine();
+        builder.AppendLine("  - the build before it cannot be trusted: a phase spanned a clock step, the inputs");
+        builder.AppendLine("    moved while it ran, something else used the directory, or an input could not");
+        builder.AppendLine("    be read");
+        builder.AppendLine("  - a compiler CMake identified is not what is at its path now: CMake identifies a");
+        builder.AppendLine("    compiler once, so one updated in place is never identified again");
+        builder.AppendLine("  - an input that changed since that build began is dated no later than the newest");
+        builder.AppendLine("    file it left, which a build system ordering dates would miss; the line names");
+        builder.AppendLine("    the input, that file and both dates");
+        builder.AppendLine("  - nothing can say: no record of what it was built from, the files git tracks");
+        builder.AppendLine("    could not be listed, or an input, its date or the directory could not be read");
+        builder.AppendLine();
+        builder.AppendLine("A change dated after that build is left to the build system, which rebuilds what");
+        builder.AppendLine("it knows reads it: an output a custom command makes from a file it names in no");
+        builder.AppendLine("DEPENDS is not remade. A project's rebuildableFormats says which files are inputs,");
+        builder.AppendLine("by extension or whole name such as '.cpp' or 'CMakeLists.txt', in place of what");
+        builder.AppendLine("its type reads, and a file with no extension always is one; an edit to any other");
+        builder.AppendLine("file never discards a directory.");
         builder.AppendLine();
         builder.AppendLine("A host's env reaches every process a leg starts there - each build phase, the");
         builder.AppendLine("ninja that reads the build's dependency records, the test runner, each step of");
@@ -1064,7 +1212,7 @@ internal static class HelpCommand
         builder.AppendLine("Selected legs run at the same time, and a command waits for all of them. Within");
         builder.AppendLine("a leg the order is fixed: sync when the host needs it, then build on buildCores");
         builder.AppendLine("cores, then test on testCores cores. Where a leg runs is measured before anything");
-        builder.AppendLine("starts; see 'DssHarness help legs'.");
+        builder.AppendLine($"starts; see '{ToolPackage.Command} help legs'.");
         builder.AppendLine();
         builder.AppendLine("A verdict must describe the code, not the moment it ran in. Every test invocation");
         builder.AppendLine("declares a successPattern, since exiting 0 is not proof anything ran. A leg whose");
@@ -1084,6 +1232,45 @@ internal static class HelpCommand
         builder.AppendLine("  }");
         builder.AppendLine();
         builder.AppendLine("Windows legs are then compared with each other, and every other leg with the rest.");
+        builder.AppendLine();
+        builder.AppendLine("'test --filter', '--exclude' and '--label' reach the runner through the invocation's");
+        builder.AppendLine("filterArg, excludeArg and labelArg, so one set of options serves every runner. For");
+        builder.AppendLine("ctest, '-R' chooses tests by name, '-L' chooses them by label and '-LE' leaves a label");
+        builder.AppendLine("out; a label could otherwise be left out but never chosen. The filter chooses the tests");
+        builder.AppendLine("to run, each --exclude leaves its tests out, and each --label names one more the tests");
+        builder.AppendLine("to run must carry. A runner that does not leave out each of several exclusions given");
+        builder.AppendLine("apart - ctest leaves out only what every -LE matches - declares excludeJoin, and several");
+        builder.AppendLine("reach it as one value joined by it: '|' for ctest, which init seeds. Where ctest's args");
+        builder.AppendLine("give its excludeArg themselves, the exclusions are added to those values instead,");
+        builder.AppendLine("where they stand: to each -LE's, and to the last -E's. An empty excludeJoin gives each");
+        builder.AppendLine("its own excludeArg over a join the shared section declares.");
+        builder.AppendLine();
+        builder.AppendLine("A leg on a host reached through WSL or ssh runs in that host's copy of its tree:");
+        builder.AppendLine("the files the sync writes there from this tree, in a git repository of the host's own -");
+        builder.AppendLine("one the sync made, or one it took over - whose index and history are not this");
+        builder.AppendLine("checkout's. A test that checks this checkout's state has nothing to say about that");
+        builder.AppendLine("copy, so an invocation's remoteExcludes are given to every leg a host runs, beside");
+        builder.AppendLine("--exclude's, and to none this machine runs:");
+        builder.AppendLine();
+        builder.AppendLine("  \"all\": {");
+        builder.AppendLine("    \"runner\": \"ctest\", \"successPattern\": \"...\",");
+        builder.AppendLine("    \"excludeArg\": \"-LE\", \"excludeJoin\": \"|\", \"remoteExcludes\": [\"git-state\"]");
+        builder.AppendLine("  }");
+        builder.AppendLine();
+        builder.AppendLine("They are held to every rule --exclude's are, when the file is read, where the");
+        builder.AppendLine("invocation alone decides it: ctest needs the excludeJoin, since --exclude's and its");
+        builder.AppendLine("args' own reach it beside them. A test preset's filters are read as the leg starts.");
+        builder.AppendLine();
+        builder.AppendLine("ctest is refused an option it would read otherwise: an exclusion beside another given");
+        builder.AppendLine("apart with no join; a filter beside a -R its args give; a filter or an exclusion beside");
+        builder.AppendLine("a test preset that sets the same filter itself; and any of the three beside");
+        builder.AppendLine("--rerun-failed, beside --union in the args - but an exclusion by -E, which ctest still");
+        builder.AppendLine("reads there - or beside a test preset that takes a union or cannot be read. A label");
+        builder.AppendLine("beside labels the args or a preset choose runs: ctest reads it as one more a test must");
+        builder.AppendLine("carry. An option given where its arg is not declared, or given empty or as spaces");
+        builder.AppendLine("alone, is refused, and a host running one of the legs is given all three. A -I in the");
+        builder.AppendLine("args, or a preset's index, picks by position among the tests the others leave, so a");
+        builder.AppendLine("filter, an exclusion or a label moves a fixed window onto other tests.");
         builder.AppendLine();
         builder.AppendLine("The file is checked when it is read: unknown keys and references to undeclared");
         builder.AppendLine("names are rejected, with every problem listed at once. Comments and trailing");

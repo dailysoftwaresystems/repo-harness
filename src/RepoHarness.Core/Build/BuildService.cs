@@ -54,6 +54,26 @@ public sealed record BuildResult(
     /// configuring; none for a build CMake does not configure, or where it reported nothing.
     /// </summary>
     public IReadOnlyList<CompilerFact> Compilers { get; init; } = [];
+
+    /// <summary>
+    /// What a leg's line says about this build beyond its verdict: why it started from clean, and each
+    /// phase that spanned a clock step.
+    /// </summary>
+    /// <remarks>
+    /// The same lines whichever command built: a test run or a runner that builds first reported its
+    /// verdict and dropped these, so a leg rebuilt from clean on the way to its tests said so only in
+    /// the progress lines, and never in its ledger or its JSON.
+    /// </remarks>
+    public IReadOnlyList<string> Notes =>
+    [
+        .. RebuiltFromClean is { } reason ? ["rebuilt from clean: " + reason] : Array.Empty<string>(),
+        .. Phases
+            .Where(phase => phase.ClockStepped)
+            .Select(phase => $"{phase.Phase} spanned a clock step, so its duration and every mtime it wrote are suspect"),
+    ];
+
+    /// <summary>The last lines the phase the build stopped at printed, as <see cref="PhaseResult.TailOf"/> picks them.</summary>
+    public IReadOnlyList<string> Tail => PhaseResult.TailOf(Phases);
 }
 
 /// <summary>Building one leg.</summary>
@@ -75,6 +95,7 @@ public sealed class BuildService(
     BuildDirectoryGuard buildDirectoryGuard,
     CMakeToolchainReader toolchainReader,
     NinjaDependencyCheck dependencyCheck,
+    CompilerVersionProbe compilerVersions,
     InputFingerprint fingerprints,
     ProcessSampler processSampler,
     Git.IGitClient gitClient,
@@ -88,6 +109,7 @@ public sealed class BuildService(
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
     private readonly CMakeToolchainReader _toolchainReader = toolchainReader;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
+    private readonly CompilerVersionProbe _compilerVersions = compilerVersions;
     private readonly InputFingerprint _fingerprints = fingerprints;
     private readonly ProcessSampler _processSampler = processSampler;
     private readonly Git.IGitClient _gitClient = gitClient;
@@ -125,7 +147,19 @@ public sealed class BuildService(
             adapter.BuildTypeOf(config, request.Variant.Config),
             PathSearch.For(environment, request.ProgramDirectories));
 
-        var rebuilt = await DecideCleanRebuildAsync(request, buildDirectory, cancellationToken).ConfigureAwait(false);
+        // Listed once, for the decision below and for the guards after it: the tracked files that can
+        // affect this build, or why they could not be listed.
+        var (watched, unmeasurable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // A compiler changed since CMake identified it comes first: no record of the tree can answer
+        // for it, since CMake never identifies a cached compiler again.
+        var replaced = adapter is CMakeAdapter
+            ? await CompilerReplacedAsync(request, buildDirectory, environment, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        var (rebuilt, taken) = replaced is not null
+            ? (replaced, null)
+            : await DecideCleanRebuildAsync(request, buildDirectory, watched, unmeasurable, cancellationToken).ConfigureAwait(false);
 
         if (rebuilt is not null)
         {
@@ -135,9 +169,6 @@ public sealed class BuildService(
 
         _fileSystem.CreateDirectory(buildDirectory);
 
-        // Asked of every configure, so the compilers a verdict names are the ones this build's
-        // configure resolved, never the ones an earlier one did.
-        var asked = adapter is CMakeAdapter ? _toolchainReader.Ask(buildDirectory) : null;
         IReadOnlyList<CompilerFact> compilers = [];
 
         var phases = new List<PhaseResult>();
@@ -150,8 +181,14 @@ public sealed class BuildService(
         // record what the directory had been built from; nothing asked whether it had held still
         // while the compiler read it. A source edited mid-build produced a binary from a tree that
         // never existed, and the leg said passed.
-        var (watched, unmeasurable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
-
+        //
+        // Opened on the snapshot the decision took where it kept the directory, rather than on another
+        // taken moments later: a file changed between the two would be what this build records it was
+        // given, and no reading would ever have compared or dated it. Where the directory was discarded
+        // there is nothing to compare, and the guards read the tree afresh once the delete is done: on the
+        // decision's reading, a file edited while a large directory was deleted would count as moving under
+        // a build that had not begun, and one unreadable only as the decision read it would leave a clean
+        // build unmeasured and its record marked, for the next build to start from clean again.
         await using var guards = await LegGuards
             .OpenAsync(
                 _fingerprints,
@@ -160,6 +197,7 @@ public sealed class BuildService(
                 {
                     TreeRoot = request.TreeRoot,
                     Inputs = unmeasurable is null ? LegInputs.Watch(watched) : LegInputs.Unmeasured(unmeasurable),
+                    Opening = rebuilt is null ? taken : null,
                     Contention = ContentionRequests.For(
                         config,
                         request.Leg,
@@ -169,6 +207,21 @@ public sealed class BuildService(
                 },
                 cancellationToken)
             .ConfigureAwait(false);
+
+        // Recorded before the build system runs, from the tree it is about to read and with when each
+        // input had last been written, and again as the build ends. A build that fails, or is stopped
+        // by its caller's time limit, still leaves objects compiled from this tree: dated against an
+        // earlier record, every change made before it would look like one a build system could miss,
+        // and a build stopped for running long would start from clean every time and never finish.
+        var recorded = Began(request, guards.Opening);
+
+        Record(buildDirectory, recorded);
+
+        // Asked of every configure, so the compilers a verdict names are the ones this build's
+        // configure resolved, never the ones an earlier one did. Asked once the record is written, so
+        // the record is the first thing a build puts in its directory: a build stopped before writing it
+        // leaves nothing else behind to be read as a build nobody recorded.
+        var asked = adapter is CMakeAdapter ? _toolchainReader.Ask(buildDirectory) : null;
 
         foreach (var phase in adapter.Phases(config, request, buildDirectory, overlay, environment))
         {
@@ -186,6 +239,14 @@ public sealed class BuildService(
                 .ConfigureAwait(false);
 
             phases.Add(result);
+
+            // Marked the moment a phase says its clock stepped, not only as the build ends: a build
+            // stopped after this phase would otherwise leave a record that says nothing of it.
+            if (recorded.Unordered is null && Stepped(phases) is { } stepped)
+            {
+                recorded = recorded with { Unordered = stepped };
+                Record(buildDirectory, recorded);
+            }
 
             if (asked is not null && string.Equals(phase.Phase, CMakeAdapter.ConfigurePhase, StringComparison.Ordinal))
             {
@@ -303,27 +364,25 @@ public sealed class BuildService(
         {
             var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
             var verdict = seen.Decide(request.Leg, [reached]);
+            var left = Survey(buildDirectory);
 
             ContentionWarnings.Write(_output, CommandName, request.Leg, seen.Contention!, config.Contention);
-            WarnWhenDeeperThanTheReserve(request, buildDirectory, config.Worktrees.PathBudgetReserve);
+            WarnWhenDeeperThanTheReserve(request, left, config.Worktrees.PathBudgetReserve);
 
-            // Recorded for a build that reached a verdict on its own terms, and marked as
-            // untrustworthy when anything doubted it. The record is what the next build's staleness
-            // decision reads: written after a moving tree it would describe the tree as it ended up,
-            // and the next build would compare cleanly against objects compiled from the tree as it
-            // began.
-            //
-            // Contention counts as doubt for the same reason. A build that shared its directory with
-            // another one wrote no record at all until now, so the previous build's clean record
-            // survived it and the obvious next step — run it again, having changed nothing — built
-            // incrementally on top of objects this tool had just called untrustworthy.
-            if (verdict.Verdict == LegVerdict.Passed
-                || seen.Inputs?.Verdict() is not null
-                || seen.Contention?.Verdict() is not null)
+            // Recorded again whatever the verdict, with the newest file the build left: the next build
+            // dates its changes against that, not against the directory as it stands by then, which
+            // holds whatever a test run wrote there since - ctest's own logs among it - and an edit made
+            // while the tests ran would be dated behind them. A failed build leaves what it compiled as
+            // surely as a passing one. Marked as unordered, with why, where anything doubted it, so the
+            // next build starts from clean rather than build on objects nobody can match to a tree.
+            // Contention is doubt too: a build that shared its directory once wrote no record at all, so
+            // the previous build's clean one survived it, and running it again with nothing changed
+            // built on top of objects this tool had just called untrustworthy.
+            Record(buildDirectory, recorded with
             {
-                await RecordInputsAsync(request, buildDirectory, phases, seen, watched, cancellationToken)
-                    .ConfigureAwait(false);
-            }
+                Unordered = recorded.Unordered ?? Unordered(phases, seen, guards.Opening),
+                Newest = left.Newest,
+            });
 
             return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies) { Compilers = compilers };
         }
@@ -334,7 +393,7 @@ public sealed class BuildService(
     /// worktrees.pathBudgetReserve declares, naming both numbers.
     /// </summary>
     /// <param name="request">The leg's build.</param>
-    /// <param name="buildDirectory">Where it built.</param>
+    /// <param name="left">What it left in its build directory.</param>
     /// <param name="reserve">What worktrees.pathBudgetReserve declares.</param>
     /// <remarks>
     /// What keeps the reserve honest. It is a number somebody measured once, against whatever the
@@ -343,136 +402,261 @@ public sealed class BuildService(
     /// touched. Measured after every build, from the files the build itself left, and said when it
     /// could not be measured rather than taken as fine.
     /// </remarks>
-    private void WarnWhenDeeperThanTheReserve(BuildRequest request, string buildDirectory, int reserve)
+    private void WarnWhenDeeperThanTheReserve(BuildRequest request, Left left, int reserve)
     {
-        if (!_fileSystem.DirectoryExists(buildDirectory))
+        if (left.Unreadable is { } unreadable)
         {
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: the deepest path this build produced could not be measured, so "
+                + $"worktrees.pathBudgetReserve was not checked against it: {unreadable}");
+
             return;
         }
 
-        var longest = 0;
+        if (left.Deepest.Length > reserve)
+        {
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: this build produced a path {left.Deepest.Length} characters long below its build "
+                + $"directory ('{left.Deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
+                + $"to at least {left.Deepest.Length}, or a worktree created against it may not leave its build room.");
+        }
+    }
+
+    /// <summary>What a build left in its directory, as one walk of it found.</summary>
+    /// <param name="Deepest">The longest path below the directory, as the host spells it; empty where it holds nothing.</param>
+    /// <param name="Newest">
+    /// The newest file in it, relative to it with forward slashes, and when it was written;
+    /// <see langword="null"/> where it holds nothing or could not be read.
+    /// </param>
+    /// <param name="Unreadable">Why the directory could not all be read, where it could not.</param>
+    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable);
+
+    /// <summary>
+    /// Walks <paramref name="buildDirectory"/> once for what is in it: the deepest path below it and the
+    /// newest file.
+    /// </summary>
+    /// <remarks>
+    /// Every file, rather than the declared outputs or the record written last. A host whose clock
+    /// steps forward for a moment and back - measured, 25 seconds for 200 milliseconds - stamps what
+    /// it writes in that moment ahead of what it writes after, and a phase that starts and ends
+    /// outside the step measures no drift: an object compiled in one is dated after the binary linked
+    /// from it and after the record. An input is newer than every output only if it is newer than
+    /// this. Each file is dated by when it was written there, and a link as itself, never as what it
+    /// points at: a build that links its test data in from the source tree would otherwise date every
+    /// edit to that data against the edit itself. A directory reached through a link is never walked.
+    /// </remarks>
+    private Left Survey(string buildDirectory)
+    {
+        if (!_fileSystem.DirectoryExists(buildDirectory))
+        {
+            return new Left(string.Empty, null, null);
+        }
+
         var deepest = string.Empty;
+        WrittenFile? newest = null;
 
         try
         {
-            foreach (var file in _fileSystem.EnumerateFiles(buildDirectory, recursive: true))
+            foreach (var file in _fileSystem.EnumerateWrittenFiles(buildDirectory))
             {
-                var below = Path.GetRelativePath(buildDirectory, file);
+                var below = Path.GetRelativePath(buildDirectory, file.Path);
 
-                if (below.Length > longest)
+                if (below.Length > deepest.Length)
                 {
-                    longest = below.Length;
                     deepest = below;
+                }
+
+                if (newest is null || file.LastWriteTimeUtc > newest.LastWriteTimeUtc)
+                {
+                    newest = new WrittenFile(below.Replace(Path.DirectorySeparatorChar, '/'), file.LastWriteTimeUtc);
                 }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: the deepest path this build produced could not be measured, so "
-                + $"worktrees.pathBudgetReserve was not checked against it: {ex.Message}");
-
-            return;
+            return new Left(string.Empty, null, ex.Message);
         }
 
-        if (longest > reserve)
-        {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: this build produced a path {longest} characters long below its build "
-                + $"directory ('{deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
-                + $"to at least {longest}, or a worktree created against it may not leave its build room.");
-        }
+        return new Left(deepest, newest, null);
     }
 
     /// <summary>
-    /// Whether this variant must be rebuilt from clean, and why.
+    /// Why this variant must start from clean because a compiler CMake identified for it is not what is
+    /// at its path now, or <see langword="null"/> where each is as CMake identified it or could not be
+    /// asked.
     /// </summary>
+    /// <param name="request">The leg's build.</param>
+    /// <param name="buildDirectory">Where it builds.</param>
+    /// <param name="environment">The environment its phases start in, a developer environment's among it.</param>
+    /// <param name="cancellationToken">Stops a compiler being asked.</param>
     /// <remarks>
-    /// Ninja, Make and MSBuild decide what is stale by ordering timestamps, which a stepped clock
-    /// defeats without a word: an object stamped during a forward step looks newer than a source
-    /// edited just after it. Six conditions rebuild the variant from clean, and the ledger names
-    /// which.
-    /// <para>
-    /// Three are answers: the previous build spanned a clock step; an input's content differs from
-    /// what this directory was built from; or a changed input is not newer than the newest output,
-    /// which is what a stepped clock does and what a build system comparing timestamps would miss.
-    /// </para>
-    /// <para>
-    /// Three are the absence of an answer, and rebuild for that reason alone: there is no record to
-    /// compare, there is no set to compare because the tracked files could not be listed, or an
-    /// input could not be read. None of them says the tree held still, and a stale binary reported
-    /// as a pass is the one price an incremental build must never pay.
-    /// </para>
-    /// <para>
-    /// The order matters and is the reason the input set can be narrowed at all. The clock step is
-    /// tested first, so a host whose clock moves rebuilds from clean whatever the set says; what is
-    /// left is builds where no step occurred, and there the build system's own dependency graph is
-    /// authoritative.
-    /// </para>
+    /// CMake identifies a cached compiler once, when the directory is first configured, and loads that
+    /// record on every configure after; a build system has no edge on the compiler itself. So a compiler
+    /// updated in place - the same path, another version, as a Visual Studio update rewrites cl.exe where
+    /// it stands - builds in a directory still recorded as the old one's, and a consumer's first build
+    /// after one failed every precompiled header it had with C1853, "from a different version of the
+    /// compiler". Only a directory configured afresh identifies it again. A compiler that cannot be asked
+    /// is said and passed over: the question exists to name the cause of a failure the build would show
+    /// anyway, and one that cannot be put is no reason to discard a warm directory.
     /// </remarks>
-    private async Task<string?> DecideCleanRebuildAsync(
+    private async Task<string?> CompilerReplacedAsync(
         BuildRequest request,
         string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
         CancellationToken cancellationToken)
     {
-        var record = Path.Combine(buildDirectory, BuildRecordFileName);
+        var (identified, unread) = _toolchainReader.Identified(buildDirectory);
 
-        if (!_fileSystem.FileExists(record))
+        foreach (var why in unread)
         {
-            return null;
+            _output.Warn(CommandName, $"{request.Leg}: whether a compiler changed since CMake identified it could not be asked: {why}");
         }
 
-        var previous = _fileSystem.ReadAllText(record);
-
-        if (previous.Contains(ClockStepMarker, StringComparison.Ordinal))
+        foreach (var compiler in identified)
         {
-            return "a clock step: the previous build spanned one, so nothing it stamped can be ordered";
-        }
+            var answer = await _compilerVersions
+                .AskAsync(compiler, Path.Combine(request.RunDirectory, request.Leg), environment, request.ProgramDirectories, cancellationToken)
+                .ConfigureAwait(false);
 
-        // The content comparison first, because it holds whatever the clock did. A source whose
-        // bytes differ from the ones this directory was built from is stale however its timestamp
-        // reads, and the timestamp is the only thing the build system will consult.
-        var changed = await ChangedSinceRecordAsync(request, previous, cancellationToken).ConfigureAwait(false);
-
-        if (changed is not null)
-        {
-            return changed;
-        }
-
-        var newestOutput = NewestOutput(request, buildDirectory);
-
-        if (newestOutput is null)
-        {
-            return null;
-        }
-
-        var stale = await ChangedInputsNotNewerThanAsync(request, newestOutput.Value, cancellationToken)
-            .ConfigureAwait(false);
-
-        return stale is null
-            ? null
-            : $"a timestamp a build system would miss: '{stale}' changed but is not newer than the "
-                + "newest output, which a stepped clock does";
-    }
-
-    private DateTime? NewestOutput(BuildRequest request, string buildDirectory)
-    {
-        DateTime? newest = null;
-
-        foreach (var path in ExpectedOutputs(request, buildDirectory))
-        {
-            if (!_fileSystem.FileExists(path))
+            // An id whose version this build does not know how to put together, as CMake's own formula does,
+            // or no id at all, as CMake records a compiler it could not identify.
+            if (answer is null)
             {
                 continue;
             }
 
-            var written = _fileSystem.LastWriteTimeUtc(path);
-            newest = newest is null || written > newest ? written : newest;
+            // The id and the version, where CMake recorded one: a record may identify a kind and leave its version out.
+            var identity = string.Join(' ', new[] { compiler.Id, compiler.Version }.Where(part => part.Length > 0));
+            var identifiedAs = $"CMake identified {compiler.Language}'s compiler, '{compiler.Program}', as {identity}";
+
+            if (answer.Replaced is { } replaced)
+            {
+                return $"a changed compiler: {identifiedAs}, and {replaced}; CMake identifies a cached compiler once, so "
+                    + "only a directory configured afresh builds with what is there now";
+            }
+
+            if (answer.Unanswered is { } unanswered)
+            {
+                _output.Warn(
+                    CommandName,
+                    $"{request.Leg}: whether {compiler.Language}'s compiler is still the {identity} CMake identified could not "
+                    + $"be asked: {unanswered}");
+
+                continue;
+            }
+
+            if (!string.Equals(answer.Version, compiler.Version, StringComparison.Ordinal))
+            {
+                return $"a changed compiler: {identifiedAs}, and it is {answer.Version} now; CMake identifies a cached "
+                    + "compiler once, so only a directory configured afresh builds with it";
+            }
         }
 
-        return newest;
+        return null;
+    }
+
+    /// <summary>
+    /// Whether this variant must be rebuilt from clean, and why; with the snapshot of its inputs the
+    /// decision took, where it took one, for the guards to open with where the directory is kept.
+    /// </summary>
+    /// <remarks>
+    /// Ninja, Make and MSBuild decide what is stale by ordering timestamps, which a stepped clock
+    /// defeats without a word: an object stamped during a forward step looks newer than a source
+    /// edited just after it. Seven conditions rebuild the variant from clean, and the ledger names
+    /// which.
+    /// <para>
+    /// Two are answers. The previous build was marked unordered: a phase spanned a clock step, an
+    /// input could not be read as it began, its inputs moved while it ran, or something else may have
+    /// used its directory. Or an input changed since that build began is dated no later than the
+    /// newest file it left, which is what a stepped clock leaves, and a tool that keeps a file's old
+    /// time, and what a build system comparing timestamps could miss.
+    /// </para>
+    /// <para>
+    /// Five are the absence of an answer, and rebuild for that reason alone: there is no record to
+    /// compare - one that holds no fingerprint, or none at all beside files a build left - there is no
+    /// set to compare because the tracked files could not be listed, an input could not be read, a
+    /// changed input could not be dated, or the directory could not be read: for its newest file,
+    /// after a build that never finished, or for whether it holds anything, where it holds no record.
+    /// None of them says the tree held still, and a stale binary reported as a pass is the one price
+    /// an incremental build must never pay. A directory that holds nothing, or is not there, has
+    /// nothing to discard.
+    /// </para>
+    /// <para>
+    /// An input changed since, and dated since, is the build system's to act on, and nothing here
+    /// rebuilds for it. Dated after everything that build left, it is newer than every output that
+    /// reads it, which is the question the build system asks; and a CMake project is configured on
+    /// every build, so what its configure reads is read again. An output made from a file its rule
+    /// does not name - a custom command reading a file it lists in no DEPENDS - is outside that
+    /// question, and is remade when its rule is. Rebuilding from clean for every change was the first
+    /// answer, and it put a consumer through 1,186 steps from nothing for one edit to one input - a
+    /// build that ran past its caller's time limit and left the directory half built for whatever
+    /// read it next.
+    /// </para>
+    /// <para>
+    /// A build that finished recorded the newest file it left, and its guards vouched for the tree
+    /// while it ran. One that never finished - failed hard, or stopped - recorded neither, so its
+    /// directory is read for its newest file, and an input written again since it began counts as
+    /// changed, its content though it held: a stash and its pop leave one exactly as it was, having
+    /// let the compiler read something else in between. An input deleted since is the build
+    /// system's, which sees an input gone without asking its date; and one the record never held -
+    /// new to the set since, as a file first committed after the build that compiled it is - is judged
+    /// by the build system alone, as every file outside the set is.
+    /// </para>
+    /// <para>
+    /// The order matters and is the reason the input set can be narrowed at all. The unordered mark
+    /// is read first, so a host whose clock moves rebuilds from clean whatever the set says; what is
+    /// left is builds where no step occurred, and there the build system's own dependency graph is
+    /// authoritative.
+    /// </para>
+    /// </remarks>
+    private async Task<(string? Rebuilt, InputSnapshot? Taken)> DecideCleanRebuildAsync(
+        BuildRequest request,
+        string buildDirectory,
+        IReadOnlyList<string> inputs,
+        string? unlistable,
+        CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(buildDirectory, BuildRecord.FileName);
+
+        if (!_fileSystem.FileExists(path))
+        {
+            return (Unaccounted(buildDirectory), null);
+        }
+
+        var previous = BuildRecord.Parse(_fileSystem.ReadAllText(path));
+
+        if (previous.Unordered is { } unordered)
+        {
+            return (unordered, null);
+        }
+
+        if (previous.Contents.Count == 0)
+        {
+            // Either the record predates fingerprinting or nothing could be fingerprinted when it
+            // was written. Neither says the tree held still, and reading it as though it did is how
+            // a stepped clock gets to hand the tests yesterday's object.
+            return ("no record to compare: the previous build recorded no input fingerprint, so "
+                + "nothing here can say the tree held still", null);
+        }
+
+        if (unlistable is not null)
+        {
+            return ($"no set to compare: {unlistable}", null);
+        }
+
+        var current = await _fingerprints.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
+
+        if (current.Unreadable.Count > 0)
+        {
+            return ($"an unreadable input: '{current.Unreadable[0].Path}' could not be read, so "
+                + "nothing here can say the tree held still", current);
+        }
+
+        // Content decides what changed, which holds whatever the clock did; a date decides whether the
+        // build system can see it.
+        return (ChangedSinceRecord(request, previous, current, buildDirectory), current);
     }
 
     /// <summary>
@@ -496,62 +680,14 @@ public sealed class BuildService(
             .Select(path => Path.Combine(buildDirectory, path!));
 
     /// <summary>
-    /// The first tracked source that changed without becoming newer than the build's newest output.
-    /// Here the question is only whether the build system would notice, and the build system asks
-    /// about times; the content question is asked separately, and first.
-    /// </summary>
-    /// <remarks>
-    /// Over the files git tracks, recursively, and not over whatever happens to sit in the tree's
-    /// top directory: a C++ project keeps its sources in subdirectories, so a scan of the root alone
-    /// looks at a README and a .gitignore and reports every build clean.
-    /// </remarks>
-    private async Task<string?> ChangedInputsNotNewerThanAsync(
-        BuildRequest request,
-        DateTime newestOutput,
-        CancellationToken cancellationToken)
-    {
-        var (scanned, unlistable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (unlistable is not null)
-        {
-            // The set this would have scanned could not be established, so "nothing is newer" is an
-            // answer about no files. Handled as the content comparison handles it, and not discarded.
-            return $"no set to scan: {unlistable}";
-        }
-
-        foreach (var relativePath in scanned)
-        {
-            var path = Path.Combine(request.TreeRoot, relativePath);
-
-            if (!_fileSystem.FileExists(path))
-            {
-                continue;
-            }
-
-            var written = _fileSystem.LastWriteTimeUtc(path);
-
-            if (written >= newestOutput)
-            {
-                continue;
-            }
-
-            if (written.AddSeconds(ClockStepSuspicionSeconds) > newestOutput)
-            {
-                return relativePath;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
     /// The tracked files whose content decides whether this variant's build directory can be kept,
-    /// or an empty list when git could not be asked.
+    /// and which the build's guards watch; or an empty list, and why, when git could not be asked.
     /// </summary>
     /// <remarks>
-    /// An empty list makes both callers fail closed: the staleness scan finds nothing to clear the
-    /// build, and the record written afterwards holds no fingerprint, so the next build cannot
-    /// conclude the tree held still and rebuilds from clean.
+    /// An empty list fails closed everywhere it goes. The decision has no set to compare a record
+    /// against, and starts from clean; the guards have nothing to watch, and the leg is unmeasured; and
+    /// the record the build writes as it begins holds no fingerprint, so the next build cannot conclude
+    /// the tree held still either, and starts from clean too.
     /// <para>
     /// Narrowed to the files that can actually affect this build, by what the project declares or
     /// else by what its type reads. Every tracked file was the first answer and it is the safe one,
@@ -620,118 +756,245 @@ public sealed class BuildService(
     }
 
     /// <summary>
-    /// Whether any input's content differs from what this directory was last built from, which is
-    /// the question no clock can answer wrongly.
+    /// Why an input changed since the previous build began is one its date hides from the build
+    /// system - dated no later than the newest file that build left - or <see langword="null"/> where
+    /// none is.
     /// </summary>
-    private async Task<string?> ChangedSinceRecordAsync(
-        BuildRequest request,
-        string previous,
-        CancellationToken cancellationToken)
+    /// <remarks>
+    /// Which inputs changed is the question no clock can answer wrongly, and it is asked by content,
+    /// or, after a build that never finished, by whether the file was written again at all, a question
+    /// of equality too. Whether the build system will see one is asked by date, as the build system
+    /// asks: one dated after everything the build left is newer than every output that reads it. The
+    /// directory of a build that never finished is read for its newest file only where an input
+    /// changed.
+    /// </remarks>
+    private string? ChangedSinceRecord(BuildRequest request, BuildRecord previous, InputSnapshot current, string buildDirectory)
     {
-        var recorded = Fingerprints(previous);
-
-        if (recorded.Count == 0)
-        {
-            // Either the record predates fingerprinting or nothing could be fingerprinted when it
-            // was written. Neither says the tree held still, and reading it as though it did is how
-            // a stepped clock gets to hand the tests yesterday's object.
-            return "no record to compare: the previous build recorded no input fingerprint, so "
-                + "nothing here can say the tree held still";
-        }
-
-        var (compared, unlistable) = await TrackedInputsAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (unlistable is not null)
-        {
-            return $"no set to compare: {unlistable}";
-        }
-
-        var current = await _fingerprints
-            .TakeAsync(request.TreeRoot, compared, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (current.Unreadable.Count > 0)
-        {
-            return $"an unreadable input: '{current.Unreadable[0].Path}' could not be read, so "
-                + "nothing here can say the tree held still";
-        }
+        var finished = previous.Newest is not null;
+        var newest = previous.Newest;
+        var read = finished;
 
         foreach (var file in current.Files)
         {
-            if (recorded.TryGetValue(file.Path, out var content) && !content.Equals(file.Content, StringComparison.Ordinal))
+            // One the record never held is new to the set since, and judged as a file outside it is;
+            // one that is gone is seen gone by the build system, which never asks its date.
+            if (!previous.Contents.TryGetValue(file.Path, out var content) || file.Length == InputFingerprint.AbsentLength)
             {
-                return $"changed content: '{file.Path}' differs from what this directory was built from";
+                continue;
+            }
+
+            var differs = !content.Equals(file.Content, StringComparison.Ordinal);
+
+            // Content that held, in a build that finished, is what its guards vouched for.
+            if (!differs && (finished || !previous.Written.TryGetValue(file.Path, out _)))
+            {
+                continue;
+            }
+
+            DateTime written;
+
+            try
+            {
+                written = _fileSystem.LastWriteTimeUtc(Path.Combine(request.TreeRoot, file.Path));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return $"an undated input: '{file.Path}' changed, or may have, and could not be dated against what "
+                    + $"this directory holds: {ex.Message.TrimEnd('.')}";
+            }
+
+            if (!differs && written == previous.Written[file.Path])
+            {
+                continue;
+            }
+
+            if (!read)
+            {
+                var left = Survey(buildDirectory);
+
+                if (left.Unreadable is { } unreadable)
+                {
+                    // Without the newest date nothing says the build system will see the change, which is
+                    // the absence of an answer, and rebuilds for that reason alone.
+                    return $"an unreadable build directory: '{file.Path}' changed, and what this directory holds "
+                        + $"could not all be read to date it against: {unreadable.TrimEnd('.')}";
+                }
+
+                newest = left.Newest;
+                read = true;
+            }
+
+            // Nothing in the directory, so nothing a change could be dated behind.
+            if (newest is null)
+            {
+                return null;
+            }
+
+            if (written <= newest.LastWriteTimeUtc)
+            {
+                var how = differs
+                    ? $"'{file.Path}' differs from what this directory was last given to build"
+                    : $"'{file.Path}' was written again after the last build began, which never finished and may "
+                        + "have read it in between";
+                var where = finished ? "the newest file that build left" : "the newest file in the directory";
+
+                return $"a change a build system could miss: {how}, and is dated {written:u}, no later than "
+                    + $"'{newest.Path}' at {newest.LastWriteTimeUtc:u}, {where} - as a stepped clock, or a tool that "
+                    + "keeps a file's old time, leaves it";
             }
         }
 
         return null;
     }
 
-    /// <summary>The content hash of every input the record names, by path.</summary>
-    private static Dictionary<string, string> Fingerprints(string record)
-    {
-        var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        foreach (var line in record.Split('\n'))
-        {
-            if (!line.StartsWith(FingerprintMarker, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var separator = line.IndexOf(' ', FingerprintMarker.Length);
-
-            if (separator > 0)
-            {
-                fingerprints[line[(separator + 1)..]] = line[FingerprintMarker.Length..separator];
-            }
-        }
-
-        return fingerprints;
-    }
-
     /// <summary>
-    /// Records what this build was built from: whether it spanned a clock step, and a content
-    /// fingerprint of every input.
+    /// What a build records as it begins: every input's content as the build system is given it, when
+    /// each had last been written, and - where one could not be read - that nothing it stamps can be
+    /// ordered.
     /// </summary>
+    /// <param name="request">The leg's build.</param>
+    /// <param name="builtFrom">
+    /// The inputs as the build began, or <see langword="null"/> when none were watched, which leaves
+    /// the next build no record to compare.
+    /// </param>
     /// <remarks>
     /// The fingerprint is what makes the next build's staleness decision independent of the clock.
     /// Without it the only question that can be asked is whether a source is newer than an object,
-    /// which is exactly the question a stepped clock answers wrongly.
+    /// which is exactly the question a stepped clock answers wrongly. Taken as the build began, not
+    /// after it: the build system read the tree it was given, and a file edited after the build ended
+    /// is a change for the next build to date, not part of what this one built. The times are for a
+    /// build that never finishes, whose guards never say whether its tree held still: an input whose
+    /// time is not what it was is one written again since. One whose time could not be read is left
+    /// out of them, and compared by its content alone.
     /// </remarks>
-    private async Task RecordInputsAsync(
-        BuildRequest request,
-        string buildDirectory,
-        IReadOnlyList<PhaseResult> phases,
-        LegGuardReport seen,
-        IReadOnlyList<string> inputs,
-        CancellationToken cancellationToken)
+    private BuildRecord Began(BuildRequest request, InputSnapshot? builtFrom)
     {
-        // A tree that moved under the build is the same problem as a clock that stepped: what this
-        // directory holds was compiled from a tree the fingerprint below does not describe. The
-        // marker already means "nothing this build stamped can be ordered", and that is exactly
-        // what is true here, so the next build starts from clean and says why.
-        var snapshot = await _fingerprints.TakeAsync(request.TreeRoot, inputs, cancellationToken).ConfigureAwait(false);
+        var files = builtFrom?.Files ?? [];
+        var written = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
-        // An input that could not be read leaves no line in the record, and a path the next build
-        // cannot find in the record is one its content comparison skips — so the file that was
-        // unreadable here is exactly the file that would go unchecked there. Marked instead, which
-        // costs one clean rebuild and cannot hand anybody a stale object.
-        var stepped = phases.Any(phase => phase.ClockStepped)
-            || seen.Inputs?.Verdict() is not null
-            || seen.Contention?.Verdict() is not null
-            || snapshot.Unreadable.Count > 0;
-
-        var record = new System.Text.StringBuilder()
-            .Append(stepped ? ClockStepMarker : "clean").Append('\n')
-            .Append(request.Variant.DirectoryName).Append('\n');
-
-        foreach (var file in snapshot.Files)
+        foreach (var file in files.Where(file => file.Length != InputFingerprint.AbsentLength))
         {
-            record.Append(FingerprintMarker).Append(file.Content).Append(' ').Append(file.Path).Append('\n');
+            try
+            {
+                written[file.Path] = _fileSystem.LastWriteTimeUtc(Path.Combine(request.TreeRoot, file.Path));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left out: this input is compared by its content alone.
+            }
         }
 
-        _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecordFileName), record.ToString());
+        return new BuildRecord(
+            Unrecorded(builtFrom),
+            request.Variant.DirectoryName,
+            Newest: null,
+            files.ToDictionary(file => file.Path, file => file.Content, StringComparer.Ordinal),
+            written);
+    }
+
+    /// <summary>Writes <paramref name="record"/> into <paramref name="buildDirectory"/>, over the one there.</summary>
+    private void Record(string buildDirectory, BuildRecord record)
+        => _fileSystem.WriteAllTextAtomic(Path.Combine(buildDirectory, BuildRecord.FileName), record.Write());
+
+    /// <summary>
+    /// Why nothing a build stamped can be ordered because one of <paramref name="phases"/> spanned a
+    /// clock step, or <see langword="null"/> where none did.
+    /// </summary>
+    private static string? Stepped(IReadOnlyList<PhaseResult> phases)
+        => phases.FirstOrDefault(phase => phase.ClockStepped) is { } stepped
+            ? $"a clock step: the previous build's '{stepped.Phase}' phase spanned one, so nothing it stamped can be ordered"
+            : null;
+
+    /// <summary>
+    /// Why nothing a finished build stamped can be ordered, or <see langword="null"/> when nothing
+    /// doubted it.
+    /// </summary>
+    /// <param name="phases">The phases it ran.</param>
+    /// <param name="seen">What its guards saw.</param>
+    /// <param name="builtFrom">The inputs as it began.</param>
+    /// <remarks>
+    /// A tree that moved under the build is the same problem as a clock that stepped: what this
+    /// directory holds was compiled from a tree no fingerprint describes. So is a directory something
+    /// else used while it built. Each is said as itself, so the next build names what happened
+    /// rather than a clock step that never did.
+    /// </remarks>
+    private static string? Unordered(IReadOnlyList<PhaseResult> phases, LegGuardReport seen, InputSnapshot? builtFrom)
+    {
+        if (Stepped(phases) is { } stepped)
+        {
+            return stepped;
+        }
+
+        if (Unrecorded(builtFrom) is { } unrecorded)
+        {
+            return unrecorded;
+        }
+
+        if (seen.Inputs?.Verdict() is { } moved)
+        {
+            return "a moving tree: the previous build's inputs could not be shown to hold still while it "
+                + $"ran, so nothing it compiled can be matched to one tree - {moved.Detail}";
+        }
+
+        if (seen.Contention?.Verdict() is { } shared)
+        {
+            return "a shared build directory: the previous build could not be shown to have had its "
+                + $"directory to itself, so nothing in it can be ordered - {shared.Detail}";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Why a record of <paramref name="builtFrom"/> would leave an input unchecked, or
+    /// <see langword="null"/> when every input was read.
+    /// </summary>
+    /// <param name="builtFrom">The inputs as the build began.</param>
+    /// <remarks>
+    /// An input that could not be read leaves no line in the record, and a path the next build
+    /// cannot find in the record is one its content comparison skips - so the file that was
+    /// unreadable here is exactly the file that would go unchecked there. Marked instead, which
+    /// costs one clean rebuild and cannot hand anybody a stale object. Asked of the record written
+    /// as the build begins as well as the one written as it ends, so a build stopped part way leaves
+    /// the same mark.
+    /// </remarks>
+    private static string? Unrecorded(InputSnapshot? builtFrom)
+        => builtFrom?.Unreadable is [var first, ..]
+            ? $"an unrecorded input: '{first.Path}' could not be read as the previous build began, so "
+                + "nothing recorded what it was built from"
+            : null;
+
+    /// <summary>
+    /// Why <paramref name="buildDirectory"/>, which holds no record, must start from clean - it holds
+    /// files, and nothing says what they were built from - or <see langword="null"/> where it holds none.
+    /// </summary>
+    /// <remarks>
+    /// A build writes its record before anything else it puts in its directory, so files with no record
+    /// beside them were left by something no record describes: a clean start stopped part way through its
+    /// delete, which can take the record and leave the objects the start was there to discard; a
+    /// configure run by hand or by an editor; a cache that restored part of a directory; or an earlier
+    /// version, which wrote none for a build that failed and that nothing doubted. Kept, they would be
+    /// built on as though the tree they came from were known.
+    /// </remarks>
+    private string? Unaccounted(string buildDirectory)
+    {
+        if (!_fileSystem.DirectoryExists(buildDirectory))
+        {
+            return null;
+        }
+
+        try
+        {
+            return _fileSystem.EnumerateWrittenFiles(buildDirectory).FirstOrDefault() is { } found
+                ? $"no record to compare: the directory holds files - '{Path.GetRelativePath(buildDirectory, found.Path).Replace(Path.DirectorySeparatorChar, '/')}' "
+                    + "among them - and no record of what they were built from, so nothing here can say the tree held still"
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return "an unreadable build directory: it holds no record, and whether it holds anything else could not be read: "
+                + ex.Message.TrimEnd('.');
+        }
     }
 
     /// <summary>
@@ -773,19 +1036,4 @@ public sealed class BuildService(
             return (null, ex.Message);
         }
     }
-
-    /// <summary>What the harness records beside a build, so the next one can tell what happened.</summary>
-    private const string BuildRecordFileName = ".harness-build";
-
-    /// <summary>What that record says when the build it describes spanned a clock step.</summary>
-    private const string ClockStepMarker = "clock-stepped";
-
-    /// <summary>What every fingerprint line in that record starts with.</summary>
-    private const string FingerprintMarker = "in ";
-
-    /// <summary>
-    /// How far behind the newest output a changed input may be before it is treated as a clock step
-    /// rather than an ordinary older file. The measured host steps its clock about 25 seconds.
-    /// </summary>
-    private const int ClockStepSuspicionSeconds = 60;
 }

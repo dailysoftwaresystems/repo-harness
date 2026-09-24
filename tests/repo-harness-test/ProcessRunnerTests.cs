@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -247,12 +248,27 @@ public sealed class ProcessRunnerTests
         var script = temp.WriteFile("script", "#!/definitely/not/an/interpreter\n");
         MakeExecutable(script);
 
-        // The system reports the interpreter missing with the same error as a missing program.
+        // Exactly this type, never the not-found one: the script is there, and "not found" would send the
+        // reader after a file that is.
         var exception = await Assert.ThrowsAsync<ProgramStartException>(() => CreateRunner().RunAsync(
             new ProcessRequest { FileName = script },
             TestContext.Current.CancellationToken));
 
-        Assert.Contains("interpreter or loader", exception.Message, StringComparison.Ordinal);
+        // Which error a system gives for an interpreter that is not there is its own to choose, and they do
+        // not all choose alike: most report the file missing, with the same error as for a missing program,
+        // and that reading is explained rather than passed on as it stands, because the script itself is
+        // there; one that reports anything else has its own words passed on. Either way the script is named
+        // and said not to have started, and a failure here says what the system reported, since only the
+        // system can say why it chose it.
+        const int fileMissing = 2;
+        var reported = (exception.InnerException as Win32Exception)?.NativeErrorCode;
+
+        Assert.Contains(script, exception.Message, StringComparison.Ordinal);
+        Assert.True(
+            exception.Message.Contains(
+                reported == fileMissing ? "interpreter or loader" : "could not be started: ",
+                StringComparison.Ordinal),
+            $"The system reported error {reported}, and the script's failure reads: {exception.Message}");
     }
 
     [Fact]

@@ -20,7 +20,8 @@ public enum AnchorState
 /// How a status is spelled in a registry, and the one test that decides whether a row is closed.
 /// </summary>
 /// <remarks>
-/// The Status cell is the only verdict a row carries: nothing is inferred from the prose beside it.
+/// The Status cell is the only verdict that decides whether a row is closed: nothing is inferred from the prose
+/// beside it, even where a registry states the verdict in its Trigger too.
 /// Each status is written glyph first and word second. The glyph is what the closed test reads,
 /// because a test on the first character of the cell has one answer however the rest is phrased;
 /// the word is there for the person reading the table.
@@ -70,6 +71,29 @@ public static class AnchorStatus
 
         state = default;
         return false;
+    }
+
+    /// <summary>
+    /// How a Status cell and a Trigger cell state different verdicts - one reads closed, as
+    /// <see cref="IsClosed"/> reads a cell, and the other does not - or <see langword="null"/> where they agree.
+    /// </summary>
+    /// <param name="status">The Status cell.</param>
+    /// <param name="trigger">The Trigger cell.</param>
+    public static string? SplitVerdict(string status, string trigger)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        ArgumentNullException.ThrowIfNull(trigger);
+
+        var closed = IsClosed(status);
+
+        if (closed == IsClosed(trigger))
+        {
+            return null;
+        }
+
+        return closed
+            ? $"the Status reads closed, and the Trigger does not open with the closed mark, {ClosedMark}"
+            : $"the Trigger opens with the closed mark, {ClosedMark}, and the Status does not read closed";
     }
 
     /// <summary>Whether a Status cell reads closed: it opens with the closed mark, ignoring emphasis.</summary>

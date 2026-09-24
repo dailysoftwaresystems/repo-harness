@@ -5,7 +5,7 @@ work — configured entirely from a file in the repository, not compiled into th
 
 ```bash
 dotnet tool install --global DssHarness
-DssHarness --help
+dssharness --help
 ```
 
 ## Why
@@ -23,15 +23,17 @@ configuration, that is a defect.
 ## Getting started
 
 ```bash
-DssHarness verify-git     # is git installed, and is this a repository?
-DssHarness init           # create .harness-config in this tree and seed config.json
-DssHarness legs           # where each leg can run, or why it cannot
-DssHarness help           # reference material: exit codes, config, legs, layout
+dssharness verify-git     # is git installed, and is this a repository?
+dssharness init           # create .harness-config in this tree and seed config.json
+dssharness legs           # where each leg can run, or why it cannot
+dssharness help           # reference material: exit codes, config, legs, layout
 ```
 
 Every CMake configure is asked which compilers it resolved, and each leg's line names them —
 `compiler: MSVC 19.51.36231 (C, CXX)` — so every verdict says which compiler produced it; a
-toolchain's `compilerId` fails a leg CMake configured with another.
+toolchain's `compilerId` fails a leg CMake configured with another. A language only a dependency's
+`project()` enables — C, where a C++ project fetches googletest — is identified from CMake's own
+record of it, because CMake's answer gives it no id.
 
 `init`'s `msvc` toolchain names the `visualStudio` developer environment, so an MSVC leg builds from
 a plain shell: the host that runs it runs Visual Studio's own `vcvarsall.bat` for the leg's processor
@@ -50,7 +52,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `init [--install-tools]` | Create `.harness-config` in the tree it runs in, a worktree's included, seed `config.json`, add ignore rules; installs tools only when asked |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
-| `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
+| `delete-worktree <name> [--force]` | Remove a worktree and everything under it, and its copies on hosts; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
 | `list-worktree` | List existing worktrees with the commit each was made from |
 | `check-root-litter` | Report files left loose at the root of the checkout, ignored ones included |
 | `write-anchor <id> --priority P --trigger TEXT` | Add an anchor: to the pending registry, or to done when closed |
@@ -60,10 +62,10 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `check-anchor-balance` | Fail a change that leaves more open anchors than it found |
 | `check-anchor-citations` | Check every anchor cited in the declared roots resolves to a row |
 | `fix-line-endings [--all \| --changed]` | Apply the line-ending policy `.gitattributes` declares; `--check` refuses instead |
-| `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun |
+| `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun, by the job and step names `ci` declares (`help ci`) |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
 | `install-missing-tools [--legs a,b] [--dry-run]` | Install or update what each configured leg's host is missing; `--dry-run` names each command and runs none |
-| `sync` | Put a host's copy of the repository in step with this tree, deletions included |
+| `sync` | Put a host's copy of this tree in step with it, deletions included: each worktree has a copy of its own |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
 | `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
 | `run <runner> [--legs a,b] [--time] [--input name=value]` | Run a predefined runner across the legs it declares, giving its action's inputs values for this run |
@@ -101,7 +103,7 @@ Three principles the implementation actually holds to:
 
 **Fail loud.** Zero always means success, and "the thing you asked about failed"
 never shares an exit code with "the harness could not run" — the remedies differ.
-Run `DssHarness help exit-codes` for the full table, which is generated from the
+Run `dssharness help exit-codes` for the full table, which is generated from the
 code rather than written by hand. A configuration file with an unknown key or a
 reference to something undeclared is rejected when it is read, with every problem
 listed at once.
@@ -184,9 +186,9 @@ its emulator - and is turned away there when that host lacks a program its comma
 ```
 
 ```bash
-DssHarness legs                                       # every leg: where it runs, or why it cannot
-DssHarness legs --legs linux-release,mac-x64-release
-DssHarness host-exec --ssh mac-mini -- verify-git
+dssharness legs                                       # every leg: where it runs, or why it cannot
+dssharness legs --legs linux-release,mac-x64-release
+dssharness host-exec --ssh mac-mini -- verify-git
 ```
 
 A host's section can also give its own `buildCores` and `testCores`, and an `env` that every
@@ -251,12 +253,15 @@ whichever of its legs asked first, and each leg is then told what it finds. On a
 tool its own `PATH` lacks is unknown for a leg in a developer environment, since this command
 sets one up only on the machine it runs on, and nothing is installed for it. `--dry-run` asks
 every host and installs nothing, naming each command that would run. `sync` creates the host's copy
-of the repository at its `repositoryPath` and keeps it in step, deletions included. An
+of the tree it runs in and keeps it in step, deletions included: the main checkout's at the host's
+`repositoryPath`, and each worktree's beside it, so worktrees do not wait for each other on a host.
+Deleting a worktree removes its copies from the hosts that hold one, and fails, naming it, while one
+stays. An
 emulator counts only once its witness proves it runs programs for its processor.
 
 `legs` runs the witness of each emulator the selected legs use, and both commands install
 or update DssHarness on the hosts they reach, as `config.json` declares. That is the
-trust building the repository already asks for. Run `DssHarness help legs` for the rules.
+trust building the repository already asks for. Run `dssharness help legs` for the rules.
 
 ## Anchors
 
@@ -266,17 +271,17 @@ disclosed anchors, and done, the archive of closed ones. Their paths are set in
 `config.json` under `anchors`, and `init` creates each one that is missing.
 
 ```bash
-DssHarness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
-DssHarness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
-DssHarness read-anchor D-AUTH-TOKEN-REFRESH
-DssHarness read-anchors --open --band P0 P1
-DssHarness check-anchor-balance --base main
+dssharness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
+dssharness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
+dssharness read-anchor D-AUTH-TOKEN-REFRESH
+dssharness read-anchors --open --band P0 P1
+dssharness check-anchor-balance --base main
 ```
 
 The Status cell (`🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED`, `✅ CLOSED`) is the only verdict a
 row carries. Closing an anchor moves its row to the done registry, and
 `check-anchor-balance` fails a change that leaves more open anchors than it found. Run
-`DssHarness help anchors` for the rules.
+`dssharness help anchors` for the rules.
 
 ## Building from source
 

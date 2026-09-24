@@ -2,6 +2,7 @@ using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
@@ -20,6 +21,7 @@ public sealed class InitService(
     VerifyGitService verifyGitService,
     IAnchorRegistryLocator anchorRegistryLocator,
     IToolProvisionService toolProvisionService,
+    IGitClient gitClient,
     ManagedIgnoreCheck managedIgnoreCheck,
     IHostPlatform platform)
 {
@@ -80,6 +82,7 @@ public sealed class InitService(
         var runner = HarnessLayout.RunnerDirectoryRelative;
         var worktreesRoot = worktrees.Root.Replace('\\', '/').Trim('/');
         var any = ManagedIgnoreRule.AnyName;
+        var folder = ManagedIgnoreRule.AnyDirectoryName;
 
         return
         [
@@ -108,11 +111,11 @@ public sealed class InitService(
             // produced it is how a repository comes to hold a measurement nobody can reproduce.
             new(
                 HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionBuildDirectoryName),
-                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionBuildDirectoryName}/{any}"],
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{folder}/{HarnessLayout.ActionBuildDirectoryName}/{any}"],
                 Ignores: true),
             new(
                 HarnessLayout.ActionScratchIgnoreRule(HarnessLayout.ActionArtifactsDirectoryName),
-                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{any}/{HarnessLayout.ActionArtifactsDirectoryName}/{any}"],
+                [$"{HarnessLayout.RunnerActionsDirectoryRelative}/{folder}/{HarnessLayout.ActionArtifactsDirectoryName}/{any}"],
                 Ignores: true),
         ];
 
@@ -123,9 +126,35 @@ public sealed class InitService(
         [
             new(
                 $"/{directory}/*",
-                [$"{directory}/{ManagedIgnoreRule.AnyName}", $"{directory}/{ManagedIgnoreRule.AnyName}/{ManagedIgnoreRule.AnyName}"],
+                [$"{directory}/{ManagedIgnoreRule.AnyName}", $"{directory}/{ManagedIgnoreRule.AnyDirectoryName}/{ManagedIgnoreRule.AnyName}"],
                 Ignores: true),
             new($"!/{directory}/{keep}", [$"{directory}/{keep}"], Ignores: false),
+        ];
+    }
+
+    /// <summary>
+    /// The files the harness keeps in git, relative to the tree's root with forward separators: its
+    /// configuration, each placeholder, an action's own files - each of <paramref name="actionFiles"/>,
+    /// and a name in an action's directory for any action's - and each anchor registry git tracks. No
+    /// rule one of them rests on is told it does nothing.
+    /// </summary>
+    /// <param name="registries">The anchor registries, as located: one git ignores is kept in no git.</param>
+    /// <param name="actionFiles">
+    /// The files git keeps under the actions directory now. A rule an action's file rests on can rest on
+    /// how it is named - a re-include of the actions directory after a rule ignoring <c>bin/</c> or
+    /// <c>*.sh</c>, as an action's helper may be - which no name made up for any action's file shows.
+    /// </param>
+    internal static IReadOnlyList<string> KeptInGit(IEnumerable<AnchorRegistry> registries, IEnumerable<string> actionFiles)
+    {
+        var root = HarnessLayout.DirectoryName;
+
+        return
+        [
+            $"{root}/{HarnessLayout.ConfigFileName}",
+            .. HarnessLayout.PlaceholderDirectories.Select(directory => $"{root}/{directory.Replace('\\', '/')}/{HarnessLayout.GitKeepFileName}"),
+            $"{HarnessLayout.RunnerActionsDirectoryRelative}/{ManagedIgnoreRule.AnyDirectoryName}/{ManagedIgnoreRule.AnyName}",
+            .. actionFiles,
+            .. registries.Where(registry => !registry.IsIgnored).Select(registry => registry.RelativePath.Replace('\\', '/')),
         ];
     }
 
@@ -137,6 +166,7 @@ public sealed class InitService(
     private readonly VerifyGitService _verifyGitService = verifyGitService;
     private readonly IAnchorRegistryLocator _anchorRegistryLocator = anchorRegistryLocator;
     private readonly IToolProvisionService _toolProvisionService = toolProvisionService;
+    private readonly IGitClient _gitClient = gitClient;
     private readonly ManagedIgnoreCheck _managedIgnoreCheck = managedIgnoreCheck;
     private readonly IHostPlatform _platform = platform;
 
@@ -160,8 +190,8 @@ public sealed class InitService(
     /// <remarks>
     /// Everything git tracks is written in the tree it runs in, a worktree's included: its
     /// configuration, its <c>.gitignore</c> and the placeholders that keep each directory in git. A
-    /// lane adopting the harness adopts it on its own branch; written into the main checkout, the
-    /// lane's own <c>.gitignore</c> never changed and main's did. What git ignores - connection data,
+    /// worktree adopting the harness adopts it on its own branch; written into the main checkout,
+    /// the worktree's own <c>.gitignore</c> never changed and main's did. What git ignores - connection data,
     /// runner values and secrets, the lock - is read from the main checkout whichever tree asks, and
     /// init in a worktree says so rather than creating any of it there.
     /// </remarks>
@@ -223,10 +253,13 @@ public sealed class InitService(
             ? $"updated {Describe(root, gitIgnorePath)}"
             : $"kept    {Describe(root, gitIgnorePath)} (rules already current)");
 
-        await ReportConflictsAsync(root, gitIgnorePath, ignoreRules, actions, cancellationToken).ConfigureAwait(false);
-
+        // Located before the rules are judged: a rule a registry git tracks rests on is never told it
+        // does nothing.
         var registries = await _anchorRegistryLocator
             .LocateAsync(new HarnessContext(layout, config), cancellationToken)
+            .ConfigureAwait(false);
+
+        await ReportConflictsAsync(root, gitIgnorePath, ignoreRules, registries.All, actions, cancellationToken)
             .ConfigureAwait(false);
 
         foreach (var registry in registries.All)
@@ -332,6 +365,7 @@ public sealed class InitService(
         string root,
         string gitIgnorePath,
         IReadOnlyList<ManagedIgnoreRule> rules,
+        IReadOnlyList<AnchorRegistry> registries,
         List<string> actions,
         CancellationToken cancellationToken)
     {
@@ -339,8 +373,10 @@ public sealed class InitService(
 
         try
         {
+            var kept = KeptInGit(registries, await ActionFilesAsync(root, cancellationToken).ConfigureAwait(false));
+
             findings = await _managedIgnoreCheck
-                .FindAsync(root, _fileSystem.ReadAllText(gitIgnorePath), rules, cancellationToken)
+                .FindAsync(root, _fileSystem.ReadAllText(gitIgnorePath), rules, kept, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (HarnessException ex)
@@ -358,7 +394,7 @@ public sealed class InitService(
 
             actions.Add(conflict.Wins
                 ? $"{where} {what} {paths}, which the managed block {managed}; git follows that rule"
-                : $"{where} {what} {paths}, which the managed block {managed}; a later rule decides them, so this one does nothing there");
+                : $"{where} {what} {paths}, which the managed block {managed}; another rule decides them, so this one does nothing there");
         }
 
         if (findings.Unruled.Count > 0)
@@ -375,6 +411,22 @@ public sealed class InitService(
 
         static string Listed(IEnumerable<string> paths) => string.Join(", ", paths.Select(path => $"'{path}'"));
     }
+
+    /// <summary>
+    /// The files git keeps under the actions directory of the tree at <paramref name="root"/> - those it
+    /// tracks, and those it would add - relative to the root with forward separators, as git lists them.
+    /// Each is asked about by its text, which a name that is not UTF-8 is too: the rules match that where
+    /// the name lies, and it is only asked about, never opened.
+    /// </summary>
+    /// <exception cref="HarnessException">git could not list them.</exception>
+    private async Task<IReadOnlyList<string>> ActionFilesAsync(string root, CancellationToken cancellationToken)
+        => [.. (await _gitClient
+                .ListNamesAsync(
+                    root,
+                    ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", HarnessLayout.RunnerActionsDirectoryRelative],
+                    cancellationToken)
+                .ConfigureAwait(false))
+            .Select(name => name.Text)];
 
     private void EnsureDirectory(string root, string path, List<string> actions)
     {
@@ -446,7 +498,7 @@ public sealed class InitService(
             if (!report.Passed)
             {
                 actions.Add(
-                    "tools   some legs are missing tools; run 'DssHarness install-missing-tools' for the detail");
+                    $"tools   some legs are missing tools; run '{ToolPackage.Command} install-missing-tools' for the detail");
             }
 
             return false;
@@ -477,8 +529,8 @@ public sealed class InitService(
         if (config.Legs.Count > 0)
         {
             actions.Add(
-                $"tools   not checked; 'DssHarness {ToolProvisionService.CommandName} --dry-run' lists what each leg's "
-                + $"host is missing, and 'DssHarness {ToolProvisionService.CommandName}' or 'DssHarness init "
+                $"tools   not checked; '{ToolPackage.Command} {ToolProvisionService.CommandName} --dry-run' lists what each leg's "
+                + $"host is missing, and '{ToolPackage.Command} {ToolProvisionService.CommandName}' or '{ToolPackage.Command} init "
                 + "--install-tools' installs it");
         }
 

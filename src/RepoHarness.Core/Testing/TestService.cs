@@ -77,11 +77,20 @@ public sealed record TestRequest
     public string? Filter { get; init; }
 
     /// <summary>
-    /// Exclusions the caller asked for, passed through the invocation's <c>excludeArg</c>. Declared
-    /// per leg as well, because a leg reached through a transport legitimately runs a narrower suite
-    /// than one running here.
+    /// Exclusions the caller asked for, passed through the invocation's <c>excludeArg</c>: beside the
+    /// invocation's <c>remoteExcludes</c> on a leg in a host's copy - see <see cref="Remote"/> - because
+    /// a leg reached through a transport legitimately runs a narrower suite than one running here.
     /// </summary>
     public IReadOnlyList<string> Excludes { get; init; } = [];
+
+    /// <summary>
+    /// Whether the leg runs on a host reached through a transport - a WSL distribution or an ssh host -
+    /// in that host's copy of the repository, where the invocation's <c>remoteExcludes</c> are left out too.
+    /// </summary>
+    public bool Remote { get; init; }
+
+    /// <summary>Labels the tests to run must carry, as the caller asked for them, passed through the invocation's <c>labelArg</c>.</summary>
+    public IReadOnlyList<string> Labels { get; init; } = [];
 
     /// <summary>
     /// The inputs to fingerprint, already resolved by the caller, or <see langword="null"/> to take
@@ -149,6 +158,23 @@ public interface ITestService
         HarnessConfig config,
         TestRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Refuses <paramref name="request"/> where its tests could not be run as asked - no settings, a
+    /// runner or pattern missing, a pattern that is not a regular expression, a filter, an exclusion or
+    /// a label the runner would read otherwise - before anything is built for them: whatever the run
+    /// refuses before it starts, refused as the run refuses it.
+    /// </summary>
+    /// <param name="config">The whole configuration.</param>
+    /// <param name="request">The leg's test run.</param>
+    /// <exception cref="HarnessException">The tests could not be run as asked.</exception>
+    /// <remarks>
+    /// Everything its command is made from is known before the build: refused only after it, a leg
+    /// spent its build on a run that was never going to start. A test preset is read from its files as
+    /// they stand then, which the build leaves as they were: CMake reads preset files and never writes
+    /// them.
+    /// </remarks>
+    void Check(HarnessConfig config, TestRequest request);
 }
 
 /// <inheritdoc cref="ITestService"/>
@@ -168,6 +194,66 @@ public sealed class TestService(
 {
     /// <summary>The command this service reports under.</summary>
     public const string CommandName = "test";
+
+    /// <summary>
+    /// The options a host running one of this run's legs is given, so it runs the command this
+    /// machine was asked to run rather than a bare one.
+    /// </summary>
+    /// <param name="filter">The filter asked for, or null.</param>
+    /// <param name="excludes">The exclusions asked for.</param>
+    /// <param name="labels">The labels asked for.</param>
+    /// <param name="skipBuild">Whether the run tests what is already built.</param>
+    /// <param name="time">Whether the run reports the profile timing.</param>
+    /// <remarks>
+    /// A filter, an exclusion and a label decide which tests run, so a host that did not get them would
+    /// run a different suite and report its result under the same leg's name. <c>--legs</c> and
+    /// <c>--json</c> are the dispatch's own; the lock and the staging are this machine's decisions
+    /// about its own state.
+    /// </remarks>
+    public static IReadOnlyList<string> RemoteArguments(
+        string? filter,
+        IReadOnlyList<string> excludes,
+        IReadOnlyList<string> labels,
+        bool skipBuild,
+        bool time)
+    {
+        ArgumentNullException.ThrowIfNull(excludes);
+        ArgumentNullException.ThrowIfNull(labels);
+
+        var remote = new List<string>();
+
+        // Whenever one was given, an empty one among them: the host refuses it as this machine does,
+        // where left out it would run every test under the leg's name.
+        if (filter is not null)
+        {
+            remote.Add("--filter");
+            remote.Add(filter);
+        }
+
+        foreach (var exclude in excludes)
+        {
+            remote.Add("--exclude");
+            remote.Add(exclude);
+        }
+
+        foreach (var label in labels)
+        {
+            remote.Add("--label");
+            remote.Add(label);
+        }
+
+        if (skipBuild)
+        {
+            remote.Add("--no-build");
+        }
+
+        if (time)
+        {
+            remote.Add("--time");
+        }
+
+        return remote;
+    }
 
     /// <summary>The phase's name when the caller names none, which also names its log file.</summary>
     public const string DefaultPhaseName = "test";
@@ -195,30 +281,7 @@ public sealed class TestService(
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(request);
 
-        var settings = TestInvocationResolver.SettingsFor(config, request.LegSettings, request.Project)
-            ?? throw new HarnessException(
-                HarnessExit.ConfigInvalid,
-                $"Leg '{request.Leg}' declares no test settings and neither does its project, so there "
-                + "is nothing to run and nothing to report a verdict on.");
-
-        var invocation = TestInvocationResolver.Resolve(settings, request.PlatformKey);
-        var cores = CoreCounts.Resolve(invocation.Cores, request.HostTestCores, config.Defaults.TestCores);
-        var command = TestInvocationResolver.CommandFor(
-            invocation,
-            cores.Value,
-            request.Filter,
-            request.Excludes,
-            new LegPaths(request.TreeRoot, request.BuildDirectory)
-            {
-                Identity = request.Identity,
-                Product = request.Product,
-                ProductProblem = request.ProductProblem,
-            });
-
-        // Compiled before anything starts, as the success pattern is: a pattern that is not a regular
-        // expression is a mistake in tracked configuration, and finding it after the suite has run
-        // would turn a leg that finished into one that reached no verdict.
-        var counter = CompileCountPattern(invocation.CountPattern);
+        var (settings, invocation, cores, command, counter) = Command(config, request);
 
         var logFile = Path.Combine(request.RunDirectory, request.Leg, request.PhaseName + ".log");
         var (inputs, unmeasurable) = await ResolveInputsAsync(settings, request, cancellationToken).ConfigureAwait(false);
@@ -249,9 +312,8 @@ public sealed class TestService(
         // test phase written before this ran in. A project that builds out of source has its tests
         // in the build directory, which is derived per leg and so cannot be written down: started at
         // the tree root, ctest reports that it found no tests, in a tree holding thousands. Made
-        // whole against the tree here, on the machine that starts the runner, so a directory rooted
-        // but not whole - '\tests' on Windows - is on the tree's own drive.
-        var working = Path.GetFullPath(command.WorkingDirectory ?? request.TreeRoot, request.TreeRoot);
+        // whole by the rule a test preset beside it was read by, so both are the same directory.
+        var working = TestInvocationResolver.StartDirectory(command.WorkingDirectory, request.TreeRoot);
 
         var phase = await _phaseRunner
             .RunAsync(
@@ -272,7 +334,7 @@ public sealed class TestService(
                     Environment = PhaseEnvironment.Layered(request.HostEnvironment, command.Environment),
                     SuccessPattern = invocation.SuccessPattern,
                     StallSeconds = config.Defaults.StallSeconds,
-                    TimingPatterns = request.Time ? config.TestTimingRegex : [],
+                    TimingPatterns = TimingPatterns(config, request),
                     ClockStepToleranceMilliseconds = config.Defaults.ClockStepToleranceMilliseconds,
                 },
                 cancellationToken)
@@ -302,10 +364,93 @@ public sealed class TestService(
             Phases = [new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped)],
             TimingNotes = TimingNotes(phase),
             Timings = [.. phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value))],
+            LogTail = phase.Tail,
         };
 
         return new TestLegResult(reached, entry, phase.LogFile, phase, comparison, contention, cores, command);
     }
+
+    /// <inheritdoc/>
+    public void Check(HarnessConfig config, TestRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(request);
+
+        _ = Command(config, request);
+    }
+
+    /// <summary>
+    /// The settings, invocation, core count, command and count pattern <paramref name="request"/> runs its
+    /// tests with, refused wherever the run could not start as asked.
+    /// </summary>
+    /// <exception cref="HarnessException">The tests could not be run as asked.</exception>
+    private (TestConfig Settings, ResolvedTestInvocation Invocation, CoreCount Cores, TestCommand Command, Regex? Counter) Command(
+        HarnessConfig config,
+        TestRequest request)
+    {
+        var settings = TestInvocationResolver.SettingsFor(config, request.LegSettings, request.Project)
+            ?? throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Leg '{request.Leg}' declares no test settings and neither does its project, so there "
+                + "is nothing to run and nothing to report a verdict on.");
+
+        var invocation = TestInvocationResolver.Resolve(settings, request.PlatformKey);
+        var cores = CoreCounts.Resolve(invocation.Cores, request.HostTestCores, config.Defaults.TestCores);
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory)
+        {
+            Identity = request.Identity,
+            Product = request.Product,
+            ProductProblem = request.ProductProblem,
+        };
+        IReadOnlyList<string> remote = request.Remote ? invocation.RemoteExcludes ?? [] : [];
+
+        TestCommand Given(IReadOnlyList<string> excludes)
+            => TestInvocationResolver.CommandFor(invocation, cores.Value, request.Filter, excludes, paths, request.Labels, _fileSystem);
+
+        TestCommand command;
+
+        try
+        {
+            command = Given([.. request.Excludes, .. remote]);
+        }
+        catch (HarnessException refused) when (remote.Count > 0 && Holds(() => Given(request.Excludes)))
+        {
+            // Refused over what a host's leg leaves out beside what was asked, which nobody typed: said so.
+            throw new HarnessException(
+                refused.ExitCode,
+                $"{refused.Message} It is refused over the test settings' remoteExcludes - {string.Join(", ", remote)} - "
+                + "which every leg a host runs is given beside what --exclude gives.",
+                refused);
+        }
+
+        // Compiled before anything starts, with what starting the phase compiles first: a pattern that is
+        // not a regular expression is a mistake in tracked configuration, and finding it after the build or
+        // the suite would turn a leg that finished into one that reached no verdict.
+        var counter = CompileCountPattern(invocation.CountPattern);
+
+        _ = PhaseRunner.Patterns(request.Leg, request.PhaseName, invocation.SuccessPattern, TimingPatterns(config, request));
+
+        return (settings, invocation, cores, command, counter);
+    }
+
+    /// <summary>Whether <paramref name="command"/> can be made, where the one asked for was refused.</summary>
+    private static bool Holds(Func<TestCommand> command)
+    {
+        try
+        {
+            _ = command();
+
+            return true;
+        }
+        catch (HarnessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The patterns the suite's own timings are read by, where the run was asked for them.</summary>
+    private static IReadOnlyList<string> TimingPatterns(HarnessConfig config, TestRequest request)
+        => request.Time ? config.TestTimingRegex : [];
 
     /// <summary>
     /// The regular expression <paramref name="countPattern"/> spells, or <see langword="null"/> when

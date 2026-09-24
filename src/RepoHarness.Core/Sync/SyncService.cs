@@ -184,7 +184,7 @@ public sealed record SyncResult(
     bool Created,
     bool RequiresAdoption = false);
 
-/// <summary>Putting a host's copy of the repository in step with this tree.</summary>
+/// <summary>Putting a host's copy of a tree in step with it.</summary>
 public interface ISyncService
 {
     /// <summary>
@@ -196,8 +196,9 @@ public interface ISyncService
     /// <param name="pull">Paths to bring back from each copy instead of syncing to it.</param>
     /// <param name="cancellationToken">Stops the work.</param>
     /// <remarks>
-    /// One entry per host, not per leg: legs on one host share one tree, and syncing it once per leg
-    /// would have their copies racing over the same files.
+    /// One entry per host, not per leg: the command syncs the tree it runs in, into that tree's copy on
+    /// each host, which its legs there share, and syncing it once per leg would have them racing over the
+    /// same files.
     /// </remarks>
     Task<CommandOutcome> SyncHostsAsync(
         string directory,
@@ -319,7 +320,7 @@ public sealed class SyncService(
         // takes over one, so a host that has no copy is answered for here rather than after the
         // files have gone to the hosts listed before it.
         if (carrying.Count > 0
-            && await NoCopyToCarryIntoAsync(hosts, context.Config, cancellationToken).ConfigureAwait(false)
+            && await NoCopyToCarryIntoAsync(hosts, context, cancellationToken).ConfigureAwait(false)
                 is { Count: > 0 } unreachable)
         {
             return CommandOutcome.Failed(
@@ -328,7 +329,7 @@ public sealed class SyncService(
                 + $"run '{options.Artifact}' was carried nowhere. A carry writes an existing copy's "
                 + "own files and nothing else: it creates no directory and takes none over, because "
                 + "a repositoryPath that is a typo would otherwise be filled in rather than "
-                + "noticed. Run 'DssHarness sync' first, adding '--adopt \"<host>\"' where a "
+                + $"noticed. Run '{ToolPackage.Command} sync' first, adding '--adopt \"<host>\"' where a "
                 + "directory is already there. Nothing was changed.",
                 unreachable);
         }
@@ -337,7 +338,7 @@ public sealed class SyncService(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var destination = RepositoryPathOf(context.Config, host);
+            var destination = CopyOf(context, host);
             var transport = _transportFactory.For(host);
 
             if (carrying.Count > 0)
@@ -435,27 +436,12 @@ public sealed class SyncService(
             : $"{count} host(s) in step";
     }
 
-    /// <summary>
-    /// Where a host keeps its copy, as its own configuration declares it.
-    /// </summary>
-    /// <param name="config">The whole configuration.</param>
+    /// <summary>Where <paramref name="host"/> keeps the copy of the tree the command runs in: see <see cref="HostCopies"/>.</summary>
+    /// <param name="context">The tree, and the configuration that declares the host.</param>
     /// <param name="host">The host.</param>
     /// <exception cref="HarnessException">The host declares no repository path.</exception>
-    public static string RepositoryPathOf(Configuration.HarnessConfig config, Hosts.HostReport host)
-    {
-        ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(host);
-
-        var name = host.Host.Name;
-
-        Configuration.RemoteHostConfig? declared = host.Host.Kind == Hosts.HostKind.Wsl
-            ? config.Hosts.Wsl.GetValueOrDefault(name)
-            : config.Hosts.Ssh.GetValueOrDefault(name);
-
-        return declared?.RepositoryPath ?? throw new HarnessException(
-            HarnessExit.ConfigInvalid,
-            $"Host {host.Host} declares no repositoryPath, so there is nowhere to keep its copy.");
-    }
+    private string CopyOf(HarnessContext context, Hosts.HostReport host)
+        => HostCopies.Of(context.Config, host.Host, context.Layout, context.Layout.RepositoryRoot, _platform.PathComparison);
 
     /// <inheritdoc/>
     public async Task<SyncResult> SyncAsync(
@@ -507,6 +493,27 @@ public sealed class SyncService(
             _output.Warn(
                 CommandName,
                 $"sync.neverTransfer entries could not all be checked against this tree: {unread}");
+        }
+
+        // A worktree's copy is claimed for it before anything is written to it: recorded, so that deleting the
+        // worktree asks this host to remove it and asks no host that holds none; and refused while another worktree
+        // kept under the same name, which still exists, holds it, as the two would be syncing over each other.
+        // Before, not after: a first sync that stops part way has already made a copy, and one recorded only once
+        // finished would be one nothing removes. A copy recorded that was never made is found not there when the
+        // worktree is deleted, and forgotten.
+        if (!options.DryRun && context.Layout.IsWorktree(_platform) && transport.Host.Kind != Hosts.HostKind.Local)
+        {
+            var name = HostCopies.NameOf(context.Layout.RepositoryRoot);
+            var claim = new HostCopyEntry(name, transport.Host.ToString(), destinationRoot, Path.GetFullPath(context.Layout.RepositoryRoot));
+
+            if (new HostCopyRecord(_fileSystem, _platform.PathComparison).Claim(context.Layout, claim) is { } holder)
+            {
+                throw new HarnessException(
+                    HarnessExit.Refused,
+                    $"{transport.Host}: '{destinationRoot}' is the copy of the worktree at '{holder}', which is kept under "
+                    + $"the same name, '{name}', and still exists: synced by both, each would replace the tree the other "
+                    + "put there. Rename one of them, or delete the other. Nothing was changed.");
+            }
         }
 
         var state = await PrepareCopyAsync(transport, destinationRoot, options.DryRun, cancellationToken)
@@ -958,7 +965,7 @@ public sealed class SyncService(
     /// The hosts among <paramref name="hosts"/> that hold no copy this harness made, each with why.
     /// </summary>
     /// <param name="hosts">Every host this run would reach.</param>
-    /// <param name="config">The whole configuration, for where each host keeps its copy.</param>
+    /// <param name="context">The tree carried from, and the configuration, for where each host keeps its copy of that tree.</param>
     /// <param name="cancellationToken">Stops the questions.</param>
     /// <remarks>
     /// The same gate an ordinary sync passes through, asked for a carry as well. Without it a carry
@@ -969,7 +976,7 @@ public sealed class SyncService(
     /// </remarks>
     private async Task<IReadOnlyList<string>> NoCopyToCarryIntoAsync(
         IReadOnlyList<Hosts.HostReport> hosts,
-        Configuration.HarnessConfig config,
+        HarnessContext context,
         CancellationToken cancellationToken)
     {
         var refused = new List<string>();
@@ -978,7 +985,7 @@ public sealed class SyncService(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var destination = RepositoryPathOf(config, host);
+            var destination = CopyOf(context, host);
 
             var found = await _transportFactory.For(host)
                 .InspectAsync(destination, cancellationToken)
@@ -1162,15 +1169,8 @@ public sealed class SyncService(
         // looks right and only the host keeps the husk. Measured on a consumer's host after a wave
         // of twenty deletions: ten directories left, eight of them holding nothing at all, and the
         // checks that read that tree refused it for having a directory nothing in it answers to.
-        var emptied = plan.Deletes
-            .Select(path => path.Replace('\\', '/'))
-            .Select(path => path.LastIndexOf('/') is var cut and > 0 ? path[..cut] : string.Empty)
-            .Where(directory => directory.Length > 0)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-
         foreach (var directory in await transport
-            .RemoveEmptyDirectoriesAsync(destinationRoot, emptied, cancellationToken)
+            .RemoveEmptyDirectoriesAsync(destinationRoot, plan.Emptied, cancellationToken)
             .ConfigureAwait(false))
         {
             if (directory.Removed)

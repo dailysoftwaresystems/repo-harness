@@ -39,8 +39,10 @@ public sealed class RepositoryLocator(IGitClient gitClient) : IRepositoryLocator
         {
             throw new HarnessException(
                 HarnessExit.CommandFailed,
-                $"git found a repository at '{repositoryRoot}' but did not list its main "
-                + "worktree, so the main checkout cannot be located.");
+                $"git found a repository at '{repositoryRoot}' but names no checkout as its main worktree - "
+                + "as for a worktree of one whose git directory was made apart from it, which records none - "
+                + "so the main checkout cannot be located. Run it from the main checkout, or record that "
+                + "checkout as the git directory's core.worktree.");
         }
 
         if (main.IsBare)

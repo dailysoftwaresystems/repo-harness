@@ -5,6 +5,7 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Tests;
 
@@ -16,6 +17,40 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
 {
     private readonly List<(HostConnection Connection, HostCommand Command)> _calls = [];
     private readonly List<HostConnection> _shellProbes = [];
+    private readonly List<HostConnection> _settingsReads = [];
+
+    /// <summary>
+    /// What <c>ssh -G</c> prints for a connection; by default what ssh with no configuration of the user's
+    /// prints, as <see cref="PrintedSettings"/> writes it.
+    /// </summary>
+    public Func<HostConnection, ProcessResult> SettingsPrinted { get; set; } = connection => HostResults.Ok(PrintedSettings(connection));
+
+    /// <summary>
+    /// What <c>ssh -G</c> prints for <paramref name="connection"/>, as the clients measured print it: the
+    /// address it is given as its hostname - or a holding pin's address, with the pin's alias - on the
+    /// connection's port, with <paramref name="configured"/>, what the user's own configuration adds, after.
+    /// </summary>
+    public static string PrintedSettings(HostConnection connection, string configured = "")
+    {
+        var pin = connection.Pin is { Holds: true } holding ? holding : null;
+
+        return $"user {connection.User}\nhostname {pin?.Address ?? connection.Address}\nport {connection.Port}\n"
+            + (pin is null ? string.Empty : $"hostkeyalias {pin.KeyAlias}\n")
+            + "checkhostip no\nforwardagent no\n"
+            + configured;
+    }
+
+    /// <summary>Every connection ssh was asked what it would do over, in order.</summary>
+    public IReadOnlyList<HostConnection> SettingsReads
+    {
+        get
+        {
+            lock (_calls)
+            {
+                return [.. _settingsReads];
+            }
+        }
+    }
 
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
@@ -92,6 +127,16 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
         => Task.FromResult(DefaultWslDistribution());
+
+    public Task<ProcessResult> ReadSshSettingsAsync(HostConnection connection, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        lock (_calls)
+        {
+            _settingsReads.Add(connection);
+        }
+
+        return Task.FromResult(SettingsPrinted(connection));
+    }
 }
 
 /// <summary>Reports a fixed measurement for each host, and records which hosts were measured, and for which emulators.</summary>
@@ -188,6 +233,13 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
                     StringComparer.Ordinal),
             });
     }
+}
+
+/// <summary>Removes no copy from any host, and records none: a deletion that reaches no host.</summary>
+internal sealed class NoHostCopies : IHostCopyRemover
+{
+    public Task<HostCopyRemoval> RemoveAsync(HarnessContext context, string worktree, string tree, HarnessConfig? treeConfig, CancellationToken cancellationToken = default)
+        => Task.FromResult(HostCopyRemoval.None);
 }
 
 /// <summary>

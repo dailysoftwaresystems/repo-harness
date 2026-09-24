@@ -724,6 +724,45 @@ public sealed class SyncServiceTests
         }
     }
 
+    /// <summary>
+    /// A path --pull names that the copy does not hold fails the pull by name, as a write that fails does:
+    /// nothing at it, nothing along it, or a directory. Read by the runtime alone, the first two ended the
+    /// host's command as an unexpected DirectoryNotFoundException or FileNotFoundException - a defect in
+    /// the tool, exit 70 - with the path only inside the runtime's own words. Never a refusal, which would
+    /// end a whole run where the same read found a file a sync's plan listed removed since.
+    /// </summary>
+    [Theory]
+    [InlineData("out/missing.txt", "nothing is at that path there")]
+    [InlineData("absent/deeper/report.txt", "nothing is at that path there")]
+    [InlineData("out", "is a directory in")]
+    public async Task APathThePullNamesThatTheCopyDoesNotHold_IsRefusedByName(string path, string reason)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+        var landing = Path.Combine(temp.Path, "artefacts");
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+            Directory.CreateDirectory(Path.Combine(copy, "out"));
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.PullAsync(
+                Transport(harness), copy, landing, [path], cancellationToken));
+
+            Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+            Assert.False(HarnessExit.RefusesTheRun(refusal.ExitCode));
+            Assert.StartsWith($"'{path}' ", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains(reason, refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(landing), "Something landed for a path that was not there.");
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
     [Fact]
     public async Task ALinkedFile_IsNeverTransferred_SoItsTargetsBytesNeverLeaveThisMachine()
     {
@@ -1201,6 +1240,30 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A host ssh never connected to is said as that, in ssh's words, whatever the sync asked it: nothing
+    /// ran there, where a command that never said how it finished may have run in part.
+    /// </summary>
+    [Fact]
+    public async Task AHostSshNeverConnectedTo_IsSaidAsThat_WhateverTheSyncAskedIt()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var commands = new ScriptedHostCommands((_, _) => HostResults.Failed(255, "banner exchange: Connection to UNKNOWN port -1: Connection refused\r\n"));
+
+        var transport = new RemoteSyncTransport(
+            HostId.Ssh("vps"),
+            new HostSession(new HostConnection { Host = HostId.Ssh("vps") }, "dssharness"),
+            commands,
+            new ConsoleHarnessOutput(output, error, verbose: false));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => transport.ReadManifestAsync(
+            "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, refusal.ExitCode);
+        Assert.Equal("ssh vps: the host could not be reached: ssh said banner exchange: Connection to UNKNOWN port -1: Connection refused", refusal.Message);
+    }
+
+    /// <summary>
     /// A manifest answer that never arrived is refused, not read as a copy holding nothing. Empty is
     /// the most dangerous answer available here: the deletion bound measures against what the copy
     /// holds, so an empty one disables it, and the refusal then tells somebody that taking the
@@ -1477,6 +1540,39 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A deletion in a directory that still holds the source's own files empties nothing: the directory
+    /// stays, as it must, and nothing says it held only files the sync does not manage. A consumer was
+    /// told exactly that of a directory whose files it then found identical to the source's.
+    /// </summary>
+    [Fact]
+    public async Task ADeletionBesideTheSourcesOwnFiles_EmptiesNothing_AndSaysNothingOfIt()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await MirrorAsync(temp.Path, copy, cancellationToken);
+
+            // A file the source no longer has, beside two it has.
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "retired.c"), "r\n", cancellationToken);
+
+            await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            Assert.False(File.Exists(Path.Combine(copy, "src", "retired.c")));
+            Assert.True(File.Exists(Path.Combine(copy, "src", "a.c")));
+            Assert.DoesNotContain("does not manage", harness.StandardError.ToString() + harness.StandardOutput, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
     /// A directory kept alive by something the walk never lists stays, and is named with what kept
     /// it. A link is the sharp case: no manifest holds one, so deciding emptiness from the plan
     /// would delete a directory still holding the one thing no plan can speak for. The same path
@@ -1630,7 +1726,7 @@ public sealed class SyncServiceTests
     /// <summary>
     /// A leg placed on a host runs its runner there, from the host's copy: an action that never
     /// crosses is a runner no remote leg can run. Measured before this: every file under the actions
-    /// directory was withheld. A new action nobody has committed crosses too - it is the one a lane
+    /// directory was withheld. A new action nobody has committed crosses too - it is the one a worktree
     /// most needs to try on a remote leg.
     /// </summary>
     [Fact]
@@ -1768,9 +1864,9 @@ public sealed class SyncServiceTests
 
     /// <summary>
     /// A worktree's legs on a host run with the worktree's configuration. The configuration placed
-    /// on a host was read from the main checkout whatever tree was synced, so a lane's remote legs
-    /// ran a configuration the lane did not have - the defect round three fixed for commands run
-    /// here, surviving in the sync.
+    /// on a host was read from the main checkout whatever tree was synced, so a worktree's remote legs
+    /// ran a configuration the worktree did not have - the defect already fixed for commands run here,
+    /// surviving in the sync.
     /// </summary>
     [Fact]
     public async Task AWorktreeSync_PlacesTheWorktreesOwnConfiguration()
@@ -1785,7 +1881,7 @@ public sealed class SyncServiceTests
         {
             await harness.RunGitAsync(temp.Path, ["worktree", "add", "--detach", worktree], cancellationToken);
 
-            // A setting only the lane has, written the way the tool writes its own file.
+            // A setting only the worktree has, written the way the tool writes its own file.
             harness.ConfigStore.Save(
                 Path.Combine(worktree, ".harness-config", "config.json"),
                 new HarnessConfig { Worktrees = new WorktreeSettings { MaxNameLength = 17 } });
@@ -1794,6 +1890,137 @@ public sealed class SyncServiceTests
 
             var placed = harness.ConfigStore.Load(Path.Combine(copy, ".harness-config", "config.json"));
             Assert.Equal(17, placed.Worktrees.MaxNameLength);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+            DeleteIfPresent(worktree);
+        }
+    }
+
+    /// <summary>
+    /// The command works on the host's copy of the tree it is typed in: the main checkout's at the host's
+    /// repositoryPath, a worktree's in that worktree's own beside it - never the main checkout's, which another tree's
+    /// legs may be building in.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "/home/pi/repo")]
+    [InlineData(true, "/home/pi/repo.worktree-feature")]
+    public async Task TheSync_GoesToTheHostsCopyOfTheTreeItIsTypedIn(bool inWorktree, string expected)
+    {
+        var harness = new HarnessFactory();
+        var main = TestHost.TemporaryRoot;
+        var here = inWorktree ? Path.Combine(main, ".harness-config", "worktrees", "feature") : main;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" } } },
+            Legs = { ["arm"] = HostDoubles.Leg("linux", "arm64") },
+        };
+
+        var loader = HostDoubles.Loader(config, here, main);
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : new HostReport { Host = host, Os = "linux", Processor = "arm64" });
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            Substitute.For<ISyncTransportFactory>(),
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(
+            here, null, new SyncOptions(DryRun: true), ["build/report.txt"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.Equal([$"ssh pi: would bring back 1 named file(s) from '{expected}'"], outcome.Details);
+    }
+
+    /// <summary>
+    /// A worktree's copy on a host is recorded before anything is written to it, so that deleting the worktree asks
+    /// that host to remove it - a first sync that stops part way included, since it has made a copy all the same.
+    /// The main checkout's copy, which deleting no worktree removes, is not recorded, and a dry run, which writes
+    /// nothing, records nothing.
+    /// </summary>
+    [Fact]
+    public async Task AWorktreesCopyOnAHost_IsRecordedBeforeAnythingIsWritten_AndTheMainCheckoutsIsNot()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var worktree = Path.GetFullPath(Path.Combine(temp.Path, "..", "wt-" + Guid.NewGuid().ToString("N")[..8]));
+        var mainCopy = Path.GetFullPath(Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]));
+        var name = HostCopies.NameOf(worktree);
+        var worktreeCopy = HostCopies.ForWorktree(mainCopy, name);
+        var stoppedCopy = HostCopies.ForWorktree(mainCopy + "-stopped", name);
+        var dryCopy = HostCopies.ForWorktree(mainCopy + "-dry", name);
+        var pi = HostId.Ssh("pi");
+        var vps = HostId.Ssh("vps");
+
+        try
+        {
+            await harness.RunGitAsync(temp.Path, ["worktree", "add", "--detach", worktree], cancellationToken);
+
+            await service.SyncAsync(temp.Path, new RecordingTransport(Transport(harness), reports: pi), mainCopy, new SyncOptions(), cancellationToken);
+            await service.SyncAsync(worktree, new RecordingTransport(Transport(harness), reports: pi), worktreeCopy, new SyncOptions(), cancellationToken);
+            await service.SyncAsync(worktree, new RecordingTransport(Transport(harness), reports: HostId.Ssh("mac")), dryCopy, new SyncOptions(DryRun: true), cancellationToken);
+            var dropped = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                worktree, new RecordingTransport(Transport(harness), reports: vps) { FailsWrite = 1 }, stoppedCopy, new SyncOptions(), cancellationToken));
+            Assert.StartsWith("the link dropped writing", dropped.Message, StringComparison.Ordinal);
+
+            var context = await harness.ContextLoader.LoadAsync(temp.Path, cancellationToken);
+            var record = new HostCopyRecord(harness.FileSystem, harness.Platform.PathComparison);
+            var recorded = record.Of(context.Layout, name);
+
+            Assert.True(Directory.Exists(stoppedCopy));
+            Assert.Equal([("ssh pi", worktreeCopy), ("ssh vps", stoppedCopy)], recorded.Select(entry => (entry.Host, entry.Path)));
+            Assert.All(recorded, entry => Assert.True(record.SameTree(worktree, entry.Tree), entry.Tree));
+            Assert.Empty(record.Of(context.Layout, HostCopies.NameOf(temp.Path)));
+        }
+        finally
+        {
+            DeleteIfPresent(mainCopy);
+            DeleteIfPresent(worktreeCopy);
+            DeleteIfPresent(stoppedCopy);
+            DeleteIfPresent(dryCopy);
+            DeleteIfPresent(worktree);
+        }
+    }
+
+    /// <summary>
+    /// A copy another worktree kept under the same name still holds is refused before anything is written to it:
+    /// synced by both, each would replace the tree the other put there. The refusal names that worktree.
+    /// </summary>
+    [Fact]
+    public async Task ACopyAnotherWorktreeOfTheNameHolds_IsRefused_BeforeAnythingIsWritten()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var worktree = Path.GetFullPath(Path.Combine(temp.Path, "..", "wt-" + Guid.NewGuid().ToString("N")[..8]));
+        var copy = HostCopies.ForWorktree(Path.GetFullPath(Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8])), HostCopies.NameOf(worktree));
+        var other = temp.Combine("elsewhere", Path.GetFileName(worktree));
+        Directory.CreateDirectory(other);
+
+        try
+        {
+            await harness.RunGitAsync(temp.Path, ["worktree", "add", "--detach", worktree], cancellationToken);
+            var context = await harness.ContextLoader.LoadAsync(temp.Path, cancellationToken);
+            new HostCopyRecord(harness.FileSystem, harness.Platform.PathComparison)
+                .Claim(context.Layout, new HostCopyEntry(HostCopies.NameOf(worktree), "ssh pi", copy, other));
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.SyncAsync(
+                worktree, new RecordingTransport(Transport(harness), reports: HostId.Ssh("pi")), copy, new SyncOptions(), cancellationToken));
+
+            Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+            Assert.Contains($"is the copy of the worktree at '{other}'", refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(copy));
         }
         finally
         {

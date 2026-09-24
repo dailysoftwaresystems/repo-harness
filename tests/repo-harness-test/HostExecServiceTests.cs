@@ -4,6 +4,7 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -139,6 +140,22 @@ public sealed class HostExecServiceTests
         Assert.Contains("exit 255: Connection to vps.example closed by remote host.", outcome.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A command on a host ssh never connected to is said as that host not reached, in ssh's words: the
+    /// command never ran, so saying it may have run in part would send somebody to check the host.
+    /// </summary>
+    [Fact]
+    public async Task ACommandOnAHostSshNeverConnectedTo_IsSaidAsThatHostNotReached()
+    {
+        var fixture = Create(respond: (_, _) => HostResults.Failed(255, "ssh: connect to host host.invalid port 22: Connection timed out\n"));
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+        Assert.EndsWith(": the host could not be reached: ssh said ssh: connect to host host.invalid port 22: Connection timed out", outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("never reported", outcome.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task VerboseOutput_AsksTheHostToReportItsOwnDefectsInFull()
     {
@@ -213,11 +230,36 @@ public sealed class HostExecServiceTests
         Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
     }
 
+    /// <summary>
+    /// host-exec typed in a worktree runs in that worktree's own copy on the host, beside the main checkout's, as
+    /// the worktree's legs do there: the main checkout's copy holds another tree.
+    /// </summary>
+    [Fact]
+    public async Task FromAWorktree_TheCommandRunsInThatWorktreesOwnCopy()
+    {
+        HostCommand? sent = null;
+        var worktree = Path.Combine(Root, ".harness-config", "worktrees", "feature");
+        var fixture = Create(
+            respond: (_, command) =>
+            {
+                sent = command;
+                return HostResults.Finished(command, HarnessExit.Success);
+            },
+            loader: HostDoubles.Loader(Config, worktree, Root));
+
+        var outcome = await fixture.Service.RunAsync(worktree, "vps", null, ["verify-git"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.NotNull(sent);
+        Assert.Equal("/srv/repo.worktree-feature", JsonSerializer.Deserialize<HostAgentRequest>(sent.StandardInput, HostAgentProtocol.JsonOptions)!.Directory);
+    }
+
     private static Fixture Create(
         Func<HostId, HostReport>? report = null,
         Func<HostConnection, HostCommand, ProcessResult>? respond = null,
         IHostPlatform? platform = null,
-        bool verbose = false)
+        bool verbose = false,
+        IHarnessContextLoader? loader = null)
     {
         var inspector = new RecordingInspector(report ?? (host => new HostReport
         {
@@ -241,7 +283,7 @@ public sealed class HostExecServiceTests
         var error = new StringWriter();
 
         var service = new HostExecService(
-            HostDoubles.Loader(Config, Root),
+            loader ?? HostDoubles.Loader(Config, Root),
             inspector,
             commands,
             platform ?? HostDoubles.Platform(),

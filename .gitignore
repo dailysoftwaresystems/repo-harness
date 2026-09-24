@@ -42,3 +42,6 @@ Thumbs.db
 
 # Claude Code local state (per-user settings, agent worktrees)
 .claude/
+
+# Working notes and handoffs between sessions, kept beside the tree and never committed
+/.plans/

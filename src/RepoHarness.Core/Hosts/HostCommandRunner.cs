@@ -21,8 +21,18 @@ public sealed record HostConnection
     /// </summary>
     public string? Distribution { get; init; }
 
-    /// <summary>The address ssh connects to, read from the item's <c>.env</c>. ssh only.</summary>
+    /// <summary>
+    /// The host's address as the item's <c>.env</c> declares it: a name, or an IP address. ssh is always
+    /// given this, so that every Host block written for it applies. ssh only.
+    /// </summary>
     public string? Address { get; init; }
+
+    /// <summary>
+    /// The address ssh dials in place of looking the name up, for every call the connection makes, while it
+    /// holds; <see langword="null"/> where ssh looks the name up itself, or a jump host or a command it
+    /// reaches the host through does. ssh only.
+    /// </summary>
+    public SshPin? Pin { get; init; }
 
     /// <summary>The user ssh logs in as, read from the item's <c>.env</c>. ssh only.</summary>
     public string? User { get; init; }
@@ -147,6 +157,13 @@ public interface IHostCommandRunner
     Task<ProcessResult> ProbeShellAsync(HostConnection connection, TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Asks ssh what it would do to reach an ssh host over <paramref name="connection"/>, with <c>ssh -G</c>,
+    /// which reads its configuration and prints the settings it would connect with, and connects to nothing.
+    /// </summary>
+    /// <exception cref="HarnessException">ssh would not start, so the host could not be reached.</exception>
+    Task<ProcessResult> ReadSshSettingsAsync(HostConnection connection, TimeSpan timeout, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Asks WSL which distribution is its default, by running <c>printenv WSL_DISTRO_NAME</c> in it: the
     /// distribution answers with its own name.
     /// </summary>
@@ -180,11 +197,40 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(command);
 
-        var request = BuildRequest(connection, command);
+        return connection.Host.Kind switch
+        {
+            HostKind.Local => await _processRunner.RunAsync(BuildRequest(connection, command), cancellationToken).ConfigureAwait(false),
+            HostKind.Ssh => await OverSshAsync(connection, () => BuildRequest(connection, command), cancellationToken).ConfigureAwait(false),
+            _ => await ThroughTransportAsync(connection.Host.ToString(), BuildRequest(connection, command), cancellationToken).ConfigureAwait(false),
+        };
+    }
 
-        return connection.Host.Kind == HostKind.Local
-            ? await _processRunner.RunAsync(request, cancellationToken).ConfigureAwait(false)
-            : await ThroughTransportAsync(connection.Host.ToString(), request, cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// Runs the ssh call <paramref name="build"/> makes for <paramref name="connection"/>; and where it went to a
+    /// pinned address and failed before any session began, drops the pin and runs it once more, letting ssh
+    /// look the name up as it would have.
+    /// </summary>
+    /// <remarks>
+    /// Nothing ran on the host before a session began, so running the call again runs nothing twice. The
+    /// address resolved at the start of a command can stop answering part way through it - a machine that
+    /// slept and woke with another lease, one that answers at another of its addresses - and ssh itself tries
+    /// every address a name has. What the pinned call printed is kept ahead of what the second one printed.
+    /// </remarks>
+    private async Task<ProcessResult> OverSshAsync(HostConnection connection, Func<ProcessRequest> build, CancellationToken cancellationToken)
+    {
+        var pinned = connection.Pin is { Holds: true };
+        var result = await ThroughTransportAsync(connection.Host.ToString(), build(), cancellationToken).ConfigureAwait(false);
+
+        if (!pinned || !HostProbes.FailedBeforeAnySession(result))
+        {
+            return result;
+        }
+
+        connection.Pin!.Drop();
+
+        var again = await ThroughTransportAsync(connection.Host.ToString(), build(), cancellationToken).ConfigureAwait(false);
+
+        return again with { StandardError = result.StandardError + again.StandardError };
     }
 
     /// <summary>
@@ -222,10 +268,44 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
             throw new ArgumentException("Only an ssh host hands commands to a shell.", nameof(connection));
         }
 
+        return OverSshAsync(
+            connection,
+            () => SshRequest(connection, RemoteCommandLine.ShellProbe) with { Timeout = timeout, StandardInput = string.Empty },
+            cancellationToken);
+    }
+
+    public Task<ProcessResult> ReadSshSettingsAsync(
+        HostConnection connection,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        if (connection.Host.Kind != HostKind.Ssh)
+        {
+            throw new ArgumentException("Only an ssh host has ssh settings.", nameof(connection));
+        }
+
         return ThroughTransportAsync(
             connection.Host.ToString(),
-            SshRequest(connection, RemoteCommandLine.ShellProbe) with { Timeout = timeout, StandardInput = string.Empty },
+            SshSettingsRequest(connection) with { Timeout = timeout, StandardInput = string.Empty },
             cancellationToken);
+    }
+
+    /// <summary>
+    /// The process that asks ssh what it would do for <paramref name="connection"/>: <c>ssh -G</c>, with every
+    /// option a call over the connection is given, its pin's among them, and the same destination.
+    /// </summary>
+    public static ProcessRequest SshSettingsRequest(HostConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        return new()
+        {
+            FileName = SshProgram,
+            Arguments = ["-G", .. SshOptions(connection), Destination(connection)],
+            WorkingDirectory = connection.LocalDirectory,
+        };
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -287,14 +367,36 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
     }
 
     /// <summary>
-    /// How ssh is invoked, built entirely from the host's own item. No ssh configuration file is read:
-    /// one passed with <c>-F</c> is read whatever its permissions, and a repository that named a file
-    /// would decide, through git, which machine a clone reaches.
+    /// How ssh is invoked: everything the connection needs from the host's own item, on the command line,
+    /// where it outranks what ssh's own configuration says. None is named with <c>-F</c>: a file passed so
+    /// is read whatever its permissions, and a repository that named one would decide, through git, which
+    /// machine a clone reaches. ssh still reads the user's and the system's own configuration for what the
+    /// command line leaves unsaid - a ProxyJump there applies, and a HostName there is what is looked up
+    /// and pinned - as it does for anybody, and the destination is always the address declared, so a Host
+    /// block written for it matches.
     /// </summary>
     private static ProcessRequest SshRequest(HostConnection connection, string commandLine) => new()
     {
         FileName = SshProgram,
         Arguments =
+        [
+            .. SshOptions(connection),
+
+            // No terminal: standard input then carries its bytes unchanged, and nothing waits for a key.
+            "-T",
+            Destination(connection),
+            commandLine,
+        ],
+        WorkingDirectory = connection.LocalDirectory,
+    };
+
+    /// <summary>Where every ssh call goes: the user and the address the host's item declares.</summary>
+    private static string Destination(HostConnection connection)
+        => $"{Declared(connection.User, nameof(HostConnection.User))}@{Declared(connection.Address, nameof(HostConnection.Address))}";
+
+    /// <summary>The options every ssh call over <paramref name="connection"/> is given, its pin's while it holds.</summary>
+    private static string[] SshOptions(HostConnection connection)
+        =>
         [
             "-i", Declared(connection.KeyFile, nameof(HostConnection.KeyFile)),
 
@@ -312,15 +414,12 @@ public sealed class HostCommandRunner(IProcessRunner processRunner) : IHostComma
             "-o", $"ConnectTimeout={connection.ConnectTimeoutSeconds}",
             "-o", $"ServerAliveInterval={connection.KeepAliveSeconds}",
             "-o", "ServerAliveCountMax=1",
-            "-p", connection.Port.ToString(CultureInfo.InvariantCulture),
 
-            // No terminal: standard input then carries its bytes unchanged, and nothing waits for a key.
-            "-T",
-            $"{Declared(connection.User, nameof(HostConnection.User))}@{Declared(connection.Address, nameof(HostConnection.Address))}",
-            commandLine,
-        ],
-        WorkingDirectory = connection.LocalDirectory,
-    };
+            // Measured with OpenSSH for Windows 10.0p2 against a server whose key known_hosts held under a
+            // name alone: reached by its address, ssh found no key; with the alias, it found it.
+            .. connection.Pin is { Holds: true } pin ? pin.Options() : [],
+            "-p", connection.Port.ToString(CultureInfo.InvariantCulture),
+        ];
 
     /// <summary>
     /// One part of a connection that the host's own item declares. Absent, it stops the call rather

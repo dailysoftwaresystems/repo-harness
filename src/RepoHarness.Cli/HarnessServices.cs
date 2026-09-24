@@ -115,6 +115,7 @@ internal static class HarnessServices
 
         services.AddSingleton<BuildDirectoryGuard>();
         services.AddSingleton<CMakeToolchainReader>();
+        services.AddSingleton<CompilerVersionProbe>();
         services.AddSingleton<DeveloperEnvironmentProbe>();
         services.AddSingleton<DeveloperEnvironmentProvider>();
         services.AddSingleton<NinjaDependencyCheck>();
@@ -126,6 +127,7 @@ internal static class HarnessServices
         services.AddSingleton<ISyncTransport, LocalSyncTransport>();
         services.AddSingleton<ISyncTransportFactory, SyncTransportFactory>();
         services.AddSingleton<ISyncService, SyncService>();
+        services.AddSingleton<IHostCopyRemover, HostCopyRemover>();
 
         // Predefined runners and their action files.
         services.AddSingleton<IActionFileParser, ActionFileParser>();

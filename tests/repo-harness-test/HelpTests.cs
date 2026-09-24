@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
@@ -108,6 +109,72 @@ public sealed partial class HelpTests
         }
     }
 
+    /// <summary>
+    /// The config topic says how test --filter, --exclude and --label reach a runner, what each is
+    /// for ctest, that a label can now be chosen as well as left out, how several exclusions reach
+    /// a runner that would not leave out each of them given apart, and what a leg on a host's copy
+    /// leaves out beside them.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysHowTheTestSelectionReachesTheRunner()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "filterArg, excludeArg and labelArg, so one set of options serves every runner. For",
+            "ctest, '-R' chooses tests by name, '-L' chooses them by label and '-LE' leaves a label",
+            "apart - ctest leaves out only what every -LE matches - declares excludeJoin, and several",
+            "one the sync made, or one it took over - whose index and history are not this",
+            "copy, so an invocation's remoteExcludes are given to every leg a host runs, beside",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The config topic says when a combination's build directory is kept and when it starts from
+    /// clean, and what rebuildableFormats decides: a consumer found both only by reading the source.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysWhenABuildDirectoryIsKept_AndWhatCountsAsAnInput()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "A combination's directory is kept between builds, and its build system decides",
+            "  - a compiler CMake identified is not what is at its path now: CMake identifies a",
+            "  - an input that changed since that build began is dated no later than the newest",
+            "  - nothing can say: no record of what it was built from, the files git tracks",
+            "DEPENDS is not remade. A project's rebuildableFormats says which files are inputs,",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The runners topic names a step's successPattern, which line it is matched against, and which of
+    /// that line's streams.
+    /// </summary>
+    [Fact]
+    public async Task RunnersTopic_SaysWhatAStepsSuccessPatternIsMatchedAgainst()
+    {
+        var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+
+        foreach (var text in new[]
+        {
+            "successPattern: <regular expression>   what the step's last line must print",
+            "matched with ^ and $ at each line, against that line's standard output and standard",
+            "error read together, after secrets are redacted.",
+        })
+        {
+            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public async Task WorktreesTopic_QuotesTheLimitsFromTheCode()
     {
@@ -196,7 +263,9 @@ public sealed partial class HelpTests
         foreach (var text in new[]
         {
             "block on later runs and leaving every other rule untouched. It then asks git which",
-            "overrules does nothing there.",
+            "overrules does nothing there - named only where taking it out would take from git",
+            "configuration, a placeholder, an action's files, an anchor registry - and no",
+            "the slot a placeholder is kept in is overruled for the slot's contents and needed",
             "init writes the tree it runs in, a worktree's own included",
         })
         {
@@ -205,8 +274,9 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
-    /// The legs topic says a toolchain names its compiler, and that a build directory is held to the
-    /// compiler it was configured with by the file it starts, not by its name.
+    /// The legs topic says a toolchain names its compiler, that a build directory is held to the
+    /// compiler it was configured with by the file it starts, not by its name, and where a language
+    /// only a subproject enables is identified.
     /// </summary>
     [Fact]
     public async Task LegsTopic_SaysAToolchainNamesItsCompiler_AndHowABuildDirectoryIsHeldToIt()
@@ -219,6 +289,14 @@ public sealed partial class HelpTests
         Assert.Contains("and by its name only where that PATH holds", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"compilerId\": { \"C\": \"MSVC\", \"CXX\": \"MSVC\" }", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("A build CMake configured with another compiler fails before anything is built with", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("loaded: CMakeFiles/<version>/CMake<language>Compiler.cmake - where the record names", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("the compiler the answer names and is no newer than the answer", result.StandardOutput, StringComparison.Ordinal);
+
+        // And which ssh reaches a host, what it is given, and when it is given nothing.
+        Assert.Contains("The ssh that runs is the first on the PATH. It is asked first what it would do, with", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("refused before ssh starts. Every call the run makes is then given the address it", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("the address. Each still goes to the address declared, so every Host block written for", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("where ssh reaches the host through a ProxyJump or a ProxyCommand, which do their own", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -323,6 +401,60 @@ public sealed partial class HelpTests
         Assert.DoesNotContain("Unknown topic", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// check-ci-legs assumes no workflow of its own, and its topic says what it reads a workflow by instead.
+    /// </summary>
+    [Fact]
+    public async Task CiTopic_SaysCheckCiLegsReadsOnlyWhatTheSettingsDeclare()
+    {
+        var result = await CliRunner.RunAsync(["help", "ci"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("It knows no workflow of its own", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("with {leg} standing for the leg's", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("A green leg past 80% of its", result.StandardOutput, StringComparison.Ordinal);
+
+        // The example reads what it says it reads: a leg and its budget from a whole job name, and the leg from one
+        // the forge cut short, which it would otherwise not read at all.
+        var example = new Regex(
+            JsonSerializer.Deserialize<string>(ExamplePattern().Match(result.StandardOutput).Groups["pattern"].Value)!,
+            RegexOptions.None,
+            TimeSpan.FromSeconds(1));
+        var whole = example.Match("test (linux-gcc-debug, 45)");
+        var cut = example.Match("test (linux-gcc-debug-with-a-name-long-enou");
+
+        Assert.Equal(("linux-gcc-debug", "45"), (whole.Groups["leg"].Value, whole.Groups["budget"].Value));
+        Assert.Equal(("linux-gcc-debug-with-a-name-long-enou", false), (cut.Groups["leg"].Value, cut.Groups["budget"].Success));
+    }
+
+    /// <summary>
+    /// Every command the help tells a reader to type - in the overview's list, its examples and every topic - is spelt
+    /// as the package installs it, lower case: a Linux filesystem is case-sensitive, and the product's name,
+    /// capitalised, runs nothing there. The product's name in prose is no command, and stays as it is.
+    /// </summary>
+    [Fact]
+    public async Task EveryCommandTheHelpSaysToType_IsSpeltAsTheToolInstallsIt()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var overview = await CliRunner.RunAsync(["help"], cancellationToken);
+        var texts = new List<string> { overview.StandardOutput };
+
+        foreach (Match topic in TopicPattern().Matches(overview.StandardOutput))
+        {
+            texts.Add((await CliRunner.RunAsync(["help", topic.Groups["topic"].Value], cancellationToken)).StandardOutput);
+        }
+
+        var commands = InstalledCommandPattern().Matches(overview.StandardOutput)
+            .Select(match => match.Groups["verb"].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("legs", commands);
+        Assert.Contains("help", commands);
+        Assert.All(texts, text => Assert.DoesNotContain(
+            ProductNamePattern().Matches(text).Select(match => match.Groups["verb"].Value),
+            commands.Contains));
+    }
+
     [Fact]
     public async Task Overview_AdvertisesOnlyTopicsThatExist()
     {
@@ -418,6 +550,15 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}(?<name>\S+)(\s+<\S+>)?\s{2,}(?<description>.+)$")]
     private static partial Regex CommandLinePattern();
 
-    [GeneratedRegex(@"DssHarness help (?<topic>[a-z-]+)")]
+    [GeneratedRegex(ToolPackage.Command + @" help (?<topic>[a-z-]+)")]
     private static partial Regex TopicPattern();
+
+    [GeneratedRegex(@"^\s{2}" + ToolPackage.Command + @" (?<verb>[a-z-]+)", RegexOptions.Multiline)]
+    private static partial Regex InstalledCommandPattern();
+
+    [GeneratedRegex(ToolPackage.Id + @" (?<verb>[a-z-]+)\b")]
+    private static partial Regex ProductNamePattern();
+
+    [GeneratedRegex(@"""legJobPattern"": (?<pattern>""(?:[^""\\]|\\.)*"")")]
+    private static partial Regex ExamplePattern();
 }

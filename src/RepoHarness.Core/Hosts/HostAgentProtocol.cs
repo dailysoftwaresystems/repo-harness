@@ -128,7 +128,11 @@ public sealed class HostAgentRequest
     /// </remarks>
     public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The host's copy of the repository, absolute or from the home directory. Run only.</summary>
+    /// <summary>
+    /// The directory the command starts in on the host, absolute or from the home directory: the host's copy of the
+    /// tree it runs in, or, for a sync's own operations, the directory that copy is kept in, which is there before the
+    /// copy is. Run only.
+    /// </summary>
     public string? Directory { get; init; }
 
     /// <summary>The command and its arguments, exactly as they would be typed after <c>DssHarness</c>. Run only.</summary>

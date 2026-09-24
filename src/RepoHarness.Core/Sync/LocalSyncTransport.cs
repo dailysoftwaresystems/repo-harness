@@ -172,6 +172,97 @@ public sealed class LocalSyncTransport(
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Told apart by the copy's marker, which a copy the harness made or took over carries, and the marker goes
+    /// last. A removal that stops part way - a file held open, an interruption - then leaves a directory still
+    /// marked as the harness's, which asking again finishes; removed in whatever order the disk lists it, it could
+    /// leave the rest of the copy unmarked, which the next request would have to leave where it is as somebody's.
+    /// The one thing that can outlast the marker is a directory holding nothing at all, the root among them, when
+    /// its last removal fails - a process whose working directory it is holds it on Windows - and a directory that
+    /// holds no file and no link is removed whatever marks it, as there is nothing in it anybody could lose.
+    /// </remarks>
+    public Task<CopyRemoval> RemoveCopyAsync(string root, CancellationToken cancellationToken = default)
+    {
+        var home = Home(root);
+
+        if (!_fileSystem.DirectoryExists(home))
+        {
+            return Task.FromResult(CopyRemoval.Absent);
+        }
+
+        var removal = Marker(root) switch
+        {
+            null when HoldsNothing(home) => CopyRemoval.Removed,
+            null => CopyRemoval.NotACopy,
+            { Adopted: true } => CopyRemoval.Adopted,
+            _ => CopyRemoval.Removed,
+        };
+
+        if (removal == CopyRemoval.Removed)
+        {
+            try
+            {
+                // Each entry told by its name alone. A listing spells what it holds as the root was spelt, which is
+                // how the host's configuration gives it - 'C:/src/repo', say - where a path built from the root is
+                // spelt as this machine spells one, and the two would never be found equal.
+                RemoveAllBut(home, HarnessLayout.DirectoryName, cancellationToken);
+                RemoveAllBut(Path.Combine(home, HarnessLayout.DirectoryName), MarkerFileName, cancellationToken);
+                _fileSystem.DeleteDirectory(home);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Named here, as a write's failure is, because for every host but this one the removal happens on the
+                // far side and only this message comes back.
+                throw new HarnessException(
+                    HarnessExit.CommandFailed,
+                    $"'{root}' could not be removed whole: {ex.Message} Its marker goes last, so what is left of it is "
+                    + "still marked as the harness's copy, or holds nothing at all, and asking again removes it once "
+                    + "nothing holds it.",
+                    ex);
+            }
+        }
+
+        return Task.FromResult(removal);
+    }
+
+    /// <summary>Whether <paramref name="directory"/> holds no file and no link, at any depth.</summary>
+    /// <param name="directory">The directory.</param>
+    private bool HoldsNothing(string directory)
+        => !_fileSystem.EnumerateFiles(directory, recursive: true).Any() && !_fileSystem.EnumerateDirectoryLinks(directory).Any();
+
+    /// <summary>Removes everything in <paramref name="directory"/> but the entry named <paramref name="kept"/>, which stays whole.</summary>
+    /// <param name="directory">The directory to empty, if it is there.</param>
+    /// <param name="kept">The name of the one entry in it to keep.</param>
+    /// <param name="cancellationToken">Stops the removal between entries.</param>
+    private void RemoveAllBut(string directory, string kept, CancellationToken cancellationToken)
+    {
+        if (!_fileSystem.DirectoryExists(directory))
+        {
+            return;
+        }
+
+        foreach (var child in _fileSystem.EnumerateDirectories(directory).ToList())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!string.Equals(Path.GetFileName(child), kept, _platform.PathComparison))
+            {
+                _fileSystem.DeleteDirectory(child);
+            }
+        }
+
+        foreach (var file in _fileSystem.EnumerateFiles(directory, recursive: false).ToList())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!string.Equals(Path.GetFileName(file), kept, _platform.PathComparison))
+            {
+                _fileSystem.DeleteFile(file);
+            }
+        }
+    }
+
+    /// <inheritdoc/>
     public Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
     {
         _fileSystem.DeleteFile(Resolve(root, relativePath));
@@ -269,17 +360,45 @@ public sealed class LocalSyncTransport(
     private const int HeldNamesReported = 5;
 
     /// <inheritdoc/>
+    /// <exception cref="HarnessException">No file is at the path: nothing, a directory, or nothing along it.</exception>
+    /// <remarks>
+    /// Named here, as <see cref="WriteFileAsync"/> names a write that failed, and with its exit code: for
+    /// every host but this one the read happens on the far side and only its message comes back, and the
+    /// runtime's own exception arrived as a defect in the harness, exit 70, with the path only inside its
+    /// words. A path <c>--pull</c> names is the likeliest. Never a refusal, whose code ends a whole run as a
+    /// configuration would: the same read serves a sync's own plan and a carry, and a file removed since
+    /// the plan was made stops that transfer part way, for the legs that needed it alone.
+    /// </remarks>
     public async Task<byte[]> ReadFileAsync(
         string root,
         string relativePath,
         CancellationToken cancellationToken = default)
     {
-        await using var stream = _fileSystem.OpenRead(Resolve(root, relativePath));
-        using var buffer = new MemoryStream();
+        var path = Resolve(root, relativePath);
 
-        await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        if (_fileSystem.DirectoryExists(path))
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{relativePath}' is a directory in '{root}', and only files cross, each named: name the files in it.");
+        }
 
-        return buffer.ToArray();
+        try
+        {
+            await using var stream = _fileSystem.OpenRead(path);
+            using var buffer = new MemoryStream();
+
+            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+
+            return buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{relativePath}' is not in '{root}': nothing is at that path there.",
+                ex);
+        }
     }
 
     /// <summary>

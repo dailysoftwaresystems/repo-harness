@@ -1,4 +1,5 @@
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Sync;
 
@@ -126,9 +127,29 @@ public interface ISyncTransport
         IReadOnlyList<string> directories,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Reads one file out of the copy, for bringing a leg's output home.</summary>
+    /// <summary>
+    /// Removes the whole copy at <paramref name="root"/>, where the harness made it. One it took over was
+    /// somebody's directory before it was a copy, and one holding no mark of the harness's is nothing it
+    /// knows it may remove: each is left where it is, and answered for.
+    /// </summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="cancellationToken">Stops the removal.</param>
+    /// <exception cref="HarnessException">
+    /// The copy could not be removed whole, <see cref="HarnessExit.CommandFailed"/>; or its marker cannot be read,
+    /// refused.
+    /// </exception>
+    Task<CopyRemoval> RemoveCopyAsync(string root, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads one file out of the copy: one a sync or a carry sends on, one it checks after writing, or a
+    /// leg's output brought home.
+    /// </summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="relativePath">The file to read, relative to the root.</param>
     /// <param name="cancellationToken">Stops the read.</param>
+    /// <exception cref="HarnessException">
+    /// No file is at the path - nothing at it, nothing along it, or a directory - said by name as a transfer
+    /// that failed, <see cref="HarnessExit.CommandFailed"/>; or the path leaves the copy, refused.
+    /// </exception>
     Task<byte[]> ReadFileAsync(string root, string relativePath, CancellationToken cancellationToken = default);
 }

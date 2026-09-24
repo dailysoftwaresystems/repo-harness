@@ -82,7 +82,11 @@ public sealed record PhaseRequest
 /// its silence rather than by a guess at how long it should take, and every duration comes from the
 /// monotonic clock while the wall clock is watched for the steps one host makes every few seconds.
 /// </remarks>
-public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSystem, IHarnessOutput output)
+public sealed class PhaseRunner(
+    IProcessRunner processRunner,
+    IFileSystem fileSystem,
+    IHarnessOutput output,
+    TimeProvider? wallClock = null)
 {
     /// <summary>
     /// How long a pattern may spend on one match. A pattern that backtracks past this is refused
@@ -98,6 +102,12 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
 
+    /// <summary>
+    /// The wall clock, read as a phase starts and ends so a step in it can be told from the phase's
+    /// own duration: the system's, unless a test needs one that steps.
+    /// </summary>
+    private readonly TimeProvider _wallClock = wallClock ?? TimeProvider.System;
+
     /// <summary>Runs <paramref name="request"/> to completion, or until it stalls.</summary>
     /// <param name="request">The phase.</param>
     /// <param name="cancellationToken">Stops the child and its descendants.</param>
@@ -111,8 +121,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var success = CompileWitness(request);
-        var timings = request.TimingPatterns.Select(pattern => (Pattern: pattern, Regex: Compile(pattern, "a timing pattern"))).ToList();
+        var (success, timings) = Patterns(request.Leg, request.Phase, request.SuccessPattern, request.TimingPatterns);
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(request.LogFile));
         if (!string.IsNullOrEmpty(directory))
@@ -137,7 +146,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         var clock = new StallClock();
         var streamed = new StringBuilder();
 
-        WriteHeader(log, gate, request);
+        WriteHeader(log, gate, request, _wallClock.GetUtcNow());
 
         void Line(string raw, bool error)
         {
@@ -196,9 +205,9 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             // honest run that exceeds it gets killed. The stall bound below is the bound in force.
         };
 
-        var startedUtc = DateTimeOffset.UtcNow;
+        var startedUtc = _wallClock.GetUtcNow();
         var result = await RunBoundedAsync(processRequest, request.StallSeconds, clock, cancellationToken).ConfigureAwait(false);
-        var wall = DateTimeOffset.UtcNow - startedUtc;
+        var wall = _wallClock.GetUtcNow() - startedUtc;
 
         // Both readings cover the same window, so what they disagree by is the clock's own movement:
         // a step forward, a step back, or a host that slept in the middle of the phase.
@@ -232,6 +241,15 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         // pattern nobody should be able to write.
         var visible = request.RedactLine is { } redactAll ? redactAll(childOutput) : childOutput;
 
+        // In the order the lines came, masked as each came: the captured output holds one stream after
+        // the other, and its end is whichever came second, not what the child printed last.
+        IReadOnlyList<string> lastLines;
+
+        lock (gate)
+        {
+            lastLines = PhaseResult.LastLinesOf(streamed.ToString());
+        }
+
         return new PhaseResult(
             Leg: request.Leg,
             Phase: request.Phase,
@@ -244,7 +262,10 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
             ClockStepped: stepped,
             Timings: Extract(timings, visible, request.Phase),
             LogFile: request.LogFile,
-            Output: visible);
+            Output: visible)
+        {
+            LastLines = lastLines,
+        };
     }
 
     /// <summary>
@@ -331,7 +352,7 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         }
     }
 
-    private static void WriteHeader(StreamWriter log, Lock gate, PhaseRequest request)
+    private static void WriteHeader(StreamWriter log, Lock gate, PhaseRequest request, DateTimeOffset started)
     {
         // Written for whoever reads the log, and deliberately never matched against: this is the
         // text a success pattern would otherwise witness itself in.
@@ -339,26 +360,39 @@ public sealed class PhaseRunner(IProcessRunner processRunner, IFileSystem fileSy
         {
             log.WriteLine($"# leg {request.Leg}, phase {request.Phase}");
             log.WriteLine($"# command {request.FileName} {string.Join(' ', request.Arguments)}");
-            log.WriteLine($"# started {DateTimeOffset.UtcNow:u}");
+            log.WriteLine($"# started {started:u}");
         }
     }
 
-    private static Regex? CompileWitness(PhaseRequest request)
+    /// <summary>
+    /// The success pattern and the timing patterns a phase is read by, compiled, or refused where one cannot
+    /// be: what starting a phase refuses before anything of it starts, for a caller to refuse as well before
+    /// the work the phase would follow.
+    /// </summary>
+    /// <param name="leg">The leg the phase belongs to, named in a refusal.</param>
+    /// <param name="phase">The phase, named in a refusal.</param>
+    /// <param name="successPattern">The success pattern, or <see langword="null"/> where the phase declares none.</param>
+    /// <param name="timingPatterns">The timing patterns.</param>
+    /// <exception cref="HarnessException">The success pattern is empty, or a pattern is not a regular expression.</exception>
+    internal static (Regex? Success, IReadOnlyList<(string Pattern, Regex Regex)> Timings) Patterns(
+        string leg,
+        string phase,
+        string? successPattern,
+        IReadOnlyList<string> timingPatterns)
     {
-        if (request.SuccessPattern is not { } pattern)
-        {
-            return null;
-        }
+        ArgumentNullException.ThrowIfNull(timingPatterns);
 
-        if (string.IsNullOrWhiteSpace(pattern))
+        if (successPattern is not null && string.IsNullOrWhiteSpace(successPattern))
         {
             throw new HarnessException(
                 HarnessExit.ConfigInvalid,
-                $"Phase '{request.Phase}' of leg '{request.Leg}' declares an empty success pattern, which matches anything; "
+                $"Phase '{phase}' of leg '{leg}' declares an empty success pattern, which matches anything; "
                 + "declare the line the command prints when it succeeds, or declare no pattern.");
         }
 
-        return Compile(pattern, "a success pattern");
+        return (
+            successPattern is null ? null : Compile(successPattern, "a success pattern"),
+            [.. timingPatterns.Select(pattern => (pattern, Compile(pattern, "a timing pattern")))]);
     }
 
     private static Regex Compile(string pattern, string what)

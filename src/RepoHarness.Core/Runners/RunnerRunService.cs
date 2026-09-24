@@ -441,6 +441,10 @@ public sealed class RunnerRunService(
 
             // On the leg's own line, so a step this operating system left out is never simply absent.
             SkippedSteps = steps.SkippedSteps,
+
+            // The last step that did not pass, for a leg that did not: one whose failure was excused, or
+            // that went on past its failure, is the last only where nothing after it failed.
+            LogTail = decided.Verdict.Verdict == LegVerdict.Passed ? [] : PhaseResult.TailOf(state.Phases),
         };
 
         return new RunnerLegResult(

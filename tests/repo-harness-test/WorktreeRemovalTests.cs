@@ -425,7 +425,7 @@ public sealed class WorktreeRemovalTests
                 return null;
             },
         };
-        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output)
+        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output, harness.HostCopies)
         {
             InterruptionGrace = TimeSpan.FromMilliseconds(400),
         };
@@ -514,7 +514,7 @@ public sealed class WorktreeRemovalTests
                 return null;
             },
         };
-        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output)
+        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output, harness.HostCopies)
         {
             InterruptionGrace = TimeSpan.FromMilliseconds(400),
         };
@@ -554,7 +554,7 @@ public sealed class WorktreeRemovalTests
                 return result;
             },
         };
-        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output)
+        var service = new WorktreeService(harness.ContextLoader, git, harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output, harness.HostCopies)
         {
             InterruptionGrace = TimeSpan.Zero,
         };
@@ -589,7 +589,7 @@ public sealed class WorktreeRemovalTests
     }
 
     private static WorktreeService Service(HarnessFactory harness, IGitClient git, IFileSystem? fileSystem = null)
-        => new(harness.ContextLoader, git, fileSystem ?? harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output);
+        => new(harness.ContextLoader, git, fileSystem ?? harness.FileSystem, harness.PathBudget, harness.Platform, harness.Output, harness.HostCopies);
 
     private static async Task<HarnessFactory> PrepareAsync(TempDirectory temp)
     {

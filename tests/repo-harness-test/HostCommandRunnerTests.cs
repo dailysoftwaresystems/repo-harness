@@ -45,7 +45,7 @@ public sealed class HostCommandRunnerTests
     [Fact]
     public void Wsl_StartsTheProgramWithoutAShell_InTheHomeDirectory()
     {
-        var connection = new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" };
+        var connection = new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" };
 
         var request = HostCommandRunner.BuildRequest(connection, ListSdks);
 
@@ -66,7 +66,7 @@ public sealed class HostCommandRunnerTests
         // Left to wsl.exe, a call with no --distribution reaches whichever distribution is the default,
         // which is a machine nobody selected.
         Assert.Throws<InvalidOperationException>(
-            () => HostCommandRunner.BuildRequest(new HostConnection { Host = HostId.Wsl("lane-a") }, ListSdks));
+            () => HostCommandRunner.BuildRequest(new HostConnection { Host = HostId.Wsl("wsl-a") }, ListSdks));
     }
 
     [Fact]
@@ -112,6 +112,109 @@ public sealed class HostCommandRunnerTests
         Assert.Equal("{}", request.StandardInput);
     }
 
+    /// <summary>
+    /// A pinned call still goes to the address declared, so every Host block written for it applies, and
+    /// gives ssh the address this machine resolved as its HostName - the % of an IPv6 scope doubled, since ssh
+    /// expands tokens there - with the key looked up under the pin's alias, and the address neither looked up
+    /// in known_hosts nor written into it. A pin once dropped gives ssh nothing, and it looks the name up.
+    /// </summary>
+    [Theory]
+    [InlineData("192.0.2.10", "HostName=192.0.2.10")]
+    [InlineData("fe80::1%12", "HostName=fe80::1%%12")]
+    public void Ssh_Pinned_GoesToTheAddressDeclared_WithTheResolvedOneAsItsHostName(string address, string hostName)
+    {
+        var pin = new SshPin(address, "[host.invalid]:2222");
+        var pinned = HostCommandRunner.BuildRequest(Ssh() with { Pin = pin }, ListSdks).Arguments.ToList();
+        var at = pinned.IndexOf(hostName);
+
+        Assert.Equal("harness@host.invalid", pinned[^2]);
+        Assert.True(at > 0, string.Join(' ', pinned));
+        Assert.Equal(["-o", hostName, "-o", "HostKeyAlias=[host.invalid]:2222", "-o", "CheckHostIP=no"], pinned[(at - 1)..(at + 5)]);
+
+        pin.Drop();
+
+        Assert.Equal(HostCommandRunner.BuildRequest(Ssh(), ListSdks).Arguments, HostCommandRunner.BuildRequest(Ssh() with { Pin = pin }, ListSdks).Arguments);
+    }
+
+    /// <summary>
+    /// ssh is asked what it would do with every option a call over the connection is given - a pin's among
+    /// them - and the same destination, and with nothing to run: <c>-G</c> prints its settings and connects to nothing.
+    /// </summary>
+    [Fact]
+    public void AskingSshWhatItWouldDo_GivesItWhatACallIsGiven_AndNothingToRun()
+    {
+        var connection = Ssh() with { Pin = new SshPin("192.0.2.10", "[host.invalid]:2222") };
+        var call = HostCommandRunner.BuildRequest(connection, ListSdks).Arguments;
+
+        var asked = HostCommandRunner.SshSettingsRequest(connection);
+
+        Assert.Equal(HostCommandRunner.SshProgram, asked.FileName);
+        Assert.Equal(["-G", .. call.SkipLast(3), "harness@host.invalid"], asked.Arguments);
+        Assert.Equal("/repo", asked.WorkingDirectory);
+    }
+
+    /// <summary>
+    /// A pinned call that failed before any session - the address took no connection, or showed a key the
+    /// name is not known by - is run once more with the pin dropped, for every later call too, and what both
+    /// printed is kept. One that failed for any other reason - its login refused, a connection closed part
+    /// way, where the command may have run - is run once.
+    /// </summary>
+    [Theory]
+    [InlineData("ssh: connect to host 192.0.2.10 port 2222: Connection timed out\n", true)]
+    [InlineData("banner exchange: Connection to UNKNOWN port -1: Connection refused\r\n", true)]
+    [InlineData("Host key for [host.invalid]:2222 has changed and you have requested strict checking.\nHost key verification failed.\n", true)]
+    [InlineData("Connection to host.invalid closed by remote host.\n", false)]
+    [InlineData("harness@host.invalid: Permission denied (publickey).\n", false)]
+    public async Task APinThatFailedBeforeAnySession_IsDropped_AndTheCallRunAgainWithout(string said, bool again)
+    {
+        var requests = new List<ProcessRequest>();
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Do<ProcessRequest>(requests.Add), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(HostResults.Failed(255, said)), Task.FromResult(HostResults.Ok("10.0.100 [/usr/lib/dotnet/sdk]\n")));
+        var pin = new SshPin("192.0.2.10", "[host.invalid]:2222");
+        var connection = Ssh() with { Pin = pin };
+
+        var result = await new HostCommandRunner(processRunner).RunAsync(connection, ListSdks, TestContext.Current.CancellationToken);
+
+        Assert.Contains("HostName=192.0.2.10", requests[0].Arguments);
+        Assert.Equal(again ? 2 : 1, requests.Count);
+        Assert.Equal(!again, pin.Holds);
+        Assert.Equal(again ? 0 : 255, result.ExitCode);
+        Assert.StartsWith(said, result.StandardError, StringComparison.Ordinal);
+
+        if (again)
+        {
+            Assert.DoesNotContain(requests[1].Arguments, argument => argument.StartsWith("HostName=", StringComparison.Ordinal));
+            Assert.Equal("harness@host.invalid", requests[1].Arguments[^2]);
+            Assert.DoesNotContain("HostName=192.0.2.10", HostCommandRunner.BuildRequest(connection, ListSdks).Arguments);
+        }
+    }
+
+    /// <summary>
+    /// The shell probe drops a pin that failed before any session the same way; and a call that was never
+    /// pinned is run once whatever it failed over, since nothing would change the second time.
+    /// </summary>
+    [Fact]
+    public async Task TheShellProbe_DropsAFailedPinTheSameWay_AndAnUnpinnedCallRunsOnce()
+    {
+        var processRunner = Substitute.For<IProcessRunner>();
+        processRunner.RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(HostResults.Failed(255, "ssh: connect to host 192.0.2.10 port 2222: Connection refused\n")));
+        var hosts = new HostCommandRunner(processRunner);
+        var pin = new SshPin("192.0.2.10", "[host.invalid]:2222");
+
+        await hosts.ProbeShellAsync(Ssh() with { Pin = pin }, TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.False(pin.Holds);
+        _ = processRunner.Received(2).RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>());
+
+        processRunner.ClearReceivedCalls();
+        var unpinned = await hosts.RunAsync(Ssh(), ListSdks, TestContext.Current.CancellationToken);
+
+        Assert.Equal(255, unpinned.ExitCode);
+        _ = processRunner.Received(1).RunAsync(Arg.Any<ProcessRequest>(), Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public void Ssh_WithoutAKey_StartsNothing()
     {
@@ -154,7 +257,7 @@ public sealed class HostCommandRunnerTests
     public void InputHeldOpen_IsPassedOnHeldOpen()
     {
         var request = HostCommandRunner.BuildRequest(
-            new HostConnection { Host = HostId.Wsl("lane-a"), Distribution = "Example-Linux" },
+            new HostConnection { Host = HostId.Wsl("wsl-a"), Distribution = "Example-Linux" },
             new HostCommand { Program = "DssHarness", Arguments = ["host-agent"], StandardInput = "{}\n", HoldStandardInputOpen = true });
 
         Assert.Equal("{}\n", request.StandardInput);

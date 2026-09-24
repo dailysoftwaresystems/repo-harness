@@ -46,8 +46,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
     /// <summary>Runs <paramref name="commandName"/> for one leg on its host, and returns its entry.</summary>
     /// <param name="commandName">The command to run there, which is the one running here.</param>
-    /// <param name="leg">The placed leg, whose host and repository path say where and what.</param>
-    /// <param name="repositoryPath">The host's copy of the repository, which sync created.</param>
+    /// <param name="leg">The placed leg: its host, and the host's copy of its tree, which sync made, that it runs in.</param>
     /// <param name="arguments">The command's own options, without <c>--legs</c> or <c>--json</c>.</param>
     /// <param name="cancellationToken">Stops the command on the host as well as here.</param>
     /// <exception cref="HarnessException">
@@ -59,7 +58,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     public async Task<LegEntry> RunAsync(
         string commandName,
         PlacedLeg leg,
-        string repositoryPath,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken = default)
     {
@@ -78,7 +76,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Run,
-                Directory = repositoryPath,
+                Directory = leg.HostTreeRoot,
                 Arguments = [commandName, "--legs", leg.Name, "--json", HereOption, leg.Host.Host.ToString(), .. arguments],
                 Nonce = nonce,
             },
@@ -141,9 +139,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             // reporting that as a red leg would blame the code for a connection.
             throw new HarnessException(
                 HarnessExit.HostUnavailable,
-                $"{leg.Host.Host}: '{commandName}' for leg '{leg.Name}' never reported how it "
-                + $"finished, so it may not have run, or run only in part; the connection ended with "
-                + $"exit {result.ExitCode}{Detail(result.StandardError)}");
+                $"{leg.Host.Host}: {HostProbes.NeverFinished($"'{commandName}' for leg '{leg.Name}'", result, session.Connection)}");
         }
 
         return Read(ledger.ToString(), leg, commandName, finished.Value, failure.Count == 0 ? null : string.Join(Environment.NewLine, failure));
@@ -243,16 +239,12 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             // caller is told where, as it is for a leg this machine ran.
             RunDirectory = ledger?.RunDirectory,
             SkippedSteps = [.. entry.SkippedSteps ?? []],
+
+            // What the phase that failed there printed last: its log stays on that host.
+            LogTail = [.. entry.LogTail ?? []],
             Compilers = [.. entry.Compilers ?? []],
             DeveloperEnvironment = entry.DeveloperEnvironment,
         };
-    }
-
-    private static string Detail(string standardError)
-    {
-        var said = HostProbes.Excerpt(standardError);
-
-        return said.Length == 0 ? string.Empty : ": " + said;
     }
 
     /// <summary>The shape a host's ledger arrives in, read back by name rather than by position.</summary>
@@ -274,5 +266,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         IReadOnlyList<Build.CompilerFact>? Compilers = null,
         DeveloperEnvironmentFact? DeveloperEnvironment = null,
         string? Project = null,
-        string? TestSet = null);
+        string? TestSet = null,
+        IReadOnlyList<string>? LogTail = null);
 }

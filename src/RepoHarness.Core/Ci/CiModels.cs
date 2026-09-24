@@ -70,7 +70,7 @@ public static class CiConclusions
 }
 
 /// <summary>What check-ci-legs found for one leg.</summary>
-/// <param name="Leg">The leg's name, taken from the job name's first matrix value.</param>
+/// <param name="Leg">The leg's name, as <c>ci.legJobPattern</c>'s <c>leg</c> group captures it from the job's.</param>
 /// <param name="Job">The job's full name, so a reader can find it in the forge.</param>
 /// <param name="Success">Whether the job concluded anything other than failure.</param>
 /// <param name="Errors">
@@ -79,11 +79,15 @@ public static class CiConclusions
 /// code to fix.
 /// </param>
 /// <param name="Overran">
-/// Whether the Test step's failure is at or over this leg's budget. Advisory, exactly as in the guard
-/// this replaces: the leg is red either way, and this only says which question to ask about it.
+/// Whether the test step's failure is at or over this leg's budget. Advisory: the leg is red either
+/// way, and this only says which question to ask about it.
+/// </param>
+/// <param name="Unclassified">
+/// Whether the test step failed with nothing to measure it against - no budget, or no duration - so the
+/// failure is called neither a real one nor an overrun.
 /// </param>
 /// <param name="Warnings">Facts worth seeing that are not failures, such as a green leg near its cap.</param>
-/// <param name="TestSeconds">How long the Test step took, or null when the metadata does not say.</param>
+/// <param name="TestSeconds">How long the test step took, or null when the metadata does not say.</param>
 /// <param name="BudgetSeconds">The leg's budget, or null when no source declared one.</param>
 /// <param name="BudgetSource">Where the budget came from, so a reader can tell a run's own value from a file's.</param>
 public sealed record CiLegOutcome(
@@ -92,6 +96,7 @@ public sealed record CiLegOutcome(
     bool Success,
     IReadOnlyList<string> Errors,
     bool Overran,
+    bool Unclassified,
     IReadOnlyList<string> Warnings,
     double? TestSeconds,
     double? BudgetSeconds,
@@ -121,11 +126,14 @@ public sealed record CiLegsReport(string Branch, IReadOnlyList<CiRunReport> Runs
     /// <summary>Legs that concluded failure.</summary>
     public IReadOnlyList<CiLegOutcome> Red => [.. Legs.Where(leg => !leg.Success)];
 
-    /// <summary>Red legs whose Test step failure is at or over the budget.</summary>
+    /// <summary>Red legs whose test step failed at or over the budget.</summary>
     public IReadOnlyList<CiLegOutcome> Overran => [.. Red.Where(leg => leg.Overran)];
 
-    /// <summary>Red legs that are not explained by a budget.</summary>
-    public IReadOnlyList<CiLegOutcome> RealFailures => [.. Red.Where(leg => !leg.Overran)];
+    /// <summary>Red legs that a budget does not explain: failed short of it, or failed in a way no budget explains.</summary>
+    public IReadOnlyList<CiLegOutcome> RealFailures => [.. Red.Where(leg => !leg.Overran && !leg.Unclassified)];
+
+    /// <summary>Red legs whose test step failed with nothing to measure it against, so called neither.</summary>
+    public IReadOnlyList<CiLegOutcome> Unclassified => [.. Red.Where(leg => leg.Unclassified)];
 
     /// <summary>Whether no run read here carried the matrix at all, so none says anything about the tree.</summary>
     public bool MatrixNeverRan => Runs.Count > 0 && Runs.All(run => !run.MatrixRan);

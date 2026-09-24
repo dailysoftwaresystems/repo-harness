@@ -34,8 +34,9 @@ public sealed record HostConnectionResult
 
 /// <summary>
 /// Opens a connection to a host: reads the host's own item, refuses before connecting when that item
-/// is not safe to use, establishes that its name resolves, measures which shell answers, and measures
-/// where the programs it will be asked to run actually are.
+/// is not safe to use, asks ssh what it would do and - unless ssh reaches the host through a jump host
+/// or a command - establishes that the name ssh would look up resolves and pins the address it resolved
+/// to, measures which shell answers, and measures where the programs it will be asked to run actually are.
 /// </summary>
 /// <remarks>
 /// Separate from inspection because the two are needed apart: inspection then asks whether DssHarness
@@ -175,7 +176,7 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused(
                 HostProbes.IsMissingDistribution(uname.StandardOutput + uname.StandardError)
                     ? $"WSL has no distribution named '{item.Distribution}'"
-                    : HostProbes.Failure("the distribution did not start a program", uname));
+                    : HostProbes.Failure("the distribution did not start a program", uname, connection));
         }
 
         var (os, processor) = HostProbes.ReadUname(uname.StandardOutput);
@@ -214,13 +215,6 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused("ssh was not found on this machine");
         }
 
-        var resolution = await _addresses.ResolveAsync(item.Address, cancellationToken).ConfigureAwait(false);
-
-        if (!resolution.Resolved)
-        {
-            return HostConnectionResult.Refused(HostAddressResolver.Unresolved(resolution));
-        }
-
         var connection = new HostConnection
         {
             Host = host,
@@ -234,6 +228,30 @@ public sealed class HostConnector(
             LocalDirectory = context.Layout.MainCheckoutRoot,
         };
 
+        // What ssh would do, its own configuration read: which name it would look up, and whether it
+        // would reach the host through something else. Unsaid where ssh could not say, and ssh is then
+        // left to itself, with the name declared looked up here all the same.
+        var seen = SshSettings.Read(
+            await _hostCommands.ReadSshSettingsAsync(connection, ProbeBudget, cancellationToken).ConfigureAwait(false));
+
+        // Through a jump host or a command, the name is theirs to look up: the jump host looks it up on its
+        // side, where an address this machine found means nothing, and a command is given the name to
+        // reach as it chooses - a tunnel's client given an address in its place reaches nothing.
+        if (seen is not { Proxied: true })
+        {
+            var resolution = await _addresses.ResolveAsync(seen?.HostName ?? item.Address, cancellationToken).ConfigureAwait(false);
+
+            if (!resolution.Resolved)
+            {
+                return HostConnectionResult.Refused(HostAddressResolver.Unresolved(resolution, item.Address));
+            }
+
+            connection = connection with
+            {
+                Pin = seen is null ? null : await PinAsync(connection, seen, resolution, cancellationToken).ConfigureAwait(false),
+            };
+        }
+
         var budget = TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds) + ProbeBudget;
         var probe = await _hostCommands.ProbeShellAsync(connection, budget, cancellationToken).ConfigureAwait(false);
 
@@ -246,10 +264,13 @@ public sealed class HostConnector(
             // the reader to the server; the client is what had changed.
             var client = await SshClientAsync(cancellationToken).ConfigureAwait(false);
 
+            // echo exits 255 nowhere, so here that code is ssh's own, whatever it failed over. And no
+            // session has opened yet on this connection, so whatever ssh failed over - a key it refused
+            // among them - the host could not be reached for this command.
             return HostConnectionResult.Refused(probe switch
             {
                 { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
-                { ExitCode: HostProbes.SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
+                { ExitCode: HostProbes.SshFailed } => $"{HostProbes.CouldNotReach(HostProbes.Excerpt(probe.StandardError))} ({client})",
                 _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
             });
         }
@@ -272,6 +293,36 @@ public sealed class HostConnector(
                 .ConfigureAwait(false),
             Superuser = item.Superuser,
         };
+    }
+
+    /// <summary>
+    /// The address <paramref name="resolution"/> found, pinned for every call <paramref name="connection"/>
+    /// makes, or <see langword="null"/> where ssh is to look the name up itself: where it would dial that
+    /// address anyway, or where giving it the address would change anything else it does.
+    /// </summary>
+    /// <param name="connection">The connection, unpinned.</param>
+    /// <param name="seen">What ssh would do over it unpinned.</param>
+    /// <param name="resolution">What this machine resolved the name ssh would look up to.</param>
+    /// <param name="cancellationToken">Stops the question.</param>
+    /// <remarks>
+    /// Asked of ssh a second time, pinned, and kept only where the two answers differ in where the connection
+    /// goes and nothing else: a Match block keyed by the host, which a pin can switch on or off, shows there.
+    /// </remarks>
+    private async Task<SshPin?> PinAsync(
+        HostConnection connection,
+        SshSettings seen,
+        AddressResolution resolution,
+        CancellationToken cancellationToken)
+    {
+        if (resolution.ResolvedTo is not { } address || SshPin.For(seen, address, connection.Port) is not { } pin)
+        {
+            return null;
+        }
+
+        var pinned = SshSettings.Read(
+            await _hostCommands.ReadSshSettingsAsync(connection with { Pin = pin }, ProbeBudget, cancellationToken).ConfigureAwait(false));
+
+        return pinned is not null && seen.DifferOnlyInWhereTheyGo(pinned) ? pin : null;
     }
 
     /// <summary>

@@ -187,10 +187,10 @@ public sealed class HostSecretsStoreTests
         using var repository = new TempDirectory();
         var fixture = new Fixture(repository);
         repository.WriteFile(
-            Path.Combine(".harness-config", "wslDistros", "lane-a", ".env"),
+            Path.Combine(".harness-config", "wslDistros", "wsl-a", ".env"),
             "DISTRO=Example-Linux\nSUDO_PASSWORD=not-a-real-password\n");
 
-        var read = fixture.Store.ReadWslItem(fixture.Layout, "lane-a");
+        var read = fixture.Store.ReadWslItem(fixture.Layout, "wsl-a");
 
         Assert.NotNull(read.Item);
         Assert.Equal("Example-Linux", read.Item.Distribution);
@@ -204,10 +204,10 @@ public sealed class HostSecretsStoreTests
         using var repository = new TempDirectory();
         var fixture = new Fixture(repository);
         repository.WriteFile(
-            Path.Combine(".harness-config", "wslDistros", "lane-a", ".env"),
+            Path.Combine(".harness-config", "wslDistros", "wsl-a", ".env"),
             "DISTRO=Example-Linux\nSUDO_PASSWORD=not-a-real-password\n");
 
-        var read = fixture.Store.ReadWslItem(fixture.Layout, "lane-a");
+        var read = fixture.Store.ReadWslItem(fixture.Layout, "wsl-a");
 
         // A record prints its members, and an interpolated message and a debugger both call ToString,
         // so the wrapper is what keeps a credential out of every one of them.
@@ -220,9 +220,9 @@ public sealed class HostSecretsStoreTests
     {
         using var repository = new TempDirectory();
         var fixture = new Fixture(repository);
-        repository.WriteFile(Path.Combine(".harness-config", "wslDistros", "lane-a", ".env"), "SUDO_PASSWORD=x\n");
+        repository.WriteFile(Path.Combine(".harness-config", "wslDistros", "wsl-a", ".env"), "SUDO_PASSWORD=x\n");
 
-        var read = fixture.Store.ReadWslItem(fixture.Layout, "lane-a");
+        var read = fixture.Store.ReadWslItem(fixture.Layout, "wsl-a");
 
         Assert.Null(read.Item);
         Assert.Contains("declares no 'DISTRO'", read.Problem, StringComparison.Ordinal);

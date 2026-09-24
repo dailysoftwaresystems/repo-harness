@@ -120,14 +120,65 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
     }
 
     public IEnumerable<string> EnumerateFiles(string path, bool recursive)
-        => Walk(path, recursive, (ref FileSystemEntry entry) => !entry.IsDirectory);
+        => Walk(path, recursive, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath());
 
-    public IEnumerable<string> EnumerateDirectoryLinks(string path)
-        => Walk(path, recursive: true, (ref FileSystemEntry entry) => entry.IsDirectory && IsLink(ref entry));
+    public IEnumerable<WrittenFile> EnumerateWrittenFiles(string path)
+        => Dated(Walk(
+            path,
+            recursive: true,
+            (ref FileSystemEntry entry) => !entry.IsDirectory,
+            (ref FileSystemEntry entry) => new WrittenFile(entry.ToSpecifiedFullPath(), entry.LastWriteTimeUtc.UtcDateTime)));
 
     /// <summary>
-    /// The entries under <paramref name="path"/> that <paramref name="include"/> accepts, never
-    /// walking a directory reached through a link.
+    /// <paramref name="walked"/>, each dated by the walk's own reading of its time where the walk had one,
+    /// and by asking it again directly where it had none; a file gone since the walk listed it is left out.
+    /// </summary>
+    /// <param name="walked">The files a walk listed, with the times it read for them.</param>
+    /// <remarks>
+    /// The walk's own reading costs nothing more on Windows. Where the runtime could not stat an entry it
+    /// answers 1601, and the file is asked again directly. On Linux and macOS a walk lists a directory
+    /// before it stats what is in it, so a file something else removes in between - a compiler's
+    /// temporary, a test's scratch file - is one it could not stat, and asked again it is not there. It is
+    /// no longer in the directory at all, and the walk describes what is: raised, one file deleted at the
+    /// wrong moment left a build nothing to date its changes against. One that is there, and whose time
+    /// still cannot be read, raises what kept it.
+    /// </remarks>
+    internal IEnumerable<WrittenFile> Dated(IEnumerable<WrittenFile> walked)
+    {
+        ArgumentNullException.ThrowIfNull(walked);
+
+        foreach (var file in walked)
+        {
+            if (file.LastWriteTimeUtc != Unstatted)
+            {
+                yield return file;
+                continue;
+            }
+
+            DateTime written;
+
+            try
+            {
+                written = LastWriteTimeUtc(file.Path);
+            }
+            catch (FileNotFoundException)
+            {
+                continue;
+            }
+
+            yield return file with { LastWriteTimeUtc = written };
+        }
+    }
+
+    public IEnumerable<string> EnumerateDirectoryLinks(string path)
+        => Walk(path, recursive: true, (ref FileSystemEntry entry) => entry.IsDirectory && IsLink(ref entry), (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath());
+
+    /// <summary>The time the runtime gives an entry it could not stat.</summary>
+    private static readonly DateTime Unstatted = DateTime.FromFileTimeUtc(0);
+
+    /// <summary>
+    /// The entries under <paramref name="path"/> that <paramref name="include"/> accepts, as
+    /// <paramref name="transform"/> reads each, never walking a directory reached through a link.
     /// </summary>
     /// <remarks>
     /// What the plain overload did - nothing skipped, and a directory that cannot be read said so -
@@ -136,13 +187,14 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
     /// which a walk follows until the stack goes. One walk for the files and for the links it passed
     /// over, so the links a caller is told about are exactly the directories it did not see.
     /// </remarks>
-    private static FileSystemEnumerable<string> Walk(
+    private static FileSystemEnumerable<T> Walk<T>(
         string path,
         bool recursive,
-        FileSystemEnumerable<string>.FindPredicate include)
+        FileSystemEnumerable<T>.FindPredicate include,
+        FileSystemEnumerable<T>.FindTransform transform)
         => new(
             path,
-            (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath(),
+            transform,
             new EnumerationOptions
             {
                 RecurseSubdirectories = recursive,
@@ -191,13 +243,22 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
 
         var info = new FileInfo(path);
 
-        // Refresh() raises what Exists and LastWriteTimeUtc would swallow. Asked directly, the
-        // runtime answers 1601-01-01 for a file it could not stat, and that reads as a real time.
+        // Refreshed, so it answers for now; Refresh() itself raises nothing. A path with nothing at it, a
+        // directory, and a file the runtime could not look up all read as no file there. Asked for its
+        // time, the runtime then raises what kept it from looking the last up - measured on Linux, a file
+        // in a directory that can be listed but not searched raised UnauthorizedAccessException - and
+        // answers for the others: 1601-01-01 for nothing, which reads as a real time, and a directory's
+        // own time, which is no file's. Those two are raised here as not found.
         info.Refresh();
 
-        return info.Exists
-            ? info.LastWriteTimeUtc
-            : throw new FileNotFoundException($"'{path}' could not be asked when it was last written.", path);
+        if (info.Exists)
+        {
+            return info.LastWriteTimeUtc;
+        }
+
+        _ = info.LastWriteTimeUtc;
+
+        throw new FileNotFoundException($"'{path}' is not there to be asked when it was last written.", path);
     }
 
     public Stream OpenRead(string path)

@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using RepoHarness.Core.Anchors;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Tests;
@@ -44,6 +46,81 @@ public sealed class AnchorCellFileCliTests
         using var json = JsonDocument.Parse(read.StandardOutput);
         var anchor = Assert.Single(json.RootElement.EnumerateArray());
         Assert.Equal(trigger, anchor.GetProperty("trigger").GetString());
+    }
+
+    /// <summary>
+    /// A cell read from a file keeps every character of every line - a run, a tab, a no-break space - and
+    /// only its line breaks go: each with the whitespace either side of it, the file's last among them.
+    /// </summary>
+    [Fact]
+    public async Task ACellFile_IsStoredAsWritten_ButForItsLineBreaks()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await PrepareAsync(temp);
+
+        var file = temp.Combine("trigger.txt");
+        await File.WriteAllTextAsync(file, "inputs  : held still\t4  +  38\u00a0\u00a0kept\n  and the next line\n", new UTF8Encoding(false), cancellationToken);
+
+        var written = await CliRunner.RunAsync(
+            ["write-anchor", One, "--priority", "P1", "--trigger-file", file, "-C", temp.Path],
+            cancellationToken);
+
+        Assert.Equal(HarnessExit.Success, written.ExitCode);
+
+        var read = await CliRunner.RunAsync(["read-anchor", One, "--json", "-C", temp.Path], cancellationToken);
+
+        using var json = JsonDocument.Parse(read.StandardOutput);
+        var anchor = Assert.Single(json.RootElement.EnumerateArray());
+        Assert.Equal("inputs  : held still\t4  +  38\u00a0\u00a0kept and the next line", anchor.GetProperty("trigger").GetString());
+    }
+
+    /// <summary>
+    /// A cell file that is there and cannot be read - another program holds it, or this user may not read it - is
+    /// refused by name, as one that is not there is: it is the file the option named, and nothing wrong with the tool.
+    /// </summary>
+    [Fact]
+    public void ACellFileThatCannotBeRead_IsRefusedByName()
+    {
+        using var temp = new TempDirectory();
+        var file = temp.Combine("trigger.txt");
+        File.WriteAllText(file, "held");
+
+        var refusal = Assert.Throws<HarnessException>(() => AnchorCellInputs.Resolve(
+            new HeldByAnother(new HarnessFactory().FileSystem),
+            new AnchorCellInput("Trigger", "--trigger", "--trigger-file", Inline: null, File: file)));
+
+        Assert.Equal(HarnessExit.UsageError, refusal.ExitCode);
+        Assert.StartsWith($"--trigger-file names '{file}', which could not be read: ", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A cell file that is not UTF-8 is refused, naming the file and the byte, rather than read leniently:
+    /// a Latin-1 é was stored as U+FFFD, and the character its author wrote was gone with nothing said. A
+    /// byte-order mark is refused rather than dropped: kept, it would open the cell with an invisible character.
+    /// </summary>
+    [Theory]
+    [InlineData(new byte[] { 0x63, 0x61, 0x66, 0xE9, 0x20, 0x74 }, "is not UTF-8: the byte at offset 3 (0xE9) does not form a UTF-8 character")]
+    [InlineData(new byte[] { 0xEF, 0xBB, 0xBF, 0x63, 0x61, 0x66, 0xC3, 0xA9 }, "opens with a byte-order mark")]
+    public async Task ACellFileThatIsNotPlainUtf8_IsRefused_NamingWhatIsWrong(byte[] bytes, string expected)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await PrepareAsync(temp);
+
+        var file = temp.Combine("trigger.txt");
+        await File.WriteAllBytesAsync(file, bytes, cancellationToken);
+
+        var result = await CliRunner.RunAsync(
+            ["write-anchor", One, "--priority", "P1", "--trigger-file", file, "-C", temp.Path],
+            cancellationToken);
+
+        Assert.Equal(HarnessExit.UsageError, result.ExitCode);
+        Assert.Contains($"--trigger-file names '{file}', which", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains(expected, result.StandardError, StringComparison.Ordinal);
+
+        var read = await CliRunner.RunAsync(["read-anchor", One, "-C", temp.Path], cancellationToken);
+        Assert.NotEqual(HarnessExit.Success, read.ExitCode);
     }
 
     [Fact]
@@ -159,4 +236,11 @@ public sealed class AnchorCellFileCliTests
 
     private static async Task PrepareAsync(TempDirectory temp)
         => await new HarnessFactory().InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken);
+
+    /// <summary>A disk on which every file is held open by another program.</summary>
+    private sealed class HeldByAnother(IFileSystem inner) : PassThroughFileSystem(inner)
+    {
+        public override Stream OpenRead(string path)
+            => throw new IOException($"The process cannot access the file '{path}' because it is being used by another process.");
+    }
 }

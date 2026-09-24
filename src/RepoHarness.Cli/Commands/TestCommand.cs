@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Testing;
@@ -27,6 +28,12 @@ internal static class TestCommand
     private static readonly Option<string[]> ExcludeOption = new("--exclude")
     {
         Description = "Skip tests the invocation's excludeArg excludes with these values.",
+        AllowMultipleArgumentsPerToken = true,
+    };
+
+    private static readonly Option<string[]> LabelOption = new("--label")
+    {
+        Description = "Run only tests the invocation's labelArg selects with these values, such as a ctest label.",
         AllowMultipleArgumentsPerToken = true,
     };
 
@@ -64,6 +71,7 @@ internal static class TestCommand
         command.Options.Add(LegsOption);
         command.Options.Add(FilterOption);
         command.Options.Add(ExcludeOption);
+        command.Options.Add(LabelOption);
         command.Options.Add(JsonOption);
         command.Options.Add(TimeOption);
         command.Options.Add(ForceLockOption);
@@ -82,9 +90,14 @@ internal static class TestCommand
 
             var builds = context.Get<IBuildService>();
             var tests = context.Get<ITestService>();
+
+            // Read once, for the legs run here and the hosts given theirs alike: which tests run is one
+            // choice, and a host told something else would report another suite under the same leg.
             var filter = arguments.GetValue(FilterOption);
             var excludes = arguments.GetValue(ExcludeOption) ?? [];
+            var labels = arguments.GetValue(LabelOption) ?? [];
             var skipBuild = arguments.GetValue(SkipBuildOption);
+            var time = arguments.GetValue(TimeOption);
 
             return await context.Get<LegRunService>()
                 .RunAsync(
@@ -95,58 +108,19 @@ internal static class TestCommand
                         arguments.GetValue(ForceLockOption),
                         arguments.GetValue(JsonOption),
                         arguments.GetValue(UseStagedOption),
-                        arguments.GetValue(TimeOption),
+                        time,
                         arguments.GetValue(DispatchOptions.Here),
-                        RemoteArguments(arguments))
+                        TestService.RemoteArguments(filter, excludes, labels, skipBuild, time))
                     {
                         // Built first unless told not to, and tested either way.
                         Workload = new LegWorkload(Build: !skipBuild, Test: true, []),
                     },
-                    (work, token) => RunLegAsync(builds, tests, context.Get<CMakeToolchainReader>(), work, filter, excludes, skipBuild, token),
+                    (work, token) => RunLegAsync(builds, tests, context.Get<CMakeToolchainReader>(), work, filter, excludes, labels, skipBuild, token),
                     cancellationToken)
                 .ConfigureAwait(false);
         }, JsonOption));
 
         return command;
-    }
-
-    /// <summary>
-    /// The options a host running one of this run's legs is given, so it runs the command this
-    /// machine was asked to run rather than a bare one.
-    /// </summary>
-    /// <remarks>
-    /// A filter and an exclusion decide which tests run, so a host that did not get them would run
-    /// a different suite and report its result under the same leg's name. <c>--legs</c> and
-    /// <c>--json</c> are the dispatch's own; the lock and the staging are this machine's decisions
-    /// about its own state.
-    /// </remarks>
-    private static IReadOnlyList<string> RemoteArguments(System.CommandLine.ParseResult arguments)
-    {
-        var remote = new List<string>();
-
-        if (arguments.GetValue(FilterOption) is { Length: > 0 } filter)
-        {
-            remote.Add("--filter");
-            remote.Add(filter);
-        }
-
-        foreach (var exclude in arguments.GetValue(ExcludeOption) ?? [])
-        {
-            remote.Add("--exclude");
-            remote.Add(exclude);
-        }
-
-        if (arguments.GetValue(SkipBuildOption))
-        {
-            remote.Add("--no-build");
-        }
-
-        if (arguments.GetValue(TimeOption))
-        {
-            remote.Add("--time");
-        }
-
-        return remote;
     }
 
     /// <summary>
@@ -161,6 +135,7 @@ internal static class TestCommand
         LegWork work,
         string? filter,
         IReadOnlyList<string> excludes,
+        IReadOnlyList<string> labels,
         bool skipBuild,
         CancellationToken cancellationToken)
     {
@@ -168,9 +143,44 @@ internal static class TestCommand
         var config = work.Context.Config;
         var started = Stopwatch.GetTimestamp();
 
+        // Derived once from the placed leg, the same way the runner derives it.
+        var (testProduct, testProductProblem) = leg.ProductFor(leg.BuildDirectory);
+
+        var request = new TestRequest
+        {
+            Leg = leg.Name,
+            ProgramDirectories = leg.Host.ProgramDirectories,
+            TreeRoot = leg.TreeRoot,
+            BuildDirectory = leg.BuildDirectory,
+            RunDirectory = work.RunDirectory,
+            LegSettings = leg.Leg,
+            Project = leg.Project,
+            PlatformKey = leg.Host.Os ?? string.Empty,
+            Identity = leg.IdentityFor(work.RunId.Value),
+            Product = testProduct,
+            ProductProblem = testProductProblem,
+            HostTestCores = leg.HostSettings.TestCores,
+            HostEnvironment = leg.Environment,
+            Filter = filter,
+            Excludes = excludes,
+
+            // The host the dispatching machine named, where this machine runs a leg for another: a host
+            // reached through a transport runs it in a copy of its own.
+            Remote = leg.Named.Kind != HostKind.Local,
+            Labels = labels,
+            Emulated = leg.Emulated,
+            Time = work.Time,
+        };
+
+        // Refused before the build rather than after it: everything the command is made from is known now.
+        tests.Check(config, request);
+
         // The compilers the binaries under test were built with: this build's, or - where the leg
         // tests a build it does not make - what its directory was last configured with.
         IReadOnlyList<CompilerFact> compilers;
+
+        // What the build says beyond its verdict, which the leg's line carries as the build's own does.
+        IReadOnlyList<string> built = [];
 
         if (!skipBuild)
         {
@@ -179,6 +189,7 @@ internal static class TestCommand
                 .ConfigureAwait(false);
 
             compilers = build.Compilers;
+            built = build.Notes;
 
             if (build.Verdict.Verdict != LegVerdict.Passed)
             {
@@ -189,7 +200,9 @@ internal static class TestCommand
                     Detail = build.Verdict.Detail,
                     Duration = Stopwatch.GetElapsedTime(started),
                     Emulated = leg.Emulated,
+                    TimingNotes = built,
                     Compilers = compilers,
+                    LogTail = build.Tail,
                 };
             }
         }
@@ -215,37 +228,15 @@ internal static class TestCommand
             }
         }
 
-        // Derived once from the placed leg, the same way the runner derives it.
-        var (testProduct, testProductProblem) = leg.ProductFor(leg.BuildDirectory);
-
-        var result = await tests
-            .RunAsync(
-                config,
-                new TestRequest
-                {
-                    Leg = leg.Name,
-                    ProgramDirectories = leg.Host.ProgramDirectories,
-                    TreeRoot = leg.TreeRoot,
-                    BuildDirectory = leg.BuildDirectory,
-                    RunDirectory = work.RunDirectory,
-                    LegSettings = leg.Leg,
-                    Project = leg.Project,
-                    PlatformKey = leg.Host.Os ?? string.Empty,
-                    Identity = leg.IdentityFor(work.RunId.Value),
-                    Product = testProduct,
-                    ProductProblem = testProductProblem,
-                    HostTestCores = leg.HostSettings.TestCores,
-                    HostEnvironment = leg.Environment,
-                    Filter = filter,
-                    Excludes = excludes,
-                    Emulated = leg.Emulated,
-                    Time = work.Time,
-                },
-                cancellationToken)
-            .ConfigureAwait(false);
+        var result = await tests.RunAsync(config, request, cancellationToken).ConfigureAwait(false);
 
         // The leg's whole duration, not the runner's: the build, the fingerprints and the sampling
         // are what the ledger reports as overhead, and leaving them out would hide them.
-        return result.Entry with { Duration = Stopwatch.GetElapsedTime(started), Compilers = compilers };
+        return result.Entry with
+        {
+            Duration = Stopwatch.GetElapsedTime(started),
+            TimingNotes = [.. built, .. result.Entry.TimingNotes],
+            Compilers = compilers,
+        };
     }
 }

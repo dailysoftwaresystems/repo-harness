@@ -54,8 +54,8 @@ public sealed class BuildVariantTests
         var variant = new VariantKey("x86_64", "gcc", "debug", null);
 
         PathAssert.Same(
-            Path.Combine("/repo/.worktrees/lane", "build", "x86_64-gcc-debug"),
-            variant.DirectoryUnder("/repo/.worktrees/lane"));
+            Path.Combine("/repo/.worktrees/feature", "build", "x86_64-gcc-debug"),
+            variant.DirectoryUnder("/repo/.worktrees/feature"));
     }
 
     [Fact]

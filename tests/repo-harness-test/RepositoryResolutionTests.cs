@@ -122,7 +122,7 @@ public sealed class HarnessContextLoaderTests
 
     /// <summary>
     /// config.json is tracked, so a worktree has its own and a branch may legitimately change it.
-    /// Read from the main checkout — which is what this did — a lane could not run anything it had
+    /// Read from the main checkout — which is what this did — a worktree could not run anything it had
     /// just written, and nothing said so. Measured by a consumer: a worktree's config replaced with
     /// text that is not JSON left the survey answering normally, from inside the worktree and with
     /// an explicit --directory alike.

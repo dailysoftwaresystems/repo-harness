@@ -288,6 +288,36 @@ public sealed class ConfigStoreTests
         Assert.Contains("disables the path budget", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// How check-ci-legs reads a workflow is held when the file is read: a pattern that does not compile, or
+    /// lacks the group it is read by, a step named by nothing, and a workflow pattern naming no leg, which
+    /// would find the same budget for every one.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "ci": { "legJobPattern": "unit (" } }""", "ci.legJobPattern is not a valid regular expression")]
+    [InlineData("""{ "ci": { "legJobPattern": "^unit \\((?<name>[^)]+)\\)" } }""", "ci.legJobPattern has no named group 'leg' to capture the leg's name")]
+    [InlineData("""{ "ci": { "buildStep": " " } }""", "ci.buildStep is given empty, or as spaces alone")]
+    [InlineData("""{ "ci": { "testStep": "" } }""", "ci.testStep is given empty, or as spaces alone")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "minutes: (?<budget>[0-9]+)" } }""", "ci.workflowBudgetPattern has no {leg}")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "{leg}: (?<minutes>[0-9]+)" } }""", "ci.workflowBudgetPattern has no named group 'budget'")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "{leg}: (?<budget>[0-9]+" } }""", "ci.workflowBudgetPattern is not a valid regular expression")]
+    [InlineData("""{ "ci": { "legBudgetMinutes": -1 } }""", "ci.legBudgetMinutes cannot be negative, found -1")]
+    public void Load_RejectsCiConventionsThatCannotBeRead(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_AcceptsCiConventions_ThatCanBeRead()
+    {
+        var config = LoadValid("""{ "ci": { "legJobPattern": "^unit \\((?<leg>[^,)]+)", "buildStep": "Build", "testStep": "Test", "workflowBudgetPattern": "leg: {leg}, minutes: (?<budget>[0-9]+)" } }""");
+
+        Assert.Equal("^unit \\((?<leg>[^,)]+)", config.Ci.LegJobPattern);
+        Assert.Equal("leg: {leg}, minutes: (?<budget>[0-9]+)", config.Ci.WorkflowBudgetPattern);
+    }
+
     [Fact]
     public void Load_RejectsAPathLimitBelowOne()
     {
@@ -508,6 +538,38 @@ public sealed class ConfigStoreTests
         var exception = LoadInvalid(json);
 
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A worktrees root or a sync path spelled with a '.' segment or a doubled separator inside it is
+    /// compared as written - by sync's lists, and by init's ignore rule for the root - and so would
+    /// withhold and ignore nothing it names: refused, with the one spelling to write.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "worktrees": { "root": ".harness-config/./worktrees" } }""", "worktrees.root names '.harness-config/./worktrees'", ".harness-config/worktrees")]
+    [InlineData("""{ "sync": { "neverTransfer": ["build//x"] } }""", "sync.neverTransfer names 'build//x'", "build/x")]
+    [InlineData("""{ "sync": { "exclude": ["docs/./old"] } }""", "sync.exclude names 'docs/./old'", "docs/old")]
+    public void Load_RejectsAPathSpelledTwoWays_NamingTheOneSpelling(string json, string named, string spelling)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(named, exception.Message, StringComparison.Ordinal);
+        Assert.Contains($"write '{spelling}'", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A worktrees root that is the tree itself is refused as that, and only as that: it is no path
+    /// spelled two ways, and a line saying to write '' would send the reader nowhere.
+    /// </summary>
+    [Theory]
+    [InlineData(".")]
+    [InlineData("./")]
+    public void Load_RejectsAWorktreesRootThatIsTheTreeItself_AsThatAlone(string root)
+    {
+        var exception = LoadInvalid($$"""{ "worktrees": { "root": "{{root}}" } }""");
+
+        Assert.Contains("worktrees.root cannot be the repository root itself", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("doubled separator", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -752,12 +814,34 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresArgs": ["-j", "8"] }""", "never uses {cores}")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresEnv": [""] }""", "coresEnv contains a blank variable name")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "testSet": " " }""", "testSet is blank; leave it out for the project's shared test set")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state", " "] }""", "remoteExcludes cannot reach the runner on windows, linux, macos: An exclusion was given empty, or as spaces alone")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "remoteExcludes": ["git-state"] }""", "remoteExcludes cannot reach the runner on windows, linux, macos: An exclusion was given, but the test settings declare no excludeArg")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "remoteExcludes": ["git-state"] }""", "with no excludeJoin it would take them apart, never leaving out what each names; declare \"excludeJoin\": \"|\"")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["--rerun-failed"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""", "run ctest with --rerun-failed")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["-U", "ON"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""", "run ctest with --union")]
     public void Load_RejectsATestInvocationThatCannotWork(string invocation, string expected)
     {
         var exception = LoadInvalid(
             $$"""{ "projects": [ { "name": "main", "type": "cmake", "test": { "all": {{invocation}} } } ] }""");
 
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// remoteExcludes that can reach the runner as declared load: joined for ctest, by -E beside a union in
+    /// the args, and beside a test preset, whose files are read as the leg starts, not here.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state", "gpu"] }""")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["-U", "ON"], "excludeArg": "-E", "excludeJoin": "|", "remoteExcludes": ["git_state"] }""")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["--preset", "ci"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""")]
+    [InlineData("""{ "runner": "dart", "successPattern": "ok", "excludeArg": "--exclude-tags", "remoteExcludes": ["git-state", "gpu"] }""")]
+    public void Load_AcceptsRemoteExcludes_ThatCanReachTheRunnerAsDeclared(string invocation)
+    {
+        var config = LoadValid(
+            $$"""{ "projects": [ { "name": "main", "type": "cmake", "test": { "all": {{invocation}} } } ] }""");
+
+        Assert.NotEmpty(Assert.Single(config.Projects).Test!.All!.RemoteExcludes!);
     }
 
     [Fact]

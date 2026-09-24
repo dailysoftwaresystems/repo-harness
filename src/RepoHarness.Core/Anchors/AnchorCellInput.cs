@@ -1,3 +1,4 @@
+using System.Text;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Results;
 
@@ -34,7 +35,7 @@ public static class AnchorCellInputs
     /// <param name="input">The two options for one cell, as they were given.</param>
     /// <exception cref="HarnessException">
     /// Both options were given, so which text the row should carry is not decided; or the file named
-    /// is not there.
+    /// is not there, cannot be read, is not UTF-8, or opens with a byte-order mark.
     /// </exception>
     public static string? Resolve(IFileSystem fileSystem, AnchorCellInput input)
     {
@@ -62,21 +63,64 @@ public static class AnchorCellInputs
                 $"{input.FileOption} names '{input.File}', which is not a file, so the {input.Cell} cell has no text.");
         }
 
-        return TrimOneLineEnding(fileSystem.ReadAllText(input.File));
+        return Decode(fileSystem, input.File, input);
     }
 
+    /// <summary>A decoder that raises on bytes that do not form a UTF-8 character, rather than writing U+FFFD in their place.</summary>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     /// <summary>
-    /// Drops the single line ending a file ends with, and nothing else. Every editor writes one and no
-    /// author means it as part of the value; dropping more would quietly eat a deliberate blank line
-    /// at the end of a long cell.
+    /// The file's text, read as UTF-8 and nothing else: a file that is not, or that opens with a byte-order
+    /// mark, is refused by name rather than cleaned. The line ending a file ends with is the value's own
+    /// last line break, and goes as every line break does.
     /// </summary>
-    private static string TrimOneLineEnding(string text)
+    /// <remarks>
+    /// Read leniently, a Latin-1 byte was stored as U+FFFD, and the character its author wrote was gone with
+    /// nothing said; a byte-order mark was dropped, or kept as an invisible first character of the cell,
+    /// depending on the reader.
+    /// </remarks>
+    private static string Decode(IFileSystem fileSystem, string path, AnchorCellInput input)
     {
-        if (text.EndsWith("\r\n", StringComparison.Ordinal))
+        byte[] bytes;
+
+        try
         {
-            return text[..^2];
+            using var stream = fileSystem.OpenRead(path);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            bytes = buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Named, as a file that is not there is: one another program holds, one this user may not read, or one
+            // removed since it was found are each the file the option named, and nothing wrong with this tool.
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"{input.FileOption} names '{path}', which could not be read: {ex.Message.TrimEnd('.')}. The {input.Cell} "
+                + "cell has no text until it can be.",
+                ex);
         }
 
-        return text.Length > 0 && (text[^1] == '\n' || text[^1] == '\r') ? text[..^1] : text;
+        if (bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble))
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"{input.FileOption} names '{path}', which opens with a byte-order mark, so the {input.Cell} cell would "
+                + "open with an invisible character. Save the file as UTF-8 without one.");
+        }
+
+        try
+        {
+            return StrictUtf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"{input.FileOption} names '{path}', which is not UTF-8: the byte at offset {ex.Index} "
+                + $"(0x{ex.BytesUnknown?.FirstOrDefault() ?? 0:X2}) does not form a UTF-8 character, so the {input.Cell} cell "
+                + "cannot be read as written. Save the file as UTF-8.",
+                ex);
+        }
     }
 }

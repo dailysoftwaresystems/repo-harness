@@ -253,7 +253,7 @@ public sealed class LegRunService(
             () =>
             {
                 _fileSystem.CreateDirectory(layout.RunsDirectory);
-                _fileSystem.WriteAllTextAtomic(ignore, HarnessLayout.RunsIgnoreRule);
+                _fileSystem.WriteAllTextAtomic(ignore, HarnessLayout.SelfIgnoreRule);
             });
     }
 
@@ -261,9 +261,10 @@ public sealed class LegRunService(
     /// Syncs one host's tree, once, however many legs share it.
     /// </summary>
     /// <remarks>
-    /// Legs on one host share one tree. If each synced it they would race over the same files, and
-    /// the leg that lost would build sources another leg was halfway through replacing. The tree is
-    /// taken exclusively while it is rewritten, and shared afterwards while the variants build.
+    /// Legs of one tree on one host share its copy there. If each synced it they would race over the
+    /// same files, and the leg that lost would build sources another leg was halfway through
+    /// replacing. The copy is taken exclusively while it is rewritten, and shared afterwards while
+    /// the variants build.
     /// </remarks>
     private async Task SyncTreeAsync(
         HarnessContext context,
@@ -450,7 +451,6 @@ public sealed class LegRunService(
                     .RunAsync(
                         commandName,
                         leg,
-                        leg.HostTreeRoot,
                         request.RemoteArguments ?? [],
                         cancellationToken)
                     .ConfigureAwait(false);

@@ -418,7 +418,7 @@ public sealed class ToolProvisionService(
         if (!install.Succeeded)
         {
             return (
-                new ToolOutcome(Name, ToolState.Failed, null, HostProbes.Failure($"installing the {needed} SDK there failed", install)),
+                new ToolOutcome(Name, ToolState.Failed, null, HostProbes.Failure($"installing the {needed} SDK there failed", install, connection)),
                 connection);
         }
 
@@ -682,7 +682,7 @@ public sealed class ToolProvisionService(
         return result.Succeeded
             ? null
             : new ToolOutcome(tool.Name, ToolState.Failed, null,
-                on.Superuser.Hide(HostProbes.Failure($"{(update ? "updating" : "installing")} '{tool.Name}' there failed", result)));
+                on.Superuser.Hide(HostProbes.Failure($"{(update ? "updating" : "installing")} '{tool.Name}' there failed", result, connection)));
     }
 
     /// <summary>Reads a tool's version the way its own configuration says to read it.</summary>
@@ -702,7 +702,7 @@ public sealed class ToolProvisionService(
 
         if (!result.Succeeded)
         {
-            return (null, HostProbes.Failure($"'{tool.Name}' would not report its version there", result));
+            return (null, HostProbes.Failure($"'{tool.Name}' would not report its version there", result, connection));
         }
 
         var text = result.StandardOutput.Length > 0 ? result.StandardOutput : result.StandardError;
@@ -1139,7 +1139,8 @@ public sealed class ToolProvisionService(
             {
                 _settled = Hide(HostProbes.Failure(
                     $"it has to be installed by a superuser, and checking the password typed for {host} never finished",
-                    answer));
+                    answer,
+                    connection));
             }
 
             return (false, _settled);

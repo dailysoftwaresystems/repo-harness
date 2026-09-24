@@ -80,7 +80,7 @@ public sealed class HarnessContextLoader(
         // Read from the tree being acted on, which for a worktree is that worktree. config.json
         // is tracked, so a worktree has its own and a branch may legitimately change it: a leg it
         // adds, a runner it declares, a project it renames. Read from the main checkout instead —
-        // which is what this did — a lane could not run anything it had just written, and nothing
+        // which is what this did — a worktree could not run anything it had just written, and nothing
         // said so: the tree's own file was read by nobody and no message named the file that was.
         //
         // State stays where it was. Locks and connection data are gitignored and shared, so they

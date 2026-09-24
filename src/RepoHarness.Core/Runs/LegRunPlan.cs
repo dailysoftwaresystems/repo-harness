@@ -47,10 +47,10 @@ public sealed record PlacedLeg(
 {
     /// <summary>The host and tree this leg shares a sync with, so a tree is synced once, not once per leg.</summary>
     /// <remarks>
-    /// Keyed by the tree on the host, never by the tree here. Two legs carrying two different
-    /// worktrees to one host write into one copy: keyed by their sources they look like two trees,
-    /// are synced twice one over the other, and the leg that loses builds sources the other was
-    /// halfway through replacing.
+    /// Keyed by the tree on the host, never by the tree here. Each tree has a copy of its own on a
+    /// host, but two worktrees kept under one name would write into one: keyed by their sources they
+    /// would look like two trees, be synced twice one over the other, and the leg that lost would
+    /// build sources the other was halfway through replacing.
     /// </remarks>
     public string TreeKey => CompositeKey.Of(Host.Host.ToString(), HostTreeRoot);
 
@@ -271,7 +271,7 @@ public static class LegRunPlan
                 continue;
             }
 
-            placed.Add(Place(context, placement.Leg, placement.Host, report.Here));
+            placed.Add(Place(context, placement.Leg, placement.Host, report.Here, platform.PathComparison));
         }
 
         RefuseSharedBuildDirectories(placed, platform);
@@ -302,7 +302,7 @@ public static class LegRunPlan
             [.. skipped.Select(entry => $"{entry.Leg}: {Verdicts.Display(entry.Verdict)}: {entry.Detail}")]);
     }
 
-    private static PlacedLeg Place(HarnessContext context, SelectedLeg selected, HostReport host, HostId? here)
+    private static PlacedLeg Place(HarnessContext context, SelectedLeg selected, HostReport host, HostId? here, StringComparison comparison)
     {
         var config = context.Config;
         var leg = selected.Leg;
@@ -314,18 +314,21 @@ public static class LegRunPlan
         var variant = VariantKey.For(config, leg, host.Os ?? string.Empty);
 
         // A leg naming a worktree acts on that tree; every path below derives from it, which is what
-        // keeps a worktree's build output out of the main checkout's build directory.
-        var treeRoot = leg.Worktree is { Length: > 0 } worktree
+        // keeps a worktree's build output out of the main checkout's build directory. On a host a leg
+        // was sent to, its tree is the copy it was sent to, which is that worktree's own: the worktree
+        // it names is on the machine that sent it, and nothing in the copy is at that path.
+        var treeRoot = here is null && leg.Worktree is { Length: > 0 } worktree
             ? context.Layout.WorktreePathUnder(config.Worktrees.Root, worktree)
             : context.Layout.RepositoryRoot;
 
-        // Where the work actually happens. A leg on another machine works in that machine's copy,
-        // and describing it with a path from this one would key its lock, its sync and its build
-        // directory by a directory the work never touches. Resolved here rather than at the moment
-        // of the sync, so a host that declares no repositoryPath is refused before anything starts.
+        // Where the work actually happens. A leg on another machine works in that machine's copy of its
+        // tree - the main checkout's, or a worktree's own beside it - and describing it with a path from
+        // this one would key its lock, its sync and its build directory by a directory the work never
+        // touches. Resolved here rather than at the moment of the sync, so a host that declares no
+        // repositoryPath is refused before anything starts.
         var hostTreeRoot = host.Host.Kind == HostKind.Local
             ? treeRoot
-            : SyncService.RepositoryPathOf(config, host);
+            : HostCopies.Of(config, host.Host, context.Layout, treeRoot, comparison);
 
         // Read under the name the reader knows the host by. A host running a leg another machine
         // dispatched to it is 'local' to itself, and 'local' in the configuration the two share is
@@ -353,11 +356,12 @@ public static class LegRunPlan
     /// Refuses two legs that would carry different trees into one copy on one host.
     /// </summary>
     /// <remarks>
-    /// A host keeps one copy, at the path it declares. Two legs naming two different worktrees on
-    /// that host both sync into it, so the second overwrites the first and whichever leg runs
-    /// second measures a tree the other one put there. Caught here because after the sync there is
-    /// nothing left to notice: both legs find exactly the tree they asked for, one of them just
-    /// finds it some time after it stopped being true.
+    /// Each tree has a copy of its own on a host, kept under its directory's name, so two trees share
+    /// one only where two worktrees are kept under one name - two directories called 'feature', say.
+    /// Both would sync into it, the second over the first, and whichever leg ran second would measure
+    /// a tree the other one put there. Caught here because after the sync there is nothing left to
+    /// notice: both legs find exactly the tree they asked for, one of them just finds it some time
+    /// after it stopped being true.
     /// </remarks>
     private static void RefuseSharedHostCopies(List<PlacedLeg> placed, IHostPlatform platform)
     {
@@ -383,7 +387,7 @@ public static class LegRunPlan
         throw new HarnessException(
             HarnessExit.Refused,
             $"Selected legs disagree about what a host's copy should hold: {string.Join("; ", contested)}. "
-            + "Nothing was run. Give them one worktree, or run them separately.");
+            + "Nothing was run. Rename one of the worktrees, or run them separately.");
     }
 
     /// <summary>

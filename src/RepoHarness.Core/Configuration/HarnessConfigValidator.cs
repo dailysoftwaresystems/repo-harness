@@ -6,6 +6,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
+using RepoHarness.Core.Testing;
 using RepoHarness.Core.Tools;
 using RepoHarness.Core.Worktrees;
 
@@ -156,6 +157,13 @@ public static partial class HarnessConfigValidator
         // sibling of the tree it came from.
         RequireRelativePaths([worktrees.Root], "worktrees.root", problems);
 
+        // Compared as written wherever it is read - by sync's withheld list, by init's ignore rule - so a
+        // spelling the file system reads past would leave its worktrees neither withheld nor ignored.
+        if (Repository.PathPatterns.Misspelling(worktrees.Root) is { } misspelled)
+        {
+            problems.Add($"worktrees.root names '{worktrees.Root}', which {misspelled}");
+        }
+
         if (worktrees.Root.Trim() is "" or "." or "./")
         {
             problems.Add("worktrees.root cannot be the repository root itself");
@@ -288,6 +296,35 @@ public static partial class HarnessConfigValidator
         if (ci.LegBudgetMinutes < 0)
         {
             problems.Add($"ci.legBudgetMinutes cannot be negative, found {ci.LegBudgetMinutes}");
+        }
+
+        CheckGroupPattern(ci.LegJobPattern, "ci.legJobPattern", "leg", "to capture the leg's name", problems);
+
+        foreach (var (step, setting) in new[] { (ci.BuildStep, "ci.buildStep"), (ci.TestStep, "ci.testStep") })
+        {
+            if (step is not null && string.IsNullOrWhiteSpace(step))
+            {
+                problems.Add($"{setting} is given empty, or as spaces alone, and names no step");
+            }
+        }
+
+        if (ci.WorkflowBudgetPattern is { } budget)
+        {
+            // Checked with a name in place of the placeholder, as it is matched: one that named no leg
+            // would find the same budget, the first in the file, for every leg.
+            if (!budget.Contains(CiSettings.LegPlaceholder, StringComparison.Ordinal))
+            {
+                problems.Add($"ci.workflowBudgetPattern has no {CiSettings.LegPlaceholder}, so it would find the same budget for every leg");
+            }
+            else
+            {
+                CheckGroupPattern(
+                    budget.Replace(CiSettings.LegPlaceholder, "leg", StringComparison.Ordinal),
+                    "ci.workflowBudgetPattern",
+                    "budget",
+                    "to capture the leg's budget in minutes",
+                    problems);
+            }
         }
     }
 
@@ -1415,7 +1452,7 @@ public static partial class HarnessConfigValidator
             }
 
             CheckPattern(invocation.SuccessPattern, $"{setting}.successPattern", problems);
-            CheckCountPattern(invocation.CountPattern, $"{setting}.countPattern", problems);
+            CheckGroupPattern(invocation.CountPattern, $"{setting}.countPattern", "total", "to capture how many tests ran", problems);
 
             // Blank would read as a set of its own that nothing else names, splitting its legs from
             // the rest of the project without a name anybody chose.
@@ -1490,6 +1527,58 @@ public static partial class HarnessConfigValidator
             problems.Add(
                 $"{owner} test has no successPattern for {string.Join(", ", withoutWitness)}; "
                 + "without one, a runner that exits 0 having run nothing would pass");
+        }
+
+        // Every leg a host runs is given them, once a sync has taken the tree there, and a refusal there
+        // ends the run: found here it names the line, and costs no host its sync. Merged per operating
+        // system as the run merges them, and each refusal said once, with the systems it holds for.
+        var unfit = applicable
+            .Select(entry => (entry.Platform, Invocation: TestInvocationResolver.InvocationFor(test, entry.Platform)))
+            .Where(entry => entry.Invocation.RemoteExcludes is { Count: > 0 } && !string.IsNullOrWhiteSpace(entry.Invocation.Runner))
+            .Select(entry => (entry.Platform, Refusal: RemoteExclusionRefusal(entry.Invocation)))
+            .Where(entry => entry.Refusal is not null)
+            .GroupBy(entry => entry.Refusal!, StringComparer.Ordinal);
+
+        foreach (var refused in unfit)
+        {
+            problems.Add(
+                $"{owner} test's remoteExcludes cannot reach the runner on {string.Join(", ", refused.Select(entry => entry.Platform))}: "
+                + refused.Key);
+        }
+    }
+
+    /// <summary>
+    /// Why <paramref name="invocation"/>'s remoteExcludes could not be given as declared on a leg a host runs,
+    /// or <see langword="null"/>: the run's own refusal, in its own words, where the invocation alone decides
+    /// it. A test preset the args name is read as the leg starts, and what it says is the run's to find.
+    /// </summary>
+    /// <remarks>
+    /// ctest is refused without a join as well. Beside what --exclude adds, or its args already give, it
+    /// would take them apart - leaving out only what every -LE matches, or only what the last -E does - and
+    /// every leg a host runs would be refused for it, on a run whose own command line gave one exclusion.
+    /// </remarks>
+    private static string? RemoteExclusionRefusal(ResolvedTestInvocation invocation)
+    {
+        if (Ctest.SelectionOf(invocation.Runner, invocation.ExcludeArg) is not null && string.IsNullOrEmpty(invocation.ExcludeJoin))
+        {
+            return $"ctest takes them beside what --exclude adds and its args give, and with no excludeJoin it would take "
+                + $"them apart, never leaving out what each names; declare \"excludeJoin\": \"{Ctest.ExcludeJoin}\"";
+        }
+
+        if (Ctest.PresetIn(invocation.Runner, invocation.Args) is not null)
+        {
+            return null;
+        }
+
+        try
+        {
+            _ = TestInvocationResolver.CommandFor(invocation, cores: 1, filter: null, excludes: invocation.RemoteExcludes);
+
+            return null;
+        }
+        catch (HarnessException ex)
+        {
+            return ex.Message;
         }
     }
 
@@ -1652,8 +1741,13 @@ public static partial class HarnessConfigValidator
             .Where(axis => axis.Values.Count > 0)
             .Select(axis => $"{axis.Name} {string.Join(", ", axis.Values)}"));
 
-    /// <summary>Checks a pattern that must compile and capture a named group <c>total</c>.</summary>
-    private static void CheckCountPattern(string? pattern, string setting, List<string> problems)
+    /// <summary>Checks a pattern that must compile and capture the named group <paramref name="group"/>.</summary>
+    /// <param name="pattern">The pattern, or <see langword="null"/> where none is set.</param>
+    /// <param name="setting">Where it is set, as a message names it.</param>
+    /// <param name="group">The group it must capture.</param>
+    /// <param name="purpose">What the group is for, as a fragment beginning with "to".</param>
+    /// <param name="problems">Where a problem is added.</param>
+    private static void CheckGroupPattern(string? pattern, string setting, string group, string purpose, List<string> problems)
     {
         if (pattern is null)
         {
@@ -1664,9 +1758,9 @@ public static partial class HarnessConfigValidator
         {
             var regex = new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(1));
 
-            if (!regex.GetGroupNames().Contains("total", StringComparer.Ordinal))
+            if (!regex.GetGroupNames().Contains(group, StringComparer.Ordinal))
             {
-                problems.Add($"{setting} has no named group 'total' to capture how many tests ran");
+                problems.Add($"{setting} has no named group '{group}' {purpose}");
             }
         }
         catch (ArgumentException ex)

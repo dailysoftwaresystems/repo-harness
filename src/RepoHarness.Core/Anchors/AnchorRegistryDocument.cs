@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Anchors;
@@ -165,7 +166,7 @@ public sealed partial class AnchorRegistryDocument
         };
 
         lines.AddRange(fatal.Select(finding => $"  line {finding.LineNumber}: {finding.Message}"));
-        lines.Add("'DssHarness read-anchors --lint' lists every problem in both registries.");
+        lines.Add($"'{ToolPackage.Command} read-anchors --lint' lists every problem in both registries.");
 
         throw new HarnessException(HarnessExit.CommandFailed, string.Join(Environment.NewLine, lines));
     }

@@ -255,8 +255,8 @@ public sealed class InitServiceTests
         }
 
         Assert.Equal(
-            "tools   not checked; 'DssHarness install-missing-tools --dry-run' lists what each leg's host is missing, "
-            + "and 'DssHarness install-missing-tools' or 'DssHarness init --install-tools' installs it",
+            "tools   not checked; 'dssharness install-missing-tools --dry-run' lists what each leg's host is missing, "
+            + "and 'dssharness install-missing-tools' or 'dssharness init --install-tools' installs it",
             Assert.Single(pointer));
     }
 
@@ -286,6 +286,7 @@ public sealed class InitServiceTests
             harness.VerifyGitService,
             harness.AnchorRegistryLocator,
             harness.ToolProvisionService,
+            git,
             new ManagedIgnoreCheck(git, harness.FileSystem, harness.Platform, harness.Output),
             harness.Platform);
 
@@ -448,7 +449,7 @@ public sealed class InitServiceTests
 
         Assert.Equal(
             "note    .gitignore line 3 ('!/.harness-config/sshItems/*') re-includes '.harness-config/sshItems/<any>', "
-            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; a later rule decides them, so this "
+            + "'.harness-config/sshItems/<any>/<any>', which the managed block ignores; another rule decides them, so this "
             + "one does nothing there",
             note);
 
@@ -513,9 +514,9 @@ public sealed class InitServiceTests
     }
 
     /// <summary>
-    /// A lane adopting the harness adopts it on its own branch: its configuration - the main
+    /// A worktree adopting the harness adopts it on its own branch: its configuration - the main
     /// checkout's, which it was running with - its .gitignore and its placeholders are written in the
-    /// worktree, and the main checkout is left exactly as it was. Written there instead, the lane's
+    /// worktree, and the main checkout is left exactly as it was. Written there instead, the worktree's
     /// .gitignore never changed and main's did.
     /// </summary>
     [Fact]
@@ -528,11 +529,11 @@ public sealed class InitServiceTests
 
         await harness.InitializeGitRepositoryAsync(repository.Path, token);
 
-        // The lane's branch predates the harness; main adopts it afterwards.
-        var worktree = elsewhere.Combine("lane");
+        // The worktree's branch predates the harness; main adopts it afterwards.
+        var worktree = elsewhere.Combine("feature");
         await harness.RunGitAsync(repository.Path, ["worktree", "add", "--detach", worktree], token);
         await harness.InitService.InitializeAsync(repository.Path, token);
-        harness.WriteConfig(repository.Path, new HarnessConfig { Legs = { ["lane-leg"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } }, BuildConfigs = { ["debug"] = new BuildConfiguration() } });
+        harness.WriteConfig(repository.Path, new HarnessConfig { Legs = { ["feature-leg"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug" } }, BuildConfigs = { ["debug"] = new BuildConfiguration() } });
         await harness.CommitAllAsync(repository.Path, "harness", token);
 
         var mainIgnore = File.ReadAllText(repository.Combine(".gitignore"));
@@ -562,6 +563,29 @@ public sealed class InitServiceTests
         // Nothing written in the main checkout: its files are as they were, and git sees no change.
         Assert.Equal(mainIgnore, File.ReadAllText(repository.Combine(".gitignore")));
         Assert.Empty((await harness.RunGitAsync(repository.Path, ["status", "--porcelain"], token)).OutputLines);
+    }
+
+    /// <summary>
+    /// init in a submodule initialises the submodule's own checkout as a main checkout - never as a
+    /// worktree of the git directory its superproject keeps it in, which git names as its main worktree,
+    /// and where its connection data and runs would otherwise be looked for.
+    /// </summary>
+    [Fact]
+    public async Task InitializeAsync_InASubmodule_TakesItsOwnCheckoutForTheMainOne()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var token = TestContext.Current.CancellationToken;
+        var submodule = await GitClientTests.AddSubmoduleAsync(harness, temp, token);
+
+        var outcome = await harness.InitService.InitializeAsync(submodule, token);
+        var layout = await harness.RepositoryLocator.LocateAsync(submodule, token);
+
+        Assert.True(outcome.Succeeded, outcome.Message);
+        Assert.DoesNotContain(outcome.Details!, line => line.Contains("this is a worktree", StringComparison.Ordinal));
+        Assert.True(File.Exists(Path.Combine(submodule, ".harness-config", "config.json")));
+        Assert.NotNull(layout);
+        PathAssert.Same(submodule, layout.MainCheckoutRoot);
     }
 
     [Fact]

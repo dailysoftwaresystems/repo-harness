@@ -106,10 +106,11 @@ internal static class BuildCommand
             CommandTime = result.Phases.Aggregate(TimeSpan.Zero, (total, phase) => total + phase.Duration),
             Emulated = leg.Emulated,
             Phases = [.. result.Phases.Select(phase => new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped))],
-            TimingNotes = [.. Notes(result)],
+            TimingNotes = result.Notes,
             Timings = [.. result.Phases.SelectMany(phase =>
                 phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value)))],
             Compilers = result.Compilers,
+            LogTail = result.Tail,
         };
     }
 
@@ -132,16 +133,4 @@ internal static class BuildCommand
                 ? $"{dependencies.ObjectsRead} object(s) read, {dependencies.Excused.Count} excused"
                 : string.Empty;
 
-    private static IEnumerable<string> Notes(BuildResult result)
-    {
-        if (result.RebuiltFromClean is { } reason)
-        {
-            yield return "rebuilt from clean: " + reason;
-        }
-
-        foreach (var phase in result.Phases.Where(phase => phase.ClockStepped))
-        {
-            yield return $"{phase.Phase} spanned a clock step, so its duration and every mtime it wrote are suspect";
-        }
-    }
 }

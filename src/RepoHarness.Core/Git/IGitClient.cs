@@ -34,8 +34,11 @@ public interface IGitClient
 
     /// <summary>
     /// The repository's main worktree, even when <paramref name="directory"/> is inside a
-    /// linked one, or <see langword="null"/> when it is not inside a repository. This is
-    /// where gitignored harness state (ssh secrets, the run lock) actually lives.
+    /// linked one, or <see langword="null"/> when it is not inside a repository - or when git
+    /// names a git directory as the main worktree that records no checkout, as one made with
+    /// --separate-git-dir does not, and <paramref name="directory"/> is in a linked worktree of
+    /// it, where nothing says which checkout is the main one. This is where gitignored harness
+    /// state (ssh secrets, the run lock) actually lives.
     /// </summary>
     /// <exception cref="HarnessException">git could not inspect the directory.</exception>
     Task<GitWorktree?> GetMainWorktreeAsync(string directory, CancellationToken cancellationToken = default);

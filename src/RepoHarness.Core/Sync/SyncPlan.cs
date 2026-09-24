@@ -28,6 +28,19 @@ public sealed record SyncPlan(
     /// </remarks>
     public IReadOnlyList<string> Overwrites { get; init; } = [];
 
+    /// <summary>
+    /// The directories this plan's deletions leave with no file the source has: each directory a deleted
+    /// file was in, where the source keeps nothing at any depth.
+    /// </summary>
+    /// <remarks>
+    /// What the copy may have to remove once the deletions are done, and all a sync may call emptied: a
+    /// directory still holding a file the source has is no part of it, however many of its files went.
+    /// Every deleted file's directory used to be taken for one, and the host, finding the source's own
+    /// files still in it, warned that it "held only files this sync does not manage" - naming files a
+    /// consumer then found identical to the source's, byte for byte.
+    /// </remarks>
+    public IReadOnlyList<string> Emptied { get; init; } = [];
+
     /// <summary>Whether the copy already matches the source.</summary>
     public bool IsUpToDate => Writes.Count == 0 && Deletes.Count == 0;
 
@@ -80,7 +93,24 @@ public sealed record SyncPlan(
             .Where(path => !exclusions.IsProtectedFromDeletion(path))
             .ToList();
 
-        return new SyncPlan(writes, deletes, unchanged) { Overwrites = overwrites };
+        // Every directory the source keeps a file in, at any depth. Each path stops at the first of its
+        // directories already counted, whose own are then counted too.
+        var kept = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var path in source.Entries.Keys)
+        {
+            for (var cut = path.LastIndexOf('/'); cut > 0 && kept.Add(path[..cut]); cut = path.LastIndexOf('/', cut - 1))
+            {
+            }
+        }
+
+        var emptied = deletes
+            .Select(path => path.LastIndexOf('/') is var cut and > 0 ? path[..cut] : string.Empty)
+            .Where(directory => directory.Length > 0 && !kept.Contains(directory))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        return new SyncPlan(writes, deletes, unchanged) { Overwrites = overwrites, Emptied = emptied };
     }
 
     /// <summary>

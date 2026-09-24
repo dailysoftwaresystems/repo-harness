@@ -339,7 +339,7 @@ public sealed class LegRunServiceTests
     /// <summary>
     /// A run names where its records are - as 'logs:' in the text, as runDirectory in --json - so a
     /// caller never works out which tree a run wrote into. Run in a worktree, they are in the
-    /// worktree: kept in the main checkout, a lane's records were out of the lane's reach.
+    /// worktree: kept in the main checkout, a worktree's records were out of its reach.
     /// </summary>
     [Theory]
     [InlineData(false, false)]
@@ -350,7 +350,7 @@ public sealed class LegRunServiceTests
     {
         using var temp = new TempDirectory();
         var harness = new HarnessFactory();
-        var tree = inWorktree ? temp.Combine("lane") : temp.Path;
+        var tree = inWorktree ? temp.Combine("feature") : temp.Path;
 
         var outcome = await OutcomeAsync(
             temp,
@@ -490,7 +490,7 @@ public sealed class LegRunServiceTests
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.True(Directory.Exists(RunDirectoryOf(outcome, json: true)));
         Assert.Equal(string.Empty, status.StandardOutput.Trim());
-        Assert.Equal(HarnessLayout.RunsIgnoreRule, File.ReadAllText(temp.Combine(".harness-config", "runs", ".gitignore")));
+        Assert.Equal(HarnessLayout.SelfIgnoreRule, File.ReadAllText(temp.Combine(".harness-config", "runs", ".gitignore")));
     }
 
     /// <summary>

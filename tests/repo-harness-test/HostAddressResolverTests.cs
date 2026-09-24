@@ -81,6 +81,30 @@ public sealed class HostAddressResolverTests
         Assert.Equal(0, lookup.Calls);
     }
 
+    /// <summary>
+    /// A name resolves to an IPv4 address where it has one, since a link-local IPv6 one reaches the machine
+    /// only through the interface its scope names, and a literal to itself; one kept briefly keeps its
+    /// address, and a name that resolved to none has none.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "fe80::1%12", "192.0.2.10" }, "192.0.2.10")]
+    [InlineData(new[] { "fe80::1%12" }, "fe80::1%12")]
+    [InlineData(new string[0], null)]
+    public async Task ANameResolvesToAnIpv4AddressFirst_AndALiteralToItself(string[] addresses, string? resolvedTo)
+    {
+        var lookup = new ScriptedLookup(_ => addresses);
+        var resolver = Resolver(lookup);
+
+        var first = await resolver.ResolveAsync(Name, TestContext.Current.CancellationToken);
+        var kept = await resolver.ResolveAsync(Name, TestContext.Current.CancellationToken);
+        var literal = await resolver.ResolveAsync("198.51.100.7", TestContext.Current.CancellationToken);
+
+        Assert.Equal(resolvedTo, first.ResolvedTo);
+        Assert.Equal(resolvedTo, kept.ResolvedTo);
+        Assert.Equal(0, kept.Attempts);
+        Assert.Equal("198.51.100.7", literal.ResolvedTo);
+    }
+
     private static HostAddressResolver Resolver(INameLookup lookup)
         => new(lookup, new SteppedClock(), TimeSpan.Zero);
 

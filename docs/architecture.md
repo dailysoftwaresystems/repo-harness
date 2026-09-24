@@ -136,10 +136,57 @@ at once, with the line it concerns where the parser knows it:
   leg a host ran is named once on the machine that reports it. A toolchain's `compilerId` -
   `{"C": "MSVC", "CXX": "MSVC"}`, in CMake's own ids - holds the build to it: a compiler CMake
   configured that contradicts it fails the leg before anything is built, and a declared language
-  CMake named no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
-  answer, and a misspelled language is never answered. `test --no-build` names what its build
+  CMake identified no compiler for leaves it `unwitnessed`, naming why - an older CMake writes no
+  answer, and a misspelled language is never answered. The answer holds what the top-level
+  directory holds, so a language only a subdirectory enables - C, where a C++ project fetches
+  googletest, whose own `project()` declares C and C++ - comes with no id: with its compiler's
+  path where CMake caches one, and under a Visual Studio generator, which caches none, with no
+  path either. A leg declaring the C it built with was left `unwitnessed` while its configure log
+  named that compiler. CMake keeps each language's identification once for the whole build
+  directory, in `CMakeFiles/<version>/CMake<language>Compiler.cmake`, which enabling the language
+  in any directory loads, and the language is identified from that record. The record is held to
+  the answer, because it can be a later configure's: one that identifies the compiler again -
+  given another, or run with `--fresh` - rewrites it, and one that then fails writes no answer,
+  which leaves the last one's beside a record of a compiler that built nothing there. Read that
+  way, `test --no-build` named a compiler its binaries were not built with. So the record must name
+  the compiler the answer names, where the answer names one, and must have been written no later
+  than the answer, which a configure writes after every record it writes; a record nothing ties to
+  the answer identifies nothing, and the language is `unwitnessed`, with why. The answer keeps a
+  toolchain file's value as written, where the record holds what CMake's
+  `Modules/CMakeDetermineCompiler.cmake` made of it, so the two are compared as that: a list's
+  first item - `gcc.exe;-m64` names `gcc.exe` - a path tidied of `.`, `..` and doubled separators,
+  with forward slashes, and a name alone found as a program, with `.com` or `.exe` after it on
+  Windows. Each tie leaves a case to the other: the time alone tells a later record apart where the
+  answer names no compiler, as under Visual Studio, where it names one by its name alone, which a
+  program of that name elsewhere answers to, and where the same file was replaced in place; the
+  compiler alone does where a clock stepped back since the answer was written. Measured with CMake
+  3.29 and 4.3: MSVC through Ninja and through Visual Studio 18 2026, gcc on Windows and on Linux,
+  toolchain files naming the compiler each of those ways, and a configure that failed after
+  identifying the compiler again. A language
+  CMake identified nowhere, such as the resource compiler it lists on Windows, is left out of the
+  compilers, and a toolchain declaring one is told what CMake's answer named for it and why that
+  is no id, never that CMake named none. `test --no-build` names what its build
   directory was last configured with, and holds it to the same `compilerId`: binaries a compiler
   nobody chose produced are failed rather than tested. A runner that does not build names none.
+- **A compiler updated in place starts its build directory from clean.** CMake identifies a cached
+  compiler once, when a build directory is first configured, and loads that record on every
+  configure after; a build system has no edge on the compiler itself. A Visual Studio update
+  rewrote `cl.exe`, `c1xx.dll` and `c2.dll` in the same toolset directory, taking `cl` from
+  19.51.36257 to 19.51.36260, and a consumer's trees configured before it still recorded the old
+  version: the first build of each failed every precompiled header with C1853, "from a different
+  version of the compiler". So before each build of a CMake project, the C and C++ compilers the
+  directory's records name - under the version of CMake that last answered there - are asked their
+  versions as CMake identified them: a line naming the macros CMake's identification reads is
+  preprocessed, in the leg's own environment, and the values put together by CMake's formula for the
+  id it recorded - `_MSC_VER`, `_MSC_FULL_VER` and `_MSC_BUILD` for MSVC, `__GNUC__` with its minor and
+  patch level for GNU, `__clang_major__` and its fellows for Clang, with `__apple_build_version__` for
+  AppleClang. Never by which are defined: clang defines `__GNUC__` too, as 4.2.1. A version that
+  differs, a compiler that is not there, or one that defines none of its id's macros starts the
+  directory from clean, naming both versions. Preprocessing takes a fraction of a second, where a
+  scratch configure took 19 with MSVC; measured against CMake 4.3's records, MSVC 19.51.36260.0
+  through Visual Studio 18, MinGW gcc 13.2.0, Linux gcc 13.3.0 and clang 18.1.3 each came out as CMake
+  wrote it. A compiler that cannot be asked is said and passed over - the question names the cause of
+  a failure the build would show anyway - and one of another id is not asked.
 - **A toolchain may name a developer environment**, declared once under `developerEnvironments`,
   and one naming none that is declared is refused, as is a `visualStudio` one on a toolchain whose
   `platforms` is not `["windows"]`: a leg elsewhere would be turned away on every run for want of it.
@@ -188,7 +235,11 @@ The root is configurable because it is spent before a worktree's own name. The d
 characters of the Windows path budget, and a repository whose build paths are long has no name left
 that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
 checked against the real path, so a shorter root never hides an overrun — it only makes one
-avoidable.
+avoidable. A root spelled with a `.` segment or a doubled separator inside it -
+`.harness-config/./worktrees` - is refused with the one spelling to write, and so is a
+`sync.exclude` or `sync.neverTransfer` entry spelled that way: each is compared as written, by
+sync's lists and by `init`'s ignore rule, so the file system's reading of it would put the
+worktrees where nothing withholds or ignores them, and an entry would protect nothing.
 
 **The root is ignored whole, and never holds a placeholder.** `init` writes `/<root>` for it and
 creates nothing there; `create-worktree` makes the directory the first time it needs it. It is
@@ -218,7 +269,26 @@ block, a nested `.gitignore`, or a whole-directory rule such as `.env` - which t
 `runner/.env` directory, from which git re-includes no placeholder. The same paths are then asked of
 the tree's own `.gitignore` with the block blanked out, in a scratch repository holding nothing
 else; a hand-written rule that would decide one the other way, where the tree's answer is the
-block's, is named as doing nothing there. A rule agreeing with the block is not named at all: it
+block's, is named as doing nothing there - but only where nothing the harness keeps in git rests
+on it. Taken out of the tree's ignore files - its `.gitignore` files, its `.git/info/exclude` and
+the excludes file its configuration names - in scratch repositories asked with and without it, such
+a rule must turn from kept to ignored no path the block rules on, none of the harness's own files -
+its configuration, each placeholder, each file git keeps in an action and a name standing for any
+action's, the anchor registries git tracks - and no directory one of those is in; where it would, it
+is not named. An action's own files are listed as git keeps them, because a rule can rest on how one
+is named: a re-include of the actions directory after the `[Bb]in/` Visual Studio's template
+ignores keeps an action's helper in its `bin`, which no name made up for an action's file shows. An allowlist that excludes
+`/.harness-config/*`, or everything, re-includes each slot the block keeps a placeholder in - by the
+slot's name, or by `!*/` - and git never looks inside an excluded directory for the placeholder:
+that re-include is overruled for the slot's contents and needed for the placeholder, and the note
+once told a consumer to delete it, which loses the placeholder the block itself re-includes. A rule
+keeping an action's files, or the configuration, counts the same way, whatever the block rules on
+beside them, and so does one needed only because `.git/info/exclude` excludes what it re-includes.
+Only what taking a rule out removes from git counts: a file `*` hid, which taking it out would put
+in git, rests on nothing. A re-include of a directory nothing excludes changes nothing, and is
+named. No path the check asks about is made a directory in a scratch repository unless git takes
+it for one in the tree too - a directory above a probe - so a rule ending in `/` matches there only
+what it matches in the tree. A rule agreeing with the block is not named at all: it
 changes nothing, and a broad rule covering a managed path is not a copy of the block's rule. The
 spelling comparison this replaced named rules that match nothing as overriding the block, and
 could not see a rule reaching a managed path through a wildcard.
@@ -242,18 +312,28 @@ written is a note that git could not be asked; one that cannot be removed afterw
 and the answer stands.
 
 `init` writes the tree it runs in, a worktree's own included: its configuration, its `.gitignore`
-and the placeholders that keep each directory in git. A lane adopting the harness adopts it on its
-own branch; written into the main checkout, the lane's `.gitignore` never changed and main's did. A
-worktree with no configuration of its own gets a copy of the main checkout's, which it was running
+and the placeholders that keep each directory in git. A worktree adopting the harness adopts it on
+its own branch; written into the main checkout, the worktree's `.gitignore` never changed and main's
+did. A worktree with no configuration of its own gets a copy of the main checkout's, which it was running
 with and warned about on every command; a default in its place would drop every leg, host and
 runner main declares. What git ignores - connection data, runner values and secrets, the lock - is
 read from the main checkout whichever tree asks, and `init` in a worktree says so rather than
 creating any of it there.
 
+The main checkout is the one git's `worktree list` names first, which it names for the git
+directory its worktrees share: that directory's parent, where it is called `.git`, and the directory
+itself otherwise - no checkout at all. A submodule's is named so, kept under its superproject's
+`.git/modules`, and `init` in a submodule once took it for a worktree of that directory, where its
+connection data, runs and worktrees would have been looked for. Where git names a git directory, the
+main checkout is the one that directory's configuration records, as a submodule's `core.worktree`
+does; one made with `--separate-git-dir` records none, and is then the tree asked from, where git
+lists that as no linked worktree. From a linked worktree of such a checkout, nothing says which
+checkout is the main one, and the command is refused, saying how to record it.
+
 `create-worktree` records the commit a worktree was made from, under
 `refs/harness/worktree-base/<name>`, and `list-worktree` reports it. A worktree's own HEAD moves
-with every commit made in it, so after the first one nothing else says what tree the lane started
-from, and the lane can only be reproduced from the moment it happened to be made. The record is
+with every commit made in it, so after the first one nothing else says what tree the worktree
+started from, and it can only be reproduced from the moment it happened to be made. The record is
 kept under `refs/harness/` rather than among heads, tags or remotes precisely so it can never be
 mistaken for somewhere work is kept: the deletion checks below read branches, tags,
 remote-tracking refs, the newest stash and other worktrees' HEADs, and this record is none of them.
@@ -306,7 +386,7 @@ names everything it found on one line, each with its remedy, and exits 13:
 
 - **Evidence.** The directories `worktrees.evidenceRoots` declares are checked before git is asked
   anything, because they hold files git was never told about. One of them holding anything refuses
-  the deletion and names it. A lane's measurements live in an ignored directory precisely because
+  the deletion and names it. A worktree's measurements live in an ignored directory precisely because
   they are not source, and deleting them is silent: git reports nothing missing afterwards.
   `--delete-evidence` proceeds while every other check still runs; `--force` proceeds too, and
   skips everything else as well. A declared root that cannot be read counts as holding something,
@@ -366,19 +446,27 @@ nothing. Every command that reads or changes anchors refuses a malformed registr
 rather than answer from rows it cannot trust, while `read-anchors --lint` and
 `check-anchor-balance` report the problem among their findings (exit 1).
 
-The Status cell is the only verdict: `🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED` or `✅ CLOSED`. A
+The Status cell is the only verdict that decides: `🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED` or `✅ CLOSED`. A
 row is closed exactly when its Status cell starts with ✅, and every other glyph, including
 one nobody anticipated, reads as open: a row wrongly read as open stays visible as work,
 while a row wrongly read as closed disappears from every count. Nothing is inferred from
-the prose cells.
+the prose cells. A registry whose rows open a closed Trigger with the closure itself can say
+so with `anchors.triggerCarriesVerdict`: a closed row's Trigger then opens with ✅ and no
+other row's does, the writing commands refuse a row whose two cells disagree, and the lint
+reports one, so that a row states its verdict once, even where it states it twice.
 
 ### Writing a row
 
 Commands take fields, never rows. Line breaks collapse and pipes are escaped, because a raw
 `|` adds a column and shifts every later cell, and a wrapped row hides its id from every
-search. A value that already holds an escaped pipe is refused: escaping it again would
-double the backslash, and it usually means someone copied a raw table line. Every composed
-row is read back through the same parser before anything is written.
+search. Only the breaks go - each, with the whitespace either side of it, as one space, at
+every boundary a reader of the file might split a line at - and so does whitespace at the
+value's very start and end; every other character is kept as given: a run of spaces or a tab
+inside a line is often a cell's evidence, quoted tool output or aligned figures. A value that already holds an escaped pipe is refused: escaping it
+again would double the backslash, and it usually means someone copied a raw table line. A
+cell given in a file is read as UTF-8, and a file that is not, or that opens with a byte-order
+mark, is refused by name rather than cleaned. Every composed row is read back through the same
+parser before anything is written.
 
 `set-anchor` rebuilds only the cells it was given and writes every other cell back byte for
 byte; a row whose cell count is wrong is refused rather than guessed at. A new id must match
@@ -576,8 +664,21 @@ is not dependable on such a host.
   command that fixes them. Per-host files also confine that risk: one world-writable shared
   configuration file threatened every host at once.
 - **Names that resolve.** A host reached by an mDNS `.local` name on a DHCP network fails a
-  lookup as a matter of course. The lookup is retried and the answer cached briefly, so one
-  failed lookup never fails a leg.
+  lookup as a matter of course, and a name each ssh call looks up afresh is one each call can fail
+  to find. So ssh is asked first what it would do (`ssh -G`), and the name it would look up - the
+  address declared, or a HostName its own configuration gives it - is looked up here, retried,
+  with the answer cached briefly, so one failed lookup never fails a leg. Every ssh call is then
+  given the address as its `HostName`, while the pin holds, with the host's key looked up under
+  the name through `HostKeyAlias` - its configuration's own alias where it sets one, and
+  otherwise `[name]:port` off port 22, as known_hosts spells such a host - and `CheckHostIP` off,
+  so the address itself is neither checked against known_hosts nor written into it. The
+  destination stays the address declared, so a Host block written for it still applies. A host ssh
+  reaches through a `ProxyJump` or a `ProxyCommand` is neither looked up here nor pinned, since the
+  jump host or the command does its own lookup. One whose `ssh -G`, asked again pinned, shows
+  anything but the address changed, as a `Match` block keyed by the host would, is looked up here
+  but not pinned. A pinned call that fails before any session - the address takes no connection,
+  or shows a key the name is not known by - drops the pin for the rest of the connection and runs
+  again, with ssh looking the name up itself.
 - **PATH truth.** A login shell's PATH is not what a command sees: `/opt/homebrew/bin` is absent
   from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
   are resolved to an absolute path once per connection, measured rather than assumed, the same
@@ -737,9 +838,9 @@ there. That is the trust building the repository already asks for, since a build
 repository's own code.
 
 - An ssh host is reached only when the main checkout holds its directory under
-  `.harness-config/sshItems/`, which git ignores, and ssh reads no configuration file of its
-  own. A `config.json` that arrives through git cannot point the harness at a machine nobody
-  set up here.
+  `.harness-config/sshItems/`, which git ignores, and no ssh configuration file is named with
+  `-F`: ssh reads the user's and the system's own, as it does for anybody. A `config.json` that
+  arrives through git cannot point the harness at a machine nobody set up here.
 - A launcher and a required file are each a program name, found the way a leg's programs are -
   on the host's `PATH`, then in the searched directories - or an absolute path. A relative path would resolve against whichever directory a host
   starts programs in, and would let a file shipped in the repository stand in for the tool
@@ -959,22 +1060,49 @@ for about 200 milliseconds, every few seconds, and the steps reach file modifica
 times: a file written one second after a marker carried a timestamp 24 seconds before
 it. So:
 
-- Nothing compares two timestamps taken at different moments or on different hosts.
-  Change is detected by equality, as above, which a clock cannot distort because both
-  readings carry the same distortion. Sync decides what to delete by comparing
-  manifests, never by stamp order.
+- Nothing decides that something changed by comparing two timestamps taken at different
+  moments or on different hosts. Change is detected by equality, as above, which a clock
+  cannot distort because both readings carry the same distortion. Sync decides what to
+  delete by comparing manifests, never by stamp order. Where dates are still ordered, it
+  is to ask what a build system that orders them will do with a change already found by
+  content, below, or which of two files CMake wrote in one configure came first.
 - Durations come from the monotonic clock. UTC times are for display only.
 - Each phase compares elapsed wall-clock time with elapsed monotonic time. Drift beyond
   `defaults.clockStepToleranceMilliseconds` records a clock step or a host sleep inside
   that phase: its durations are suspect, and so is every timestamp it wrote.
 - Incremental builds are protected from it. Ninja, Make and MSBuild decide what is
   stale by ordering timestamps, which a stepped clock defeats without a word: an object
-  stamped during a forward step looks newer than a source edited just after it. The
-  harness records a content fingerprint of each variant's inputs with its last
-  successful build. Before building again, if a changed input is not newer than the
-  newest output, or the previous build spanned a clock step, that variant is rebuilt
-  from clean and the ledger says why. A stale binary reported as a pass is the one price
-  an incremental build must never pay.
+  stamped during a forward step looks newer than a source edited just after it. In each
+  variant's build directory the harness keeps a record of the build that last ran there:
+  a content fingerprint of the inputs the build system was given, and when each had last
+  been written, taken before it runs, so a build that fails or is stopped by its caller's
+  time limit leaves the record of what it compiled from. A phase that spans a clock step
+  marks the record at once; the end of the build writes it again with the newest file the
+  build left, and marks it unordered, with why, if anything doubted it: inputs that did
+  not hold still, a directory something else used, an input that could not be read.
+  Before building again, if the record is marked unordered, or an input whose content
+  changed since is dated no later than the newest file that build left, the variant is
+  rebuilt from clean and the ledger says why, naming the file and both dates; so is a
+  directory that holds files and no record, as a clean start stopped part way through its
+  delete can leave one, since nothing says what they were built from. The newest
+  file, not the declared outputs or the record: a step forward and back inside one phase
+  measures no drift, and an object compiled in it is dated ahead of the binary linked
+  after. What the build left, not the directory as it stands: a test run writes there
+  too - ctest its logs as a suite ends - and an edit made while the suite ran would be
+  dated behind them. After a build that never finished, which recorded no newest file and
+  whose guards never said whether its tree held still, the directory is read as it
+  stands, and an input written again since it began counts as changed though its content
+  held: a stash and its pop leave one exactly as it was, having let the compiler read
+  something else in between. A stale binary reported as a pass is the one price an
+  incremental build must never pay. An input changed and dated after all of that is the
+  build system's to act on - newer than every output, it rebuilds what reads it - as is
+  one deleted since, which a build system sees gone without asking its date, and a CMake
+  project is configured on every build. What a build system does not know reads a file -
+  a custom command's input it names in no `DEPENDS` - is not remade. Rebuilding from clean
+  for every change put a consumer through 1,186 steps from nothing for one edit to one
+  input, and a build stopped for running long would have started from clean again every
+  time. The record keeps `clock-stepped` on its first line for an unordered build,
+  and each input's fingerprint on a line of its own, as 0.5.8 wrote and reads them.
 
 ### One run per build directory
 
@@ -1067,9 +1195,37 @@ while a gate ran turned a green suite red, with four test processes live at once
 - An ssh host bounds how long a connection may take to open and how long it may go
   unanswered (`connectTimeoutSeconds`, `keepAliveSeconds`). Without both, a dead link
   hangs a leg indefinitely, with no output and no verdict.
-- A host's copy of the repository is a git repository sync creates at its `repositoryPath`: the
-  working tree being tested is transferred into it file by file, compared by content hash, so what
-  the host holds is this tree including its uncommitted changes. Nothing is pushed and it is never
+- A host's copy of a tree is a git repository sync creates: the main checkout's at the host's
+  `repositoryPath`, and each worktree's beside it, at `<repositoryPath>.worktree-<name>`, named for
+  the worktree's directory as a worktree's name is spelt. One copy per host had every worktree whose
+  legs reached a host wait for every other's, under one lock, each sync replacing the tree the one
+  before had put there. Beside the main copy rather than inside it, because the agent a sync starts
+  begins in the copy's parent, which must already be there, and a copy inside another would be taken
+  for part of it by git. This machine records which hosts hold a copy of which worktree, and of
+  which tree on this machine, in `.harness-config/host-copies` in the main checkout - as the lock is,
+  at a place no branch's configuration moves - which ignores itself, as the runs directory does, so
+  git never sees it and no sync carries it. A sync claims its copy there before it writes anything,
+  so a first sync that stops part way is recorded too, and is refused one another worktree of the
+  same name - made by hand, or by another tool, outside the worktrees root - still holds: synced by
+  both, each would replace the tree the other put there. Deleting a worktree asks each host that
+  holds one of its copies to remove it, only where the harness made it, and no other host. A host is
+  reached through the worktree's own configuration, read before it goes - its branch may declare a
+  host the configuration the command runs in does not - or else through that one; a host neither
+  declares is not asked, and its copy is forgotten, named. Each copy is removed under the lock a leg
+  this machine runs there takes, the record read again once it is held, so a copy another worktree
+  of the name has claimed since is left for it; it is forgotten before that lock is let go, and its
+  marker goes last, so a removal that stops part way leaves the rest marked as the harness's. The
+  host is asked from its home directory, which is there when the directory the copy was kept in is
+  not, so a copy whose directory is gone is answered as not there, and forgotten.
+  A copy that cannot be removed then stays recorded, and the deletion fails naming it though the
+  worktree is gone, with the highest code a copy was left with - 13 where a run holds one or it was
+  refused, 15 where its host is unreachable, 20 where the removal failed there - so whoever deleted
+  it learns something of it is left; deleting the worktree again finishes the job, and for a name
+  whose worktree is gone removes what any worktree of that name left, never the copies of one that
+  still exists. On a host a leg was sent to,
+  the copy it was sent to is its tree, whatever worktree the leg names. The working tree being tested
+  is transferred into its copy file by file, compared by content hash, so what the host holds is this
+  tree including its uncommitted changes. Nothing is pushed and it is never
   a clone from a remote, either of which would need credentials on the host and neither of which
   could carry a change nobody has committed. It is made a git repository because the host's
   DssHarness finds everything through git, and sync never writes into a directory it did not
@@ -1169,7 +1325,7 @@ while their sources are being replaced. A lock is released only by the run that 
 
 A run's records - its logs, and what it has already completed - are kept in
 `.harness-config/runs/<run id>/` of **the tree that ran it**, a worktree's own included, so a
-lane reads what it judged without leaving its tree. Kept in the main checkout instead, as they
+worktree reads what it judged without leaving it. Kept in the main checkout instead, as they
 once were, a worktree's runs landed beside the main checkout's. Nothing in `runs/` is shared
 between runs: each writes only the directory named by its own id. What two runs from different
 trees contend over is the lock above, which stays in the main checkout.
@@ -1269,6 +1425,22 @@ directory here cannot drift apart.
   local `.env`, a virtual environment or an editor's cache never reaches a host, and the host's own
   copies of such things are left alone. `sync.exclude` names paths to withhold *in addition* to
   these.
+- **A `sync.neverTransfer` name that protects nothing is named.** An entry is rooted: `.secrets`
+  covers the root's and no other, so one absent from the root while the name exists deeper protects
+  nothing, and a reader takes it for protection. Before every sync the tree is searched for such
+  names, and each is named with the fix, `**/<name>`. A name counts only where nothing the
+  configuration writes covers it - not where an entry covers the path, the `**/<name>` the warning
+  asks for among them, and not in the worktrees root - or the author who followed the advice would
+  be told it again on every sync. The search goes where a sync goes, and into the harness's own
+  directory besides: never into what a sync withholds - what an entry covers, the worktrees root,
+  what git ignores, what `sync.exclude` names - though such a directory's own name is seen from the
+  one holding it, so a `node_modules` git ignores still counts. What lies inside is generated,
+  fetched or another checkout's, and it is where a tree's size is: on a consumer's tree 68,697 of
+  69,890 directories lay under what its entries name, and a search that went in spent its
+  20,000-directory budget before it reached most of the tree, and said so on every sync. The
+  harness's own directory is searched all the same, though git ignores most of it by design,
+  because a `.secrets` there is what the search was written to find. A search that still runs out
+  says so; it never reads as having found none.
 - **The copy gets `.harness-config/config.json`, and nothing else from that directory.** A leg
   placed on a host runs DssHarness there, and DssHarness in a directory holding no configuration
   refuses as not initialised — so without it the copy is a tree no leg can run in. The rest of the
@@ -1445,6 +1617,26 @@ Beneath it, `logs:` names where the run's records are, and each leg another host
 that host's own; `--json` carries the same as `runDirectory`, at the top and on such a leg (see
 "Where a run's records live").
 
+## CI legs
+
+`check-ci-legs` reads each leg's verdict from the forge's job metadata, one job at a time and never
+from a run's rollup, and tells a test step that failed at or past its time budget - a possible
+overrun, whose budget is to be re-derived - from one that failed before reaching it, which is a real
+failure. It assumes no workflow of its own. Which jobs are legs, what a leg is called, and which
+steps build and test it are the repository's `ci` settings: `legJobPattern`, a regular expression
+whose `leg` group names the leg and whose optional `budget` group reads its budget from the job's
+name, and `buildStep` and `testStep`, by their exact names. Until they are set, the command refuses
+and names them. No forge fixes a leg's job name or a step's, and a command that assumed one
+workflow's would read every other as having no legs at all. A leg whose job name gave no budget - a
+long name the forge cut short, which a `legJobPattern` must still match, so what follows the leg's
+name in it is kept optional - takes it from its workflow's text through `workflowBudgetPattern`,
+where `{leg}` stands for the leg's name, and then from `legBudgetMinutes`. A failure with no budget
+from any of them is called neither, and counted apart in the summary: a discriminator that invents
+its denominator is worse than one that says it has none. A pattern that runs out of time, or a
+`budget` group that captures anything but a whole number of minutes, refuses the command as
+configuration rather than being read as no match, or as no budget, either of which would let a red
+leg pass unseen.
+
 ## Exit codes
 
 `0` always means success. "The thing you asked about failed" never shares a code
@@ -1472,11 +1664,11 @@ a defect in this tool. `install-missing-tools` exits `1` when a tool is missing,
 date or could not be installed, and `15` when a host could not be reached: a tool that is not
 there and a host that did not answer call for different things. `check-anchor-balance` and
 `check-anchor-citations` exit `1` on a finding, which is what they were asked to look for rather
-than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `2` when the
-matrix did not run at all — an empty answer is indistinguishable from every leg passing, and is
-never read as one. `host-exec` returns the exit code of the command it ran on the host,
+than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `2` when no job
+is a leg - the matrix did not run, or `legJobPattern` matches none of its jobs - an empty answer
+indistinguishable from every leg passing, and never read as one. `host-exec` returns the exit code of the command it ran on the host,
 unchanged, or 15 when that command never reported how it finished.
-`DssHarness help exit-codes` prints the shared table from the code itself; this copy, and the
+`dssharness help exit-codes` prints the shared table from the code itself; this copy, and the
 per-command codes above, are maintained by hand.
 
 Commands that run legs (`build`, `run`, `test`) use four codes from the range reserved for

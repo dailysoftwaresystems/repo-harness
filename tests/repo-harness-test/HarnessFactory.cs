@@ -44,7 +44,7 @@ public sealed class HarnessFactory
         PathBudget = new PathBudget(Platform);
         ContextLoader = new HarnessContextLoader(
             RepositoryLocator, ConfigStore, GitClient, FileSystem, Platform, Output);
-        WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform, Output);
+        WorktreeService = new WorktreeService(ContextLoader, GitClient, FileSystem, PathBudget, Platform, Output, HostCopies);
 
         AnchorRegistryLocator = new AnchorRegistryLocator(GitClient);
         AnchorRegistryLock = new NamedMutexAnchorRegistryLock(Platform, NamedMutexAnchorRegistryLock.DefaultTimeout);
@@ -68,6 +68,7 @@ public sealed class HarnessFactory
             VerifyGitService,
             AnchorRegistryLocator,
             ToolProvisionService,
+            GitClient,
             new ManagedIgnoreCheck(GitClient, FileSystem, Platform, Output),
             Platform);
     }
@@ -103,6 +104,9 @@ public sealed class HarnessFactory
     public IProjectDetector ProjectDetector { get; }
 
     public IPathBudget PathBudget { get; }
+
+    /// <summary>What deleting a worktree does on hosts: nothing, since no host is reached from these tests.</summary>
+    public IHostCopyRemover HostCopies { get; } = new NoHostCopies();
 
     public IHarnessContextLoader ContextLoader { get; }
 

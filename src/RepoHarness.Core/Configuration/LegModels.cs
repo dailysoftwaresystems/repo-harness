@@ -123,11 +123,62 @@ public sealed class TestInvocation
 
     /// <summary>
     /// Argument introducing a test exclusion, such as <c>-LE</c> for ctest, so one <c>--exclude</c>
-    /// option works everywhere. Declared per leg as well as per project, because a leg reached
-    /// through a transport legitimately runs a narrower suite than one running here: a guard that
-    /// checks this checkout has nothing to say about a host's copy of it.
+    /// option works everywhere; what <see cref="RemoteExcludes"/> leave out on a host's legs reaches
+    /// the runner through it too.
     /// </summary>
     public string? ExcludeArg { get; init; }
+
+    /// <summary>
+    /// What joins several exclusions into the one value <see cref="ExcludeArg"/> is given, such as
+    /// <c>|</c> for ctest, for a runner that does not leave out each of them when given the argument
+    /// more than once. Unset or empty, each exclusion is given an <see cref="ExcludeArg"/> of its own;
+    /// empty says so in an operating system's section over a join the shared one declares.
+    /// </summary>
+    /// <remarks>
+    /// Measured with ctest 4.3.2: given <c>-LE slow -LE gpu</c> it leaves out only a test whose labels
+    /// match both, and given <c>-E a -E b</c> only what the last matches, so a test run told to leave
+    /// out slow tests and gpu tests ran the gpu-only ones on a machine with no GPU. One regular expression
+    /// joined by <c>|</c> leaves out what any of them matches.
+    /// <para>
+    /// Exclusions the <see cref="Args"/> already give are kept as ctest reads them: those given are added
+    /// to each <c>-LE</c> value there, and to the last <c>-E</c>, in whatever spelling and form it was
+    /// written. Another runner's values there are joined with those given. Where none is given, the args
+    /// run as written. ctest is refused an exclusion beside another given apart with no join; beside a
+    /// test preset that leaves tests out the same way itself, takes a union, or cannot be read; beside
+    /// <c>--rerun-failed</c>; and, by <c>-LE</c>, beside <c>--union</c> in the args, where ctest reads
+    /// <c>-E</c> alone.
+    /// </para>
+    /// </remarks>
+    public string? ExcludeJoin { get; init; }
+
+    /// <summary>
+    /// Exclusions every leg on a host reached through a transport - a WSL distribution or an ssh host -
+    /// is given, through <see cref="ExcludeArg"/>, beside those <c>--exclude</c> gives. A leg this
+    /// machine runs is given none of them.
+    /// </summary>
+    /// <remarks>
+    /// Such a host runs its legs in a copy of the repository of its own: the files the sync writes there
+    /// from this tree, in a git repository of the host's own - one the sync made, or one it took over -
+    /// whose index and history are not this checkout's. A test that checks this checkout's state - a
+    /// guard reading git's index, say - has nothing to say about that copy, and fails there on the files
+    /// the sync wrote. Declared with the invocation, in its runner's words and merged per operating
+    /// system like the rest, so no leg repeats the whole test section to leave them out - a leg's own
+    /// section replaces the project's - and no run has to leave them out in an invocation of its own.
+    /// Held when the configuration is read to every rule <c>--exclude</c>'s values are, where the
+    /// invocation alone decides it - a host that refused them would end the run, after its sync - and
+    /// ctest to an <see cref="ExcludeJoin"/>, since what <c>--exclude</c> adds and its args give reach it
+    /// beside them.
+    /// </remarks>
+    public List<string>? RemoteExcludes { get; init; }
+
+    /// <summary>
+    /// Argument introducing a label the tests to run must carry, such as <c>-L</c> for ctest, so one
+    /// <c>--label</c> option works everywhere. Beside <see cref="FilterArg"/>, which selects by name,
+    /// and <see cref="ExcludeArg"/>, which a label can already be left out by: a group a runner labels
+    /// could otherwise be left out but never chosen, only matched by a name pattern that happens to
+    /// cover the same tests.
+    /// </summary>
+    public string? LabelArg { get; init; }
 
     /// <summary>
     /// Cores this invocation uses, replacing both the host's <c>testCores</c> and

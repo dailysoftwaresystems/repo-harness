@@ -1,5 +1,6 @@
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Platform;
 
@@ -38,6 +39,202 @@ public sealed class CMakeToolchainReaderTests
 
         Assert.Null(reading.Unread);
         Assert.Equal([new CompilerFact("C", "GNU", "13.2.0"), new CompilerFact("CXX", "GNU", "13.2.0")], reading.Compilers);
+    }
+
+    /// <summary>
+    /// The reply CMake 4.3 wrote for a C++ project whose C only a subproject enables - as googletest's
+    /// own project() enables it - measured with MSVC: C with the compiler's path and no id, which CMake
+    /// identified in that subdirectory alone. C is identified from CMake's own record of it, which names
+    /// the same compiler; the resource compiler, which CMake never identifies, is named unidentified,
+    /// with why, and never read as a compiler.
+    /// </summary>
+    [Fact]
+    public void Read_IdentifiesALanguageOnlyASubprojectEnabled_FromCMakesOwnRecordOfIt()
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp);
+
+        WriteRecord(build, "C", $"set(CMAKE_C_COMPILER \"{Cl}\")\nset(CMAKE_C_COMPILER_ARG1 \"\")\nset(CMAKE_C_COMPILER_ID \"MSVC\")\nset(CMAKE_C_COMPILER_VERSION \"19.51.36257.0\")\r\n");
+        WriteRecord(build, "RC", $"set(CMAKE_RC_COMPILER \"{Rc}\")\nset(CMAKE_RC_COMPILER_ARG1 \"\")\n");
+
+        var reading = Reader().Read(build);
+
+        Assert.Null(reading.Unread);
+        Assert.Equal([new CompilerFact("C", "MSVC", "19.51.36257.0"), new CompilerFact("CXX", "MSVC", "19.51.36257.0")], reading.Compilers);
+        Assert.Equal("RC", Assert.Single(reading.Unidentified).Key);
+        Assert.EndsWith("names no id either", reading.Unidentified["RC"], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Such a language is identified from a record of the compiler the answer names, however the answer
+    /// names it: under a Visual Studio generator it names no compiler for the language at all, measured
+    /// with Visual Studio 18 2026, and a toolchain file's value is kept in the answer as written, where
+    /// the record holds what CMake made of it - a path tidied of .. and doubled separators, a list's first
+    /// item, and a name alone found as a program, dotted or not.
+    /// </summary>
+    [Theory]
+    [InlineData(null, Cl, "MSVC", "19.51.36257.0")]
+    [InlineData("gcc", "/usr/bin/gcc", "GNU", "13.2.0")]
+    [InlineData("x86_64-w64-mingw32-gcc-13.2.0", "/usr/bin/x86_64-w64-mingw32-gcc-13.2.0", "GNU", "13.2.0")]
+    [InlineData("/opt/gcc/bin/../bin/gcc", "/opt/gcc/bin/gcc", "GNU", "13.2.0")]
+    [InlineData("/opt/gcc/bin//gcc", "/opt/gcc/bin/gcc", "GNU", "13.2.0")]
+    [InlineData("/opt/gcc/bin/gcc;-m64", "/opt/gcc/bin/gcc", "GNU", "13.2.0")]
+    public void Read_IdentifiesSuchALanguage_FromARecordOfTheCompilerTheAnswerNames(string? answered, string recorded, string id, string version)
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp, c: answered);
+
+        WriteRecord(build, "C", $"set(CMAKE_C_COMPILER \"{recorded}\")\nset(CMAKE_C_COMPILER_ID \"{id}\")\nset(CMAKE_C_COMPILER_VERSION \"{version}\")\n");
+
+        Assert.Equal(new CompilerFact("C", id, version), Reader().Read(build).Compilers[0]);
+    }
+
+    /// <summary>
+    /// What CMake makes of a Windows toolchain file's compiler, measured with CMake 4.3 and MinGW gcc: a
+    /// path with the backslashes Windows takes for separators, and one with a doubled separator, each
+    /// spelled with forward slashes in the record, its drive in the case written; and a name alone - dotted
+    /// or not - found as the program with .exe after it. The record identifies the language each time.
+    /// </summary>
+    [Theory]
+    [InlineData(@"C:\\Strawberry\\c\\bin\\gcc.exe", "C:/Strawberry/c/bin/gcc.exe")]
+    [InlineData("c:/Strawberry/c/bin//gcc.exe", "c:/Strawberry/c/bin/gcc.exe")]
+    [InlineData("gcc", "C:/Strawberry/c/bin/gcc.exe")]
+    [InlineData("x86_64-w64-mingw32-gcc-13.2.0", "C:/Strawberry/c/bin/x86_64-w64-mingw32-gcc-13.2.0.exe")]
+    public void Read_IdentifiesSuchALanguage_AsCMakeMakesACompilerOfAWindowsToolchainFile(string answeredInJson, string recorded)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Only Windows takes a backslash for a separator, and adds .exe to a program's name.");
+
+        using var temp = new TempDirectory();
+
+        // The answer's JSON, which escapes each backslash.
+        var build = WriteSubprojectReply(temp, c: answeredInJson);
+
+        WriteRecord(build, "C", $"set(CMAKE_C_COMPILER \"{recorded}\")\nset(CMAKE_C_COMPILER_ID \"GNU\")\nset(CMAKE_C_COMPILER_VERSION \"13.2.0\")\n");
+
+        Assert.Equal(new CompilerFact("C", "GNU", "13.2.0"), Reader().Read(build).Compilers[0]);
+    }
+
+    /// <summary>
+    /// Off Windows, a name alone is found as a program of exactly that name, as CMake's find_program finds
+    /// it there: a record naming the name with .exe after it names another program.
+    /// </summary>
+    [Fact]
+    public void Read_TakesARecordOfTheNameWithAnExtension_ForAnotherProgram_OffWindows()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows adds .com or .exe to a program's name.");
+
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp, c: "gcc");
+
+        WriteRecord(build, "C", "set(CMAKE_C_COMPILER \"/usr/bin/gcc.exe\")\nset(CMAKE_C_COMPILER_ID \"GNU\")\n");
+
+        Assert.EndsWith("names '/usr/bin/gcc.exe', another compiler", Reader().Read(build).Unidentified["C"], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An answer whose path holds a NUL names no file, and ties no record to itself: the language is
+    /// unidentified, and the rest of the answer is still read.
+    /// </summary>
+    [Fact]
+    public void Read_TiesNoRecordToAPathHoldingANul()
+    {
+        using var temp = new TempDirectory();
+
+        // The answer's JSON, which escapes the NUL.
+        var build = WriteSubprojectReply(temp, c: "/opt/gcc\\u0000/bin/gcc");
+
+        WriteRecord(build, "C", "set(CMAKE_C_COMPILER \"/opt/gcc/bin/gcc\")\nset(CMAKE_C_COMPILER_ID \"GNU\")\n");
+
+        var reading = Reader().Read(build);
+
+        Assert.Equal(["CXX"], reading.Compilers.Select(compiler => compiler.Language));
+        Assert.EndsWith("names '/opt/gcc/bin/gcc', another compiler", reading.Unidentified["C"], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A record nothing ties to the answer identifies nothing, as a configure after the answer's can leave
+    /// one - one that identified the compiler again and then failed writes no answer: a record of another
+    /// compiler than the answer names, by path or by a toolchain file's program name, one naming none, and
+    /// one written after the answer, whether or not the answer names a compiler.
+    /// </summary>
+    [Theory]
+    [InlineData("C:/Strawberry/c/bin/gcc.exe", Cl, false, $"names '{Cl}', another compiler")]
+    [InlineData("gcc", "C:/Program Files/LLVM/bin/clang.exe", false, "names 'C:/Program Files/LLVM/bin/clang.exe', another compiler")]
+    [InlineData(Cl, null, false, "names no compiler")]
+    [InlineData(Cl, Cl, true, "was written after that answer")]
+    [InlineData(null, Cl, true, "was written after that answer")]
+    public void Read_IdentifiesNothingFromARecordNothingTiesToTheAnswer(string? answered, string? recorded, bool later, string expected)
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp, c: answered);
+        var names = recorded is null ? string.Empty : $"set(CMAKE_C_COMPILER \"{recorded}\")\n";
+
+        WriteRecord(build, "C", $"{names}set(CMAKE_C_COMPILER_ID \"MSVC\")\nset(CMAKE_C_COMPILER_VERSION \"19.51.36257.0\")\n", later ? Answered.AddSeconds(1) : null);
+
+        var reading = Reader().Read(build);
+
+        Assert.Equal(["CXX"], reading.Compilers.Select(compiler => compiler.Language));
+        Assert.StartsWith($"its answer names {(answered is null ? "no compiler" : $"'{answered}'")} for C and no id, and its record of identifying C's compiler, ", reading.Unidentified["C"], StringComparison.Ordinal);
+        Assert.EndsWith(expected, reading.Unidentified["C"], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A language the answer names no id for, where CMake's record does not identify it, is named
+    /// unidentified with why - never read as any compiler: no record, one with no id, and an index
+    /// naming no version to find it under - saying what the answer named, or that it named nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("missing", Cl, "is not there")]
+    [InlineData("missing", null, "is not there")]
+    [InlineData("no-id", Cl, "names no id either")]
+    [InlineData("no-version", Cl, "its index names no CMake version, which its record of identifying C's compiler is kept under")]
+    public void Read_NamesALanguageItCannotIdentify_WithWhy(string state, string? answered, string expected)
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp, version: state == "no-version" ? null : "4.3.2", c: answered);
+
+        if (state is "no-id" or "no-version")
+        {
+            WriteRecord(build, "C", $"set(CMAKE_C_COMPILER \"{Cl}\")\nset(CMAKE_C_COMPILER_ID \"\")\n");
+        }
+
+        var reading = Reader().Read(build);
+
+        Assert.Equal(["CXX"], reading.Compilers.Select(compiler => compiler.Language));
+        Assert.StartsWith($"its answer names {(answered is null ? "no compiler" : $"'{answered}'")} for C and no id, and ", reading.Unidentified["C"], StringComparison.Ordinal);
+        Assert.EndsWith(expected, reading.Unidentified["C"], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A declared language CMake's answer lists without identifying its compiler is unwitnessed, saying
+    /// what the answer named for it and why that is no id - never that CMake named none - beside one the
+    /// answer does not list at all; a language it identified as declared answers for itself.
+    /// </summary>
+    [Fact]
+    public void HeldTo_SaysWhyALanguageCMakeListedIsUnidentified_ApartFromOneItNamedNothingFor()
+    {
+        var config = new HarnessConfig { Toolchains = { ["msvc"] = new ToolchainConfig { CompilerId = { ["C"] = "MSVC", ["CXX"] = "MSVC" } } } };
+        var why = $"its answer names '{Cl}' for C and no id, and its record of identifying that compiler, 'CMakeCCompiler.cmake', is not there";
+        var reading = new CompilerReading([new CompilerFact("CXX", "MSVC", "19.51.36257.0")], null)
+        {
+            Unidentified = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["C"] = why },
+        };
+
+        var alone = CompilerFacts.HeldTo(config, "msvc", reading);
+
+        Assert.Equal(LegVerdict.Unwitnessed, alone!.Verdict);
+        Assert.Equal(
+            $"toolchain 'msvc' declares the compiler for C, and CMake identified none for it: {why}; nothing established which compiler this build used",
+            alone.Detail);
+
+        config.Toolchains["msvc"].CompilerId["CUDA"] = "NVIDIA";
+
+        var both = CompilerFacts.HeldTo(config, "msvc", reading);
+
+        Assert.Equal(
+            $"toolchain 'msvc' declares the compiler for C, CUDA, and CMake named none for CUDA; CMake identified none for C: {why}; "
+            + "nothing established which compiler this build used",
+            both!.Detail);
     }
 
     /// <summary>
@@ -164,7 +361,217 @@ public sealed class CMakeToolchainReaderTests
         Assert.Null(CompilerFacts.Describe([]));
     }
 
+    /// <summary>
+    /// The compilers the next configure builds with are read from CMake's records of identifying them,
+    /// under the version that last answered: each one's path, id and version, the words recorded after
+    /// its path, and whether it takes MSVC's options - as its record says, or, where the record predates
+    /// saying, as MSVC's own compiler does.
+    /// </summary>
+    [Fact]
+    public void Identified_ReadsTheRecordsTheNextConfigureLoads()
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp);
+
+        WriteRecord(build, "CXX", $"""
+            set(CMAKE_CXX_COMPILER "{Cl}")
+            set(CMAKE_CXX_COMPILER_ARG1 "")
+            set(CMAKE_CXX_COMPILER_ID "MSVC")
+            set(CMAKE_CXX_COMPILER_VERSION "19.51.36257.0")
+            """);
+        WriteRecord(build, "C", """
+            set(CMAKE_C_COMPILER "/usr/bin/ccache")
+            set(CMAKE_C_COMPILER_ARG1 " clang-cl  -m64")
+            set(CMAKE_C_COMPILER_ID "Clang")
+            set(CMAKE_C_COMPILER_VERSION "18.1.3")
+            set(CMAKE_C_COMPILER_FRONTEND_VARIANT "MSVC")
+            """);
+
+        var (compilers, unread) = Reader().Identified(build);
+
+        Assert.Empty(unread);
+        Assert.Collection(
+            compilers,
+            c =>
+            {
+                Assert.Equal(("C", "Clang", "18.1.3", "/usr/bin/ccache"), (c.Language, c.Id, c.Version, c.Program));
+                Assert.Equal(["clang-cl", "-m64"], c.Arguments);
+                Assert.True(c.MsvcOptions);
+            },
+            cxx =>
+            {
+                Assert.Equal(("CXX", "MSVC", "19.51.36257.0", Cl), (cxx.Language, cxx.Id, cxx.Version, cxx.Program));
+                Assert.Empty(cxx.Arguments);
+                Assert.True(cxx.MsvcOptions);
+            });
+    }
+
+    /// <summary>
+    /// A GNU compiler takes GCC's options where its record says so and where its record predates
+    /// saying, and a setting the record gives as empty comes back empty rather than as a record that
+    /// could not be read: which compilers can be asked is the asker's to decide.
+    /// </summary>
+    [Fact]
+    public void Identified_ReadsGccsOptions_AndWhatARecordGivesAsEmpty()
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp);
+
+        WriteRecord(build, "CXX", """
+            set(CMAKE_CXX_COMPILER "/usr/bin/c++")
+            set(CMAKE_CXX_COMPILER_ID "GNU")
+            set(CMAKE_CXX_COMPILER_VERSION "13.3.0")
+            set(CMAKE_CXX_COMPILER_FRONTEND_VARIANT "GNU")
+            """);
+        WriteRecord(build, "C", """
+            set(CMAKE_C_COMPILER "/usr/bin/cc")
+            set(CMAKE_C_COMPILER_ID "GNU")
+            set(CMAKE_C_COMPILER_VERSION "")
+            """);
+
+        var (compilers, unread) = Reader().Identified(build);
+
+        Assert.Empty(unread);
+        Assert.Collection(
+            compilers,
+            c =>
+            {
+                Assert.Equal(("C", "GNU", string.Empty, "/usr/bin/cc"), (c.Language, c.Id, c.Version, c.Program));
+                Assert.Empty(c.Arguments);
+                Assert.False(c.MsvcOptions);
+            },
+            cxx =>
+            {
+                Assert.Equal(("CXX", "GNU", "13.3.0"), (cxx.Language, cxx.Id, cxx.Version));
+                Assert.False(cxx.MsvcOptions);
+            });
+    }
+
+    /// <summary>
+    /// A record missing a line CMake writes in every record of a compiler - its path, id or version, each
+    /// empty where CMake identified nothing - was not written whole by CMake, and is named among what could
+    /// not be read: skipped in silence, the check for a compiler changed in place would be off for its
+    /// directory without a word.
+    /// </summary>
+    [Theory]
+    [InlineData("set(CMAKE_C_COMPILER_ID \"GNU\")\nset(CMAKE_C_COMPILER_VERSION \"13.3.0\")\n")]
+    [InlineData("set(CMAKE_C_COMPILER \"/usr/bin/cc\")\nset(CMAKE_C_COMPILER_VERSION \"13.3.0\")\n")]
+    [InlineData("set(CMAKE_C_COMPILER \"/usr/bin/cc\")\nset(CMAKE_C_COMPILER_ID \"GNU\")\n")]
+    public void Identified_NamesARecordMissingALineCMakeAlwaysWrites_AsUnread(string record)
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp);
+
+        WriteRecord(build, "C", record);
+
+        var (compilers, unread) = Reader().Identified(build);
+
+        Assert.Empty(compilers);
+        Assert.Contains("lacks a line CMake writes in every record of a compiler", Assert.Single(unread), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A compiler CMake could not identify comes back as recorded - an empty id and version, as CMake
+    /// records one - and a language with no record under the answering version not at all. Named among
+    /// what could not be read, the first would be warned about on every build, though no id-less compiler
+    /// is ever asked anything.
+    /// </summary>
+    [Fact]
+    public void Identified_ReturnsACompilerCMakeCouldNotIdentify_AsItWasRecorded()
+    {
+        using var temp = new TempDirectory();
+        var build = WriteSubprojectReply(temp);
+
+        WriteRecord(build, "C", """
+            set(CMAKE_C_COMPILER "/opt/sdk/bin/xcc")
+            set(CMAKE_C_COMPILER_ARG1 "")
+            set(CMAKE_C_COMPILER_ID "")
+            set(CMAKE_C_COMPILER_VERSION "")
+            """);
+
+        var (compilers, unread) = Reader().Identified(build);
+
+        Assert.Empty(unread);
+
+        var c = Assert.Single(compilers);
+        Assert.Equal(("C", string.Empty, string.Empty, "/opt/sdk/bin/xcc"), (c.Language, c.Id, c.Version, c.Program));
+    }
+
+    /// <summary>A directory CMake never answered in holds nothing a configure would load, and says so by naming none.</summary>
+    [Fact]
+    public void Identified_NamesNone_WhereCMakeNeverAnswered()
+    {
+        using var temp = new TempDirectory();
+        var build = temp.Combine("build");
+
+        WriteRecord(build, "CXX", $"""
+            set(CMAKE_CXX_COMPILER "{Cl}")
+            set(CMAKE_CXX_COMPILER_ID "MSVC")
+            set(CMAKE_CXX_COMPILER_VERSION "19.51.36257.0")
+            """);
+
+        var (compilers, unread) = Reader().Identified(build);
+
+        Assert.Empty(compilers);
+        Assert.Empty(unread);
+    }
+
+    /// <summary>The C and C++ compiler CMake 4.3 named in the measured reply, as it spelled it.</summary>
+    private const string Cl ="C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe";
+
+    /// <summary>The resource compiler it named beside them.</summary>
+    private const string Rc = "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe";
+
+    /// <summary>When the measured reply's index was written, as its name says.</summary>
+    private static readonly DateTime Answered = new(2026, 9, 22, 12, 0, 0, DateTimeKind.Utc);
+
     private static CMakeToolchainReader Reader() => new(new PhysicalFileSystem(FilePermissionsFactory.Create()));
+
+    /// <summary>
+    /// Writes the index and toolchains answer CMake 4.3 wrote, measured, for a C++ project whose C a
+    /// subproject enables: C with no id - the path <paramref name="c"/>, or none - C++ identified, and
+    /// the resource compiler with its path alone. The index names the CMake <paramref name="version"/>
+    /// that answered, or none, and was written at <see cref="Answered"/>.
+    /// </summary>
+    private static string WriteSubprojectReply(TempDirectory temp, string? version = "4.3.2", string? c = Cl)
+    {
+        var build = temp.Combine("build");
+        var replies = Path.Combine(build, ".cmake", "api", "v1", "reply");
+        var cmake = version is null ? string.Empty : $$""" "cmake": { "version": { "major": 4, "minor": 3, "patch": 2, "string": "{{version}}", "suffix": "" } }, """;
+        var index = Path.Combine(replies, "index-2026-09-22T12-00-00-0000.json");
+
+        temp.WriteFile(index, $$"""
+            { {{cmake}} "reply": { "toolchains-v1": { "jsonFile": "toolchains-v1-a.json", "kind": "toolchains", "version": { "major": 1, "minor": 1 } } } }
+            """);
+        File.SetLastWriteTimeUtc(index, Answered);
+        temp.WriteFile(Path.Combine(replies, "toolchains-v1-a.json"), $$"""
+            {
+              "kind": "toolchains",
+              "version": { "major": 1, "minor": 1 },
+              "toolchains": [
+                { "language": "C", "compiler": { {{(c is null ? string.Empty : $"\"path\": \"{c}\", ")}}"implicit": {} } },
+                { "language": "CXX", "compiler": { "id": "MSVC", "version": "19.51.36257.0", "path": "{{Cl}}", "implicit": {} } },
+                { "language": "RC", "compiler": { "path": "{{Rc}}", "implicit": {} } }
+              ]
+            }
+            """);
+
+        return build;
+    }
+
+    /// <summary>
+    /// Writes CMake's record of identifying <paramref name="language"/>'s compiler, where CMake 4.3.2 keeps
+    /// it, as written at <paramref name="written"/> - by default before <see cref="Answered"/>, as the
+    /// configure that answered wrote it.
+    /// </summary>
+    private static void WriteRecord(string build, string language, string text, DateTime? written = null)
+    {
+        var record = Path.Combine(build, "CMakeFiles", "4.3.2", $"CMake{language}Compiler.cmake");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(record)!);
+        File.WriteAllText(record, text);
+        File.SetLastWriteTimeUtc(record, written ?? Answered.AddSeconds(-5));
+    }
 
     /// <summary>
     /// Writes an index and the toolchains answer it names, in the shape CMake 4.3 wrote them: C and
