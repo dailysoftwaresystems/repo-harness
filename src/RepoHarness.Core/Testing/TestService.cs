@@ -364,6 +364,7 @@ public sealed class TestService(
             Phases = [new PhaseRecord(phase.Phase, phase.Duration, phase.ClockStepped)],
             TimingNotes = TimingNotes(phase),
             Timings = [.. phase.Timings.Select(timing => new TimingMark(phase.Phase, timing.Text, timing.Value))],
+            LogTail = phase.Tail,
         };
 
         return new TestLegResult(reached, entry, phase.LogFile, phase, comparison, contention, cores, command);

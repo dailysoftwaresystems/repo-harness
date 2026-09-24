@@ -68,6 +68,39 @@ public sealed record PhaseResult(
     /// </summary>
     public bool Passed => !Stalled && ExitCode == 0 && Witnessed != false && MissingOutputs.Count == 0;
 
+    /// <summary>How many of its last lines a phase that did not pass is shown by.</summary>
+    public const int TailLines = 50;
+
+    /// <summary>
+    /// The last <see cref="TailLines"/> lines the child printed, on either stream, in the order they came,
+    /// with the run's secrets masked as in <see cref="Output"/> - which holds one stream after the other,
+    /// and so ends with whichever came second rather than with what came last.
+    /// </summary>
+    public IReadOnlyList<string> LastLines { get; init; } = [];
+
+    /// <summary>
+    /// <see cref="LastLines"/> where the phase did not pass; empty where it did. What a reader who cannot
+    /// open the log - another host's, which stays on that host - needs first.
+    /// </summary>
+    public IReadOnlyList<string> Tail => Passed ? [] : LastLines;
+
+    /// <summary>
+    /// The <see cref="Tail"/> of the last of <paramref name="phases"/> that did not pass - the one a build
+    /// stopped at, or a run's last failure - and none where every one passed.
+    /// </summary>
+    /// <param name="phases">The phases, in the order they ran.</param>
+    public static IReadOnlyList<string> TailOf(IEnumerable<PhaseResult> phases)
+    {
+        ArgumentNullException.ThrowIfNull(phases);
+
+        return phases.LastOrDefault(phase => !phase.Passed)?.Tail ?? [];
+    }
+
+    /// <summary>The last <see cref="TailLines"/> lines of <paramref name="text"/>, however they end, and no empty one after the last.</summary>
+    /// <param name="text">What was printed.</param>
+    internal static IReadOnlyList<string> LastLinesOf(string text)
+        => text.Length == 0 ? [] : [.. text.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n').TakeLast(TailLines)];
+
     /// <summary>
     /// What this phase declared it would produce and did not, or empty when it produced everything
     /// it named.

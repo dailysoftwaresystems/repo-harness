@@ -208,6 +208,7 @@ internal static class RunCommand
                     Emulated = leg.Emulated,
                     TimingNotes = built,
                     Compilers = compilers,
+                    LogTail = build.Tail,
                 };
             }
         }

@@ -939,6 +939,33 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A leg whose build failed carries the last lines the build printed on its line, whichever command
+    /// built it: what a reader whose log is on another host has. Here the tree holds no project file, so
+    /// the build fails the same way on every machine, and says so.
+    /// </summary>
+    [Theory]
+    [InlineData("build")]
+    [InlineData("test")]
+    [InlineData("run")]
+    public async Task ALegWhoseBuildFailed_CarriesWhatTheBuildPrintedLast_WhicheverCommandBuiltIt(string verb)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        string[] command = verb == "run" ? ["run", "probe"] : [verb];
+
+        await ABuildThatFailsAsync(temp, new TestInvocation { Runner = "dotnet", Args = ["--version"], SuccessPattern = @"^\d+\.\d+" }, token);
+
+        var result = await CliRunner.RunAsync([.. command, "--legs", "native", "--json", "-C", temp.Path], token);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.True(legs.Count == 1, $"exit {result.ExitCode}: {result.StandardError}");
+        Assert.Equal("failed", legs[0].GetProperty("verdict").GetString());
+        Assert.Contains(legs[0].GetProperty("logTail").EnumerateArray(), line => line.GetString()!.Contains("MSB1003", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// A test run the runner could not be given as asked is refused before the leg builds: everything its
     /// command is made from is known then. Here the build would fail - the tree holds no project file - so
     /// a refusal that came after it would never be reached, and the leg would say its build failed.
@@ -947,28 +974,12 @@ public sealed partial class CliEndToEndTests
     public async Task ATestThatCannotBeGivenAsAsked_IsRefusedBeforeTheLegBuilds()
     {
         using var temp = new TempDirectory();
-        var harness = new HarnessFactory();
-        var platform = harness.Platform;
         var token = TestContext.Current.CancellationToken;
 
-        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
-        {
-            BuildConfigs = { ["debug"] = new BuildConfiguration() },
-            Projects =
-            {
-                new ProjectConfig
-                {
-                    Name = "app",
-                    Type = "dotnet",
-                    Path = ".",
-                    Test = new TestConfig
-                    {
-                        All = new TestInvocation { Runner = "dotnet", Args = ["--version"], ExcludeArg = "--exclude", SuccessPattern = @"^\d+\.\d+" },
-                    },
-                },
-            },
-            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" } },
-        });
+        await ABuildThatFailsAsync(
+            temp,
+            new TestInvocation { Runner = "dotnet", Args = ["--version"], ExcludeArg = "--exclude", SuccessPattern = @"^\d+\.\d+" },
+            token);
 
         var test = await CliRunner.RunAsync(["test", "--legs", "native", "--exclude", "", "-C", temp.Path], token);
 
@@ -1063,6 +1074,28 @@ public sealed partial class CliEndToEndTests
         using var document = JsonDocument.Parse(result.StandardOutput);
 
         return document.RootElement.GetProperty("runDirectory").GetString()!;
+    }
+
+    /// <summary>
+    /// A repository whose one leg builds a .NET project, testing it with <paramref name="test"/>, from a tree
+    /// that holds no project file: its build runs and fails the same way on every machine, saying MSB1003.
+    /// A predefined runner, 'probe', builds before it runs.
+    /// </summary>
+    private static async Task ABuildThatFailsAsync(TempDirectory temp, TestInvocation test, CancellationToken token)
+    {
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["sdk"] = new ToolchainConfig { Platforms = [platform.PlatformKey] } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Projects = { new ProjectConfig { Name = "app", Type = "dotnet", Path = ".", Test = new TestConfig { All = test } } },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "sdk" } },
+            PredefinedRunners = { ["probe"] = new RunnerConfig { Action = "probe/probe.yml", RequireBuild = true } },
+        });
+
+        temp.WriteFile(Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"), "name: probe\nsteps:\n  - name: version\n    run: dotnet --version\n");
     }
 
     /// <summary>

@@ -241,6 +241,15 @@ public sealed class PhaseRunner(
         // pattern nobody should be able to write.
         var visible = request.RedactLine is { } redactAll ? redactAll(childOutput) : childOutput;
 
+        // In the order the lines came, masked as each came: the captured output holds one stream after
+        // the other, and its end is whichever came second, not what the child printed last.
+        IReadOnlyList<string> lastLines;
+
+        lock (gate)
+        {
+            lastLines = PhaseResult.LastLinesOf(streamed.ToString());
+        }
+
         return new PhaseResult(
             Leg: request.Leg,
             Phase: request.Phase,
@@ -253,7 +262,10 @@ public sealed class PhaseRunner(
             ClockStepped: stepped,
             Timings: Extract(timings, visible, request.Phase),
             LogFile: request.LogFile,
-            Output: visible);
+            Output: visible)
+        {
+            LastLines = lastLines,
+        };
     }
 
     /// <summary>

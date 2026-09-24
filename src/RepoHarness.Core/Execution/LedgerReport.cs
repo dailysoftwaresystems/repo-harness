@@ -46,6 +46,9 @@ public sealed record LedgerLine(
     /// <summary>The steps the leg's operating system does not run, by name.</summary>
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
+    /// <summary>The last lines the leg's last phase that did not pass printed, as <see cref="LegEntry.LogTail"/> says.</summary>
+    public IReadOnlyList<string> LogTail { get; init; } = [];
+
     /// <summary>The compilers CMake configured the leg's build with.</summary>
     public IReadOnlyList<Build.CompilerFact> Compilers { get; init; } = [];
 
@@ -258,6 +261,7 @@ public sealed class LedgerReport
                 {
                     RunDirectory = entry.RunDirectory,
                     SkippedSteps = entry.SkippedSteps,
+                    LogTail = entry.LogTail,
                     Compilers = entry.Compilers,
                     DeveloperEnvironment = entry.DeveloperEnvironment,
                     Project = entry.Project,
@@ -322,6 +326,26 @@ public sealed class LedgerReport
             duration)));
 
         rows.AddRange(RenderTimings());
+        rows.AddRange(RenderTails());
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The last lines each leg's last phase that did not pass printed, as a block below the table: what a
+    /// reader who cannot open the leg's log - another host's, which stays on that host - needs first.
+    /// Below rather than in the table, as the timings are, so no row is pushed apart.
+    /// </summary>
+    private IReadOnlyList<string> RenderTails()
+    {
+        var rows = new List<string>();
+
+        foreach (var line in Lines.Where(line => line.LogTail.Count > 0))
+        {
+            rows.Add(string.Empty);
+            rows.Add(string.Create(CultureInfo.InvariantCulture, $"{line.Leg}: the last {line.LogTail.Count} line(s) its phase printed"));
+            rows.AddRange(line.LogTail.Select(text => "  | " + text));
+        }
 
         return rows;
     }
@@ -461,6 +485,9 @@ public sealed class LedgerReport
 
                 // Only where a step was left out for the leg's operating system.
                 SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
+
+                // Only for a leg that has one: a phase of its own did not pass.
+                LogTail = line.LogTail.Count > 0 ? line.LogTail : null,
 
                 // Only where CMake named the compilers it configured the leg's build with.
                 Compilers = line.Compilers.Count > 0

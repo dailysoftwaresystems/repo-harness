@@ -104,6 +104,14 @@ public sealed record LegEntry
     public string? RunDirectory { get; init; }
 
     /// <summary>
+    /// The last lines the leg's last phase that did not pass printed, on either stream in the order they
+    /// came, secrets masked: what a reader who cannot open its log - another host's, which stays on that
+    /// host - needs first. Empty for a leg that passed, and for one whose every phase passed, whatever else
+    /// decided its verdict.
+    /// </summary>
+    public IReadOnlyList<string> LogTail { get; init; } = [];
+
+    /// <summary>
     /// The steps of the runner's action this leg's operating system does not run, by name, in the order
     /// they are declared: left out on purpose, and said so, rather than simply absent.
     /// </summary>

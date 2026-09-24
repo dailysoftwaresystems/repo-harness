@@ -111,6 +111,31 @@ public sealed class RemoteLegRunnerTests
     }
 
     /// <summary>
+    /// The last lines the phase that failed on a host printed travel on the leg's line, read from the very
+    /// document the host writes: its log stays on that host, and a reader here has nothing else.
+    /// </summary>
+    [Fact]
+    public async Task TheLastLinesAPhaseThatFailedTherePrinted_AreCarriedOnTheLegsLine()
+    {
+        IReadOnlyList<string> tail = ["[ 99%] Linking CXX executable app", "ld: symbol(s) not found for architecture arm64"];
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Failed, Detail = "build exited 2", LogTail = tail }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("build", Leg(), "/home/dev/repo", [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(tail, entry.LogTail);
+    }
+
+    /// <summary>
     /// The project and test set a host's count belongs to travel with the count, read from the very
     /// document the host writes: the host ran what it had, and this machine compares the count with
     /// its siblings as it was counted there, never as its own configuration would name it now.

@@ -677,6 +677,37 @@ public sealed class LedgerReportTests
         Assert.DoesNotContain("TIMINGS", string.Join("\n", report.Render()), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A leg that did not pass shows the last lines its deciding phase printed, below the table and named
+    /// by the leg, in the text and in the JSON alike; a leg that passed shows none, and the JSON leaves
+    /// the field out for it.
+    /// </summary>
+    [Fact]
+    public void TheLastLinesAFailedLegPrinted_AreShown_ForItAlone()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("mac-release", LegVerdict.Failed, TimeSpan.FromSeconds(80), "test exited 8") with
+            {
+                LogTail = ["1 test failed out of 412", "The following tests FAILED: 17 - git_state"],
+            },
+            Entry("win-msvc-release", LegVerdict.Passed, TimeSpan.FromSeconds(134), "412 tests"),
+        ],
+        durationWarningFactor: 0);
+
+        var rows = report.Render();
+        var heading = Assert.Single(rows, row => row.Contains("line(s) its phase printed", StringComparison.Ordinal));
+
+        Assert.StartsWith("mac-release: the last 2 line(s)", heading, StringComparison.Ordinal);
+        Assert.Equal("  | The following tests FAILED: 17 - git_state", rows[^1]);
+
+        using var json = System.Text.Json.JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = json.RootElement.GetProperty("legs");
+
+        Assert.Equal(2, legs[0].GetProperty("logTail").GetArrayLength());
+        Assert.False(legs[1].TryGetProperty("logTail", out var none) && none.ValueKind != System.Text.Json.JsonValueKind.Null);
+    }
+
     [Fact]
     public void TheJsonLedger_CarriesEveryTimingMark()
     {

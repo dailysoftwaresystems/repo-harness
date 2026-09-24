@@ -170,6 +170,9 @@ public sealed class TestServiceTests
         Assert.Equal(LegVerdict.InputsMoved, result.Verdict.Verdict);
         Assert.Contains(Fixture, result.Verdict.Detail, StringComparison.Ordinal);
         Assert.Equal(1, result.Phase.ExitCode);
+
+        // What the suite printed last is on the leg's line, for a reader whose log is on another host.
+        Assert.Equal(["2 tests failed"], result.Entry.LogTail);
     }
 
     [Fact]

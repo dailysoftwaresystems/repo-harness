@@ -71,6 +71,9 @@ public sealed record BuildResult(
             .Where(phase => phase.ClockStepped)
             .Select(phase => $"{phase.Phase} spanned a clock step, so its duration and every mtime it wrote are suspect"),
     ];
+
+    /// <summary>The last lines the phase the build stopped at printed, as <see cref="PhaseResult.TailOf"/> picks them.</summary>
+    public IReadOnlyList<string> Tail => PhaseResult.TailOf(Phases);
 }
 
 /// <summary>Building one leg.</summary>

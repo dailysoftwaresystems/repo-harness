@@ -202,6 +202,7 @@ internal static class TestCommand
                     Emulated = leg.Emulated,
                     TimingNotes = built,
                     Compilers = compilers,
+                    LogTail = build.Tail,
                 };
             }
         }
