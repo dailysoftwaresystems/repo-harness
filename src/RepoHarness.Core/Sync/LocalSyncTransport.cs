@@ -23,7 +23,7 @@ public sealed class LocalSyncTransport(
     /// The file recording that the harness made this copy, inside the copy's own harness directory,
     /// which is withheld from transfer and so can never be overwritten by the source.
     /// </summary>
-    public const string MarkerFileName = "synced-copy.json";
+    public const string MarkerFileName = HarnessLayout.SyncedCopyMarkerName;
 
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;

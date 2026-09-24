@@ -196,8 +196,17 @@ public sealed class HostSecretsStore(IFileSystem fileSystem, IFilePermissions fi
 
         if (!_fileSystem.DirectoryExists(directory))
         {
-            return (null, $"'{Show(layout, directory)}' does not exist; create it, with a "
-                + $"'{HarnessLayout.ItemEnvFileName}' declaring {required}");
+            // In a copy on a host it is absent by design, not left undone: connection data is gitignored and
+            // never transferred, so that a host holds no key of its own. Telling the reader to create it there
+            // would have the host reach a machine over ssh - itself, where it is the host the leg names. A leg
+            // is placed by the machine that syncs to the host and dispatches it, and that is where it belongs.
+            return _fileSystem.FileExists(layout.SyncedCopyMarkerFile)
+                ? (null, $"'{Show(layout, directory)}' does not exist, and this tree is a copy the harness "
+                    + "synced to a host: connection data is never synced, so nothing here reaches another "
+                    + "machine. Run this from the machine that syncs to this one, which places the legs it "
+                    + "dispatches here")
+                : (null, $"'{Show(layout, directory)}' does not exist; create it, with a "
+                    + $"'{HarnessLayout.ItemEnvFileName}' declaring {required}");
         }
 
         if (Absent(layout, file, $"it declares {required}") is { } noFile)

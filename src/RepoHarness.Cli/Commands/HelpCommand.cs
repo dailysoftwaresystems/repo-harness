@@ -852,6 +852,11 @@ internal static class HelpCommand
         builder.AppendLine("reached only when the main checkout holds its directory under sshItems, so a");
         builder.AppendLine("config.json arriving through git cannot point the harness at a machine nobody set up.");
         builder.AppendLine();
+        builder.AppendLine("A host's own copy of the tree holds none of that connection data: it is gitignored, so");
+        builder.AppendLine("a sync never carries it, and a host keeps no key of its own. A command typed in a copy");
+        builder.AppendLine("therefore reaches no other machine, and a leg naming a host is placed by the machine");
+        builder.AppendLine("that syncs to that host and dispatches the work there.");
+        builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");
         builder.AppendLine($"  {HarnessExit.Incomplete,3}  legs: the legs that answered can run, and a host did not answer");

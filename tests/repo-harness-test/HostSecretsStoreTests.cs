@@ -66,6 +66,26 @@ public sealed class HostSecretsStoreTests
             read.Problem);
     }
 
+    /// <summary>
+    /// In a copy the harness synced to a host, connection data is absent by design: it is gitignored and never
+    /// transferred, so the host holds no key of its own. The refusal says that, rather than telling the reader to
+    /// create it there - which would have the host reach a machine over ssh to run work it was dispatched.
+    /// </summary>
+    [Fact]
+    public void AnItemDirectoryMissingFromAHostsOwnCopy_SaysWhyItIsAbsent_NotToCreateIt()
+    {
+        using var repository = new TempDirectory();
+        var fixture = new Fixture(repository);
+        repository.WriteFile(Path.Combine(".harness-config", HarnessLayout.SyncedCopyMarkerName), """{"Adopted":false,"Completed":true}""");
+
+        var read = fixture.Store.ReadSshItem(fixture.Layout, Item);
+
+        Assert.Null(read.Item);
+        Assert.Contains("this tree is a copy the harness synced to a host", read.Problem, StringComparison.Ordinal);
+        Assert.Contains("Run this from the machine that syncs to this one", read.Problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("create it", read.Problem, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AKeyTheEnvDoesNotDeclare_IsNamed_WithTheFileItBelongsIn()
     {
