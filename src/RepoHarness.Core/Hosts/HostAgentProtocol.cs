@@ -75,8 +75,8 @@ public static class HostAgentProtocol
         => $"{CommandName}: finished {nonce} {exitCode.ToString(CultureInfo.InvariantCulture)}";
 
     /// <summary>
-    /// The line a host writes to standard error first, before it serves a run request, so that the machine
-    /// that asked can tell what the agent says from what the host's login shell said before it.
+    /// The line a host writes on each stream first, before it serves a run request, so that the machine that
+    /// asked can tell what the agent says from what the host's login shell said before it.
     /// </summary>
     /// <remarks>
     /// A login shell writes to the same streams the command does, and whatever it writes arrives first. One
@@ -88,13 +88,31 @@ public static class HostAgentProtocol
     public static string StartedLine(string nonce)
         => $"{CommandName}: serving {nonce}";
 
-    /// <summary>Whether <paramref name="line"/> is the started line of the request that carried <paramref name="nonce"/>.</summary>
+    /// <summary>Whether <paramref name="line"/> carries the started line of the request that sent <paramref name="nonce"/>.</summary>
+    /// <remarks>
+    /// Matched as the end of the line rather than the whole of it. A login profile whose last write has no
+    /// trailing newline - a prompt, an escape sequence, an <c>echo -n</c> - glues its bytes onto the first
+    /// line the agent writes, which is this one. Held to the whole line, such a host would never open the
+    /// gate at all, and every run on it would report as one that never said how it finished.
+    /// </remarks>
     public static bool IsStartedLine(string line, string nonce)
     {
         ArgumentNullException.ThrowIfNull(line);
         ArgumentException.ThrowIfNullOrWhiteSpace(nonce);
 
-        return string.Equals(line.TrimEnd(), StartedLine(nonce), StringComparison.Ordinal);
+        return line.TrimEnd().EndsWith(StartedLine(nonce), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> is one the agent itself wrote under its own name, which is relayed
+    /// even before the started line: a request refused before it could be read carries no nonce to mark.
+    /// </summary>
+    /// <param name="line">A line the host wrote.</param>
+    public static bool IsAgentsOwnLine(string line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+
+        return line.TrimStart().StartsWith(CommandName + ": ", StringComparison.Ordinal);
     }
 
     /// <summary>Reads <paramref name="line"/> as the completion line of the request that carried <paramref name="nonce"/>.</summary>

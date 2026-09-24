@@ -108,9 +108,16 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                     // this end reports one ledger for the whole run rather than one per machine.
                     OnOutputLine = line =>
                     {
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
+                        {
+                            reporting = true;
+                            return;
+                        }
+
+                        // Nothing the host said before its agent began belongs in the ledger: a login shell
+                        // writes to the same stream, and what it says is the host's business.
                         if (!reporting)
                         {
-                            reporting = HostAgentProtocol.IsStartedLine(line, nonce);
                             return;
                         }
 
@@ -118,18 +125,28 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                     },
                     OnErrorLine = line =>
                     {
-                        // Nothing the host said before its agent began is this run's output: a login shell
-                        // writes to the same stream, and one consumer's printed the account's home layout on
-                        // every session, which a relayed leg line then published.
-                        if (!serving)
-                        {
-                            serving = HostAgentProtocol.IsStartedLine(line, nonce);
-                            return;
-                        }
-
+                        // Read before the gate, and never behind it: how the command finished is the one
+                        // thing that must survive a host whose profile writes to this stream, because a line
+                        // that never arrives is reported as a command that may not have run at all.
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;
+                            return;
+                        }
+
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
+                        {
+                            serving = true;
+                            return;
+                        }
+
+                        // Nothing else the host said before its agent began is this run's output: a login
+                        // shell writes to the same stream, and one consumer's printed the account's home
+                        // layout on every session, which a relayed leg line then published. The agent's own
+                        // lines pass all the same, because a request refused before it could be read carries
+                        // no nonce to mark, and that refusal is the whole of what the reader has to go on.
+                        if (!serving && !HostAgentProtocol.IsAgentsOwnLine(line))
+                        {
                             return;
                         }
 

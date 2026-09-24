@@ -157,6 +157,59 @@ public sealed class HostExecServiceTests
         Assert.Contains("create-worktree: OK", fixture.Error.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A profile whose last write has no newline glues its bytes onto the first line the agent writes, which
+    /// is the marker. The gate still opens, the glued text is not relayed, and the command's exit code is
+    /// read as it always was.
+    /// </summary>
+    /// <remarks>
+    /// Held to the whole line, such a host would open the gate on nothing at all, and every command on it
+    /// would report as one that never said how it finished - a far worse failure than the leak, and one that
+    /// no host with a quiet profile would ever show.
+    /// </remarks>
+    [Fact]
+    public async Task AProfileThatLeavesItsLastLineOpen_StillOpensTheGate_AndIsNotRelayed()
+    {
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 7, "create-worktree: FAIL - no\n"));
+        fixture.Commands.LoginShellPrints = _ => "PATH += /Users/someone/Library/emsdk";
+        fixture.Commands.LoginShellLeavesALineOpen = true;
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        // The command's own exit code, not the connection's: the completion line was still read.
+        Assert.Equal(7, outcome.ExitCode);
+        Assert.Contains("create-worktree: FAIL - no", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host that refuses before it can read the request writes no marker - it has no nonce to mark with -
+    /// and its refusal is the whole of what the reader has to go on, so it is relayed all the same.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatRefusesBeforeItCanMarkItsOutput_IsStillHeard()
+    {
+        var refusal = FailureLine.For(HostAgentProtocol.CommandName, "the request speaks protocol 5, and this host speaks 4");
+
+        var fixture = Create(respond: (_, command) =>
+        {
+            command.OnErrorLine?.Invoke(refusal);
+            return HostResults.Failed(HarnessExit.UsageError, refusal + "\n");
+        });
+
+        fixture.Commands.Marks = false;
+        fixture.Commands.LoginShellPrints = _ => "PATH += /Users/someone/Library/emsdk";
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+
+        // Why it refused reaches the reader, and the host's profile still does not.
+        Assert.Contains("the request speaks protocol 5", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ACommandThatNeverSaysHowItFinished_IsUnavailable_RatherThanTheConnectionsExitCode()
     {

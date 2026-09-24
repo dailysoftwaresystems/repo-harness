@@ -62,6 +62,19 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// </remarks>
     public Func<HostCommand, string>? LoginShellPrints { get; set; }
 
+    /// <summary>
+    /// Whether the agent marks where its own output begins. A host that refuses a request before it can read
+    /// one - an empty request, a protocol it does not speak - writes its refusal and no marker at all, so the
+    /// machine that asked must still hear it.
+    /// </summary>
+    public bool Marks { get; set; } = true;
+
+    /// <summary>
+    /// Whether the host's login shell ends its last write without a newline, so that what it printed is glued
+    /// onto the first line the agent writes - the marker.
+    /// </summary>
+    public bool LoginShellLeavesALineOpen { get; set; }
+
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
@@ -122,22 +135,37 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             _calls.Add((connection, command));
         }
 
-        // The host's own shell first, as it comes: before the agent has run, and so before its marker.
-        foreach (var line in LoginShellPrints?.Invoke(command).Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? [])
+        // The host's own shell first, as it comes: before the agent has run, and so before its marker. A
+        // profile whose last write has no newline glues those bytes onto the marker, which is the next thing
+        // written, exactly as a reader splitting on newlines would deliver it.
+        var printed = LoginShellPrints?.Invoke(command).Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? [];
+        var glued = string.Empty;
+
+        for (var index = 0; index < printed.Length; index++)
         {
-            command.OnOutputLine?.Invoke(line);
-            command.OnErrorLine?.Invoke(line);
+            if (LoginShellLeavesALineOpen && index == printed.Length - 1)
+            {
+                glued = printed[index];
+                break;
+            }
+
+            command.OnOutputLine?.Invoke(printed[index]);
+            command.OnErrorLine?.Invoke(printed[index]);
         }
 
         // Then the agent marks its own output, as it does before serving: the machine that asked relays
-        // nothing until it has seen this, so what a profile said is not taken for the run's output.
-        Mark(command);
+        // nothing until it has seen this, so what a profile said is not taken for the run's output. A host
+        // that refused before it could read the request writes no marker at all.
+        if (Marks)
+        {
+            Mark(command, glued);
+        }
 
         return Task.FromResult(respond(connection, command));
     }
 
     /// <summary>Writes the agent's start marker on both streams, where the command carries a request with a nonce.</summary>
-    private static void Mark(HostCommand command)
+    private static void Mark(HostCommand command, string glued = "")
     {
         if (string.IsNullOrEmpty(command.StandardInput))
         {
@@ -160,7 +188,7 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             return;
         }
 
-        var started = HostAgentProtocol.StartedLine(nonce);
+        var started = glued + HostAgentProtocol.StartedLine(nonce);
         command.OnOutputLine?.Invoke(started);
         command.OnErrorLine?.Invoke(started);
     }

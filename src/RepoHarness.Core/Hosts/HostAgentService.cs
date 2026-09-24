@@ -173,10 +173,6 @@ public sealed class HostAgentService(
         };
     }
 
-    /// <summary>
-    /// Serves a run request, then writes its completion line last. The machine that asked reads the command's
-    /// exit code from that line, and a line that never arrives tells it the connection failed first.
-    /// </summary>
     /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>
     /// <param name="output">Where a command's own standard output is forwarded.</param>
     /// <param name="error">Where a command's own standard error, and the completion line, are forwarded.</param>
@@ -184,7 +180,7 @@ public sealed class HostAgentService(
     /// <remarks>
     /// Written whatever has been cancelled since, as the completion line is: the machine that asked relays
     /// nothing until it has seen this, so a marker withheld because the input had already ended would lose
-    /// the whole of what the request then says about itself - including why it refused.
+    /// the whole of what the request then says about itself.
     /// </remarks>
     private static async Task WriteStartedAsync(TextWriter output, TextWriter error, string nonce)
     {
@@ -196,6 +192,10 @@ public sealed class HostAgentService(
         await error.FlushAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Serves a run request, then writes its completion line last. The machine that asked reads the command's
+    /// exit code from that line, and a line that never arrives tells it the connection failed first.
+    /// </summary>
     private async Task<int> RunAsync(
         HostAgentRequest request,
         TextWriter output,
