@@ -72,6 +72,60 @@ public sealed class BuildServiceTests
         }
     }
 
+    /// <summary>
+    /// A path an earlier build left is reported as a leftover, with the remedy for one, and never as
+    /// something this build produced.
+    /// </summary>
+    /// <remarks>
+    /// A directory kept between builds holds the objects of targets since renamed or removed, and the
+    /// deepest path in it is often one of those. A consumer measured it: a test renamed shorter left its
+    /// old object behind, four legs warned that "this build produced" it and told them to raise the
+    /// reserve - which their own budget arithmetic had no room for - while the two legs that had rebuilt
+    /// from clean, and so held only what they wrote, said nothing.
+    /// </remarks>
+    [Fact]
+    public async Task APathAnEarlierBuildLeft_IsSaidAsALeftover_WithTheRemedyForOne()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        var (service, factory) = await TrackedWithFactoryAsync(temp, token, leaves: [Path.Combine("bin", "app.dll")]);
+
+        var config = new HarnessConfig
+        {
+            Defaults = new HarnessDefaults { StallSeconds = 0 },
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 40 },
+        };
+
+        // A first build, so the directory is kept rather than started from clean for having no record.
+        Assert.Equal(LegVerdict.Passed, (await service.BuildAsync(config, request, token)).Verdict.Verdict);
+
+        // What an earlier build left: deeper than the reserve, and dated before this build begins.
+        var leftover = Path.Combine(
+            request.Variant.DirectoryUnder(temp.Path),
+            "obj",
+            "a-target-that-no-longer-exists",
+            "with-a-very-long-name-indeed-left-behind.cpp.obj");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(leftover)!);
+        await File.WriteAllTextAsync(leftover, "stale\n", token);
+        File.SetLastWriteTimeUtc(leftover, DateTime.UtcNow.AddHours(-6));
+
+        factory.StandardError.GetStringBuilder().Clear();
+
+        Assert.Equal(LegVerdict.Passed, (await service.BuildAsync(config, request, token)).Verdict.Verdict);
+
+        var said = factory.StandardError.ToString();
+
+        Assert.Contains("an earlier build left a path", said, StringComparison.Ordinal);
+        Assert.Contains("which this build did not write", said, StringComparison.Ordinal);
+        Assert.Contains("start this variant's build directory from clean", said, StringComparison.Ordinal);
+
+        // Never this build's, and never the remedy that would move a number nothing measured against it.
+        Assert.DoesNotContain("this build produced a path", said, StringComparison.Ordinal);
+        Assert.DoesNotContain("Raise it to at least", said, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ABuildThatExitedZeroAndProducedNothingItDeclared_IsUnwitnessed()
     {
@@ -1420,7 +1474,11 @@ public sealed class BuildServiceTests
             new ProcessSampler(processTable ?? new QuietProcessTable(), factory.Platform, factory.Output),
             factory.GitClient,
             fileSystem ?? factory.FileSystem,
-            factory.Output);
+            factory.Output,
+
+            // The same clock its phases are timed against, so which build wrote a file is decided here by a
+            // clock that steps only when a test steps it, never by this machine's own.
+            wallClock ?? new SteppingClock());
 
     private static HarnessConfig Config() => new()
     {

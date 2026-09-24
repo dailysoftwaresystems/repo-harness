@@ -100,7 +100,8 @@ public sealed class BuildService(
     ProcessSampler processSampler,
     Git.IGitClient gitClient,
     IFileSystem fileSystem,
-    IHarnessOutput output) : IBuildService
+    IHarnessOutput output,
+    TimeProvider? wallClock = null) : IBuildService
 {
     /// <summary>The command this service reports under.</summary>
     public const string CommandName = "build";
@@ -113,6 +114,9 @@ public sealed class BuildService(
     private readonly InputFingerprint _fingerprints = fingerprints;
     private readonly ProcessSampler _processSampler = processSampler;
     private readonly Git.IGitClient _gitClient = gitClient;
+
+    /// <summary>The clock this build dates its own work by, so that what it wrote is told from what it found.</summary>
+    private readonly TimeProvider _wallClock = wallClock ?? TimeProvider.System;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHarnessOutput _output = output;
 
@@ -214,6 +218,12 @@ public sealed class BuildService(
         // earlier record, every change made before it would look like one a build system could miss,
         // and a build stopped for running long would start from clean every time and never finish.
         var recorded = Began(request, guards.Opening);
+
+        // When this build began touching the directory, so that what it wrote there can be told from what
+        // it found. A directory kept between builds holds objects of targets that no longer exist - a test
+        // renamed shorter leaves the old name's object behind - and the deepest path in it is often one of
+        // those, which this build did not produce and raising a reserve would not affect.
+        var began = _wallClock.GetUtcNow().UtcDateTime;
 
         Record(buildDirectory, recorded);
 
@@ -364,10 +374,10 @@ public sealed class BuildService(
         {
             var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
             var verdict = seen.Decide(request.Leg, [reached]);
-            var left = Survey(buildDirectory);
+            var left = Survey(buildDirectory, began);
 
             ContentionWarnings.Write(_output, CommandName, request.Leg, seen.Contention!, config.Contention);
-            WarnWhenDeeperThanTheReserve(request, left, config.Worktrees.PathBudgetReserve);
+            WarnWhenDeeperThanTheReserve(request, left, config.Worktrees.PathBudgetReserve, phases);
 
             // Recorded again whatever the verdict, with the newest file the build left: the next build
             // dates its changes against that, not against the directory as it stands by then, which
@@ -395,6 +405,7 @@ public sealed class BuildService(
     /// <param name="request">The leg's build.</param>
     /// <param name="left">What it left in its build directory.</param>
     /// <param name="reserve">What worktrees.pathBudgetReserve declares.</param>
+    /// <param name="phases">The phases it ran, which say whether its dates can be ordered at all.</param>
     /// <remarks>
     /// What keeps the reserve honest. It is a number somebody measured once, against whatever the
     /// build produced then; headers grow deeper and generators rename what they write, and nothing
@@ -402,7 +413,7 @@ public sealed class BuildService(
     /// touched. Measured after every build, from the files the build itself left, and said when it
     /// could not be measured rather than taken as fine.
     /// </remarks>
-    private void WarnWhenDeeperThanTheReserve(BuildRequest request, Left left, int reserve)
+    private void WarnWhenDeeperThanTheReserve(BuildRequest request, Left left, int reserve, IReadOnlyList<PhaseResult> phases)
     {
         if (left.Unreadable is { } unreadable)
         {
@@ -414,6 +425,23 @@ public sealed class BuildService(
             return;
         }
 
+        // Which build wrote a file is read from its date, and a clock that stepped during this one puts
+        // that beyond saying: an object stamped inside the step can date before a build that preceded it.
+        // Said as not checked, rather than guessed at, because both readings are actionable and wrong.
+        if (phases.FirstOrDefault(phase => phase.ClockStepped) is { } stepped)
+        {
+            if (left.Deepest.Length > reserve || left.Leftover.Length > reserve)
+            {
+                _output.Warn(
+                    CommandName,
+                    $"{request.Leg}: this build's '{stepped.Phase}' phase spanned a clock step, so which of the paths "
+                    + "below its build directory it wrote cannot be told from their dates, and "
+                    + "worktrees.pathBudgetReserve was not checked against them.");
+            }
+
+            return;
+        }
+
         if (left.Deepest.Length > reserve)
         {
             _output.Warn(
@@ -421,17 +449,39 @@ public sealed class BuildService(
                 $"{request.Leg}: this build produced a path {left.Deepest.Length} characters long below its build "
                 + $"directory ('{left.Deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
                 + $"to at least {left.Deepest.Length}, or a worktree created against it may not leave its build room.");
+
+            return;
+        }
+
+        // Nothing this build wrote is that deep, so the reserve is not what is wrong: a directory kept
+        // between builds holds the objects of targets that have since been renamed or removed, and raising
+        // a reserve for one of those would move a number nothing measured against this build.
+        if (left.Leftover.Length > reserve)
+        {
+            _output.Warn(
+                CommandName,
+                $"{request.Leg}: an earlier build left a path {left.Leftover.Length} characters long below this "
+                + $"build directory ('{left.Leftover}'), which this build did not write and "
+                + $"worktrees.pathBudgetReserve declares {reserve}. Nothing builds it now, so the reserve is not "
+                + "what is short: start this variant's build directory from clean to be rid of it.");
         }
     }
 
     /// <summary>What a build left in its directory, as one walk of it found.</summary>
-    /// <param name="Deepest">The longest path below the directory, as the host spells it; empty where it holds nothing.</param>
+    /// <param name="Deepest">
+    /// The longest path below the directory that this build wrote, as the host spells it; empty where it
+    /// wrote none. Where the walk was not given when the build began, every path counts as its own.
+    /// </param>
     /// <param name="Newest">
     /// The newest file in it, relative to it with forward slashes, and when it was written;
     /// <see langword="null"/> where it holds nothing or could not be read.
     /// </param>
     /// <param name="Unreadable">Why the directory could not all be read, where it could not.</param>
-    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable);
+    /// <param name="Leftover">
+    /// The longest path below the directory that this build did not write, as the host spells it; empty
+    /// where every path is this build's, or where the walk was not given when the build began.
+    /// </param>
+    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable, string Leftover = "");
 
     /// <summary>
     /// Walks <paramref name="buildDirectory"/> once for what is in it: the deepest path below it and the
@@ -447,14 +497,25 @@ public sealed class BuildService(
     /// points at: a build that links its test data in from the source tree would otherwise date every
     /// edit to that data against the edit itself. A directory reached through a link is never walked.
     /// </remarks>
-    private Left Survey(string buildDirectory)
+    /// <param name="buildDirectory">The directory to walk.</param>
+    /// <param name="began">
+    /// When this build began touching the directory, which sorts what it wrote from what it found, or
+    /// <see langword="null"/> to take every path as this build's - for a walk made for the newest file
+    /// alone, where nothing asks which build wrote it.
+    /// </param>
+    private Left Survey(string buildDirectory, DateTime? began = null)
     {
         if (!_fileSystem.DirectoryExists(buildDirectory))
         {
             return new Left(string.Empty, null, null);
         }
 
+        // A filesystem that dates coarsely - FAT to two seconds - can stamp a file this build wrote just
+        // before the instant recorded. Counted as this build's, because "raise the reserve" is the
+        // actionable warning of the two and the one that must not be missed.
+        var mine = began?.AddSeconds(-2);
         var deepest = string.Empty;
+        var leftover = string.Empty;
         WrittenFile? newest = null;
 
         try
@@ -463,9 +524,16 @@ public sealed class BuildService(
             {
                 var below = Path.GetRelativePath(buildDirectory, file.Path);
 
-                if (below.Length > deepest.Length)
+                if (mine is null || file.LastWriteTimeUtc >= mine)
                 {
-                    deepest = below;
+                    if (below.Length > deepest.Length)
+                    {
+                        deepest = below;
+                    }
+                }
+                else if (below.Length > leftover.Length)
+                {
+                    leftover = below;
                 }
 
                 if (newest is null || file.LastWriteTimeUtc > newest.LastWriteTimeUtc)
@@ -479,7 +547,7 @@ public sealed class BuildService(
             return new Left(string.Empty, null, ex.Message);
         }
 
-        return new Left(deepest, newest, null);
+        return new Left(deepest, newest, null, leftover);
     }
 
     /// <summary>
