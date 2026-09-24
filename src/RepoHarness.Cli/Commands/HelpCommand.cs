@@ -855,7 +855,9 @@ internal static class HelpCommand
         builder.AppendLine("A host's own copy of the tree holds none of that connection data: it is gitignored, so");
         builder.AppendLine("a sync never carries it, and a host keeps no key of its own. A command typed in a copy");
         builder.AppendLine("therefore reaches no other machine, and a leg naming a host is placed by the machine");
-        builder.AppendLine("that syncs to that host and dispatches the work there.");
+        builder.AppendLine("that syncs to that host and dispatches the work there. Typed in a copy, a command");
+        builder.AppendLine("refused any host says so, and a sync that reaches none of the hosts its legs need");
+        builder.AppendLine($"fails, exit {HarnessExit.HostUnavailable}, rather than reporting that no host needed a copy.");
         builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");

@@ -1165,6 +1165,110 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A sync that could reach none of the hosts its legs need copied nothing it was asked to, and fails
+    /// naming them - a real run and a dry run alike, since a dry run answers for the real one. Counting
+    /// the reachable hosts alone read this as no host needing a copy: inside a host's own copy, which
+    /// reaches no other machine, every leg warned it could not run and the sync still concluded OK.
+    /// Inside a copy the conclusion also says where the command belongs, once, whatever the host count.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ASyncThatCanReachNoHostItsLegsNeed_FailsNamingThem_RatherThanConcludingOk(bool syncedCopy, bool dryRun)
+    {
+        var factory = Substitute.For<ISyncTransportFactory>();
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig
+            {
+                Ssh =
+                {
+                    ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" },
+                    ["mac"] = new SshHostConfig { RepositoryPath = "/Users/harness/repo" },
+                },
+            },
+            Legs = { ["arm"] = HostDoubles.Leg("linux", "arm64"), ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "mac" } },
+        };
+
+        var loader = HostDoubles.Loader(config, here, syncedCopy: syncedCopy);
+
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : new HostReport { Host = host, Reason = "the host could not be reached" });
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            factory,
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(
+            here, null, new SyncOptions(DryRun: dryRun), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+        Assert.StartsWith("no host a leg is placed on could be reached, so nothing was copied", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh pi", outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("ssh mac", outcome.Message, StringComparison.Ordinal);
+
+        var notices = outcome.Message.Split(HostConnector.SyncedCopyNotice).Length - 1;
+        Assert.Equal(syncedCopy ? 1 : 0, notices);
+
+        factory.DidNotReceive().For(Arg.Any<HostReport>());
+    }
+
+    /// <summary>
+    /// A sync whose every leg runs on this machine needed no copy anywhere, and says so as the success it
+    /// is - the conclusion the failure above must not be mistaken for, and must not replace.
+    /// </summary>
+    [Fact]
+    public async Task ASyncWhoseLegsAllRunHere_SaysNoHostNeedsACopy()
+    {
+        var factory = Substitute.For<ISyncTransportFactory>();
+        var harness = new HarnessFactory();
+        var here = TestHost.TemporaryRoot;
+
+        var config = new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Hosts = new HostsConfig { Ssh = { ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" } } },
+            Legs = { ["here"] = HostDoubles.Leg("linux", "x86_64") },
+        };
+
+        var loader = HostDoubles.Loader(config, here, syncedCopy: true);
+
+        var inspector = new RecordingInspector(host => host.Kind == HostKind.Local
+            ? new HostReport { Host = host, Os = "linux", Processor = "x86_64" }
+            : throw new InvalidOperationException($"{host} was measured, though no leg needs it"));
+
+        var service = new SyncService(
+            loader,
+            new ManifestBuilder(harness.FileSystem, harness.Platform),
+            Transport(harness),
+            factory,
+            new LegsService(loader, inspector, harness.Output),
+            harness.GitClient,
+            harness.FileSystem,
+            harness.Platform,
+            harness.Output);
+
+        var outcome = await service.SyncHostsAsync(here, null, new SyncOptions(), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, outcome.ExitCode);
+        Assert.Equal("no host needs a copy: every runnable leg runs on this machine", outcome.Message);
+    }
+
+    /// <summary>
     /// A name no host answers to is refused before a transport is made for any host, so a typo
     /// cannot be learned about after another host's directory has already been taken over.
     /// </summary>

@@ -306,7 +306,27 @@ public sealed class SyncService(
 
         if (hosts.Count == 0)
         {
-            return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+            // A host is measured only for a leg this machine cannot take, so one measured and unreachable is
+            // a copy some leg needed and nothing made. Counting the runnable hosts alone read that as no
+            // host needing one: inside a host's own copy - which reaches no other machine - every leg
+            // warned it could not run, and the sync still concluded OK.
+            var unreached = report.Hosts
+                .Where(host => host.Host.Kind != Hosts.HostKind.Local && !host.Available)
+                .Select(host => host.Host.ToString())
+                .ToList();
+
+            if (unreached.Count == 0)
+            {
+                return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+            }
+
+            // Each host's own reason was warned with the legs it stopped, so it is named here and not said
+            // again; in a copy, where that reason is the same for every host, the conclusion says it once.
+            var conclusion = $"no host a leg is placed on could be reached, so nothing was copied: {string.Join(", ", unreached)}";
+
+            return CommandOutcome.Failed(
+                HarnessExit.HostUnavailable,
+                context.IsSyncedCopy ? Hosts.HostConnector.InACopy(conclusion) : conclusion);
         }
 
         var details = new List<string>();
