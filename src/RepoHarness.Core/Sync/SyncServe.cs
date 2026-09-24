@@ -197,7 +197,10 @@ public static class SyncServe
 
         try
         {
-            return JsonSerializer.Deserialize<IReadOnlyList<SyncFileWrite>>(carried, JsonOptions) ?? [];
+            // A payload of 'null' reads as no batch at all, which is the very thing the refusal below
+            // exists to prevent: written as nothing and answered as though every file had crossed.
+            return JsonSerializer.Deserialize<IReadOnlyList<SyncFileWrite>>(carried, JsonOptions)
+                ?? throw new JsonException("the files to write are null");
         }
         catch (JsonException ex)
         {
@@ -354,4 +357,29 @@ public sealed record SyncFileAnswer(string Content, string ContentHash);
 /// <summary>One file a batched write carries.</summary>
 /// <param name="Path">Where it goes, relative to the copy's root.</param>
 /// <param name="Content">Its bytes, base64 encoded so they survive a line of text intact.</param>
-public sealed record SyncFileWrite(string Path, string Content);
+public sealed record SyncFileWrite(string Path, string Content)
+{
+    /// <summary>The bytes this carries, decoded.</summary>
+    /// <exception cref="HarnessException">The content is not base64, so the two ends are different builds.</exception>
+    /// <remarks>
+    /// Decoded here rather than where the batch is served, so that a file which did not survive the journey
+    /// is named and said as a transfer this build cannot read - the reasoning
+    /// <see cref="SyncServe.TooLargeToCarry"/> already applies to a file too large. Left to the runtime it
+    /// is a FormatException, which every command reports as a defect in this tool, naming neither the file
+    /// nor the host, and one bad entry in a batch of hundreds would identify none of them.
+    /// </remarks>
+    public byte[] Bytes()
+    {
+        try
+        {
+            return Convert.FromBase64String(Content);
+        }
+        catch (FormatException ex)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"'{Path}' arrived in a shape this build cannot read: {ex.Message.TrimEnd('.')}. The two ends "
+                + "are different builds.");
+        }
+    }
+}

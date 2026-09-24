@@ -78,10 +78,15 @@ public sealed class SyncServiceTests
             Assert.True(result.Verified);
             Assert.True(recording.Written.Count > extra, $"only {recording.Written.Count} files were written");
 
-            // The point of the batching: sessions grow with the tree's size divided by a batch, not with it.
-            Assert.True(
-                recording.Batches < recording.Written.Count / 10,
-                $"{recording.Written.Count} files were carried in {recording.Batches} batches");
+            // Nothing of the plan crosses on its own: a file at a time is the cost this exists to avoid, and
+            // a batch that merely wrapped single writes would satisfy any bound on how many batches there
+            // are. The one write outside a batch is the configuration, placed on its own after the transfer
+            // so that a copy which failed part way never looks like one a leg could run in.
+            Assert.Equal(1, recording.SingleWrites);
+
+            // And the batches are as few as the bounds allow, not merely fewer than the files: sessions grow
+            // with the tree's size divided by a batch, which is what makes a first sync finish.
+            Assert.InRange(recording.Batches, 1, (recording.Written.Count / SyncServe.MostFilesInABatch) + 2);
 
             // No file is lost to the grouping, and the count bound is the one that fired here.
             Assert.True(File.Exists(Path.Combine(copy, "src", "f0000.c")));

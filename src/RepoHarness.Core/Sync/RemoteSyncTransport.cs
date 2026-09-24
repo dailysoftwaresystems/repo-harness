@@ -179,29 +179,32 @@ public sealed class RemoteSyncTransport(
             SyncServe.RefuseAFileTooLargeToCarry(file.Contents.LongLength, file.Path, Host.ToString());
         }
 
+        string request;
+
+        // Only the encoding is guarded, because only here is it certain that nothing has been written: past
+        // this point the request has gone to the host, and an exception raised while the reply is read says
+        // nothing about how much of the batch the far side had already written.
         try
         {
             var carried = files
                 .Select(file => new SyncFileWrite(file.Path, Convert.ToBase64String(file.Contents)))
                 .ToList();
 
-            await AskAsync<object>(
-                    root,
-                    [SyncServe.WriteMany, root, SyncServe.Carry(carried)],
-                    cancellationToken)
-                .ConfigureAwait(false);
+            request = SyncServe.Carry(carried);
         }
         catch (OutOfMemoryException)
         {
-            // As one file's own write reports it: the batch is bounded by what the caller grouped, and
-            // this is the other ceiling - whatever this machine had free. Reported as the transfer being
-            // too large for this machine rather than as a defect in the tool, which is where an
+            // As one file's own write reports it: the batch is bounded by what the caller grouped, and this
+            // is the other ceiling - whatever this machine had free. Reported as the transfer being too
+            // large for this machine rather than as a defect in the tool, which is where an
             // OutOfMemoryException otherwise arrives.
             throw new HarnessException(
                 HarnessExit.CommandFailed,
                 $"{files.Count} files could not be carried to {Host} in one request: this machine ran out "
-                + "of memory holding them. Nothing in the batch was written.");
+                + "of memory encoding them, so none of them was sent.");
         }
+
+        await AskAsync<object>(root, [SyncServe.WriteMany, root, request], cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>

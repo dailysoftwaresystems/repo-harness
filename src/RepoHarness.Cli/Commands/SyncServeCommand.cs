@@ -100,7 +100,7 @@ internal static class SyncServeCommand
                         .WriteFilesAsync(
                             root,
                             [.. SyncServe.Carried(Required(arguments, 1, operation))
-                                .Select(file => new SyncFileContent(file.Path, Convert.FromBase64String(file.Content)))],
+                                .Select(file => new SyncFileContent(file.Path, file.Bytes()))],
                             cancellationToken)
                         .ConfigureAwait(false);
 

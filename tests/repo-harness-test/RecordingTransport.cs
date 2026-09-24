@@ -27,6 +27,9 @@ internal sealed class RecordingTransport(
     private int _manifests;
     private int _writes;
 
+    /// <summary>Whether a batch is being carried, so a file of it is not counted as a write of its own.</summary>
+    private bool _batching;
+
     /// <summary>How many times both halves were asked together.</summary>
     public int Inspections { get; private set; }
 
@@ -106,6 +109,11 @@ internal sealed class RecordingTransport(
 
     public async Task WriteFileAsync(string root, string relativePath, byte[] contents, CancellationToken cancellationToken = default)
     {
+        if (!_batching)
+        {
+            SingleWrites++;
+        }
+
         if (++_writes == FailsWrite)
         {
             throw new HarnessException(HarnessExit.HostUnavailable, $"the link dropped writing '{relativePath}'");
@@ -121,15 +129,26 @@ internal sealed class RecordingTransport(
     /// </summary>
     public int Batches { get; private set; }
 
+    /// <summary>How many files were written one at a time, outside any batch: what batching exists to avoid.</summary>
+    public int SingleWrites { get; private set; }
+
     public async Task WriteFilesAsync(string root, IReadOnlyList<SyncFileContent> files, CancellationToken cancellationToken = default)
     {
         Batches++;
+        _batching = true;
 
         // Through the same write as a file of its own, so a batch counts each file it carries and
         // FailsWrite still names the file to fail rather than the batch.
-        foreach (var file in files)
+        try
         {
-            await WriteFileAsync(root, file.Path, file.Contents, cancellationToken).ConfigureAwait(false);
+            foreach (var file in files)
+            {
+                await WriteFileAsync(root, file.Path, file.Contents, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _batching = false;
         }
     }
 
