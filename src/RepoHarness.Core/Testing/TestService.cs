@@ -77,11 +77,17 @@ public sealed record TestRequest
     public string? Filter { get; init; }
 
     /// <summary>
-    /// Exclusions the caller asked for, passed through the invocation's <c>excludeArg</c>. Declared
-    /// per leg as well, because a leg reached through a transport legitimately runs a narrower suite
-    /// than one running here.
+    /// Exclusions the caller asked for, passed through the invocation's <c>excludeArg</c>: beside the
+    /// invocation's <c>remoteExcludes</c> on a leg in a host's copy - see <see cref="Remote"/> - because
+    /// a leg reached through a transport legitimately runs a narrower suite than one running here.
     /// </summary>
     public IReadOnlyList<string> Excludes { get; init; } = [];
+
+    /// <summary>
+    /// Whether the leg runs on a host reached through a transport - a WSL distribution or an ssh host -
+    /// in that host's copy of the repository, where the invocation's <c>remoteExcludes</c> are left out too.
+    /// </summary>
+    public bool Remote { get; init; }
 
     /// <summary>Labels the tests to run must carry, as the caller asked for them, passed through the invocation's <c>labelArg</c>.</summary>
     public IReadOnlyList<string> Labels { get; init; } = [];
@@ -389,19 +395,32 @@ public sealed class TestService(
 
         var invocation = TestInvocationResolver.Resolve(settings, request.PlatformKey);
         var cores = CoreCounts.Resolve(invocation.Cores, request.HostTestCores, config.Defaults.TestCores);
-        var command = TestInvocationResolver.CommandFor(
-            invocation,
-            cores.Value,
-            request.Filter,
-            request.Excludes,
-            new LegPaths(request.TreeRoot, request.BuildDirectory)
-            {
-                Identity = request.Identity,
-                Product = request.Product,
-                ProductProblem = request.ProductProblem,
-            },
-            request.Labels,
-            _fileSystem);
+        var paths = new LegPaths(request.TreeRoot, request.BuildDirectory)
+        {
+            Identity = request.Identity,
+            Product = request.Product,
+            ProductProblem = request.ProductProblem,
+        };
+        IReadOnlyList<string> remote = request.Remote ? invocation.RemoteExcludes ?? [] : [];
+
+        TestCommand Given(IReadOnlyList<string> excludes)
+            => TestInvocationResolver.CommandFor(invocation, cores.Value, request.Filter, excludes, paths, request.Labels, _fileSystem);
+
+        TestCommand command;
+
+        try
+        {
+            command = Given([.. request.Excludes, .. remote]);
+        }
+        catch (HarnessException refused) when (remote.Count > 0 && Holds(() => Given(request.Excludes)))
+        {
+            // Refused over what a host's leg leaves out beside what was asked, which nobody typed: said so.
+            throw new HarnessException(
+                refused.ExitCode,
+                $"{refused.Message} It is refused over the test settings' remoteExcludes - {string.Join(", ", remote)} - "
+                + "which every leg a host runs is given beside what --exclude gives.",
+                refused);
+        }
 
         // Compiled before anything starts, with what starting the phase compiles first: a pattern that is
         // not a regular expression is a mistake in tracked configuration, and finding it after the build or
@@ -411,6 +430,21 @@ public sealed class TestService(
         _ = PhaseRunner.Patterns(request.Leg, request.PhaseName, invocation.SuccessPattern, TimingPatterns(config, request));
 
         return (settings, invocation, cores, command, counter);
+    }
+
+    /// <summary>Whether <paramref name="command"/> can be made, where the one asked for was refused.</summary>
+    private static bool Holds(Func<TestCommand> command)
+    {
+        try
+        {
+            _ = command();
+
+            return true;
+        }
+        catch (HarnessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>The patterns the suite's own timings are read by, where the run was asked for them.</summary>

@@ -123,9 +123,8 @@ public sealed class TestInvocation
 
     /// <summary>
     /// Argument introducing a test exclusion, such as <c>-LE</c> for ctest, so one <c>--exclude</c>
-    /// option works everywhere. Declared per leg as well as per project, because a leg reached
-    /// through a transport legitimately runs a narrower suite than one running here: a guard that
-    /// checks this checkout has nothing to say about a host's copy of it.
+    /// option works everywhere; what <see cref="RemoteExcludes"/> leave out on a host's legs reaches
+    /// the runner through it too.
     /// </summary>
     public string? ExcludeArg { get; init; }
 
@@ -151,6 +150,26 @@ public sealed class TestInvocation
     /// </para>
     /// </remarks>
     public string? ExcludeJoin { get; init; }
+
+    /// <summary>
+    /// Exclusions every leg on a host reached through a transport - a WSL distribution or an ssh host -
+    /// is given, through <see cref="ExcludeArg"/>, beside those <c>--exclude</c> gives. A leg this
+    /// machine runs is given none of them.
+    /// </summary>
+    /// <remarks>
+    /// Such a host runs its legs in a copy of the repository of its own: the files the sync writes there
+    /// from this tree, in a git repository of the host's own - one the sync made, or one it took over -
+    /// whose index and history are not this checkout's. A test that checks this checkout's state - a
+    /// guard reading git's index, say - has nothing to say about that copy, and fails there on the files
+    /// the sync wrote. Declared with the invocation, in its runner's words and merged per operating
+    /// system like the rest, so no leg repeats the whole test section to leave them out - a leg's own
+    /// section replaces the project's - and no run has to leave them out in an invocation of its own.
+    /// Held when the configuration is read to every rule <c>--exclude</c>'s values are, where the
+    /// invocation alone decides it - a host that refused them would end the run, after its sync - and
+    /// ctest to an <see cref="ExcludeJoin"/>, since what <c>--exclude</c> adds and its args give reach it
+    /// beside them.
+    /// </remarks>
+    public List<string>? RemoteExcludes { get; init; }
 
     /// <summary>
     /// Argument introducing a label the tests to run must carry, such as <c>-L</c> for ctest, so one

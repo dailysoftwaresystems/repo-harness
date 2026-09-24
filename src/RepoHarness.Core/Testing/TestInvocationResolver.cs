@@ -11,10 +11,11 @@ namespace RepoHarness.Core.Testing;
 /// platform it runs on.
 /// </summary>
 /// <remarks>
-/// Three layers, each narrower than the last, because a leg reached through a transport legitimately
-/// runs a narrower suite than one running here: a guard that checks this checkout has nothing to say
-/// about a host's copy of it. Resolving them in one place is what keeps the runner, the success
-/// pattern and the exclusions from being decided by three different rules.
+/// Three layers, each more particular than the last: the project's settings; a leg's own, which replace
+/// them for a leg that runs another suite, a sanitizer's subset say; and an operating system's section,
+/// merged over the shared one. What a leg on a host's copy leaves out beside the rest is the invocation's
+/// remoteExcludes. Resolving them in one place is what keeps the runner, the success pattern and the
+/// exclusions from being decided by three different rules.
 /// </remarks>
 public static class TestInvocationResolver
 {
@@ -70,13 +71,14 @@ public static class TestInvocationResolver
     }
 
     /// <summary>
-    /// The command line for a resolved invocation, with the caller's filter and exclusions spliced
-    /// in, and the core count handed over explicitly.
+    /// The command line for a resolved invocation, with a filter and exclusions spliced in - the caller's,
+    /// and on a leg a host runs the invocation's remoteExcludes beside them - and the core count handed
+    /// over explicitly.
     /// </summary>
     /// <param name="invocation">The resolved invocation.</param>
     /// <param name="cores">The core count this leg runs with.</param>
     /// <param name="filter">A filter the caller asked for, or null.</param>
-    /// <param name="excludes">Exclusions the caller asked for.</param>
+    /// <param name="excludes">Exclusions to give the runner: the caller's, and any remoteExcludes beside them.</param>
     /// <param name="paths">
     /// The directories this leg runs against, which the arguments and the working directory may
     /// name. Null is for a caller with no leg in hand: every placeholder is left as written and the
@@ -478,7 +480,8 @@ public static class TestInvocationResolver
             platform?.SuccessPattern ?? all?.SuccessPattern ?? string.Empty,
             platform?.CountPattern ?? all?.CountPattern,
             platform?.WorkingDirectory ?? all?.WorkingDirectory,
-            platform?.TestSet ?? all?.TestSet);
+            platform?.TestSet ?? all?.TestSet,
+            platform?.RemoteExcludes ?? all?.RemoteExcludes ?? []);
 }
 
 /// <summary>One test invocation, with every field decided.</summary>
@@ -496,6 +499,7 @@ public static class TestInvocationResolver
 /// <param name="CountPattern">What captures how many tests ran, or null.</param>
 /// <param name="WorkingDirectory">Where the runner starts, or null for the leg's tree root.</param>
 /// <param name="TestSet">Which of the project's test sets it runs, or null for the shared one.</param>
+/// <param name="RemoteExcludes">What a leg on a host reached through a transport leaves out beside what it is asked to.</param>
 public sealed record ResolvedTestInvocation(
     string Runner,
     IReadOnlyList<string> Args,
@@ -510,7 +514,8 @@ public sealed record ResolvedTestInvocation(
     string SuccessPattern,
     string? CountPattern,
     string? WorkingDirectory = null,
-    string? TestSet = null);
+    string? TestSet = null,
+    IReadOnlyList<string>? RemoteExcludes = null);
 
 /// <summary>A test invocation ready to start.</summary>
 /// <param name="Program">The runner to start.</param>

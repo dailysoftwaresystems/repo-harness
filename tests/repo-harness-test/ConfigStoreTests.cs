@@ -784,12 +784,34 @@ public sealed class ConfigStoreTests
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresArgs": ["-j", "8"] }""", "never uses {cores}")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "coresEnv": [""] }""", "coresEnv contains a blank variable name")]
     [InlineData("""{ "runner": "ctest", "successPattern": "ok", "testSet": " " }""", "testSet is blank; leave it out for the project's shared test set")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state", " "] }""", "remoteExcludes cannot reach the runner on windows, linux, macos: An exclusion was given empty, or as spaces alone")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "remoteExcludes": ["git-state"] }""", "remoteExcludes cannot reach the runner on windows, linux, macos: An exclusion was given, but the test settings declare no excludeArg")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "remoteExcludes": ["git-state"] }""", "with no excludeJoin it would take them apart, never leaving out what each names; declare \"excludeJoin\": \"|\"")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["--rerun-failed"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""", "run ctest with --rerun-failed")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["-U", "ON"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""", "run ctest with --union")]
     public void Load_RejectsATestInvocationThatCannotWork(string invocation, string expected)
     {
         var exception = LoadInvalid(
             $$"""{ "projects": [ { "name": "main", "type": "cmake", "test": { "all": {{invocation}} } } ] }""");
 
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// remoteExcludes that can reach the runner as declared load: joined for ctest, by -E beside a union in
+    /// the args, and beside a test preset, whose files are read as the leg starts, not here.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state", "gpu"] }""")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["-U", "ON"], "excludeArg": "-E", "excludeJoin": "|", "remoteExcludes": ["git_state"] }""")]
+    [InlineData("""{ "runner": "ctest", "successPattern": "ok", "args": ["--preset", "ci"], "excludeArg": "-LE", "excludeJoin": "|", "remoteExcludes": ["git-state"] }""")]
+    [InlineData("""{ "runner": "dart", "successPattern": "ok", "excludeArg": "--exclude-tags", "remoteExcludes": ["git-state", "gpu"] }""")]
+    public void Load_AcceptsRemoteExcludes_ThatCanReachTheRunnerAsDeclared(string invocation)
+    {
+        var config = LoadValid(
+            $$"""{ "projects": [ { "name": "main", "type": "cmake", "test": { "all": {{invocation}} } } ] }""");
+
+        Assert.NotEmpty(Assert.Single(config.Projects).Test!.All!.RemoteExcludes!);
     }
 
     [Fact]

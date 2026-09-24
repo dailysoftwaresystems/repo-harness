@@ -72,10 +72,9 @@ public sealed class TestInvocationResolverTests
             Processor = PlatformNames.Arm64,
             Config = "release",
 
-            // A leg reached through a transport legitimately runs a narrower suite than one running
-            // here, so its section replaces the project's rather than merging with it: a half
-            // inherited runner is how a leg ends up running the project's suite with its own
-            // arguments.
+            // A leg that runs another suite - a smoke subset here - declares a section of its own,
+            // which replaces the project's rather than merging with it: a half inherited runner is
+            // how a leg ends up running the project's suite with its own arguments.
             Test = new TestConfig
             {
                 All = new TestInvocation { Runner = "ctest", Args = ["-L", "smoke"], SuccessPattern = "tests passed" },
@@ -827,6 +826,26 @@ public sealed class TestInvocationResolverTests
 
         Assert.Equal("--label-regex", TestInvocationResolver.Resolve(settings, PlatformNames.Linux).LabelArg);
         Assert.Equal("-L", TestInvocationResolver.Resolve(settings, PlatformNames.Windows).LabelArg);
+    }
+
+    /// <summary>
+    /// An operating system's own remoteExcludes replace the shared ones, as every other field does, and an
+    /// invocation declaring none has none.
+    /// </summary>
+    [Fact]
+    public void AnOperatingSystemsRemoteExcludes_ReplaceTheSharedOnes()
+    {
+        var settings = new TestConfig
+        {
+            All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed", RemoteExcludes = ["git-state"] },
+            Linux = new TestInvocation { RemoteExcludes = ["git-state", "gpu"] },
+        };
+
+        Assert.Equal(["git-state", "gpu"], TestInvocationResolver.Resolve(settings, PlatformNames.Linux).RemoteExcludes);
+        Assert.Equal(["git-state"], TestInvocationResolver.Resolve(settings, PlatformNames.Windows).RemoteExcludes);
+        Assert.Empty(TestInvocationResolver.Resolve(
+            new TestConfig { All = new TestInvocation { Runner = "ctest", SuccessPattern = "tests passed" } },
+            PlatformNames.Linux).RemoteExcludes!);
     }
 
     /// <summary>

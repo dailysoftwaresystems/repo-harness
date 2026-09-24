@@ -110,8 +110,9 @@ public sealed partial class HelpTests
 
     /// <summary>
     /// The config topic says how test --filter, --exclude and --label reach a runner, what each is
-    /// for ctest, that a label can now be chosen as well as left out, and how several exclusions reach
-    /// a runner that would not leave out each of them given apart.
+    /// for ctest, that a label can now be chosen as well as left out, how several exclusions reach
+    /// a runner that would not leave out each of them given apart, and what a leg on a host's copy
+    /// leaves out beside them.
     /// </summary>
     [Fact]
     public async Task ConfigTopic_SaysHowTheTestSelectionReachesTheRunner()
@@ -123,6 +124,8 @@ public sealed partial class HelpTests
             "filterArg, excludeArg and labelArg, so one set of options serves every runner. For",
             "ctest, '-R' chooses tests by name, '-L' chooses them by label and '-LE' leaves a label",
             "apart - ctest leaves out only what every -LE matches - declares excludeJoin, and several",
+            "one the sync made, or one it took over - whose index and history are not this",
+            "copy, so an invocation's remoteExcludes are given to every leg a host runs, beside",
         })
         {
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);

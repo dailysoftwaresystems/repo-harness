@@ -80,7 +80,7 @@ internal static class HelpCommand
         "verdicts" or "verdict" => RenderVerdicts(),
         null or "" => RenderOverview(),
         _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
-            + $"secrets, tools, runners, verdicts.{Environment.NewLine}",
+            + $"secrets, tools, runners, verdicts, ci.{Environment.NewLine}",
     };
 
     private static string RenderTools()
@@ -1141,6 +1141,22 @@ internal static class HelpCommand
         builder.AppendLine("give its excludeArg themselves, the exclusions are added to those values instead,");
         builder.AppendLine("where they stand: to each -LE's, and to the last -E's. An empty excludeJoin gives each");
         builder.AppendLine("its own excludeArg over a join the shared section declares.");
+        builder.AppendLine();
+        builder.AppendLine("A leg on a host reached through WSL or ssh runs in that host's copy of the repository:");
+        builder.AppendLine("the files the sync writes there from this tree, in a git repository of the host's own -");
+        builder.AppendLine("one the sync made, or one it took over - whose index and history are not this");
+        builder.AppendLine("checkout's. A test that checks this checkout's state has nothing to say about that");
+        builder.AppendLine("copy, so an invocation's remoteExcludes are given to every leg a host runs, beside");
+        builder.AppendLine("--exclude's, and to none this machine runs:");
+        builder.AppendLine();
+        builder.AppendLine("  \"all\": {");
+        builder.AppendLine("    \"runner\": \"ctest\", \"successPattern\": \"...\",");
+        builder.AppendLine("    \"excludeArg\": \"-LE\", \"excludeJoin\": \"|\", \"remoteExcludes\": [\"git-state\"]");
+        builder.AppendLine("  }");
+        builder.AppendLine();
+        builder.AppendLine("They are held to every rule --exclude's are, when the file is read, where the");
+        builder.AppendLine("invocation alone decides it: ctest needs the excludeJoin, since --exclude's and its");
+        builder.AppendLine("args' own reach it beside them. A test preset's filters are read as the leg starts.");
         builder.AppendLine();
         builder.AppendLine("ctest is refused an option it would read otherwise: an exclusion beside another given");
         builder.AppendLine("apart with no join; a filter beside a -R its args give; a filter or an exclusion beside");

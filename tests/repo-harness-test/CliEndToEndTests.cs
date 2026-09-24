@@ -890,6 +890,55 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A leg a host runs for the machine that dispatched it - in that host's copy of the repository, an
+    /// ssh host's or a WSL distribution's - leaves out the invocation's remoteExcludes, end to end; the same
+    /// leg run where it was asked for leaves out only what it was asked to, and the witness its runner
+    /// would print is not there.
+    /// </summary>
+    [Theory]
+    [InlineData("ssh mac", HarnessExit.Success)]
+    [InlineData("wsl Example-Linux", HarnessExit.Success)]
+    [InlineData(null, LegExit.Unwitnessed)]
+    public async Task ALegAHostRuns_LeavesOutTheRemoteExcludes_AndOneRunHereDoesNot(string? dispatchedAs, int exitCode)
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var token = TestContext.Current.CancellationToken;
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            Legs =
+            {
+                ["native"] = new LegConfig
+                {
+                    Os = platform.PlatformKey,
+                    Processor = platform.Processor,
+                    Config = "debug",
+                    Test = new TestConfig
+                    {
+                        All = new TestInvocation
+                        {
+                            Runner = TestHost.DotnetExecutable,
+                            Args = ["exec", TestHost.AssemblyPath],
+                            Env = new Dictionary<string, string>(StringComparer.Ordinal) { [TestHost.ChildModeVariable] = "echo-args" },
+                            ExcludeArg = "-LE",
+                            RemoteExcludes = ["git-state"],
+                            SuccessPattern = @"\[-LE\]\s+\[git-state\]",
+                        },
+                    },
+                },
+            },
+        });
+
+        string[] here = dispatchedAs is null ? [] : ["--here", dispatchedAs];
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", .. here, "-C", temp.Path], token);
+
+        Assert.True(exitCode == test.ExitCode, $"exit {test.ExitCode}: {test.StandardError}");
+    }
+
+    /// <summary>
     /// A test run the runner could not be given as asked is refused before the leg builds: everything its
     /// command is made from is known then. Here the build would fail - the tree holds no project file - so
     /// a refusal that came after it would never be reached, and the leg would say its build failed.

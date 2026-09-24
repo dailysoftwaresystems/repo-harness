@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using RepoHarness.Core.Build;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Testing;
@@ -162,6 +163,10 @@ internal static class TestCommand
             HostEnvironment = leg.Environment,
             Filter = filter,
             Excludes = excludes,
+
+            // The host the dispatching machine named, where this machine runs a leg for another: a host
+            // reached through a transport runs it in a copy of its own.
+            Remote = leg.Named.Kind != HostKind.Local,
             Labels = labels,
             Emulated = leg.Emulated,
             Time = work.Time,

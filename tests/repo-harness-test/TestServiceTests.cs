@@ -233,6 +233,54 @@ public sealed class TestServiceTests
         Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
     }
 
+    /// <summary>
+    /// A leg in a host's copy of the repository leaves out the invocation's remoteExcludes beside those it
+    /// is asked to; a leg this machine runs leaves out only those it is asked to.
+    /// </summary>
+    [Theory]
+    [InlineData(true, new[] { "-LE", "slow", "-LE", "git-state" })]
+    [InlineData(false, new[] { "-LE", "slow" })]
+    public async Task ALegInAHostsCopy_LeavesOutTheRemoteExcludes_AndOneHereDoesNot(bool remote, string[] expected)
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var request = Request(temp, Child("All 1 tests passed"), excludeArg: "-LE", remoteExcludes: ["git-state"]) with
+        {
+            Excludes = ["slow"],
+            Remote = remote,
+        };
+
+        var result = await Service(factory).RunAsync(Config(), request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Equal(expected, result.Command.Arguments.TakeLast(expected.Length));
+        Assert.DoesNotContain("git-state", result.Command.Arguments.SkipLast(expected.Length));
+    }
+
+    /// <summary>
+    /// A host's leg refused over its remoteExcludes says so, naming them, since nobody typed them; one
+    /// refused over what was asked says only that, and a leg this machine runs is never given them.
+    /// </summary>
+    [Fact]
+    public void ARefusalOverTheRemoteExcludes_NamesThem()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+        temp.WriteFile(Fixture, "fixture");
+
+        var service = Service(factory);
+        var remote = Request(temp, Child("All 1 tests passed"), excludeArg: "-LE", remoteExcludes: ["git-state", " "]) with { Remote = true };
+
+        var overThem = Assert.Throws<HarnessException>(() => service.Check(Config(), remote with { Excludes = ["slow"] }));
+        var overWhatWasAsked = Assert.Throws<HarnessException>(() => service.Check(Config(), remote with { Excludes = [""] }));
+
+        Assert.Contains("refused over the test settings' remoteExcludes - git-state,   -", overThem.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("remoteExcludes", overWhatWasAsked.Message, StringComparison.Ordinal);
+        service.Check(Config(), remote with { Excludes = ["slow"], Remote = false });
+    }
+
     [Fact]
     public async Task ACountPatternThatIsNotARegularExpression_IsRefusedBeforeAnythingRuns()
     {
@@ -435,7 +483,8 @@ public sealed class TestServiceTests
         string? filterArg = null,
         string? excludeArg = null,
         TestInvocation? windows = null,
-        string? labelArg = null)
+        string? labelArg = null,
+        List<string>? remoteExcludes = null)
     {
         var all = new TestInvocation
         {
@@ -448,6 +497,7 @@ public sealed class TestServiceTests
             FilterArg = filterArg,
             ExcludeArg = excludeArg,
             LabelArg = labelArg,
+            RemoteExcludes = remoteExcludes,
         };
 
         return new TestRequest

@@ -6,6 +6,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
+using RepoHarness.Core.Testing;
 using RepoHarness.Core.Tools;
 using RepoHarness.Core.Worktrees;
 
@@ -1497,6 +1498,58 @@ public static partial class HarnessConfigValidator
             problems.Add(
                 $"{owner} test has no successPattern for {string.Join(", ", withoutWitness)}; "
                 + "without one, a runner that exits 0 having run nothing would pass");
+        }
+
+        // Every leg a host runs is given them, once a sync has taken the tree there, and a refusal there
+        // ends the run: found here it names the line, and costs no host its sync. Merged per operating
+        // system as the run merges them, and each refusal said once, with the systems it holds for.
+        var unfit = applicable
+            .Select(entry => (entry.Platform, Invocation: TestInvocationResolver.InvocationFor(test, entry.Platform)))
+            .Where(entry => entry.Invocation.RemoteExcludes is { Count: > 0 } && !string.IsNullOrWhiteSpace(entry.Invocation.Runner))
+            .Select(entry => (entry.Platform, Refusal: RemoteExclusionRefusal(entry.Invocation)))
+            .Where(entry => entry.Refusal is not null)
+            .GroupBy(entry => entry.Refusal!, StringComparer.Ordinal);
+
+        foreach (var refused in unfit)
+        {
+            problems.Add(
+                $"{owner} test's remoteExcludes cannot reach the runner on {string.Join(", ", refused.Select(entry => entry.Platform))}: "
+                + refused.Key);
+        }
+    }
+
+    /// <summary>
+    /// Why <paramref name="invocation"/>'s remoteExcludes could not be given as declared on a leg a host runs,
+    /// or <see langword="null"/>: the run's own refusal, in its own words, where the invocation alone decides
+    /// it. A test preset the args name is read as the leg starts, and what it says is the run's to find.
+    /// </summary>
+    /// <remarks>
+    /// ctest is refused without a join as well. Beside what --exclude adds, or its args already give, it
+    /// would take them apart - leaving out only what every -LE matches, or only what the last -E does - and
+    /// every leg a host runs would be refused for it, on a run whose own command line gave one exclusion.
+    /// </remarks>
+    private static string? RemoteExclusionRefusal(ResolvedTestInvocation invocation)
+    {
+        if (Ctest.SelectionOf(invocation.Runner, invocation.ExcludeArg) is not null && string.IsNullOrEmpty(invocation.ExcludeJoin))
+        {
+            return $"ctest takes them beside what --exclude adds and its args give, and with no excludeJoin it would take "
+                + $"them apart, never leaving out what each names; declare \"excludeJoin\": \"{Ctest.ExcludeJoin}\"";
+        }
+
+        if (Ctest.PresetIn(invocation.Runner, invocation.Args) is not null)
+        {
+            return null;
+        }
+
+        try
+        {
+            _ = TestInvocationResolver.CommandFor(invocation, cores: 1, filter: null, excludes: invocation.RemoteExcludes);
+
+            return null;
+        }
+        catch (HarnessException ex)
+        {
+            return ex.Message;
         }
     }
 
