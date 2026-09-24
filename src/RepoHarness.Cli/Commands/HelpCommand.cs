@@ -564,7 +564,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} help verdicts           What each leg verdict means, and what to do about it");
         builder.AppendLine($"  {ToolPackage.Command} help ci                 How check-ci-legs finds a workflow's legs and budgets");
         builder.AppendLine();
-        builder.AppendLine("Use 'DssHarness <command> --help' for a command's own options.");
+        builder.AppendLine($"Use '{ToolPackage.Command} <command> --help' for a command's own options.");
 
         return builder.ToString();
     }
@@ -851,6 +851,11 @@ internal static class HelpCommand
         builder.AppendLine("only. That is the trust building the repository already asks for. An ssh host is");
         builder.AppendLine("reached only when the main checkout holds its directory under sshItems, so a");
         builder.AppendLine("config.json arriving through git cannot point the harness at a machine nobody set up.");
+        builder.AppendLine();
+        builder.AppendLine("A host's own copy of the tree holds none of that connection data: it is gitignored, so");
+        builder.AppendLine("a sync never carries it, and a host keeps no key of its own. A command typed in a copy");
+        builder.AppendLine("therefore reaches no other machine, and a leg naming a host is placed by the machine");
+        builder.AppendLine("that syncs to that host and dispatches the work there.");
         builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");

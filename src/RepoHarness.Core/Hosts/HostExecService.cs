@@ -117,11 +117,23 @@ public sealed class HostExecService(
                 Kind = HostAgentRequestKind.Run,
                 Directory = HostCopies.For(target.RepositoryPath, context.Layout, context.Layout.RepositoryRoot, _platform.PathComparison),
                 Arguments = [.. arguments],
+
+                // As a sync's own requests carry it: a command run here is the host's work for as long as it
+                // takes, and a host that sleeps part way through leaves the reader a command that never said
+                // how it finished. Read from this machine's configuration, which is the one that has it.
+                KeepAwake = [.. report.KeepAwake],
+                KeepAwakeEnvironment = new(report.KeepAwakeEnvironment, StringComparer.Ordinal),
+                KeepAwakeDirectories = [.. report.ProgramDirectories],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
 
         int? finished = null;
+
+        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
+        // the host's login shell.
+        var serving = false;
+        var reporting = false;
 
         var result = await _hostCommands.RunAsync(
             session.Connection,
@@ -136,17 +148,53 @@ public sealed class HostExecService(
                 // input on the host, which cancels the command there instead of leaving it running.
                 StandardInput = request + "\n",
                 HoldStandardInputOpen = true,
-                OnOutputLine = _output.Raw,
+                OnOutputLine = line =>
+                {
+                    if (HostAgentProtocol.IsStartedLine(line, nonce))
+                    {
+                        reporting = true;
+                        return;
+                    }
+
+                    // Nothing the host said before its agent began is this command's output: a login shell
+                    // writes to the same stream, and what it says is the host's business.
+                    if (!reporting)
+                    {
+                        return;
+                    }
+
+                    _output.Raw(line);
+                },
                 OnErrorLine = line =>
                 {
+                    // Read before the gate, and never behind it: how the command finished is the one thing
+                    // that must survive a host whose profile writes to this stream, because a line that
+                    // never arrives is reported as a command that may not have run at all.
                     if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                     {
                         finished = code;
+                        return;
                     }
-                    else
+
+                    if (HostAgentProtocol.IsStartedLine(line, nonce))
                     {
-                        _output.RawError(line);
+                        serving = true;
+                        return;
                     }
+
+                    // Nothing else the host said before its agent began is this command's output: a login
+                    // shell writes to the same stream, and one consumer's printed the account's home layout
+                    // on every session, which a relayed line then published. The agent's own lines pass all
+                    // the same, because a request refused before it could be read carries no nonce to mark,
+                    // and that refusal is the whole of what the reader has to go on.
+                    if (!serving && !HostAgentProtocol.IsAgentsOwnLine(line))
+                    {
+                        return;
+                    }
+
+                    // ssh writes here too, and a pinned connection has it name an address this machine
+                    // resolved rather than the one the configuration declares.
+                    _output.RawError(HostProbes.AsConfigured(line, session.Connection));
                 },
             },
             cancellationToken).ConfigureAwait(false);

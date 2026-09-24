@@ -46,6 +46,24 @@ public sealed record HostReport
     /// </remarks>
     public string? ToolPath { get; init; }
 
+    /// <summary>
+    /// The command that keeps this host awake, as the configuration declares it for the host, or empty
+    /// where it declares none.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the report so that what is sent to the host - a sync above all - can have the host hold
+    /// itself awake while it works. The host's own copy cannot be asked: it has no configuration until a
+    /// first sync has put one there, and a first sync is the longest one.
+    /// </remarks>
+    public IReadOnlyList<string> KeepAwake { get; init; } = [];
+
+    /// <summary>
+    /// What the host declares under <c>env</c> for itself, which its <see cref="KeepAwake"/> command starts
+    /// under, as a leg's own work does. Empty where it declares none.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> KeepAwakeEnvironment { get; init; }
+        = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>What checking each emulator found there, by name.</summary>
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
@@ -175,7 +193,17 @@ public sealed class HostInspector(
         CancellationToken cancellationToken)
     {
         var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
-        var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
+        var found = new HostReport
+        {
+            Host = host,
+            Os = opened.Os,
+            Processor = opened.Processor,
+
+            // Read here, where the configuration is, so that what is sent to this host can have it hold
+            // itself awake: its own copy has no configuration to read until a first sync has put one there.
+            KeepAwake = context.Config.Hosts.SettingsFor(host).KeepAwake is { Count: > 0 } awake ? [.. awake] : [],
+            KeepAwakeEnvironment = new Dictionary<string, string>(context.Config.Hosts.SettingsFor(host).Env, StringComparer.OrdinalIgnoreCase),
+        };
 
         if (opened.Connection is not { } connection)
         {
@@ -339,10 +367,15 @@ public sealed class HostInspector(
         var toolPath = ToolPackage.PathFromHome(windowsHost, connection.Shell);
         var shownTool = $"~/{toolPath.Replace('\\', '/')}";
 
+        // Carried so the host marks where its own answer begins: an inspection that fails quotes what the
+        // host said into this host's reason, and unmarked that quotation is whatever its login shell printed.
+        var nonce = HostAgentProtocol.NewNonce();
+
         var request = JsonSerializer.Serialize(
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Info,
+                Nonce = nonce,
                 Emulators = new Dictionary<string, EmulatorConfig>(emulators, StringComparer.OrdinalIgnoreCase),
                 DeveloperEnvironments = new Dictionary<string, DeveloperEnvironmentConfig>(questions.DeveloperEnvironments, StringComparer.OrdinalIgnoreCase),
                 Programs = [.. questions.Programs],
@@ -360,6 +393,15 @@ public sealed class HostInspector(
         // which ends the input there and stops any witness still running.
         var answer = await RunAsync(connection, toolPath, [HostAgentProtocol.CommandName], budget, cancellationToken, request + "\n", holdOpen: true)
             .ConfigureAwait(false);
+
+        // From the host's own marker on, on each stream, before any of this is quoted or read: a host that
+        // never reached its agent wrote no marker, and then the whole of what it said is all there is to go
+        // on. A profile that prints a '{' would otherwise be read as the start of the answer, too.
+        answer = answer with
+        {
+            StandardOutput = HostAgentProtocol.SinceServing(answer.StandardOutput, nonce),
+            StandardError = HostAgentProtocol.SinceServing(answer.StandardError, nonce),
+        };
 
         if (!answer.Succeeded)
         {

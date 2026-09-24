@@ -21,11 +21,28 @@ public sealed class RemoteSyncTransport(
     HostId host,
     HostSession session,
     IHostCommandRunner hostCommands,
-    IHarnessOutput output) : ISyncTransport
+    IHarnessOutput output,
+    IReadOnlyList<string>? keepAwake = null,
+    IReadOnlyDictionary<string, string>? keepAwakeEnvironment = null,
+    IReadOnlyList<string>? keepAwakeDirectories = null) : ISyncTransport
 {
     private readonly HostSession _session = session;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
     private readonly IHarnessOutput _output = output;
+
+    /// <summary>
+    /// What keeps the host awake while it serves each of this sync's requests, as the configuration
+    /// declares it for that host. A sync to a fresh copy is the longest work a host does with no leg of
+    /// its own running there, and a leg's own hold was all that ever kept one awake.
+    /// </summary>
+    private readonly IReadOnlyList<string> _keepAwake = keepAwake ?? [];
+
+    /// <summary>What the host declares under <c>env</c>, which its keepAwake command starts under.</summary>
+    private readonly IReadOnlyDictionary<string, string> _keepAwakeEnvironment =
+        keepAwakeEnvironment ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Where the survey found the host's programs, which its keepAwake command is looked for in.</summary>
+    private readonly IReadOnlyList<string> _keepAwakeDirectories = keepAwakeDirectories ?? [];
 
     /// <inheritdoc/>
     public HostId Host { get; } = host;
@@ -140,6 +157,57 @@ public sealed class RemoteSyncTransport(
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// One request, and so one session: the cost of reaching this host is paid once for the batch rather
+    /// than once per file. Each file is refused here if it alone is too large to carry, before anything is
+    /// encoded, so the reader is told which file rather than left with this machine out of memory.
+    /// </remarks>
+    public async Task WriteFilesAsync(
+        string root,
+        IReadOnlyList<SyncFileContent> files,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        if (files.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var file in files)
+        {
+            SyncServe.RefuseAFileTooLargeToCarry(file.Contents.LongLength, file.Path, Host.ToString());
+        }
+
+        string request;
+
+        // Only the encoding is guarded, because only here is it certain that nothing has been written: past
+        // this point the request has gone to the host, and an exception raised while the reply is read says
+        // nothing about how much of the batch the far side had already written.
+        try
+        {
+            var carried = files
+                .Select(file => new SyncFileWrite(file.Path, Convert.ToBase64String(file.Contents)))
+                .ToList();
+
+            request = SyncServe.Carry(carried);
+        }
+        catch (OutOfMemoryException)
+        {
+            // As one file's own write reports it: the batch is bounded by what the caller grouped, and this
+            // is the other ceiling - whatever this machine had free. Reported as the transfer being too
+            // large for this machine rather than as a defect in the tool, which is where an
+            // OutOfMemoryException otherwise arrives.
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"{files.Count} files could not be carried to {Host} in one request: this machine ran out "
+                + "of memory encoding them, so none of them was sent.");
+        }
+
+        await AskAsync<object>(root, [SyncServe.WriteMany, root, request], cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
     public Task DeleteFileAsync(string root, string relativePath, CancellationToken cancellationToken = default)
         => AskAsync<object>(root, [SyncServe.Delete, root, relativePath], cancellationToken);
 
@@ -244,12 +312,20 @@ public sealed class RemoteSyncTransport(
                 // in a directory that may not exist yet on a first sync.
                 Directory = startIn ?? ParentOf(root),
                 Arguments = [SyncServe.CommandName, .. arguments],
+                KeepAwake = [.. _keepAwake],
+                KeepAwakeEnvironment = new(_keepAwakeEnvironment, StringComparer.Ordinal),
+                KeepAwakeDirectories = [.. _keepAwakeDirectories],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
 
         T? answer = null;
         int? finished = null;
+
+        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
+        // the host's login shell, which is the host's business and not this sync's output.
+        var serving = false;
+        var reporting = false;
 
         var result = await _hostCommands.RunAsync(
                 _session.Connection,
@@ -259,17 +335,53 @@ public sealed class RemoteSyncTransport(
                     Arguments = [HostAgentProtocol.CommandName],
                     StandardInput = request + "\n",
                     HoldStandardInputOpen = true,
-                    OnOutputLine = line => answer ??= SyncServe.ReadAnswer<T>(line),
+                    OnOutputLine = line =>
+                    {
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
+                        {
+                            reporting = true;
+                            return;
+                        }
+
+                        // Nothing the host said before its agent began is an answer: a login shell writes to
+                        // the same stream, and what it says is the host's business.
+                        if (!reporting)
+                        {
+                            return;
+                        }
+
+                        answer ??= SyncServe.ReadAnswer<T>(line);
+                    },
                     OnErrorLine = line =>
                     {
+                        // Read before the gate, and never behind it: how the operation finished is the one
+                        // thing that must survive a host whose profile writes to this stream, because a line
+                        // that never arrives is reported as an operation that may have run only in part.
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;
+                            return;
                         }
-                        else
+
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
                         {
-                            _output.RawError(line);
+                            serving = true;
+                            return;
                         }
+
+                        // Nothing else the host said before its agent began is this sync's output: a login
+                        // shell writes to the same stream, and one consumer's printed the account's home
+                        // layout on every session, which a relayed line then published. The agent's own lines
+                        // pass all the same, because a request refused before it could be read carries no
+                        // nonce to mark, and that refusal is the whole of what the reader has to go on.
+                        if (!serving && !HostAgentProtocol.IsAgentsOwnLine(line))
+                        {
+                            return;
+                        }
+
+                        // ssh writes here too, and a pinned connection has it name an address this machine
+                        // resolved rather than the one the configuration declares.
+                        _output.RawError(HostProbes.AsConfigured(line, _session.Connection));
                     },
                 },
                 cancellationToken)
@@ -284,9 +396,13 @@ public sealed class RemoteSyncTransport(
 
         if (exitCode != HarnessExit.Success)
         {
+            // From the agent's own output on, and under the name the configuration declares, as every other
+            // reason built here is: the whole capture holds whatever the host's login shell printed first,
+            // and a pinned connection has ssh name the address this machine resolved.
             throw new HarnessException(
                 exitCode,
-                $"{Host}: '{arguments[0]}' exited {exitCode}{HostProbes.Detail(result.StandardError)}");
+                $"{Host}: '{arguments[0]}' exited {exitCode}"
+                + HostProbes.Detail(HostProbes.AsConfigured(HostAgentProtocol.SinceServing(result.StandardError, nonce), _session.Connection)));
         }
 
         return answer;

@@ -68,6 +68,35 @@ public static class SyncServe
     /// <summary>Writes one file into the copy.</summary>
     public const string Write = "write";
 
+    /// <summary>Writes several files into the copy, in one request.</summary>
+    /// <remarks>
+    /// One request is one session on a host reached over ssh, and a session costs what opening one costs:
+    /// a connection, an authentication, and whatever the far side's login profile does. Measured on a
+    /// consumer's first sync of a worktree's copy, a file at a time opened 2,446 of them and ran 1,136
+    /// seconds before the host slept mid-sync and the legs were left unavailable. A tree is thousands of
+    /// files, and a copy per worktree makes a first full sync the ordinary case rather than a rare one.
+    /// </remarks>
+    public const string WriteMany = "write-many";
+
+    /// <summary>
+    /// The most content one batched write carries, in bytes, counted before encoding.
+    /// </summary>
+    /// <remarks>
+    /// Both ends hold a batch whole - encoded here, decoded there - so this bounds the memory a sync
+    /// spends at once, where <see cref="LargestFile"/> bounds only what one file may be. It is a budget
+    /// somebody chose, not a limit of the format: large enough that a tree of ordinary source files
+    /// crosses in tens of requests rather than thousands, and small enough to be unremarkable on the
+    /// smallest machine a leg runs on. A file larger than this crosses in a batch of its own, since a
+    /// batch always carries at least one file.
+    /// </remarks>
+    public const long LargestBatch = 8L * 1024 * 1024;
+
+    /// <summary>
+    /// The most files one batched write carries, however small they are, so that the overhead of a
+    /// request is amortised without a batch of tiny files growing unbounded in entries.
+    /// </summary>
+    public const int MostFilesInABatch = 512;
+
     /// <summary>Deletes one file from the copy.</summary>
     public const string Delete = "delete";
 
@@ -154,6 +183,35 @@ public static class SyncServe
     /// prints. Without the mark a diagnostic written to the same stream would be parsed as the answer.
     /// </summary>
     public const string AnswerPrefix = "sync-serve-answer ";
+
+    /// <summary>The files of a batched write, as the request carries them.</summary>
+    /// <param name="files">The files, each with its path and its base64 content.</param>
+    public static string Carry(IReadOnlyList<SyncFileWrite> files) => JsonSerializer.Serialize(files, JsonOptions);
+
+    /// <summary>The files a batched write carries, read back.</summary>
+    /// <param name="carried">What <see cref="Carry"/> wrote.</param>
+    /// <exception cref="HarnessException">The request is in a shape this build cannot read.</exception>
+    public static IReadOnlyList<SyncFileWrite> Carried(string carried)
+    {
+        ArgumentNullException.ThrowIfNull(carried);
+
+        try
+        {
+            // A payload of 'null' reads as no batch at all, which is the very thing the refusal below
+            // exists to prevent: written as nothing and answered as though every file had crossed.
+            return JsonSerializer.Deserialize<IReadOnlyList<SyncFileWrite>>(carried, JsonOptions)
+                ?? throw new JsonException("the files to write are null");
+        }
+        catch (JsonException ex)
+        {
+            // Refused rather than read as none: a batch read as empty would write nothing and answer
+            // as though every file in it had crossed, and the sync would go on to call the copy current.
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"The files to write arrived in a shape this build cannot read: {ex.Message}. The two ends "
+                + "are different builds.");
+        }
+    }
 
     /// <summary>Writes an answer for the other end to read.</summary>
     /// <typeparam name="T">The answer's shape.</typeparam>
@@ -295,3 +353,33 @@ public enum CopyMark
 /// a hash taken here of the bytes that arrived agrees with them whatever happened on the way.
 /// </param>
 public sealed record SyncFileAnswer(string Content, string ContentHash);
+
+/// <summary>One file a batched write carries.</summary>
+/// <param name="Path">Where it goes, relative to the copy's root.</param>
+/// <param name="Content">Its bytes, base64 encoded so they survive a line of text intact.</param>
+public sealed record SyncFileWrite(string Path, string Content)
+{
+    /// <summary>The bytes this carries, decoded.</summary>
+    /// <exception cref="HarnessException">The content is not base64, so the two ends are different builds.</exception>
+    /// <remarks>
+    /// Decoded here rather than where the batch is served, so that a file which did not survive the journey
+    /// is named and said as a transfer this build cannot read - the reasoning
+    /// <see cref="SyncServe.TooLargeToCarry"/> already applies to a file too large. Left to the runtime it
+    /// is a FormatException, which every command reports as a defect in this tool, naming neither the file
+    /// nor the host, and one bad entry in a batch of hundreds would identify none of them.
+    /// </remarks>
+    public byte[] Bytes()
+    {
+        try
+        {
+            return Convert.FromBase64String(Content);
+        }
+        catch (FormatException ex)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"'{Path}' arrived in a shape this build cannot read: {ex.Message.TrimEnd('.')}. The two ends "
+                + "are different builds.");
+        }
+    }
+}

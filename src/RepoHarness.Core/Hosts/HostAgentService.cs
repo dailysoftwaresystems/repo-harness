@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
@@ -18,7 +19,8 @@ public sealed class HostAgentService(
     EmulatorProbe emulatorProbe,
     DeveloperEnvironmentProbe developerEnvironmentProbe,
     IFileSystem fileSystem,
-    LocalProgramResolver programs)
+    LocalProgramResolver programs,
+    KeepAwake keepAwake)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
@@ -26,6 +28,7 @@ public sealed class HostAgentService(
     private readonly DeveloperEnvironmentProbe _developerEnvironmentProbe = developerEnvironmentProbe;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly LocalProgramResolver _programs = programs;
+    private readonly KeepAwake _keepAwake = keepAwake;
 
     /// <summary>Reads one request from <paramref name="input"/> and serves it.</summary>
     /// <param name="input">
@@ -99,6 +102,15 @@ public sealed class HostAgentService(
 
         if (request.Kind == HostAgentRequestKind.Info)
         {
+            // Marked as a run request's output is, and for the same reason: an inspection that fails quotes
+            // what the host said into that host's reason, which reaches the reader, --json and every leg
+            // reported unavailable. Without the marker that quotation is whatever the login shell printed
+            // first. A request from a build that sends no nonce is answered all the same, unmarked.
+            if (!string.IsNullOrWhiteSpace(request.Nonce))
+            {
+                await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
+            }
+
             var info = await DescribeAsync(request.Emulators, request.DeveloperEnvironments, request.Programs, request.ToolSearchDirectories, abandoned.Token)
                 .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);
@@ -106,7 +118,7 @@ public sealed class HostAgentService(
             return HarnessExit.Success;
         }
 
-        return await RunAsync(request, error, run, abandoned.Token).ConfigureAwait(false);
+        return await RunAsync(request, output, error, run, abandoned.Token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -170,12 +182,32 @@ public sealed class HostAgentService(
         };
     }
 
+    /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>
+    /// <param name="output">Where a command's own standard output is forwarded.</param>
+    /// <param name="error">Where a command's own standard error, and the completion line, are forwarded.</param>
+    /// <param name="nonce">The request's nonce, which the marker carries so no other output is taken for it.</param>
+    /// <remarks>
+    /// Written whatever has been cancelled since, as the completion line is: the machine that asked relays
+    /// nothing until it has seen this, so a marker withheld because the input had already ended would lose
+    /// the whole of what the request then says about itself.
+    /// </remarks>
+    private static async Task WriteStartedAsync(TextWriter output, TextWriter error, string nonce)
+    {
+        var started = HostAgentProtocol.StartedLine(nonce);
+
+        await output.WriteLineAsync(started).ConfigureAwait(false);
+        await output.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        await error.WriteLineAsync(started).ConfigureAwait(false);
+        await error.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Serves a run request, then writes its completion line last. The machine that asked reads the command's
     /// exit code from that line, and a line that never arrives tells it the connection failed first.
     /// </summary>
     private async Task<int> RunAsync(
         HostAgentRequest request,
+        TextWriter output,
         TextWriter error,
         Func<string, string[], CancellationToken, Task<int>> run,
         CancellationToken cancellationToken)
@@ -187,6 +219,12 @@ public sealed class HostAgentService(
                 HarnessExit.UsageError,
                 "the run request carries no nonce, so how its command finished could not be reported").ConfigureAwait(false);
         }
+
+        // Written on both streams before anything this request says, so the machine that asked can drop
+        // whatever the host's login shell wrote to either of them before the agent ever ran. A profile is the
+        // host's business and not this run's output: one consumer's printed the account's home layout on
+        // every session, and a relayed line published it.
+        await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
 
         var exitCode = await ServeRunAsync(request, error, run, cancellationToken).ConfigureAwait(false);
 
@@ -232,6 +270,24 @@ public sealed class HostAgentService(
 
         try
         {
+            // Held for as long as this request is served, by the command the machine that asked carries for
+            // this host, under the environment and the program directories it carries with it: a host's copy
+            // has no configuration to read until a first sync has put one there, and a keepAwake program
+            // found only through the host's own env or a searched directory would not start without them.
+            // A sync is many requests, and its first to a fresh copy is the longest work a host does with no
+            // leg of its own running there - which is the only thing that used to hold it awake. The command
+            // names this process, so it ends with the request however the connection ends.
+            //
+            // Inside the try, because filling the command's placeholders refuses a request that names one
+            // this build cannot fill, and a refusal raised outside it would be reported as a request that
+            // never said how it finished rather than as the configuration error it is.
+            await using var awake = _keepAwake.Hold(
+                HostAgentProtocol.CommandName,
+                request.Arguments[0],
+                new LocalHostConfig { KeepAwake = [.. request.KeepAwake], Env = new(request.KeepAwakeEnvironment, StringComparer.OrdinalIgnoreCase) },
+                [.. request.KeepAwakeDirectories],
+                cancellationToken);
+
             return await run(directory, [.. request.Arguments], cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
@@ -242,6 +298,12 @@ public sealed class HostAgentService(
                 error,
                 HarnessExit.HostUnavailable,
                 $"this host's copy of the repository at '{directory}' could not be entered: {ex.Message}").ConfigureAwait(false);
+        }
+        catch (HarnessException ex)
+        {
+            // What the request itself asked for could not be done - a keepAwake command naming a placeholder
+            // this build cannot fill, above all. Said as the refusal it is, under this host's name.
+            return await RefuseAsync(error, ex.ExitCode, ex.Message).ConfigureAwait(false);
         }
     }
 

@@ -52,6 +52,29 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
         }
     }
 
+    /// <summary>
+    /// What the host's login shell prints on both streams before its agent runs, or <see langword="null"/>
+    /// for a host whose profile is quiet.
+    /// </summary>
+    /// <remarks>
+    /// A shell startup writes to the same streams the command does, and does it first: one consumer's Mac
+    /// sources emsdk's environment script on every session, which prints the account's home layout.
+    /// </remarks>
+    public Func<HostCommand, string>? LoginShellPrints { get; set; }
+
+    /// <summary>
+    /// Whether the agent marks where its own output begins. A host that refuses a request before it can read
+    /// one - an empty request, a protocol it does not speak - writes its refusal and no marker at all, so the
+    /// machine that asked must still hear it.
+    /// </summary>
+    public bool Marks { get; set; } = true;
+
+    /// <summary>
+    /// Whether the host's login shell ends its last write without a newline, so that what it printed is glued
+    /// onto the first line the agent writes - the marker.
+    /// </summary>
+    public bool LoginShellLeavesALineOpen { get; set; }
+
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
@@ -112,7 +135,62 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             _calls.Add((connection, command));
         }
 
+        // The host's own shell first, as it comes: before the agent has run, and so before its marker. A
+        // profile whose last write has no newline glues those bytes onto the marker, which is the next thing
+        // written, exactly as a reader splitting on newlines would deliver it.
+        var printed = LoginShellPrints?.Invoke(command).Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? [];
+        var glued = string.Empty;
+
+        for (var index = 0; index < printed.Length; index++)
+        {
+            if (LoginShellLeavesALineOpen && index == printed.Length - 1)
+            {
+                glued = printed[index];
+                break;
+            }
+
+            command.OnOutputLine?.Invoke(printed[index]);
+            command.OnErrorLine?.Invoke(printed[index]);
+        }
+
+        // Then the agent marks its own output, as it does before serving: the machine that asked relays
+        // nothing until it has seen this, so what a profile said is not taken for the run's output. A host
+        // that refused before it could read the request writes no marker at all.
+        if (Marks)
+        {
+            Mark(command, glued);
+        }
+
         return Task.FromResult(respond(connection, command));
+    }
+
+    /// <summary>Writes the agent's start marker on both streams, where the command carries a request with a nonce.</summary>
+    private static void Mark(HostCommand command, string glued = "")
+    {
+        if (string.IsNullOrEmpty(command.StandardInput))
+        {
+            return;
+        }
+
+        HostAgentRequest? request;
+
+        try
+        {
+            request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        if (request?.Nonce is not { Length: > 0 } nonce)
+        {
+            return;
+        }
+
+        var started = glued + HostAgentProtocol.StartedLine(nonce);
+        command.OnOutputLine?.Invoke(started);
+        command.OnErrorLine?.Invoke(started);
     }
 
     public Task<ProcessResult> ProbeShellAsync(HostConnection connection, TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -302,17 +380,23 @@ internal static class HostResults
     }
 
     /// <summary>
-    /// What the DssHarness on a host does with a run request: passes on what the command wrote to standard
-    /// error, says it finished with <paramref name="exitCode"/>, and exits with that code.
+    /// What the DssHarness on a host does with a run request: marks where its own output begins, passes on
+    /// what the command wrote to standard error, says it finished with <paramref name="exitCode"/>, and
+    /// exits with that code.
     /// </summary>
+    /// <remarks>
+    /// The marker goes on both streams, as the agent writes it, because the machine that asked relays
+    /// nothing until it has seen one: a host's login shell writes to the same streams first, and what a
+    /// profile says is not the run's output.
+    /// </remarks>
     public static ProcessResult Finished(HostCommand command, int exitCode, string error = "")
     {
         var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions)
             ?? throw new InvalidOperationException("The host was sent no request.");
 
-        var completion = HostAgentProtocol.CompletionLine(
-            request.Nonce ?? throw new InvalidOperationException("The request carries no nonce."),
-            exitCode);
+        var nonce = request.Nonce ?? throw new InvalidOperationException("The request carries no nonce.");
+        var started = HostAgentProtocol.StartedLine(nonce);
+        var completion = HostAgentProtocol.CompletionLine(nonce, exitCode);
 
         foreach (var line in error.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -321,7 +405,7 @@ internal static class HostResults
 
         command.OnErrorLine?.Invoke(completion);
 
-        return new ProcessResult(exitCode, string.Empty, error + completion + "\n", TimeSpan.Zero, TimedOut: false);
+        return new ProcessResult(exitCode, string.Empty, started + "\n" + error + completion + "\n", TimeSpan.Zero, TimedOut: false);
     }
 }
 

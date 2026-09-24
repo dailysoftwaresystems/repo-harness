@@ -1,3 +1,4 @@
+using System.Globalization;
 using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Hosts;
@@ -34,6 +35,63 @@ public sealed class SyncServiceTests
             Assert.True(result.Verified);
             Assert.True(File.Exists(Path.Combine(copy, "src", "a.c")));
             Assert.True(Directory.Exists(Path.Combine(copy, ".git")), "The copy is not a git repository.");
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A sync carries its writes in batches, so the far side is asked once for many files rather than once
+    /// for each. Over a connection one asking is one session, and a session costs a connection, an
+    /// authentication and whatever the host's login profile does: a file at a time, a consumer's first sync
+    /// of a worktree's copy opened 2,446 sessions, ran 1,136 seconds, and outlasted the host's wake.
+    /// </summary>
+    [Fact]
+    public async Task ASyncCarriesItsWritesInBatches_AskingTheFarSideFarFewerTimesThanItHasFiles()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        // More files than one batch may hold, so the grouping itself is exercised rather than assumed.
+        var extra = SyncServe.MostFilesInABatch + 20;
+
+        for (var index = 0; index < extra; index++)
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(temp.Path, "src", $"f{index.ToString("D4", CultureInfo.InvariantCulture)}.c"),
+                $"file {index}\n",
+                cancellationToken);
+        }
+
+        await harness.CommitAllAsync(temp.Path, "many files", cancellationToken);
+
+        try
+        {
+            var recording = new RecordingTransport(Transport(harness));
+
+            var result = await service.SyncAsync(temp.Path, recording, copy, new SyncOptions(), cancellationToken);
+
+            Assert.True(result.Verified);
+            Assert.True(recording.Written.Count > extra, $"only {recording.Written.Count} files were written");
+
+            // Nothing of the plan crosses on its own: a file at a time is the cost this exists to avoid, and
+            // a batch that merely wrapped single writes would satisfy any bound on how many batches there
+            // are. The one write outside a batch is the configuration, placed on its own after the transfer
+            // so that a copy which failed part way never looks like one a leg could run in.
+            Assert.Equal(1, recording.SingleWrites);
+
+            // And the batches are as few as the bounds allow, not merely fewer than the files: sessions grow
+            // with the tree's size divided by a batch, which is what makes a first sync finish.
+            Assert.InRange(recording.Batches, 1, (recording.Written.Count / SyncServe.MostFilesInABatch) + 2);
+
+            // No file is lost to the grouping, and the count bound is the one that fired here.
+            Assert.True(File.Exists(Path.Combine(copy, "src", "f0000.c")));
+            Assert.True(File.Exists(Path.Combine(copy, "src", $"f{(extra - 1).ToString("D4", CultureInfo.InvariantCulture)}.c")));
+            Assert.Equal(recording.Written.Count, recording.Written.Distinct(StringComparer.Ordinal).Count());
         }
         finally
         {

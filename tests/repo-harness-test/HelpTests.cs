@@ -432,6 +432,10 @@ public sealed partial class HelpTests
     /// as the package installs it, lower case: a Linux filesystem is case-sensitive, and the product's name,
     /// capitalised, runs nothing there. The product's name in prose is no command, and stays as it is.
     /// </summary>
+    /// <remarks>
+    /// A line that stands in for a verb rather than naming one tells the reader to type the product's name just as
+    /// surely: 'DssHarness &lt;command&gt;' is a command line, and was missed while only literal verbs were looked for.
+    /// </remarks>
     [Fact]
     public async Task EveryCommandTheHelpSaysToType_IsSpeltAsTheToolInstallsIt()
     {
@@ -452,7 +456,35 @@ public sealed partial class HelpTests
         Assert.Contains("help", commands);
         Assert.All(texts, text => Assert.DoesNotContain(
             ProductNamePattern().Matches(text).Select(match => match.Groups["verb"].Value),
-            commands.Contains));
+            word => commands.Contains(word) || word.StartsWith('<')));
+    }
+
+    /// <summary>
+    /// The usage line of a command's own help is spelt as the package installs it, as the help topics are.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here writes that line: the command-line library builds it from the executable's own name, which is
+    /// why the assembly is named for the command and not for the product. One mechanism serves every command, so a
+    /// few stand for all of them rather than starting a process per command.
+    /// </remarks>
+    [Theory]
+    [InlineData()]
+    [InlineData("init")]
+    [InlineData("build")]
+    [InlineData("help")]
+    public async Task ACommandsOwnHelp_SpellsItsUsageAsTheToolInstallsIt(params string[] command)
+    {
+        var rendered = await CliRunner.RunAsync([.. command, "--help"], TestContext.Current.CancellationToken);
+
+        var usage = rendered.StandardOutput
+            .Split('\n')
+            .SkipWhile(line => !line.StartsWith("Usage:", StringComparison.Ordinal))
+            .Skip(1)
+            .FirstOrDefault(line => line.Trim().Length > 0)
+            ?.Trim();
+
+        Assert.NotNull(usage);
+        Assert.StartsWith(ToolPackage.Command + " ", usage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -556,7 +588,8 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}" + ToolPackage.Command + @" (?<verb>[a-z-]+)", RegexOptions.Multiline)]
     private static partial Regex InstalledCommandPattern();
 
-    [GeneratedRegex(ToolPackage.Id + @" (?<verb>[a-z-]+)\b")]
+    /// <summary>The product's name followed by a verb, or by something standing in for one.</summary>
+    [GeneratedRegex(ToolPackage.Id + @" (?<verb><[a-z-]+>|[a-z-]+\b)")]
     private static partial Regex ProductNamePattern();
 
     [GeneratedRegex(@"""legJobPattern"": (?<pattern>""(?:[^""\\]|\\.)*"")")]

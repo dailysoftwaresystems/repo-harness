@@ -221,10 +221,11 @@ public sealed class LegsCliTests
 
         Assert.Contains($"<PackageId>{ToolPackage.Id}</PackageId>", project, StringComparison.Ordinal);
         Assert.Contains($"<ToolCommandName>{ToolPackage.Command}</ToolCommandName>", project, StringComparison.Ordinal);
-        // Deliberately not compared with the assembly's own name. The command a host types and the
-        // assembly this tool ships as were the same word by coincidence, and pinning that stopped
-        // the command from being spelled the way a case-sensitive filesystem needs.
-        Assert.Equal($"{ToolPackage.Id}.dll", Path.GetFileName(CliRunner.CliAssemblyPath));
+
+        // The assembly is named for the command, not for the package: the command-line library builds the usage
+        // line of every command's own help from the executable's name, so an assembly named for the product had
+        // each one tell the reader to type a spelling that runs nothing on a case-sensitive filesystem.
+        Assert.Equal($"{ToolPackage.Command}.dll", Path.GetFileName(CliRunner.CliAssemblyPath));
     }
 
     private static async Task PrepareAsync(TempDirectory temp)

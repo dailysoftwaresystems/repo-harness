@@ -23,7 +23,7 @@ public sealed class LocalSyncTransport(
     /// The file recording that the harness made this copy, inside the copy's own harness directory,
     /// which is withheld from transfer and so can never be overwritten by the source.
     /// </summary>
-    public const string MarkerFileName = "synced-copy.json";
+    public const string MarkerFileName = HarnessLayout.SyncedCopyMarkerName;
 
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IManifestBuilder _manifestBuilder = manifestBuilder;
@@ -168,6 +168,26 @@ public sealed class LocalSyncTransport(
                 + "that path is there as the other kind of thing — a file where this tree has a "
                 + "directory, or a directory where it has a file — remove it there and sync again.",
                 ex);
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Written one after another. Nothing here opens a session, so a batch costs exactly what the files
+    /// cost; it exists so that the far side of a connection is asked once rather than once per file, and
+    /// this side answers the same question the same way.
+    /// </remarks>
+    public async Task WriteFilesAsync(
+        string root,
+        IReadOnlyList<SyncFileContent> files,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await WriteFileAsync(root, file.Path, file.Contents, cancellationToken).ConfigureAwait(false);
         }
     }
 

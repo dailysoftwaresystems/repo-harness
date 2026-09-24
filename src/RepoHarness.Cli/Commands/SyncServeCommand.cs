@@ -95,6 +95,17 @@ internal static class SyncServeCommand
 
                     return Done();
 
+                case SyncServe.WriteMany:
+                    await transport
+                        .WriteFilesAsync(
+                            root,
+                            [.. SyncServe.Carried(Required(arguments, 1, operation))
+                                .Select(file => new SyncFileContent(file.Path, file.Bytes()))],
+                            cancellationToken)
+                        .ConfigureAwait(false);
+
+                    return Done();
+
                 case SyncServe.Delete:
                     await transport
                         .DeleteFileAsync(root, Required(arguments, 1, operation), cancellationToken)

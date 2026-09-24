@@ -31,7 +31,7 @@ public static class HostAgentProtocol
     /// and its own version. With the number left as it was, the same host refuses the request over
     /// whichever field it happens not to know, which says nothing about why.
     /// </remarks>
-    public const int Version = 3;
+    public const int Version = 4;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -73,6 +73,69 @@ public static class HostAgentProtocol
     /// </summary>
     public static string CompletionLine(string nonce, int exitCode)
         => $"{CommandName}: finished {nonce} {exitCode.ToString(CultureInfo.InvariantCulture)}";
+
+    /// <summary>
+    /// The line a host writes on each stream first, before it serves a run request, so that the machine that
+    /// asked can tell what the agent says from what the host's login shell said before it.
+    /// </summary>
+    /// <remarks>
+    /// A login shell writes to the same streams the command does, and whatever it writes arrives first. One
+    /// consumer's Mac sources emsdk's environment script on every session, which prints the account's home
+    /// layout - the user's name among it - and a machine relaying a leg's output published it into a ledger,
+    /// a CI log and a chat transcript. What a host's profile says is not this run's output and does not
+    /// belong in it; the agent's own words, from here on, are.
+    /// </remarks>
+    public static string StartedLine(string nonce)
+        => $"{CommandName}: serving {nonce}";
+
+    /// <summary>Whether <paramref name="line"/> carries the started line of the request that sent <paramref name="nonce"/>.</summary>
+    /// <remarks>
+    /// Matched as the end of the line rather than the whole of it. A login profile whose last write has no
+    /// trailing newline - a prompt, an escape sequence, an <c>echo -n</c> - glues its bytes onto the first
+    /// line the agent writes, which is this one. Held to the whole line, such a host would never open the
+    /// gate at all, and every run on it would report as one that never said how it finished.
+    /// </remarks>
+    public static bool IsStartedLine(string line, string nonce)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nonce);
+
+        return line.TrimEnd().EndsWith(StartedLine(nonce), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> from the agent's started line on, or the whole of it where that line is not
+    /// in it: what a message quotes from a whole captured stream, rather than the host's login shell too.
+    /// </summary>
+    /// <param name="text">Everything a stream carried.</param>
+    /// <param name="nonce">The request's nonce.</param>
+    /// <remarks>
+    /// The capture is kept whole for the reader who asks for it, and trimmed wherever it is quoted into
+    /// something the harness says: a host that never reached its agent has nothing else to show, so there
+    /// the whole of it is the answer. One consumer's profile prints the account's home layout on every
+    /// session, and an excerpt of a short stream is otherwise nothing but that.
+    /// </remarks>
+    public static string SinceServing(string text, string nonce)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nonce);
+
+        var started = text.LastIndexOf(StartedLine(nonce), StringComparison.Ordinal);
+
+        return started < 0 ? text : text[(started + StartedLine(nonce).Length)..].TrimStart('\r', '\n');
+    }
+
+    /// <summary>
+    /// Whether <paramref name="line"/> is one the agent itself wrote under its own name, which is relayed
+    /// even before the started line: a request refused before it could be read carries no nonce to mark.
+    /// </summary>
+    /// <param name="line">A line the host wrote.</param>
+    public static bool IsAgentsOwnLine(string line)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+
+        return line.TrimStart().StartsWith(CommandName + ": ", StringComparison.Ordinal);
+    }
 
     /// <summary>Reads <paramref name="line"/> as the completion line of the request that carried <paramref name="nonce"/>.</summary>
     public static bool TryReadCompletionLine(string line, string nonce, out int exitCode)
@@ -129,6 +192,36 @@ public sealed class HostAgentRequest
     public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The command that keeps the host awake while this request is served, as the configuration declares it
+    /// for that host, or empty where it declares none. Run only for a <see cref="HostAgentRequestKind.Run"/>.
+    /// </summary>
+    /// <remarks>
+    /// Carried rather than read there, because the host's copy has no configuration until a first sync has
+    /// put one in it - and a first sync is the longest one, the one that most needs the host to stay awake.
+    /// Measured by a consumer: a first sync of a worktree's copy to a Mac ran past the host's wake and the
+    /// legs were left unavailable. The command's <c>{pid}</c> becomes the agent's own process there, so it
+    /// ends with the request whatever happens to this end of the connection.
+    /// </remarks>
+    public List<string> KeepAwake { get; init; } = [];
+
+    /// <summary>
+    /// What the host declares under <c>env</c> for itself, which the <see cref="KeepAwake"/> command starts
+    /// under, as a leg's own work does. Empty where the host declares none.
+    /// </summary>
+    /// <remarks>
+    /// Carried with the command, for the same reason the command is: the host's copy has no configuration to
+    /// read until a first sync has put one there. Without it a command that starts for a leg - because a leg
+    /// supplies the host's environment - would not start here.
+    /// </remarks>
+    public Dictionary<string, string> KeepAwakeEnvironment { get; init; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Where the survey found this host's programs, which the <see cref="KeepAwake"/> command is looked for
+    /// in, as a leg's own programs are. Empty where nothing was surveyed.
+    /// </summary>
+    public List<string> KeepAwakeDirectories { get; init; } = [];
+
+    /// <summary>
     /// The directory the command starts in on the host, absolute or from the home directory: the host's copy of the
     /// tree it runs in, or, for a sync's own operations, the directory that copy is kept in, which is there before the
     /// copy is. Run only.
@@ -140,8 +233,14 @@ public sealed class HostAgentRequest
 
     /// <summary>
     /// A value the machine that asked chose for this request, repeated in the host's completion line so
-    /// that nothing the command prints can be taken for that line. Run only.
+    /// that nothing the command prints can be taken for that line, and in the line that marks where the
+    /// host's own answer begins.
     /// </summary>
+    /// <remarks>
+    /// A run request is refused without one, because how its command finished could not then be reported.
+    /// An info request answers without one, from a build that sent none: only the marker is lost, and with
+    /// it the trimming of whatever the host's login shell printed first.
+    /// </remarks>
     public string? Nonce { get; init; }
 }
 

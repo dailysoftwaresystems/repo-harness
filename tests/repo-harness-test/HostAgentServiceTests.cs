@@ -1,3 +1,7 @@
+using RepoHarness.Core.Sync;
+using System.Globalization;
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Execution;
 using System.Text.Json;
 using NSubstitute;
 using RepoHarness.Core.FileSystem;
@@ -64,8 +68,12 @@ public sealed class HostAgentServiceTests
         Assert.NotNull(ranWith);
         Assert.Equal(["read-anchor", "D-A B", "--json"], ranWith);
 
-        // And the last line says so, where the machine that asked reads it instead of from ssh's exit code.
-        Assert.Equal(HostAgentProtocol.CompletionLine(Nonce, 4), error.ToString().TrimEnd());
+        // The first line marks where this request's own output begins, so that whatever the host's login
+        // shell wrote to the same stream before the agent ran is not taken for it; the last says how the
+        // command finished, where the machine that asked reads it instead of from ssh's exit code.
+        Assert.Equal(
+            [HostAgentProtocol.StartedLine(Nonce), HostAgentProtocol.CompletionLine(Nonce, 4)],
+            error.ToString().TrimEnd().Split('\n').Select(line => line.TrimEnd('\r')));
     }
 
     [Fact]
@@ -291,12 +299,75 @@ public sealed class HostAgentServiceTests
         Assert.True(info.Emulators.ContainsKey("qemu-arm64"));
     }
 
+    /// <summary>
+    /// A host holds itself awake while it serves a request, by the command the machine that asked carries for
+    /// it, filled in with the agent's own process there so that it ends with the request however the
+    /// connection ends. A sync to a fresh copy is the longest work a host does with no leg of its own running
+    /// there, and a leg's own hold was all that ever kept one awake: a consumer's first sync of a worktree's
+    /// copy ran past a Mac's wake, and both its legs were left unavailable.
+    /// </summary>
+    [Fact]
+    public async Task Run_HoldsTheHostAwake_WhileItServesTheRequest()
+    {
+        using var copy = new TempDirectory();
+        var processes = new HeldProcesses();
+        var heldWhileRunning = false;
+
+        var request = JsonSerializer.Serialize(
+            new HostAgentRequest
+            {
+                Kind = HostAgentRequestKind.Run,
+                Directory = copy.Path,
+                Arguments = [SyncServe.CommandName, SyncServe.WriteMany],
+                KeepAwake = ["caffeinate", "-dimsu", "-w", "{pid}"],
+                Nonce = Nonce,
+            },
+            HostAgentProtocol.JsonOptions);
+
+        await Service(keepingAwake: processes).ServeAsync(
+            new StringReader(request),
+            new StringWriter(),
+            new StringWriter(),
+            (_, _, _) =>
+            {
+                heldWhileRunning = processes.Started.Count == 1;
+                return Task.FromResult(0);
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(heldWhileRunning, "the host was not held awake while the request was served");
+
+        var held = processes.Started[0].Request;
+        Assert.Equal("caffeinate", held.FileName);
+        Assert.Equal(["-dimsu", "-w", Environment.ProcessId.ToString(CultureInfo.InvariantCulture)], held.Arguments);
+    }
+
+    /// <summary>
+    /// A request carrying no such command starts nothing: a host whose configuration declares none is held
+    /// awake by nothing, here as when a leg runs on it.
+    /// </summary>
+    [Fact]
+    public async Task Run_StartsNothing_WhereTheRequestCarriesNoCommandToHoldTheHostAwake()
+    {
+        using var copy = new TempDirectory();
+        var processes = new HeldProcesses();
+
+        await Service(keepingAwake: processes).ServeAsync(
+            new StringReader(RunRequest(copy.Path, "read-anchor", "D-A B")),
+            new StringWriter(),
+            new StringWriter(),
+            (_, _, _) => Task.FromResult(0),
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(processes.Started);
+    }
+
     private static string RunRequest(string directory, params string[] arguments)
         => JsonSerializer.Serialize(
             new HostAgentRequest { Kind = HostAgentRequestKind.Run, Directory = directory, Arguments = [.. arguments], Nonce = Nonce },
             HostAgentProtocol.JsonOptions);
 
-    private static HostAgentService Service(string? home = null)
+    private static HostAgentService Service(string? home = null, IProcessRunner? keepingAwake = null)
     {
         var platform = HostDoubles.Platform(PlatformId.Linux, "arm64", home);
 
@@ -312,6 +383,7 @@ public sealed class HostAgentServiceTests
             new EmulatorProbe(platform, processRunner, fileSystem),
             new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
-            new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
+            new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
+            new KeepAwake(keepingAwake ?? processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
     }
 }

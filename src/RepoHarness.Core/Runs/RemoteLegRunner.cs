@@ -84,6 +84,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
         var ledger = new System.Text.StringBuilder();
         int? finished = null;
+
+        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
+        // the host's login shell, which is the host's business and not this run's output.
+        var serving = false;
+        var reporting = false;
         var failure = new List<string>();
 
         // A transport that will not start leaves the host unavailable, raised as that by the runner
@@ -101,14 +106,54 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
                     // Kept rather than echoed: the host writes its ledger to standard output, and
                     // this end reports one ledger for the whole run rather than one per machine.
-                    OnOutputLine = line => ledger.AppendLine(line),
+                    OnOutputLine = line =>
+                    {
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
+                        {
+                            reporting = true;
+                            return;
+                        }
+
+                        // Nothing the host said before its agent began belongs in the ledger: a login shell
+                        // writes to the same stream, and what it says is the host's business.
+                        if (!reporting)
+                        {
+                            return;
+                        }
+
+                        ledger.AppendLine(line);
+                    },
                     OnErrorLine = line =>
                     {
+                        // Read before the gate, and never behind it: how the command finished is the one
+                        // thing that must survive a host whose profile writes to this stream, because a line
+                        // that never arrives is reported as a command that may not have run at all.
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;
                             return;
                         }
+
+                        if (HostAgentProtocol.IsStartedLine(line, nonce))
+                        {
+                            serving = true;
+                            return;
+                        }
+
+                        // Nothing else the host said before its agent began is this run's output: a login
+                        // shell writes to the same stream, and one consumer's printed the account's home
+                        // layout on every session, which a relayed leg line then published. The agent's own
+                        // lines pass all the same, because a request refused before it could be read carries
+                        // no nonce to mark, and that refusal is the whole of what the reader has to go on.
+                        if (!serving && !HostAgentProtocol.IsAgentsOwnLine(line))
+                        {
+                            return;
+                        }
+
+                        // Under the name the configuration declares, before it is either kept or shown: a
+                        // pinned connection has ssh name the address this machine resolved, and the kept
+                        // copy is the one that reaches the leg's reason, the ledger and --json.
+                        line = HostProbes.AsConfigured(line, session.Connection);
 
                         // Kept as well as shown: a command that refuses before any leg has a
                         // verdict leaves no entry, and its failure is then all it said about why -

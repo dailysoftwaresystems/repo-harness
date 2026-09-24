@@ -89,6 +89,20 @@ public interface ISyncTransport
         byte[] contents,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Writes several files into the copy, as one exchange with the far side.</summary>
+    /// <param name="root">The copy's root, as the far side spells it.</param>
+    /// <param name="files">The files, each with its path relative to the root and its bytes.</param>
+    /// <param name="cancellationToken">Stops the write.</param>
+    /// <remarks>
+    /// Over a connection, one exchange is one session, and a session costs far more than the bytes it
+    /// carries. The files are written in the order given, so a failure leaves the copy in a state the
+    /// caller can reason about: everything before the file named is there, and nothing after it is.
+    /// </remarks>
+    Task WriteFilesAsync(
+        string root,
+        IReadOnlyList<SyncFileContent> files,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Deletes one file from the copy.</summary>
     /// <param name="root">The copy's root.</param>
     /// <param name="relativePath">The file to delete, relative to the root.</param>
@@ -153,3 +167,8 @@ public interface ISyncTransport
     /// </exception>
     Task<byte[]> ReadFileAsync(string root, string relativePath, CancellationToken cancellationToken = default);
 }
+
+/// <summary>One file on its way into a copy: where it goes, and what it holds.</summary>
+/// <param name="Path">Where it goes, relative to the copy's root.</param>
+/// <param name="Contents">Its bytes.</param>
+public sealed record SyncFileContent(string Path, byte[] Contents);

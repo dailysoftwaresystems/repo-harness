@@ -127,6 +127,119 @@ public sealed class HostExecServiceTests
         Assert.DoesNotContain(": finished ", fixture.Error.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// What a host's login shell writes before its agent runs is the host's own business, and never reaches
+    /// this command's output on either stream.
+    /// </summary>
+    /// <remarks>
+    /// A shell startup writes to the same streams the command does, and does it first. One consumer's Mac
+    /// sources emsdk's environment script on every session, which prints the account's home layout - the
+    /// user's name among it - and a machine relaying that output published it into a ledger, a CI log and a
+    /// chat transcript. Only what the agent wrote, from its own marker on, is this command's.
+    /// </remarks>
+    [Fact]
+    public async Task WhatTheHostsLoginShellPrintsBeforeItsAgentRuns_ReachesNoOutput()
+    {
+        const string profile = "PATH += /Users/someone/Library/emsdk";
+
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 0, "create-worktree: OK\n"));
+
+        // Written before the agent runs, and so before its marker, as a login shell writes.
+        fixture.Commands.LoginShellPrints = _ => profile;
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, outcome.ExitCode);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Output.ToString(), StringComparison.Ordinal);
+
+        // And what the agent did say still travels, so nothing is suppressed but the host's own noise.
+        Assert.Contains("create-worktree: OK", fixture.Error.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A profile whose last write has no newline glues its bytes onto the first line the agent writes, which
+    /// is the marker. The gate still opens, the glued text is not relayed, and the command's exit code is
+    /// read as it always was.
+    /// </summary>
+    /// <remarks>
+    /// Held to the whole line, such a host would open the gate on nothing at all, and every command on it
+    /// would report as one that never said how it finished - a far worse failure than the leak, and one that
+    /// no host with a quiet profile would ever show.
+    /// </remarks>
+    [Fact]
+    public async Task AProfileThatLeavesItsLastLineOpen_StillOpensTheGate_AndIsNotRelayed()
+    {
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 7, "create-worktree: FAIL - no\n"));
+        fixture.Commands.LoginShellPrints = _ => "PATH += /Users/someone/Library/emsdk";
+        fixture.Commands.LoginShellLeavesALineOpen = true;
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        // The command's own exit code, not the connection's: the completion line was still read.
+        Assert.Equal(7, outcome.ExitCode);
+        Assert.Contains("create-worktree: FAIL - no", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The command that holds the host awake travels with the request, as a sync's own requests carry it: a
+    /// command run here is the host's work for as long as it takes, and a host that sleeps part way through
+    /// leaves the reader a command that never said how it finished.
+    /// </summary>
+    [Fact]
+    public async Task ACommandRunOnAHost_CarriesWhatHoldsThatHostAwake()
+    {
+        HostAgentRequest? asked = null;
+
+        var fixture = Create(
+            report: host => Reachable(host) with
+            {
+                KeepAwake = ["caffeinate", "-dimsu", "-w", "{pid}"],
+                KeepAwakeEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["HOMEBREW_PREFIX"] = "/opt/homebrew" },
+                ProgramDirectories = ["/opt/homebrew/bin"],
+            },
+            respond: (_, command) =>
+            {
+                asked = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput!, HostAgentProtocol.JsonOptions);
+                return HostResults.Finished(command, 0);
+            });
+
+        await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(["caffeinate", "-dimsu", "-w", "{pid}"], asked!.KeepAwake);
+        Assert.Equal("/opt/homebrew", asked.KeepAwakeEnvironment["HOMEBREW_PREFIX"]);
+        Assert.Equal(["/opt/homebrew/bin"], asked.KeepAwakeDirectories);
+    }
+
+    /// <summary>
+    /// A host that refuses before it can read the request writes no marker - it has no nonce to mark with -
+    /// and its refusal is the whole of what the reader has to go on, so it is relayed all the same.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatRefusesBeforeItCanMarkItsOutput_IsStillHeard()
+    {
+        var refusal = FailureLine.For(HostAgentProtocol.CommandName, "the request speaks protocol 5, and this host speaks 4");
+
+        var fixture = Create(respond: (_, command) =>
+        {
+            command.OnErrorLine?.Invoke(refusal);
+            return HostResults.Failed(HarnessExit.UsageError, refusal + "\n");
+        });
+
+        fixture.Commands.Marks = false;
+        fixture.Commands.LoginShellPrints = _ => "PATH += /Users/someone/Library/emsdk";
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+
+        // Why it refused reaches the reader, and the host's profile still does not.
+        Assert.Contains("the request speaks protocol 5", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ACommandThatNeverSaysHowItFinished_IsUnavailable_RatherThanTheConnectionsExitCode()
     {
@@ -254,6 +367,25 @@ public sealed class HostExecServiceTests
         Assert.Equal("/srv/repo.worktree-feature", JsonSerializer.Deserialize<HostAgentRequest>(sent.StandardInput, HostAgentProtocol.JsonOptions)!.Directory);
     }
 
+    /// <summary>A host reached, with a session a request can travel on.</summary>
+    private static HostReport Reachable(HostId host) => new()
+    {
+        Host = host,
+        Os = "linux",
+        Processor = "x86_64",
+        Session = new HostSession(
+            new HostConnection
+            {
+                Host = host,
+                Distribution = "Example-Linux",
+                Address = "host.invalid",
+                User = "harness",
+                KeyFile = "/repo/.key",
+                KnownHostsFile = "/repo/known_hosts",
+            },
+            ".dotnet/tools/dssharness"),
+    };
+
     private static Fixture Create(
         Func<HostId, HostReport>? report = null,
         Func<HostConnection, HostCommand, ProcessResult>? respond = null,
@@ -261,36 +393,21 @@ public sealed class HostExecServiceTests
         bool verbose = false,
         IHarnessContextLoader? loader = null)
     {
-        var inspector = new RecordingInspector(report ?? (host => new HostReport
-        {
-            Host = host,
-            Os = "linux",
-            Processor = "x86_64",
-            Session = new HostSession(
-                new HostConnection
-                {
-                    Host = host,
-                    Distribution = "Example-Linux",
-                    Address = "host.invalid",
-                    User = "harness",
-                    KeyFile = "/repo/.key",
-                    KnownHostsFile = "/repo/known_hosts",
-                },
-                ".dotnet/tools/dssharness"),
-        }));
+        var inspector = new RecordingInspector(report ?? Reachable);
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
         var error = new StringWriter();
+        var output = new StringWriter();
 
         var service = new HostExecService(
             loader ?? HostDoubles.Loader(Config, Root),
             inspector,
             commands,
             platform ?? HostDoubles.Platform(),
-            new ConsoleHarnessOutput(new StringWriter(), error, verbose));
+            new ConsoleHarnessOutput(output, error, verbose));
 
-        return new Fixture(service, inspector, commands, error);
+        return new Fixture(service, inspector, commands, error, output);
     }
 
-    private sealed record Fixture(HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands, StringWriter Error);
+    private sealed record Fixture(HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands, StringWriter Error, StringWriter Output);
 }

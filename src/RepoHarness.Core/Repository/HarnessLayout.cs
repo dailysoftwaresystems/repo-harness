@@ -25,6 +25,9 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// <summary>Name of the directory holding one subdirectory per WSL distribution's connection data.</summary>
     public const string WslDistrosDirectoryName = "wslDistros";
 
+    /// <summary>Name of the marker a sync leaves in the copy of a tree it makes on a host.</summary>
+    public const string SyncedCopyMarkerName = "synced-copy.json";
+
     /// <summary>Name of the file holding one item's connection settings, as <c>NAME=value</c> lines.</summary>
     public const string ItemEnvFileName = ".env";
 
@@ -204,6 +207,17 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// holds is gitignored and therefore absent from every worktree's checkout.
     /// </summary>
     public string SshItemsDirectory => Path.Combine(MainHarnessDirectory, SshItemsDirectoryName);
+
+    /// <summary>
+    /// The marker a sync leaves here when this tree is the copy of one it made on a host, rather than a
+    /// checkout somebody works in.
+    /// </summary>
+    /// <remarks>
+    /// Read to tell the two apart where what is missing from a tree is missing by design. Connection data is
+    /// gitignored and never synced, so a copy on a host holds none: what reads as a setup step left undone in a
+    /// checkout is the arrangement working as intended in a copy.
+    /// </remarks>
+    public string SyncedCopyMarkerFile => Path.Combine(MainHarnessDirectory, SyncedCopyMarkerName);
 
     /// <summary>The WSL distributions directory, resolved against the main checkout for the same reason.</summary>
     public string WslDistrosDirectory => Path.Combine(MainHarnessDirectory, WslDistrosDirectoryName);
