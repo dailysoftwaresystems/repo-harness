@@ -1,4 +1,5 @@
 using System.Globalization;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
@@ -317,7 +318,8 @@ public sealed class SyncService(
 
             if (unreached.Count == 0)
             {
-                return CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
+                return FailedCheck(report, "no host was reached", context, [])
+                    ?? CommandOutcome.Ok("no host needs a copy: every runnable leg runs on this machine");
             }
 
             // Each host's own reason was warned with the legs it stopped, so it is named here and not said
@@ -430,7 +432,46 @@ public sealed class SyncService(
         // only the tree sync makes good on. A carry writes one run's artifacts and a pull reads a
         // handful of named files; either reported as "in step" tells somebody their host matches
         // this tree, which is the one thing neither of them did.
-        return CommandOutcome.Ok(Summary(options, hosts.Count, pull.Count), details);
+        return FailedCheck(report, Summary(options, hosts.Count, pull.Count), context, details)
+            ?? CommandOutcome.Ok(Summary(options, hosts.Count, pull.Count), details);
+    }
+
+    /// <summary>
+    /// The sync's conclusion where the check <c>legs</c> makes fails - a leg named with <c>--legs</c> that
+    /// no host could take, no selected leg any host could take, or a leg turned away through a defect of
+    /// this tool - after whatever the sync could do; <see langword="null"/> where the check passes.
+    /// </summary>
+    /// <param name="report">Where each selected leg was placed, or why it could not be.</param>
+    /// <param name="done">What the sync did, as its conclusion would otherwise have said.</param>
+    /// <param name="context">The tree the sync was typed in.</param>
+    /// <param name="details">What it did, host by host.</param>
+    /// <remarks>
+    /// Failed as <c>legs</c> fails, and for its reason: a leg asked for by name is a copy the command was
+    /// asked to make, and a host put in step does not answer for one nothing could reach. Such a sync said
+    /// how many hosts it had put in step, and exited 0, with the leg's warning the only word of what it
+    /// did not do. A leg merely declared on a machine that is switched off is normal, and fails nothing.
+    /// </remarks>
+    private static CommandOutcome? FailedCheck(
+        Legs.LegsReport report,
+        string done,
+        HarnessContext context,
+        IReadOnlyList<string> details)
+    {
+        var unplaced = report.Placements.Where(placement => !placement.Runnable).Select(placement => placement.Leg.Name).ToList();
+
+        // A tree that declares no leg has nothing to copy, and is done: the check fails a survey that found
+        // no leg to run, and a sync with no leg to place has placed everything it was given.
+        if (report.Passed || unplaced.Count == 0)
+        {
+            return null;
+        }
+        var conclusion = $"{done}; {unplaced.Count} leg(s) could not be placed on any host, so no copy was made for "
+            + $"them: {string.Join(", ", unplaced)}";
+
+        return CommandOutcome.Failed(
+            report.Defect is not null ? Verdicts.ExitCodeFor(LegVerdict.Poisoned) : Legs.LegsExit.Unavailable,
+            context.IsSyncedCopy ? HostConnector.InACopy(conclusion) : conclusion,
+            details);
     }
 
     /// <summary>What this run did, in one line, as the direction it ran in.</summary>

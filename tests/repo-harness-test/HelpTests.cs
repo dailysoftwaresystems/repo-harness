@@ -378,7 +378,7 @@ public sealed partial class HelpTests
             Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
         }
 
-        Assert.Contains($"{LegsExit.Unavailable,3}  legs:", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains($"{LegsExit.Unavailable,3}  legs, sync:", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains($"{HarnessExit.HostUnavailable,3}  host-exec:", result.StandardOutput, StringComparison.Ordinal);
     }
 

@@ -890,6 +890,10 @@ internal static class HelpCommand
         builder.AppendLine("refused any host says so, and a sync that reaches none of the hosts its legs need");
         builder.AppendLine($"fails, exit {HarnessExit.HostUnavailable}, rather than reporting that no host needed a copy.");
         builder.AppendLine();
+        builder.AppendLine("Wherever it is typed, a sync fails as legs does when a leg named with --legs could not be");
+        builder.AppendLine("placed on any host, or no selected leg could be: after putting in step every host it");
+        builder.AppendLine("reached, it names the legs no copy was made for.");
+        builder.AppendLine();
         builder.AppendLine($"A host's {ToolPackage.Id} is brought to its dispatcher's version when that machine next");
         builder.AppendLine("reaches it, and not before, so a command typed in a copy in between runs the old build.");
         builder.AppendLine("Typed there, a command asks nuget.org which release is newest and warns when the build");
@@ -899,8 +903,8 @@ internal static class HelpCommand
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");
         builder.AppendLine($"  {HarnessExit.Incomplete,3}  legs: the legs that answered can run, and a host did not answer");
-        builder.AppendLine($"  {LegsExit.Unavailable,3}  legs: a leg named with --legs cannot run, or no selected leg can");
-        builder.AppendLine($"  {HarnessExit.InternalError,3}  legs: whether a leg can run was never established, through a defect in this tool");
+        builder.AppendLine($"  {LegsExit.Unavailable,3}  legs, sync: a leg named with --legs cannot run, or no selected leg can");
+        builder.AppendLine($"  {HarnessExit.InternalError,3}  legs, sync: whether a leg can run was never established, through a defect in this tool");
         builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set, or no name at all");
         builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Id} than this machine");
         builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the tree it is typed in,");
