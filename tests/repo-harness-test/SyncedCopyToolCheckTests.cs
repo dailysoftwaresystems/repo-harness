@@ -143,6 +143,96 @@ public sealed class SyncedCopyToolCheckTests
     public void AnAnswerListingNoRelease_IsNoAnswer(string json)
         => Assert.Null(NuGetPublishedToolVersions.NewestRelease(json));
 
+    /// <summary>
+    /// A release newer than the one running is named only once its registration leaf says it is listed,
+    /// the newest first: an unlisted one is withdrawn, no dispatcher is ever brought to it, and named as
+    /// newer it had every copy told it trailed a release nobody was on.
+    /// </summary>
+    [Fact]
+    public async Task AnUnlistedRelease_IsPassedOver_ForTheNewestListedOne()
+    {
+        var feed = new FeedDouble(new Dictionary<string, string>
+        {
+            [NuGetPublishedToolVersions.VersionsAddress.ToString()] = """{"versions":["0.5.10","0.5.11","0.5.12"]}""",
+            [Leaf("0.5.12")] = """{"listed":false}""",
+            [Leaf("0.5.11")] = """{"listed":true}""",
+        });
+
+        using var versions = new NuGetPublishedToolVersions(feed);
+
+        Assert.Equal("0.5.11", (await versions.NewestAsync(Version("0.5.10"), TestContext.Current.CancellationToken))?.ToString());
+        Assert.Equal([NuGetPublishedToolVersions.VersionsAddress.ToString(), Leaf("0.5.12"), Leaf("0.5.11")], feed.Asked);
+    }
+
+    /// <summary>
+    /// Where every newer release is unlisted, none is newer: the build running is the newest a dispatcher
+    /// can be on. And a build that is the newest release asks nothing of any leaf.
+    /// </summary>
+    [Fact]
+    public async Task NoListedReleaseIsNewer_WhereTheNewerOnesAreUnlisted_OrThereAreNone()
+    {
+        var feed = new FeedDouble(new Dictionary<string, string>
+        {
+            [NuGetPublishedToolVersions.VersionsAddress.ToString()] = """{"versions":["0.5.10","0.5.11"]}""",
+            [Leaf("0.5.11")] = """{"listed":false}""",
+        });
+
+        using var versions = new NuGetPublishedToolVersions(feed);
+
+        Assert.Equal("0.5.10", (await versions.NewestAsync(Version("0.5.10"), TestContext.Current.CancellationToken))?.ToString());
+        Assert.Equal("0.5.11", (await versions.NewestAsync(Version("0.5.11"), TestContext.Current.CancellationToken))?.ToString());
+
+        // Asked of 0.5.11's leaf once, by the build that trails it, and never by the one that is it.
+        Assert.Single(feed.Asked, Leaf("0.5.11"));
+    }
+
+    /// <summary>A leaf that cannot be read leaves which release is newest untold, and nothing is named.</summary>
+    [Fact]
+    public async Task ALeafThatCannotBeRead_LeavesTheNewestUntold()
+    {
+        var feed = new FeedDouble(new Dictionary<string, string>
+        {
+            [NuGetPublishedToolVersions.VersionsAddress.ToString()] = """{"versions":["0.5.10","0.5.11"]}""",
+        });
+
+        using var versions = new NuGetPublishedToolVersions(feed);
+
+        Assert.Null(await versions.NewestAsync(Version("0.5.10"), TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>A leaf says whether its version is listed; one that says nothing is listed, as the feed's rule has it.</summary>
+    [Theory]
+    [InlineData("""{"listed":true}""", true)]
+    [InlineData("""{"listed":false}""", false)]
+    [InlineData("""{"@id":"leaf"}""", true)]
+    [InlineData("""{"listed":"no"}""", null)]
+    [InlineData("[]", null)]
+    [InlineData("not json", null)]
+    [InlineData(null, null)]
+    public void ALeaf_SaysWhetherItsVersionIsListed(string? json, bool? listed)
+        => Assert.Equal(listed, NuGetPublishedToolVersions.IsListed(json));
+
+    private static string Leaf(string version) => NuGetPublishedToolVersions.LeafAddress(Version(version)).ToString();
+
+    private static SemanticVersion Version(string text)
+        => SemanticVersion.TryParse(text, out var version) ? version : throw new ArgumentException(text);
+
+    /// <summary>A feed answering each address it knows, and not found for any other, recording what it was asked.</summary>
+    private sealed class FeedDouble(IReadOnlyDictionary<string, string> answers) : HttpMessageHandler
+    {
+        public List<string> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var address = request.RequestUri!.ToString();
+            Asked.Add(address);
+
+            return Task.FromResult(answers.TryGetValue(address, out var body)
+                ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(body) }
+                : new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+        }
+    }
+
     private sealed class Fixture
     {
         public Fixture(string running, string? published, bool servesAnotherMachine = false, bool verbose = false)

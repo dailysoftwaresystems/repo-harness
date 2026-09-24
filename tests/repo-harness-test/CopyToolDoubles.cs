@@ -14,7 +14,7 @@ public sealed class PublishedVersionsDouble(string? newest = null) : IPublishedT
     /// <summary>How many times the feed was asked.</summary>
     public int Asked { get; private set; }
 
-    public Task<SemanticVersion?> NewestAsync(CancellationToken cancellationToken = default)
+    public Task<SemanticVersion?> NewestAsync(SemanticVersion running, CancellationToken cancellationToken = default)
     {
         Asked++;
         return Task.FromResult(SemanticVersion.TryParse(Newest, out var version) ? version : null);

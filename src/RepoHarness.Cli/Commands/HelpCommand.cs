@@ -896,9 +896,10 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine($"A host's {ToolPackage.Id} is brought to its dispatcher's version when that machine next");
         builder.AppendLine("reaches it, and not before, so a command typed in a copy in between runs the old build.");
-        builder.AppendLine("Typed there, a command asks nuget.org which release is newest and warns when the build");
-        builder.AppendLine("running is older; it waits a few seconds at most, and says nothing when nuget.org does");
-        builder.AppendLine("not answer. A command the host agent runs for another machine asks nothing.");
+        builder.AppendLine("Typed there, a command asks nuget.org which listed release is newest - an unlisted one");
+        builder.AppendLine("is withdrawn, and no dispatcher is brought to it - and warns when the build running is");
+        builder.AppendLine("older; it waits a few seconds at most, and says nothing when nuget.org does not answer.");
+        builder.AppendLine("A command the host agent runs for another machine asks nothing.");
         builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");
