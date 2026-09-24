@@ -175,7 +175,7 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused(
                 HostProbes.IsMissingDistribution(uname.StandardOutput + uname.StandardError)
                     ? $"WSL has no distribution named '{item.Distribution}'"
-                    : HostProbes.Failure("the distribution did not start a program", uname));
+                    : HostProbes.Failure("the distribution did not start a program", uname, connection));
         }
 
         var (os, processor) = HostProbes.ReadUname(uname.StandardOutput);
@@ -246,10 +246,13 @@ public sealed class HostConnector(
             // the reader to the server; the client is what had changed.
             var client = await SshClientAsync(cancellationToken).ConfigureAwait(false);
 
+            // echo exits 255 nowhere, so here that code is ssh's own, whatever it failed over. And no
+            // session has opened yet on this connection, so whatever ssh failed over - a key it refused
+            // among them - the host could not be reached for this command.
             return HostConnectionResult.Refused(probe switch
             {
                 { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
-                { ExitCode: HostProbes.SshFailed } => $"the host could not be reached: ssh said {HostProbes.Excerpt(probe.StandardError)} ({client})",
+                { ExitCode: HostProbes.SshFailed } => $"{HostProbes.CouldNotReach(HostProbes.Excerpt(probe.StandardError))} ({client})",
                 _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
             });
         }

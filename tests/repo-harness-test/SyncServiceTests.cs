@@ -724,6 +724,45 @@ public sealed class SyncServiceTests
         }
     }
 
+    /// <summary>
+    /// A path --pull names that the copy does not hold fails the pull by name, as a write that fails does:
+    /// nothing at it, nothing along it, or a directory. Read by the runtime alone, the first two ended the
+    /// host's command as an unexpected DirectoryNotFoundException or FileNotFoundException - a defect in
+    /// the tool, exit 70 - with the path only inside the runtime's own words. Never a refusal, which would
+    /// end a whole run where the same read found a file a sync's plan listed removed since.
+    /// </summary>
+    [Theory]
+    [InlineData("out/missing.txt", "nothing is at that path there")]
+    [InlineData("absent/deeper/report.txt", "nothing is at that path there")]
+    [InlineData("out", "is a directory in")]
+    public async Task APathThePullNamesThatTheCopyDoesNotHold_IsRefusedByName(string path, string reason)
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+        var landing = Path.Combine(temp.Path, "artefacts");
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+            Directory.CreateDirectory(Path.Combine(copy, "out"));
+
+            var refusal = await Assert.ThrowsAsync<HarnessException>(() => service.PullAsync(
+                Transport(harness), copy, landing, [path], cancellationToken));
+
+            Assert.Equal(HarnessExit.CommandFailed, refusal.ExitCode);
+            Assert.False(HarnessExit.RefusesTheRun(refusal.ExitCode));
+            Assert.StartsWith($"'{path}' ", refusal.Message, StringComparison.Ordinal);
+            Assert.Contains(reason, refusal.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(landing), "Something landed for a path that was not there.");
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
     [Fact]
     public async Task ALinkedFile_IsNeverTransferred_SoItsTargetsBytesNeverLeaveThisMachine()
     {
@@ -1200,6 +1239,37 @@ public sealed class SyncServiceTests
         Assert.Contains("quote it", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A host ssh never connected to is said as that, in ssh's words, whatever the sync asked it: nothing
+    /// ran there, where a command that never said how it finished may have run in part.
+    /// </summary>
+    [Fact]
+    public async Task AHostSshNeverConnectedTo_IsSaidAsThat_WhateverTheSyncAskedIt()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var commands = new ScriptedHostCommands((_, _) => HostResults.Failed(255, "banner exchange: Connection to UNKNOWN port -1: Connection refused\r\n"));
+
+        var transport = new RemoteSyncTransport(
+            HostId.Ssh("vps"),
+            new HostSession(new HostConnection { Host = HostId.Ssh("vps") }, "dssharness"),
+            commands,
+            new ConsoleHarnessOutput(output, error, verbose: false));
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => transport.ReadManifestAsync(
+            "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, refusal.ExitCode);
+        Assert.Equal("ssh vps: the host could not be reached: ssh said banner exchange: Connection to UNKNOWN port -1: Connection refused", refusal.Message);
+    }
+
+    /// <summary>
+    /// A manifest answer that never arrived is refused, not read as a copy holding nothing. Empty is
+    /// the most dangerous answer available here: the deletion bound measures against what the copy
+    /// holds, so an empty one disables it, and the refusal then tells somebody that taking the
+    /// directory over would remove nothing — advice they act on, after which the read succeeds and
+    /// everything the host held goes.
+    /// </summary>
     [Fact]
     public async Task AManifestTheHostNeverAnswered_IsRefused_NotReadAsAnEmptyCopy()
     {

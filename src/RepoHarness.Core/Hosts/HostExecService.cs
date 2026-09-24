@@ -156,12 +156,9 @@ public sealed class HostExecService(
         // wsl.exe with codes of its own, when the connection fails, and neither is the command's result.
         if (finished is not { } exitCode)
         {
-            var said = HostProbes.Excerpt(result.StandardError);
-
             return CommandOutcome.Failed(
                 HarnessExit.HostUnavailable,
-                $"{host}: '{shown}' never reported how it finished, so it may not have run, or run only in part; "
-                + $"the connection ended with exit {result.ExitCode}{(said.Length == 0 ? string.Empty : ": " + said)}");
+                $"{host}: {HostProbes.NeverFinished($"'{shown}'", result, session.Connection)}");
         }
 
         return exitCode == HarnessExit.Success

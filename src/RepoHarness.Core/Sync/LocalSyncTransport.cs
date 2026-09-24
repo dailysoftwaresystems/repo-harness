@@ -269,17 +269,45 @@ public sealed class LocalSyncTransport(
     private const int HeldNamesReported = 5;
 
     /// <inheritdoc/>
+    /// <exception cref="HarnessException">No file is at the path: nothing, a directory, or nothing along it.</exception>
+    /// <remarks>
+    /// Named here, as <see cref="WriteFileAsync"/> names a write that failed, and with its exit code: for
+    /// every host but this one the read happens on the far side and only its message comes back, and the
+    /// runtime's own exception arrived as a defect in the harness, exit 70, with the path only inside its
+    /// words. A path <c>--pull</c> names is the likeliest. Never a refusal, whose code ends a whole run as a
+    /// configuration would: the same read serves a sync's own plan and a carry, and a file removed since
+    /// the plan was made stops that transfer part way, for the legs that needed it alone.
+    /// </remarks>
     public async Task<byte[]> ReadFileAsync(
         string root,
         string relativePath,
         CancellationToken cancellationToken = default)
     {
-        await using var stream = _fileSystem.OpenRead(Resolve(root, relativePath));
-        using var buffer = new MemoryStream();
+        var path = Resolve(root, relativePath);
 
-        await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        if (_fileSystem.DirectoryExists(path))
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{relativePath}' is a directory in '{root}', and only files cross, each named: name the files in it.");
+        }
 
-        return buffer.ToArray();
+        try
+        {
+            await using var stream = _fileSystem.OpenRead(path);
+            using var buffer = new MemoryStream();
+
+            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+
+            return buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new HarnessException(
+                HarnessExit.CommandFailed,
+                $"'{relativePath}' is not in '{root}': nothing is at that path there.",
+                ex);
+        }
     }
 
     /// <summary>

@@ -141,9 +141,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             // reporting that as a red leg would blame the code for a connection.
             throw new HarnessException(
                 HarnessExit.HostUnavailable,
-                $"{leg.Host.Host}: '{commandName}' for leg '{leg.Name}' never reported how it "
-                + $"finished, so it may not have run, or run only in part; the connection ended with "
-                + $"exit {result.ExitCode}{Detail(result.StandardError)}");
+                $"{leg.Host.Host}: {HostProbes.NeverFinished($"'{commandName}' for leg '{leg.Name}'", result, session.Connection)}");
         }
 
         return Read(ledger.ToString(), leg, commandName, finished.Value, failure.Count == 0 ? null : string.Join(Environment.NewLine, failure));
@@ -249,13 +247,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             Compilers = [.. entry.Compilers ?? []],
             DeveloperEnvironment = entry.DeveloperEnvironment,
         };
-    }
-
-    private static string Detail(string standardError)
-    {
-        var said = HostProbes.Excerpt(standardError);
-
-        return said.Length == 0 ? string.Empty : ": " + said;
     }
 
     /// <summary>The shape a host's ledger arrives in, read back by name rather than by position.</summary>

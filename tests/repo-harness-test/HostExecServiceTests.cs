@@ -139,6 +139,22 @@ public sealed class HostExecServiceTests
         Assert.Contains("exit 255: Connection to vps.example closed by remote host.", outcome.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A command on a host ssh never connected to is said as that host not reached, in ssh's words: the
+    /// command never ran, so saying it may have run in part would send somebody to check the host.
+    /// </summary>
+    [Fact]
+    public async Task ACommandOnAHostSshNeverConnectedTo_IsSaidAsThatHostNotReached()
+    {
+        var fixture = Create(respond: (_, _) => HostResults.Failed(255, "ssh: connect to host host.invalid port 22: Connection timed out\n"));
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.HostUnavailable, outcome.ExitCode);
+        Assert.EndsWith(": the host could not be reached: ssh said ssh: connect to host host.invalid port 22: Connection timed out", outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("never reported", outcome.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task VerboseOutput_AsksTheHostToReportItsOwnDefectsInFull()
     {

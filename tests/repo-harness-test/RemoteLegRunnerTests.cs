@@ -255,6 +255,27 @@ public sealed class RemoteLegRunnerTests
         Assert.Contains("never reported how it finished", failure.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A leg on a host ssh never connected to is said as that host not reached, in ssh's words, rather
+    /// than as a command that may have run in part: nothing of the leg ran, and nothing there needs looking at.
+    /// </summary>
+    [Fact]
+    public async Task ALegOnAHostSshNeverConnectedTo_IsSaidAsThatHostNotReached()
+    {
+        var hosts = new ScriptedHostCommands((_, _) => HostResults.Failed(255, "ssh: Could not resolve hostname mac.local: No such host is known.\n"));
+        var mac = HostId.Ssh("mac");
+        var leg = Leg() with
+        {
+            Host = Leg().Host with { Host = mac, Session = new HostSession(new HostConnection { Host = mac }, ".dotnet/tools/dssharness") },
+        };
+
+        var failure = await Assert.ThrowsAsync<HarnessException>(() => Runner(hosts).RunAsync(
+            "test", leg, "/home/dev/repo", [], TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.HostUnavailable, failure.ExitCode);
+        Assert.Equal("ssh mac: the host could not be reached: ssh said ssh: Could not resolve hostname mac.local: No such host is known.", failure.Message);
+    }
+
     [Fact]
     public async Task AnAnswerWithNoLedger_IsNotReadAsAPass()
     {

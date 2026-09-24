@@ -260,16 +260,14 @@ public sealed class RemoteSyncTransport(
         {
             throw new HarnessException(
                 HarnessExit.HostUnavailable,
-                $"{Host}: '{arguments[0]}' never reported how it finished, so it may not have run, or run "
-                + $"only in part; the connection ended with exit {result.ExitCode}"
-                + $"{Detail(result.StandardError)}");
+                $"{Host}: {HostProbes.NeverFinished($"'{arguments[0]}'", result, _session.Connection)}");
         }
 
         if (exitCode != HarnessExit.Success)
         {
             throw new HarnessException(
                 exitCode,
-                $"{Host}: '{arguments[0]}' exited {exitCode}{Detail(result.StandardError)}");
+                $"{Host}: '{arguments[0]}' exited {exitCode}{HostProbes.Detail(result.StandardError)}");
         }
 
         return answer;
@@ -285,12 +283,5 @@ public sealed class RemoteSyncTransport(
         var slash = trimmed.LastIndexOf('/');
 
         return slash <= 0 ? trimmed : trimmed[..slash];
-    }
-
-    private static string Detail(string standardError)
-    {
-        var said = HostProbes.Excerpt(standardError);
-
-        return said.Length == 0 ? string.Empty : ": " + said;
     }
 }

@@ -84,7 +84,8 @@ public sealed class HostProgramResolverTests
     [Fact]
     public async Task AHostThatDidNotAnswer_IsReportedAsUnreadable_SoNoRefusalClaimsTheToolIsMissing()
     {
-        // ssh's own 255 means the connection never opened, which says nothing about what is installed.
+        // ssh's own 255 means ssh itself failed - here the connection was closed - so the host never
+        // answered, which says nothing about what is installed.
         var commands = new ScriptedHostCommands((_, _) => HostResults.Failed(255, "Connection closed by remote host"));
 
         var connection = await Resolve(commands, SshHost, ["dotnet"]);

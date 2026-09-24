@@ -139,6 +139,29 @@ public sealed class HostInspectorTests
         Assert.Contains("Permission denied", report.Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A host ssh never connected to while DssHarness was asked about it is said as that, in ssh's words,
+    /// and nothing about DssHarness is: said as DssHarness not answering from its tool path, a name that did
+    /// not resolve sent the reader after an install that was fine. A host ssh reached, where DssHarness gave
+    /// no answer, is still said as that.
+    /// </summary>
+    [Theory]
+    [InlineData(255, "ssh: Could not resolve hostname host.invalid: No such host is known.", "the host could not be reached: ssh said ssh: Could not resolve hostname host.invalid: No such host is known.")]
+    [InlineData(255, "banner exchange: Connection to UNKNOWN port -1: Connection refused", "the host could not be reached: ssh said banner exchange: Connection to UNKNOWN port -1: Connection refused")]
+    [InlineData(255, "Connection to host.invalid closed by remote host.", "DssHarness did not answer from")]
+    [InlineData(1, "Segmentation fault", "DssHarness did not answer from")]
+    public async Task AHostSshNeverConnectedTo_IsSaidAsThat_AndNotAsDssHarnessNotAnswering(int exitCode, string said, string reason)
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: _ => HostResults.Failed(exitCode, said)));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains(reason, report.Reason, StringComparison.Ordinal);
+        Assert.Contains(said, report.Reason, StringComparison.Ordinal);
+        Assert.Equal(reason.StartsWith("DssHarness", StringComparison.Ordinal), report.Reason!.Contains("did not answer", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AHostThatNeverAnsweredTheLookup_IsNotReportedAsMissingTheSdk()
     {

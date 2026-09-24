@@ -210,7 +210,7 @@ public sealed class HostInspector(
 
         if (sdks is null || !sdks.Succeeded)
         {
-            return found with { Reason = NoSdk(dotnet, sdks) };
+            return found with { Reason = NoSdk(dotnet, sdks, connection) };
         }
 
         var listed = HostProbes.ReadSdks(sdks.StandardOutput);
@@ -268,7 +268,7 @@ public sealed class HostInspector(
 
         if (!tools.Succeeded || !HostProbes.TryReadToolVersion(tools.StandardOutput, ToolPackage.Id, out var installed))
         {
-            return (HostProbes.Failure("its global .NET tools could not be listed", tools), null);
+            return (HostProbes.Failure("its global .NET tools could not be listed", tools, connection), null);
         }
 
         if (installed is null)
@@ -277,7 +277,7 @@ public sealed class HostInspector(
 
             return install.Succeeded
                 ? (null, $"installed {ToolPackage.Id} {root.Version}")
-                : (HostProbes.Failure($"installing {ToolPackage.Id} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install), null);
+                : (HostProbes.Failure($"installing {ToolPackage.Id} {root.Version} from nuget.org there failed; a host runs only a version published on nuget.org", install, connection), null);
         }
 
         if (!SemanticVersion.TryParse(installed, out var hostVersion) || !SemanticVersion.TryParse(root.Version, out var rootVersion))
@@ -310,7 +310,7 @@ public sealed class HostInspector(
 
         return update.Succeeded
             ? (null, $"updated {ToolPackage.Id} {installed} to {root.Version}")
-            : (HostProbes.Failure($"updating {ToolPackage.Id} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update), null);
+            : (HostProbes.Failure($"updating {ToolPackage.Id} {installed} to {root.Version} there failed; a host runs only a version published on nuget.org", update, connection), null);
     }
 
     /// <summary>Runs <c>dotnet tool install</c> or <c>update</c> for exactly <paramref name="version"/>, from nuget.org alone.</summary>
@@ -363,7 +363,7 @@ public sealed class HostInspector(
 
         if (!answer.Succeeded)
         {
-            return found with { Reason = HostProbes.Failure($"{ToolPackage.Id} did not answer from {shownTool}, where global tools are installed", answer) };
+            return found with { Reason = HostProbes.Failure($"{ToolPackage.Id} did not answer from {shownTool}, where global tools are installed", answer, connection) };
         }
 
         var start = answer.StandardOutput.IndexOf('{', StringComparison.Ordinal);
@@ -426,7 +426,7 @@ public sealed class HostInspector(
 
         if (!listing.Succeeded)
         {
-            return HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing);
+            return HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing, connection);
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
@@ -442,7 +442,8 @@ public sealed class HostInspector(
     /// </summary>
     /// <param name="dotnet">Where <c>dotnet</c> was found, or <see langword="null"/> when it was never looked for.</param>
     /// <param name="sdks">What running it did, or <see langword="null"/> when it was never run.</param>
-    private static string NoSdk(ProgramLocation? dotnet, ProcessResult? sdks)
+    /// <param name="connection">The connection it was run through.</param>
+    private static string NoSdk(ProgramLocation? dotnet, ProcessResult? sdks, HostConnection connection)
     {
         var sdk = $"the .NET {ToolPackage.MinimumSdkMajor} SDK";
 
@@ -470,7 +471,7 @@ public sealed class HostInspector(
             ? $"'dotnet' is installed at '{dotnet.Path}', off the PATH of a command run without a login shell, and did not run from there"
             : "'dotnet' is on the PATH of a command run without a login shell there, and did not run";
 
-        return sdks is null ? where : HostProbes.Failure(where, sdks);
+        return sdks is null ? where : HostProbes.Failure(where, sdks, connection);
     }
 
     private Task<ProcessResult> RunAsync(
