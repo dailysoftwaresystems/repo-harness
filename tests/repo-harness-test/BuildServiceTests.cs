@@ -69,6 +69,10 @@ public sealed class BuildServiceTests
         {
             Assert.Contains($"{deepest.Length} characters long", said, StringComparison.Ordinal);
             Assert.Contains($"declares {reserve}", said, StringComparison.Ordinal);
+
+            // This build's own, not a path it merely found: the two read alike but call for different
+            // remedies, and only one of them is the reserve's to answer for.
+            Assert.Contains("This build wrote it", said, StringComparison.Ordinal);
         }
     }
 
@@ -117,13 +121,14 @@ public sealed class BuildServiceTests
 
         var said = factory.StandardError.ToString();
 
-        Assert.Contains("an earlier build left a path", said, StringComparison.Ordinal);
-        Assert.Contains("which this build did not write", said, StringComparison.Ordinal);
+        // Said as a path this build did not write, with both readings a date can support and the remedy for
+        // each - and never as something this build produced.
+        Assert.Contains("the deepest path below this build directory is", said, StringComparison.Ordinal);
+        Assert.Contains("with-a-very-long-name-indeed-left-behind.cpp.obj", said, StringComparison.Ordinal);
+        Assert.Contains("This build did not write it", said, StringComparison.Ordinal);
+        Assert.Contains("one that no longer exists", said, StringComparison.Ordinal);
         Assert.Contains("start this variant's build directory from clean", said, StringComparison.Ordinal);
-
-        // Never this build's, and never the remedy that would move a number nothing measured against it.
         Assert.DoesNotContain("this build produced a path", said, StringComparison.Ordinal);
-        Assert.DoesNotContain("Raise it to at least", said, StringComparison.Ordinal);
     }
 
     [Fact]

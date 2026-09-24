@@ -430,41 +430,47 @@ public sealed class BuildService(
         // Said as not checked, rather than guessed at, because both readings are actionable and wrong.
         if (phases.FirstOrDefault(phase => phase.ClockStepped) is { } stepped)
         {
-            if (left.Deepest.Length > reserve || left.Leftover.Length > reserve)
+            var longest = left.Deepest.Length >= left.Leftover.Length ? left.Deepest : left.Leftover;
+
+            if (longest.Length > reserve)
             {
                 _output.Warn(
                     CommandName,
-                    $"{request.Leg}: this build's '{stepped.Phase}' phase spanned a clock step, so which of the paths "
-                    + "below its build directory it wrote cannot be told from their dates, and "
-                    + "worktrees.pathBudgetReserve was not checked against them.");
+                    $"{request.Leg}: the deepest path below this build directory is {longest.Length} characters "
+                    + $"long ('{longest}'), and worktrees.pathBudgetReserve declares {reserve}. This build's "
+                    + $"'{stepped.Phase}' phase spanned a clock step, so whether this build wrote it cannot be told "
+                    + "from its date.");
             }
 
             return;
         }
 
-        if (left.Deepest.Length > reserve)
-        {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: this build produced a path {left.Deepest.Length} characters long below its build "
-                + $"directory ('{left.Deepest}'), and worktrees.pathBudgetReserve declares {reserve}. Raise it "
-                + $"to at least {left.Deepest.Length}, or a worktree created against it may not leave its build room.");
+        // The budget is about what a build directory can come to hold, so the deepest path in it is the
+        // measure whether this build wrote it or an earlier one did: an object no longer recompiled is
+        // still there, and still as long, when a worktree is created against the reserve.
+        var deepest = left.Deepest.Length >= left.Leftover.Length ? left.Deepest : left.Leftover;
 
+        if (deepest.Length <= reserve)
+        {
             return;
         }
 
-        // Nothing this build wrote is that deep, so the reserve is not what is wrong: a directory kept
-        // between builds holds the objects of targets that have since been renamed or removed, and raising
-        // a reserve for one of those would move a number nothing measured against this build.
-        if (left.Leftover.Length > reserve)
-        {
-            _output.Warn(
-                CommandName,
-                $"{request.Leg}: an earlier build left a path {left.Leftover.Length} characters long below this "
-                + $"build directory ('{left.Leftover}'), which this build did not write and "
-                + $"worktrees.pathBudgetReserve declares {reserve}. Nothing builds it now, so the reserve is not "
-                + "what is short: start this variant's build directory from clean to be rid of it.");
-        }
+        // Whether this build wrote it is said, and nothing more is claimed. An incremental build recompiles
+        // almost nothing, so most of what is there is older than it every time; a date cannot tell an object
+        // of a target that still exists from one of a target renamed away, and a consumer was told to raise
+        // the reserve for an object that no target owned - which their own budget arithmetic had no room for.
+        var whose = left.Deepest.Length >= left.Leftover.Length
+            ? "this build wrote it"
+            : "this build did not write it, so it is either a target this build had no reason to rebuild, or "
+                + "one that no longer exists - if no target owns it, start this variant's build directory from "
+                + "clean instead";
+
+        _output.Warn(
+            CommandName,
+            $"{request.Leg}: the deepest path below this build directory is {deepest.Length} characters long "
+            + $"('{deepest}'), and worktrees.pathBudgetReserve declares {reserve}. {char.ToUpperInvariant(whose[0])}{whose[1..]}. "
+            + $"Raise the reserve to at least {deepest.Length} where a target owns that path, or a worktree "
+            + "created against it may not leave its build room.");
     }
 
     /// <summary>What a build left in its directory, as one walk of it found.</summary>
