@@ -391,11 +391,24 @@ public sealed class ActionFileParser(
         {
             var step = ReadStep(child, earlier, problems);
 
-            if (step is not null)
+            if (step is null)
             {
-                earlier.Add(step);
-                yield return step;
+                continue;
             }
+
+            // Steps of one name are one step to everything that names it - a run, a runner's steps,
+            // another step's needs - which a leg's operating system then narrows to the one it runs.
+            // One manual and one not would have a run that names no step run the one and not the
+            // other, and '--manual-step' could not say which it meant.
+            if (earlier.FirstOrDefault(declared => string.Equals(declared.Name, step.Name, StringComparison.Ordinal) && declared.Manual != step.Manual) is { } other)
+            {
+                problems.Add(At(child, $"step '{step.Name}' is {(step.Manual ? "manual" : "not manual")}, and a step declared before it "
+                    + $"by that name is {(other.Manual ? "manual" : "not")}: a run that names no step would run one of them and "
+                    + "not the other. Give them names of their own, or make both manual or neither."));
+            }
+
+            earlier.Add(step);
+            yield return step;
         }
     }
 
@@ -547,7 +560,7 @@ public sealed class ActionFileParser(
             ? []
             : ReadCommands(runNode ?? node, run, problems);
 
-        var needs = needsNode is null ? [] : ReadNeeds(needsNode, name, manual, earlier, problems);
+        var needs = needsNode is null ? [] : ReadNeeds(needsNode, name, manual, runOn, earlier, problems);
         IReadOnlyList<ActionInput> stepInputs = inputsNode is null ? [] : [.. ReadInputs(inputsNode, $"step '{name}' inputs", problems)];
 
         // A predefined action is performed by the harness to settle what the steps after it read: it
@@ -622,12 +635,14 @@ public sealed class ActionFileParser(
     /// <param name="node">The step's <c>needs</c>.</param>
     /// <param name="name">The step, as a problem names it.</param>
     /// <param name="manual">Whether the step is manual.</param>
+    /// <param name="runOn">The operating systems the step runs on; empty, every one.</param>
     /// <param name="earlier">Every step declared before it.</param>
     /// <param name="problems">Where problems are collected.</param>
     private static IReadOnlyList<string> ReadNeeds(
         YamlNode node,
         string name,
         bool manual,
+        IReadOnlyList<string> runOn,
         IReadOnlyList<ActionStep> earlier,
         List<string> problems)
     {
@@ -680,6 +695,25 @@ public sealed class ActionFileParser(
                 problems.Add(At(item, $"step '{name}' runs in every run of the action and needs '{needed}', which is "
                     + $"manual: a run that names no step would have to run '{needed}' too. Make '{name}' manual, or "
                     + $"'{needed}' not."));
+            }
+
+            // What a step needs runs first on every leg the step runs on. A leg's operating system
+            // leaves out the steps that do not run on it, and what this step needs left out there
+            // would have it run on that leg without it.
+            var provided = earlier
+                .Where(other => string.Equals(other.Name, needed, StringComparison.Ordinal))
+                .SelectMany(other => other.RunOn.Count == 0 ? PlatformNames.OperatingSystems : other.RunOn)
+                .ToHashSet(StringComparer.Ordinal);
+
+            var unmet = (runOn.Count == 0 ? PlatformNames.OperatingSystems : runOn)
+                .Where(system => !provided.Contains(system))
+                .ToList();
+
+            if (unmet.Count > 0)
+            {
+                problems.Add(At(item, $"step '{name}' needs '{needed}', which does not run on {string.Join(" or ", unmet)}: "
+                    + $"a leg there would run '{name}' without it. Name {string.Join(" and ", unmet)} in '{needed}''s runOn, "
+                    + $"or leave {(unmet.Count == 1 ? "it" : "them")} out of '{name}''s."));
             }
         }
 

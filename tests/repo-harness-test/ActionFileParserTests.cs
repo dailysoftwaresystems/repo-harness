@@ -880,6 +880,9 @@ public sealed class ActionFileParserTests
     [InlineData("needs-twice", "step 'bench' names 'build' under 'needs' more than once")]
     [InlineData("automatic-needs-manual", "step 'report' runs in every run of the action and needs 'bench', which is manual")]
     [InlineData("input-shadows-action", "step 'bench' declares input 'root', which the action declares too")]
+    [InlineData("needs-where-it-does-not-run", "step 'bench' needs 'setup', which does not run on macos: a leg there would run 'bench' without it")]
+    [InlineData("needs-from-everywhere", "step 'bench' needs 'setup', which does not run on windows or macos")]
+    [InlineData("manual-shares-a-name", "step 'bench' is manual, and a step declared before it by that name is not")]
     public void WhatAManualStepCannotSay_IsRefused(string shape, string expected)
     {
         var steps = shape switch
@@ -973,6 +976,43 @@ public sealed class ActionFileParserTests
                     run: |
                       python3 bench.py
                 """,
+            "needs-where-it-does-not-run" => """
+                  - name: setup
+                    runOn: [linux]
+                    run: |
+                      ./setup.sh
+                  - name: bench
+                    manual: true
+                    runOn: [linux, macos]
+                    needs: [setup]
+                    successPattern: '^done'
+                    run: |
+                      ./bench.sh
+                """,
+            "needs-from-everywhere" => """
+                  - name: setup
+                    runOn: [linux]
+                    run: |
+                      ./setup.sh
+                  - name: bench
+                    manual: true
+                    needs: [setup]
+                    successPattern: '^done'
+                    run: |
+                      ./bench.sh
+                """,
+            "manual-shares-a-name" => """
+                  - name: bench
+                    runOn: [windows]
+                    run: |
+                      bench.exe
+                  - name: bench
+                    manual: true
+                    runOn: [linux]
+                    successPattern: '^done'
+                    run: |
+                      ./bench.sh
+                """,
             _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, null),
         };
 
@@ -1022,6 +1062,43 @@ public sealed class ActionFileParserTests
         Assert.Equal(
             ["python3", "./bench.py", "--size", "{size}", "--repeats", "{repeats}", "--arms", "{arms}", "--out", "{stepBuild}"],
             Assert.Single(bench.Commands).Arguments);
+    }
+
+    /// <summary>
+    /// What a step needs may be steps of one name for different systems, so long as together they run on
+    /// every system the step does; and steps of one name may all be manual, one for each system.
+    /// </summary>
+    [Fact]
+    public void NeedsMetOnEverySystemTheStepRunsOn_AndManualStepsOfOneName_AreRead()
+    {
+        var action = Parse("""
+            name: compile
+            steps:
+              - name: setup
+                runOn: [linux]
+                run: |
+                  ./setup.sh
+              - name: setup
+                runOn: [macos]
+                run: |
+                  ./setup-mac.sh
+              - name: bench
+                manual: true
+                runOn: [linux]
+                needs: [setup]
+                successPattern: '^done'
+                run: |
+                  ./bench.sh
+              - name: bench
+                manual: true
+                runOn: [macos]
+                needs: [setup]
+                successPattern: '^done'
+                run: |
+                  ./bench-mac.sh
+            """);
+
+        Assert.Equal(["setup", "setup", "bench", "bench"], action.Steps.Select(step => step.Name));
     }
 
     /// <summary>A step's input is named with its step when it is wrong, so it is never taken for the action's.</summary>

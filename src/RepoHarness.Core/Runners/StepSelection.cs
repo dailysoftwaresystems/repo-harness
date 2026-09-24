@@ -153,6 +153,7 @@ public sealed record StepSelection
             [.. selected.Where(step => step.Manual).Select(step => step.Name)])
         {
             Declared = file,
+            Named = ManualSteps.Count > 0 ? ManualSteps : RunnerSteps,
         };
     }
 
@@ -194,4 +195,44 @@ public sealed record SelectedSteps(ActionFile File, IReadOnlyList<string> Unsele
 {
     /// <summary>The action as it was read, every step included: what a refusal about the others reads.</summary>
     public required ActionFile Declared { get; init; }
+
+    /// <summary>
+    /// The steps the run named - with <c>--manual-step</c>, or as the runner's own <c>steps</c> - and
+    /// empty for a run that named none.
+    /// </summary>
+    public IReadOnlyList<string> Named { get; init; } = [];
+
+    /// <summary>
+    /// Refuses every leg on whose operating system none of the steps the run named runs.
+    /// </summary>
+    /// <param name="runnerName">The runner, as the refusal names it.</param>
+    /// <param name="legs">Each leg the run reaches, by name, with its operating system.</param>
+    /// <exception cref="HarnessException">Some leg runs none of the steps the run named; every such leg is named.</exception>
+    /// <remarks>
+    /// Such a leg runs only what the named steps need, and passes: a benchmark named for a system that
+    /// leg is not ran nowhere, and the run said passed. A run that named no step runs what every run
+    /// runs, and is asked only what <see cref="ActionFile.RequireAStepOn"/> asks.
+    /// </remarks>
+    public void RequireANamedStepOn(string runnerName, IEnumerable<(string Leg, string Os)> legs)
+    {
+        ArgumentNullException.ThrowIfNull(legs);
+
+        if (Named.Count == 0)
+        {
+            return;
+        }
+
+        var named = File.Steps.Where(step => Named.Contains(step.Name, StringComparer.Ordinal)).ToList();
+        var idle = legs.Where(leg => !named.Any(step => step.RunsOn(leg.Os))).ToList();
+
+        if (idle.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.Refused,
+                $"Runner '{runnerName}' runs none of the steps this run names - "
+                + $"{string.Join(", ", named.Select(step => step.RunOn.Count == 0 ? $"'{step.Name}'" : $"'{step.Name}' (runs on {string.Join(", ", step.RunOn)})"))} - "
+                + $"on the operating system of {string.Join(", ", idle.Select(leg => $"leg '{leg.Leg}' ({leg.Os})"))}, so it "
+                + "would run only what they need there and pass. Leave that leg out of the run, or name a step that runs there.");
+        }
+    }
 }

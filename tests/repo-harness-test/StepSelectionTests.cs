@@ -170,6 +170,56 @@ public sealed class StepSelectionTests
         Assert.Contains("--manual-step was given no step name", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A leg on which none of the steps a run names runs is refused, naming the leg and where each named
+    /// step runs: it would run only what they need, and pass, and the step named would run nowhere. Named
+    /// on the command line or as the runner's own steps, the same.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ALegOnWhichNoNamedStepRuns_IsRefused_NamingTheLeg(bool onTheCommandLine)
+    {
+        var action = Parse("""
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  cmake --build build
+              - name: bench
+                manual: true
+                runOn: [linux]
+                needs: [build]
+                successPattern: '^markdown : '
+                run: |
+                  python3 bench.py
+            """);
+
+        var selection = onTheCommandLine ? new StepSelection { ManualSteps = ["bench"] } : new StepSelection { RunnerSteps = ["bench"] };
+        var selected = selection.Apply("corpus", action);
+
+        var refusal = Assert.Throws<HarnessException>(
+            () => selected.RequireANamedStepOn("corpus", [("win-debug", "windows"), ("linux-debug", "linux")]));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains("'bench' (runs on linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("leg 'win-debug' (windows)", refusal.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("linux-debug", refusal.Message, StringComparison.Ordinal);
+
+        // A leg a named step runs on is not refused.
+        selected.RequireANamedStepOn("corpus", [("linux-debug", "linux")]);
+    }
+
+    /// <summary>A run that names no step is never asked for a named one: what it runs is what every run runs.</summary>
+    [Fact]
+    public void ARunThatNamesNoStep_IsNeverRefusedForANamedOne()
+    {
+        var selected = StepSelection.Default.Apply("corpus", Parse(Action));
+
+        Assert.Empty(selected.Named);
+        selected.RequireANamedStepOn("corpus", [("win-debug", "windows")]);
+    }
+
     private static ActionFile Parse(string text)
         => new ActionFileParser(
                 new PhysicalFileSystem(FilePermissionsFactory.Create()),

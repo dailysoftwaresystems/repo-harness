@@ -431,7 +431,8 @@ public sealed partial class CliEndToEndTests
     /// <summary>
     /// A manual step through the real parser: a plain run leaves it out and lists it; --manual-step runs it
     /// alone, reading an input only it declares; a runner naming it runs it as its own; and a step name the
-    /// action lacks, or an input of a step the run leaves out, is refused before anything runs.
+    /// action lacks, an input of a step the run leaves out, and a named step that runs on none of the
+    /// run's legs are each refused before anything runs.
     /// </summary>
     [Fact]
     public async Task AManualStep_RunsOnlyWhereARunNamesIt()
@@ -453,9 +454,12 @@ public sealed partial class CliEndToEndTests
             },
         });
 
+        // A system this machine is not, for a step that runs only there.
+        var elsewhere = platform.PlatformKey == PlatformNames.Linux ? PlatformNames.Windows : PlatformNames.Linux;
+
         temp.WriteFile(
             Path.Combine(".harness-config", "runner", "actions", "probe", "probe.yml"),
-            """
+            $$"""
             name: probe
             steps:
               - name: version
@@ -465,6 +469,12 @@ public sealed partial class CliEndToEndTests
                 inputs:
                   runs:
                     default: '1'
+                successPattern: '^\d+\.\d+'
+                run: dotnet --version
+              - name: elsewhere
+                manual: true
+                runOn: [{{elsewhere}}]
+                needs: [version]
                 successPattern: '^\d+\.\d+'
                 run: dotnet --version
             """);
@@ -479,7 +489,7 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal(HarnessExit.Success, plain.ExitCode);
         Assert.Equal(["version"], Names(Leg(plain), "ranSteps"));
-        Assert.Equal(["bench"], Names(Leg(plain), "unselectedSteps"));
+        Assert.Equal(["bench", "elsewhere"], Names(Leg(plain), "unselectedSteps"));
         Assert.Empty(Names(Leg(plain), "manualSteps"));
 
         var named = await CliRunner.RunAsync(
@@ -489,7 +499,7 @@ public sealed partial class CliEndToEndTests
         Assert.Equal(HarnessExit.Success, named.ExitCode);
         Assert.Equal(["bench"], Names(Leg(named), "ranSteps"));
         Assert.Equal(["bench"], Names(Leg(named), "manualSteps"));
-        Assert.Equal(["version"], Names(Leg(named), "unselectedSteps"));
+        Assert.Equal(["version", "elsewhere"], Names(Leg(named), "unselectedSteps"));
 
         var ownRunner = await CliRunner.RunAsync(["run", "bench", "--legs", "native", "--json", "-C", temp.Path], token);
 
@@ -505,6 +515,17 @@ public sealed partial class CliEndToEndTests
 
         Assert.Equal(HarnessExit.UsageError, unread.ExitCode);
         Assert.Contains("which only step(s) 'bench' reads", unread.StandardError, StringComparison.Ordinal);
+
+        // Named for a system this leg is not, it would leave the leg only what it needs - and a pass.
+        // Refused before a run begins: no run directory is made for it.
+        var runs = temp.Combine(".harness-config", "runs");
+        var begun = Directory.GetDirectories(runs).Length;
+
+        var nowhere = await CliRunner.RunAsync(["run", "probe", "--legs", "native", "--manual-step", "elsewhere", "-C", temp.Path], token);
+
+        Assert.Equal(HarnessExit.Refused, nowhere.ExitCode);
+        Assert.Contains("runs none of the steps this run names", nowhere.StandardError, StringComparison.Ordinal);
+        Assert.Equal(begun, Directory.GetDirectories(runs).Length);
     }
 
     [Fact]

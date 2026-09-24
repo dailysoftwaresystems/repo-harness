@@ -1562,15 +1562,19 @@ sibling directory whose name merely starts the same way is outside, not inside.
   before `runOn`'s, and the tool policy, the names a step may use, the inputs a run may be given,
   the programs a host is asked for and the refusal of a leg that would run nothing all read only
   what will run. A step lists under `needs` the steps declared before it that run first whenever it
-  does - one declared after it could not have run by then, and a step every run runs needing a
-  manual one would make a plain run run it, so both are refused when the file is read. A manual step
-  declares a `successPattern`, since it is the step whose green line is read as having done the
-  work it was named for; a predefined action cannot be manual. A run says of every step it did not
-  select that it did not run it, as it goes and as `unselectedSteps` on each leg's line in `--json`,
-  and lists the steps a leg ran as `ranSteps` and the manual ones among them as `manualSteps`, so a
-  plain run is never read as having benchmarked. A `--manual-step` naming a step the action lacks or one that is not manual, and a
-  runner naming a step its action lacks, are refused before any host is measured, naming the steps
-  there are.
+  does - one declared after it could not have run by then, one that does not run on every system the
+  step runs on would leave a leg there running the step without it, and a step every run runs
+  needing a manual one would make a plain run run it, so each is refused when the file is read.
+  Steps of one name are one step to whatever names them, narrowed by a leg's system to the one it
+  runs, so a manual step cannot share its name with one that is not. A manual step declares a
+  `successPattern`, since it is the step whose green line is read as having done the work it was
+  named for; a predefined action cannot be manual. A run says of every step it did not select that
+  it did not run it, as it goes and as `unselectedSteps` on each leg's line in `--json`, and lists
+  the steps a leg ran as `ranSteps` and the manual ones among them as `manualSteps`, so a plain run
+  is never read as having benchmarked. A `--manual-step` naming a step the action lacks or one that
+  is not manual, a runner naming a step its action lacks, and a leg on whose system none of the
+  steps a run names runs - it would run only what they need, and pass, with the step named run
+  nowhere - are refused before any host is measured, naming the steps there are.
 - **An input's value comes from `run --input name=value` first**, the runner value directories
   second and the input's own `default` last. A step may declare inputs of its own beside the
   action's, resolved the same way and read by that step alone: another step naming one names

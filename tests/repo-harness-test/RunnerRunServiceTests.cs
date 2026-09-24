@@ -1465,6 +1465,86 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A leg on which none of the steps the run named runs is refused with nothing run, naming the leg:
+    /// it would run only what they need and pass, with the step named run nowhere. <c>run</c> refuses it
+    /// before any host is measured; this is the same refusal where a leg reaches the runner anyway.
+    /// </summary>
+    [Fact]
+    public async Task ALegOnWhichNoNamedStepRuns_IsRefused_NotPassed()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                run: |
+                  dotnet --version
+              - name: bench
+                manual: true
+                runOn: [windows]
+                needs: [build]
+                successPattern: '^done'
+                run: |
+                  dotnet --info
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }) with { Identity = Identity("linux"), ManualSteps = ["bench"] },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
+        Assert.Contains($"leg '{Leg}' (linux)", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("would run only what they need there and pass", refusal.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(temp.Combine(".harness-config", "runs", RunId)));
+    }
+
+    /// <summary>
+    /// Two steps of one name that both run on a leg are refused as that, naming them, before anything
+    /// keys the steps by their names: with inputs of their own, they ended the run as a defect in this
+    /// tool - an item already added - rather than as the mistake in the file it was.
+    /// </summary>
+    [Fact]
+    public async Task TwoStepsOfOneNameOnALeg_WithInputsOfTheirOwn_AreRefusedAsTheFilesMistake()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: bench
+                inputs:
+                  size:
+                    default: '1'
+                run: |
+                  dotnet --version
+              - name: bench
+                inputs:
+                  size:
+                    default: '2'
+                run: |
+                  dotnet --info
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var refusal = await Assert.ThrowsAsync<HarnessException>(() => Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(HarnessExit.ConfigInvalid, refusal.ExitCode);
+        Assert.Contains("names step(s) bench more than once", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A leg left with only predefined steps runs nothing of the action's own: reading inputs settles
     /// what the steps after it run, and runs none. Refused like a leg left with no step at all, where
     /// it passed on "0 step(s) passed".

@@ -506,7 +506,7 @@ public sealed class RunnerRunService(
         string runnerName,
         bool time,
         IReadOnlyDictionary<string, string> inputs,
-        IReadOnlyList<string>? manualSteps = null)
+        IReadOnlyList<string>? manualSteps)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runnerName);
 
@@ -605,6 +605,17 @@ public sealed class RunnerRunService(
             // a step for another system never refuses this leg over a program it never starts.
             var (file, left) = OnThisLeg(chosen.File, request);
 
+            // Refused before anything starts by 'run'; refused here as well, as a leg that runs no step is.
+            if (request.Identity?.Os is { } os)
+            {
+                chosen.RequireANamedStepOn(request.RunnerName, [(request.Leg, os)]);
+            }
+
+            // Two steps of one name that both run on this leg are refused where the phases are counted;
+            // asked here as well, before anything keys the steps by their names, so that the refusal
+            // naming them is what the run ends with.
+            RefuseRepeatedNames(request.RunnerName, file.Steps.Select(step => step.Name));
+
             foreach (var step in left)
             {
                 _output.Info(CommandName, $"{request.Leg}: skipped '{step.Name}', which runs on {string.Join(", ", step.RunOn)} only");
@@ -680,20 +691,7 @@ public sealed class RunnerRunService(
                 + "to run and nothing to report a verdict on.");
         }
 
-        var repeated = phases
-            .GroupBy(phase => phase.Name, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)
-            .ToList();
-
-        if (repeated.Count > 0)
-        {
-            throw new HarnessException(
-                HarnessExit.ConfigInvalid,
-                $"Runner '{request.RunnerName}' names step(s) {string.Join(", ", repeated)} more than "
-                + "once. Two steps sharing a name write one log, and a resumed run cannot tell which "
-                + "of them it already did.");
-        }
+        RefuseRepeatedNames(request.RunnerName, phases.Select(phase => phase.Name));
 
         foreach (var name in performed)
         {
@@ -707,6 +705,28 @@ public sealed class RunnerRunService(
             ManualSteps = manual,
             StepInputs = stepInputs,
         };
+    }
+
+    /// <summary>Refuses <paramref name="names"/> where two of them are one step's name.</summary>
+    /// <param name="runnerName">The runner, as the refusal names it.</param>
+    /// <param name="names">The names of the steps one leg runs.</param>
+    /// <exception cref="HarnessException">A name is given more than once.</exception>
+    private static void RefuseRepeatedNames(string runnerName, IEnumerable<string> names)
+    {
+        var repeated = names
+            .GroupBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToList();
+
+        if (repeated.Count > 0)
+        {
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"Runner '{runnerName}' names step(s) {string.Join(", ", repeated)} more than "
+                + "once. Two steps sharing a name write one log, and a resumed run cannot tell which "
+                + "of them it already did.");
+        }
     }
 
     /// <summary>

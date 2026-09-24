@@ -145,7 +145,7 @@ public sealed class CommandLineInputsTests
     {
         var given = CommandLineInputs.Parse(["root=corpus", "filter=a=b c"]);
 
-        var forwarded = RunnerRunService.RemoteArguments("probe", time, given);
+        var forwarded = RunnerRunService.RemoteArguments("probe", time, given, manualSteps: null);
 
         Assert.Equal(
             ["probe", .. time ? new[] { "--time" } : [], "--input", "root=corpus", "--input", "filter=a=b c"],
