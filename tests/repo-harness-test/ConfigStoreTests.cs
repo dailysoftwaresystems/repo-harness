@@ -288,6 +288,36 @@ public sealed class ConfigStoreTests
         Assert.Contains("disables the path budget", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// How check-ci-legs reads a workflow is held when the file is read: a pattern that does not compile, or
+    /// lacks the group it is read by, a step named by nothing, and a workflow pattern naming no leg, which
+    /// would find the same budget for every one.
+    /// </summary>
+    [Theory]
+    [InlineData("""{ "ci": { "legJobPattern": "unit (" } }""", "ci.legJobPattern is not a valid regular expression")]
+    [InlineData("""{ "ci": { "legJobPattern": "^unit \\((?<name>[^)]+)\\)" } }""", "ci.legJobPattern has no named group 'leg' to capture the leg's name")]
+    [InlineData("""{ "ci": { "buildStep": " " } }""", "ci.buildStep is given empty, or as spaces alone")]
+    [InlineData("""{ "ci": { "testStep": "" } }""", "ci.testStep is given empty, or as spaces alone")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "minutes: (?<budget>[0-9]+)" } }""", "ci.workflowBudgetPattern has no {leg}")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "{leg}: (?<minutes>[0-9]+)" } }""", "ci.workflowBudgetPattern has no named group 'budget'")]
+    [InlineData("""{ "ci": { "workflowBudgetPattern": "{leg}: (?<budget>[0-9]+" } }""", "ci.workflowBudgetPattern is not a valid regular expression")]
+    [InlineData("""{ "ci": { "legBudgetMinutes": -1 } }""", "ci.legBudgetMinutes cannot be negative, found -1")]
+    public void Load_RejectsCiConventionsThatCannotBeRead(string json, string expected)
+    {
+        var exception = LoadInvalid(json);
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_AcceptsCiConventions_ThatCanBeRead()
+    {
+        var config = LoadValid("""{ "ci": { "legJobPattern": "^unit \\((?<leg>[^,)]+)", "buildStep": "Build", "testStep": "Test", "workflowBudgetPattern": "leg: {leg}, minutes: (?<budget>[0-9]+)" } }""");
+
+        Assert.Equal("^unit \\((?<leg>[^,)]+)", config.Ci.LegJobPattern);
+        Assert.Equal("leg: {leg}, minutes: (?<budget>[0-9]+)", config.Ci.WorkflowBudgetPattern);
+    }
+
     [Fact]
     public void Load_RejectsAPathLimitBelowOne()
     {

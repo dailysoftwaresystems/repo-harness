@@ -297,6 +297,35 @@ public static partial class HarnessConfigValidator
         {
             problems.Add($"ci.legBudgetMinutes cannot be negative, found {ci.LegBudgetMinutes}");
         }
+
+        CheckGroupPattern(ci.LegJobPattern, "ci.legJobPattern", "leg", "to capture the leg's name", problems);
+
+        foreach (var (step, setting) in new[] { (ci.BuildStep, "ci.buildStep"), (ci.TestStep, "ci.testStep") })
+        {
+            if (step is not null && string.IsNullOrWhiteSpace(step))
+            {
+                problems.Add($"{setting} is given empty, or as spaces alone, and names no step");
+            }
+        }
+
+        if (ci.WorkflowBudgetPattern is { } budget)
+        {
+            // Checked with a name in place of the placeholder, as it is matched: one that named no leg
+            // would find the same budget, the first in the file, for every leg.
+            if (!budget.Contains(CiSettings.LegPlaceholder, StringComparison.Ordinal))
+            {
+                problems.Add($"ci.workflowBudgetPattern has no {CiSettings.LegPlaceholder}, so it would find the same budget for every leg");
+            }
+            else
+            {
+                CheckGroupPattern(
+                    budget.Replace(CiSettings.LegPlaceholder, "leg", StringComparison.Ordinal),
+                    "ci.workflowBudgetPattern",
+                    "budget",
+                    "to capture the leg's budget in minutes",
+                    problems);
+            }
+        }
     }
 
     /// <summary>Checks one registry path, and reports whether it is usable.</summary>
@@ -1423,7 +1452,7 @@ public static partial class HarnessConfigValidator
             }
 
             CheckPattern(invocation.SuccessPattern, $"{setting}.successPattern", problems);
-            CheckCountPattern(invocation.CountPattern, $"{setting}.countPattern", problems);
+            CheckGroupPattern(invocation.CountPattern, $"{setting}.countPattern", "total", "to capture how many tests ran", problems);
 
             // Blank would read as a set of its own that nothing else names, splitting its legs from
             // the rest of the project without a name anybody chose.
@@ -1712,8 +1741,13 @@ public static partial class HarnessConfigValidator
             .Where(axis => axis.Values.Count > 0)
             .Select(axis => $"{axis.Name} {string.Join(", ", axis.Values)}"));
 
-    /// <summary>Checks a pattern that must compile and capture a named group <c>total</c>.</summary>
-    private static void CheckCountPattern(string? pattern, string setting, List<string> problems)
+    /// <summary>Checks a pattern that must compile and capture the named group <paramref name="group"/>.</summary>
+    /// <param name="pattern">The pattern, or <see langword="null"/> where none is set.</param>
+    /// <param name="setting">Where it is set, as a message names it.</param>
+    /// <param name="group">The group it must capture.</param>
+    /// <param name="purpose">What the group is for, as a fragment beginning with "to".</param>
+    /// <param name="problems">Where a problem is added.</param>
+    private static void CheckGroupPattern(string? pattern, string setting, string group, string purpose, List<string> problems)
     {
         if (pattern is null)
         {
@@ -1724,9 +1758,9 @@ public static partial class HarnessConfigValidator
         {
             var regex = new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(1));
 
-            if (!regex.GetGroupNames().Contains("total", StringComparer.Ordinal))
+            if (!regex.GetGroupNames().Contains(group, StringComparer.Ordinal))
             {
-                problems.Add($"{setting} has no named group 'total' to capture how many tests ran");
+                problems.Add($"{setting} has no named group '{group}' {purpose}");
             }
         }
         catch (ArgumentException ex)

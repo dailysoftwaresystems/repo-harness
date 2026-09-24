@@ -28,8 +28,10 @@ public interface ICiLegsService
     /// <param name="request">Which branch, and which runs.</param>
     /// <param name="cancellationToken">Stops the child processes.</param>
     /// <exception cref="HarnessException">
-    /// CI could not be read: no workflow is declared, the branch cannot be named, no run was found, or
-    /// a run answered no job rows at all. None of these is a pass.
+    /// CI could not be read: the settings that say which jobs are legs are not all set, refused; no
+    /// workflow is declared, the branch cannot be named, no run was found, or a run answered no job rows
+    /// at all; or a pattern ran out of time, or a budget group captured something that is not a whole
+    /// number of minutes, refused as configuration. None of these is a pass.
     /// </exception>
     Task<CiLegsReport> CheckAsync(
         string startDirectory,
@@ -45,14 +47,17 @@ public interface ICiLegsService
 /// the mistake this command exists to stop repeating.
 /// </para>
 /// <para>
+/// Which jobs are legs, what a leg is called, and which steps build and test it are what the
+/// repository's ci settings declare, and nothing else: no forge fixes a leg's job name or a step's,
+/// and a command that assumed one workflow's would read every other as having no legs at all.
+/// </para>
+/// <para>
 /// The budget has three sources, in this order: the job's own name, which the forge spells the matrix
 /// values into and which is authoritative for the run that produced it; the workflow file in the
-/// working tree, because the forge truncates a long job name and the leg nearest its cap is exactly
-/// the one whose name is longest; and this repository's own <c>ci.legBudgetMinutes</c>. The third is
-/// this repository's vocabulary rather than the guard's -- the guard read a matrix key and had no
-/// declared budget of its own -- and it is last so a run's own value always wins. If none of the three
-/// answers, the leg is NOT classified: a discriminator that invents its denominator is worse than one
-/// that says it has none.
+/// working tree, because the forge cuts a long job name short and the leg nearest its cap is exactly
+/// the one whose name is longest; and <c>ci.legBudgetMinutes</c>, last so a run's own value always
+/// wins. If none of the three answers, the leg is NOT classified: a discriminator that invents its
+/// denominator is worse than one that says it has none.
 /// </para>
 /// </remarks>
 public sealed class CiLegsService(
@@ -64,29 +69,11 @@ public sealed class CiLegsService(
     /// <summary>The directory a repository keeps its workflows in when configuration names none.</summary>
     public const string WorkflowsDirectory = ".github/workflows";
 
-    /// <summary>
-    /// The marker a leg's job name carries. A job whose name does not hold it is not a leg: it is the
-    /// gate, the label check, or another job entirely, and its verdict is about something else.
-    /// Matched anywhere in the name rather than at its start, because a called workflow prefixes its
-    /// jobs with its own name: GitHub reports <c>ci / run-tests (win-msvc-release)</c>.
-    /// </summary>
-    private const string LegJobPrefix = "run-tests (";
-
-    /// <summary>The two steps a leg's verdict is read from, matched by exact name.</summary>
-    private const string BuildStep = "Build";
-
-    /// <summary>The step whose failure the budget can explain.</summary>
-    private const string TestStep = "Test";
-
     /// <summary>Fraction of its budget a green leg may reach before the budget is worth re-deriving.</summary>
-    private const double WarningFraction = 0.8;
+    public const double WarningFraction = 0.8;
 
-    /// <summary>
-    /// The matrix values a forge spells into a job name end with the budget and one more number, so
-    /// the budget is the second-to-last integer. Read in minutes, as the matrix declares it.
-    /// </summary>
-    private static readonly Regex BudgetInJobName =
-        new(@",\s*(?<minutes>[0-9]+)\s*,\s*[0-9]+\s*\)\s*$", RegexOptions.CultureInvariant);
+    /// <summary>How long one of the repository's patterns may take against one job's name or one workflow's text.</summary>
+    private static readonly TimeSpan MatchBudget = TimeSpan.FromSeconds(1);
 
     /// <summary>A workflow's own name, which is what the forge lists its runs under.</summary>
     private static readonly Regex WorkflowName =
@@ -106,6 +93,7 @@ public sealed class CiLegsService(
 
         var context = await _contextLoader.LoadAsync(startDirectory, cancellationToken).ConfigureAwait(false);
         var root = context.Layout.RepositoryRoot;
+        var conventions = Conventions.From(context.Config.Ci);
 
         var workflows = ReadWorkflows(root, context.Config.Ci);
         var branch = await ResolveBranchAsync(root, request.Branch, cancellationToken).ConfigureAwait(false);
@@ -143,7 +131,7 @@ public sealed class CiLegsService(
                         $"Run {runId} answered no job rows at all, so nothing was verified. This is not a pass.");
                 }
 
-                reports.Add(Classify(run, workflow, context.Config.Ci));
+                reports.Add(Classify(run, workflow, context.Config.Ci, conventions));
             }
 
             if (request.Runs.Count > 0)
@@ -156,11 +144,12 @@ public sealed class CiLegsService(
         return new CiLegsReport(branch, reports);
     }
 
-    private static CiRunReport Classify(CiRun run, CiWorkflow workflow, CiSettings settings)
+    private static CiRunReport Classify(CiRun run, CiWorkflow workflow, CiSettings settings, Conventions conventions)
     {
         var legs = run.Jobs
-            .Where(job => job.Name.Contains(LegJobPrefix, StringComparison.Ordinal))
-            .Select(job => Classify(job, workflow, settings))
+            .Select(job => (Job: job, Recognized: conventions.Recognize(job.Name)))
+            .Where(candidate => candidate.Recognized is not null)
+            .Select(candidate => Classify(candidate.Job, candidate.Recognized!.Value, workflow, settings, conventions))
             .ToList();
 
         return new CiRunReport(
@@ -171,22 +160,29 @@ public sealed class CiLegsService(
             legs);
     }
 
-    private static CiLegOutcome Classify(CiJob job, CiWorkflow workflow, CiSettings settings)
+    private static CiLegOutcome Classify(
+        CiJob job,
+        (string Leg, int? BudgetMinutes) recognized,
+        CiWorkflow workflow,
+        CiSettings settings,
+        Conventions conventions)
     {
-        var leg = LegName(job.Name);
-        var build = job.Step(BuildStep);
-        var test = job.Step(TestStep);
+        var (leg, fromName) = recognized;
+        var (buildName, testName) = (conventions.BuildStep, conventions.TestStep);
+        var build = job.Step(buildName);
+        var test = job.Step(testName);
 
         // Only failure is failure. A cancelled, timed-out, neutral or skipped job is a different fact
         // with a different remedy, and calling it a failure sends a reader after code that never ran.
         var success = !string.Equals(job.Conclusion, CiConclusions.Failure, StringComparison.Ordinal);
 
-        var (budget, source) = Budget(job.Name, leg, workflow, settings);
+        var (budget, source) = Budget(fromName, leg, workflow, settings, conventions);
         var elapsed = test?.Elapsed?.TotalSeconds;
 
         var errors = new List<string>();
         var warnings = new List<string>();
         var overran = false;
+        var unclassified = false;
 
         if (!success)
         {
@@ -200,15 +196,16 @@ public sealed class CiLegsService(
                     overran = seconds >= cap;
 
                     errors.Add(overran
-                        ? $"the {TestStep} step failed at {Seconds(seconds)} of a {Seconds(cap)} budget ({source}): "
+                        ? $"the {testName} step failed at {Seconds(seconds)} of a {Seconds(cap)} budget ({source}): "
                         + "read this as a possible budget overrun, not a test failure. Re-derive the budget before raising it."
-                        : $"the {TestStep} step failed after {Seconds(seconds)} of a {Seconds(cap)} budget ({source}), "
-                        + "nowhere near the cap: a real test failure. Fix it; do not raise the cap.");
+                        : $"the {testName} step failed after {Seconds(seconds)} of a {Seconds(cap)} budget ({source}), "
+                        + "before reaching the cap: a real test failure. Fix it; do not raise the cap.");
                 }
                 else
                 {
+                    unclassified = true;
                     errors.Add(
-                        $"the {TestStep} step failed, and this leg has no budget to measure it against, so it is not "
+                        $"the {testName} step failed, and this leg has no budget to measure it against, so it is not "
                         + "classified: a discriminator that invents its denominator is worse than one that says it has none.");
                 }
             }
@@ -217,7 +214,7 @@ public sealed class CiLegsService(
             {
                 // A build failure is never an overrun: a budget is spent running tests, so it cannot
                 // explain a failure that happened before any ran.
-                errors.Add($"the {BuildStep} step failed, which no budget explains.");
+                errors.Add($"the {buildName} step failed, which no budget explains.");
             }
 
             if (errors.Count == 0)
@@ -231,36 +228,26 @@ public sealed class CiLegsService(
                  && green > cap * WarningFraction)
         {
             warnings.Add(
-                $"green, but the {TestStep} step took {Seconds(green)} of a {Seconds(cap)} budget ({source}); "
+                $"green, but the {testName} step took {Seconds(green)} of a {Seconds(cap)} budget ({source}); "
                 + "re-derive the budget before it reds.");
         }
 
-        return new CiLegOutcome(leg, job.Name, success, errors, overran, warnings, elapsed, budget, source);
-    }
-
-    /// <summary>The leg's name: the first matrix value the job's name carries.</summary>
-    private static string LegName(string jobName)
-    {
-        var start = jobName.IndexOf(LegJobPrefix, StringComparison.Ordinal) + LegJobPrefix.Length;
-        var rest = jobName[start..];
-        var end = rest.IndexOfAny([',', ')']);
-
-        return (end < 0 ? rest : rest[..end]).Trim();
+        return new CiLegOutcome(leg, job.Name, success, errors, overran, unclassified, warnings, elapsed, budget, source);
     }
 
     private static (double? Seconds, string? Source) Budget(
-        string jobName,
+        int? fromName,
         string leg,
         CiWorkflow workflow,
-        CiSettings settings)
+        CiSettings settings,
+        Conventions conventions)
     {
-        if (BudgetInJobName.Match(jobName) is { Success: true } match
-            && int.TryParse(match.Groups["minutes"].Value, CultureInfo.InvariantCulture, out var fromName))
+        if (fromName is { } minutes)
         {
-            return (fromName * 60.0, "job name");
+            return (minutes * 60.0, "job name");
         }
 
-        if (workflow.BudgetMinutes(leg) is { } fromFile)
+        if (conventions.WorkflowBudget is { } pattern && workflow.BudgetMinutes(leg, pattern) is { } fromFile)
         {
             return (fromFile * 60.0, "workflow");
         }
@@ -344,29 +331,129 @@ public sealed class CiLegsService(
         return branch;
     }
 
+    /// <summary>What <paramref name="pattern"/> finds in <paramref name="text"/>, refused where it could not be evaluated.</summary>
+    /// <param name="pattern">One of the repository's patterns.</param>
+    /// <param name="text">A job's name, or a workflow's text.</param>
+    /// <param name="setting">Where the pattern is set, as the refusal names it.</param>
+    private static Match Matched(Regex pattern, string text, string setting)
+    {
+        try
+        {
+            return pattern.Match(text);
+        }
+        catch (RegexMatchTimeoutException ex)
+        {
+            // Never read as no match: a job left out because its pattern could not be evaluated would be a
+            // leg missing from the answer, and a leg missing from the answer is how a red one reads as green.
+            throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"{setting} took longer than {MatchBudget.TotalSeconds:0}s, so whether it matched is unknown: it is "
+                + "written in a form that backtracks. CI was NOT read. This is not a pass.",
+                ex);
+        }
+    }
+
+    /// <summary>The whole number of minutes a budget group captured, or <see langword="null"/> where it captured nothing.</summary>
+    /// <param name="group">The pattern's <c>budget</c> group.</param>
+    /// <param name="setting">The setting the pattern is.</param>
+    /// <param name="from">What it was matched against, as a refusal names it.</param>
+    /// <exception cref="HarnessException">
+    /// It captured something that is not a whole number of minutes: refused, never read as no budget, which would have
+    /// the next source's answer for it without a word, and a pattern that reads every budget wrong pass unnoticed.
+    /// </exception>
+    private static int? Minutes(Group group, string setting, string from)
+    {
+        if (!group.Success || group.Value.Length == 0)
+        {
+            return null;
+        }
+
+        return int.TryParse(group.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var minutes)
+            ? minutes
+            : throw new HarnessException(
+                HarnessExit.ConfigInvalid,
+                $"{setting}'s budget group captured '{group.Value}' from {from}, which is not a whole number of minutes, "
+                + "so no budget it reads can be trusted: make the group capture the digits alone. CI was NOT read. "
+                + "This is not a pass.");
+    }
+
+    /// <summary>
+    /// How this repository's workflows name their legs and their steps, as its ci settings declare them.
+    /// </summary>
+    /// <param name="LegJob">What a leg's job name matches: <see cref="CiSettings.LegJobPattern"/>.</param>
+    /// <param name="BuildStep">The step a leg builds in.</param>
+    /// <param name="TestStep">The step a leg tests in.</param>
+    /// <param name="WorkflowBudget">Where a workflow gives a leg's budget, or <see langword="null"/>.</param>
+    private sealed record Conventions(Regex LegJob, string BuildStep, string TestStep, string? WorkflowBudget)
+    {
+        /// <summary>The conventions <paramref name="settings"/> declare.</summary>
+        /// <exception cref="HarnessException">One the command cannot do without is not set.</exception>
+        public static Conventions From(CiSettings settings)
+        {
+            var missing = new[]
+                {
+                    ("ci.legJobPattern", settings.LegJobPattern),
+                    ("ci.buildStep", settings.BuildStep),
+                    ("ci.testStep", settings.TestStep),
+                }
+                .Where(setting => string.IsNullOrWhiteSpace(setting.Item2))
+                .Select(setting => setting.Item1)
+                .ToList();
+
+            if (missing.Count > 0)
+            {
+                throw new HarnessException(
+                    HarnessExit.Refused,
+                    "check-ci-legs reads legs by the names this repository's workflows give their jobs and steps, and "
+                    + $"{string.Join(", ", missing)} {(missing.Count == 1 ? "is" : "are")} not set in config.json's ci "
+                    + "section, so CI was NOT read. This is not a pass. Run 'DssHarness help ci' for what each says.");
+            }
+
+            return new Conventions(
+                new Regex(settings.LegJobPattern!, RegexOptions.CultureInvariant, MatchBudget),
+                settings.BuildStep!,
+                settings.TestStep!,
+                settings.WorkflowBudgetPattern);
+        }
+
+        /// <summary>
+        /// The leg a job is, with the budget its name carries, or <see langword="null"/> for a job that is no
+        /// leg: one the pattern does not match, or whose leg it captured empty - a label check, a job that
+        /// gathers the others, another job entirely, whose verdict is about something else.
+        /// </summary>
+        /// <param name="jobName">The job's name, as the forge reports it.</param>
+        public (string Leg, int? BudgetMinutes)? Recognize(string jobName)
+            => Matched(LegJob, jobName, "ci.legJobPattern") is { Success: true } match
+                && match.Groups["leg"].Value.Trim() is { Length: > 0 } leg
+                    ? (leg, Minutes(match.Groups["budget"], "ci.legJobPattern", $"job '{jobName}'"))
+                    : null;
+    }
+
     /// <summary>One workflow file: what the forge lists its runs under, and its own text.</summary>
     /// <param name="Identifier">The workflow's declared name, or its file name when it declares none.</param>
     /// <param name="Text">The file, read once and searched for a leg's budget when a job name lost it.</param>
     private sealed record CiWorkflow(string Identifier, string Text)
     {
         /// <summary>
-        /// The matrix budget the file declares for <paramref name="leg"/>, in minutes, or null.
+        /// The budget the file gives <paramref name="leg"/>, in minutes, as <paramref name="pattern"/> finds it, or null.
         /// </summary>
+        /// <param name="leg">The leg's name, put in the pattern's <see cref="CiSettings.LegPlaceholder"/> as itself.</param>
+        /// <param name="pattern">Where the workflow gives a leg's budget: <see cref="CiSettings.WorkflowBudgetPattern"/>.</param>
         /// <remarks>
-        /// Read only because the forge truncates a long job name out of its own budget field, and the
-        /// leg with the longest name is the one running nearest its cap -- an instrument whose warning
-        /// cannot fire on that leg is answering the adjacent question.
+        /// Read only because the forge cuts a long job name short, budget and all, and the leg with the
+        /// longest name is the one running nearest its cap -- an instrument whose warning cannot fire on
+        /// that leg is answering the adjacent question.
         /// </remarks>
-        public int? BudgetMinutes(string leg)
+        public int? BudgetMinutes(string leg, string pattern)
         {
-            var pattern = new Regex(
-                $@"""name""\s*:\s*""{Regex.Escape(leg)}""[^\r\n]*?""ctest_budget_min""\s*:\s*(?<minutes>[0-9]+)",
-                RegexOptions.CultureInvariant);
+            var named = new Regex(
+                pattern.Replace(CiSettings.LegPlaceholder, Regex.Escape(leg), StringComparison.Ordinal),
+                RegexOptions.CultureInvariant | RegexOptions.Multiline,
+                MatchBudget);
 
-            return pattern.Match(Text) is { Success: true } match
-                && int.TryParse(match.Groups["minutes"].Value, CultureInfo.InvariantCulture, out var minutes)
-                    ? minutes
-                    : null;
+            return Matched(named, Text, "ci.workflowBudgetPattern") is { Success: true } match
+                ? Minutes(match.Groups["budget"], "ci.workflowBudgetPattern", $"workflow '{Identifier}'")
+                : null;
         }
     }
 }
@@ -391,8 +478,8 @@ public static class CiLegsReports
             // about the tree, and reporting that as green is what this command exists to stop.
             return CommandOutcome.Failed(
                 CiExit.MatrixDidNotRun,
-                $"no job in {report.Runs.Count} run(s) of branch {report.Branch} is a leg, so nothing was verified "
-                + "about the tree. This is not a pass.") with
+                $"no job in {report.Runs.Count} run(s) of branch {report.Branch} is a leg - the matrix did not run, or "
+                + "ci.legJobPattern matches none of its jobs - so nothing was verified about the tree. This is not a pass.") with
             { Data = data };
         }
 
@@ -405,7 +492,11 @@ public static class CiLegsReports
         return CommandOutcome.Failed(
             CiExit.LegRed,
             $"{report.Red.Count} leg(s) red: {report.RealFailures.Count} real failure(s) and "
-            + $"{report.Overran.Count} possible budget overrun(s). The two have opposite remedies: fix the first, "
+            + $"{report.Overran.Count} possible budget overrun(s)"
+            + (report.Unclassified.Count > 0
+                ? $", besides {report.Unclassified.Count} whose test step failed with no budget to measure it against"
+                : string.Empty)
+            + ". The two have opposite remedies: fix the first, "
             + "re-derive the second. Reproduce a red leg locally; the logs behind these verdicts expire.") with
         { Data = data };
     }
@@ -422,7 +513,7 @@ public static class CiLegsReports
 
             if (!run.MatrixRan)
             {
-                lines.Add("  the matrix did not run, so this run says nothing about the tree");
+                lines.Add("  no job here is a leg - the matrix did not run, or ci.legJobPattern matches none of these - so this run says nothing about the tree");
                 lines.AddRange(run.JobsPresent.Select(job => $"    {job}"));
                 continue;
             }
@@ -470,6 +561,7 @@ public static class CiLegsReports
                     ["success"] = leg.Success,
                     ["errors"] = new JsonArray([.. leg.Errors.Select(error => (JsonNode?)JsonValue.Create(error))]),
                     ["overran"] = leg.Overran,
+                    ["unclassified"] = leg.Unclassified,
                     ["warnings"] = new JsonArray([.. leg.Warnings.Select(warning => (JsonNode?)JsonValue.Create(warning))]),
                     ["testSeconds"] = leg.TestSeconds,
                     ["budgetSeconds"] = leg.BudgetSeconds,

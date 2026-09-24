@@ -62,7 +62,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `check-anchor-balance` | Fail a change that leaves more open anchors than it found |
 | `check-anchor-citations` | Check every anchor cited in the declared roots resolves to a row |
 | `fix-line-endings [--all \| --changed]` | Apply the line-ending policy `.gitattributes` declares; `--check` refuses instead |
-| `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun |
+| `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun, by the job and step names `ci` declares (`help ci`) |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
 | `install-missing-tools [--legs a,b] [--dry-run]` | Install or update what each configured leg's host is missing; `--dry-run` names each command and runs none |
 | `sync` | Put a host's copy of the repository in step with this tree, deletions included |

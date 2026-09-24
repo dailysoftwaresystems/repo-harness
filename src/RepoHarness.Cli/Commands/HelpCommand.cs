@@ -78,6 +78,7 @@ internal static class HelpCommand
         "tools" => RenderTools(),
         "runners" or "runner" or "actions" => RenderRunners(),
         "verdicts" or "verdict" => RenderVerdicts(),
+        "ci" or "check-ci-legs" => RenderCi(),
         null or "" => RenderOverview(),
         _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
             + $"secrets, tools, runners, verdicts, ci.{Environment.NewLine}",
@@ -560,6 +561,7 @@ internal static class HelpCommand
         builder.AppendLine("  DssHarness help tools              What install-missing-tools installs, and where");
         builder.AppendLine("  DssHarness help runners            Predefined runners, action files and excused failures");
         builder.AppendLine("  DssHarness help verdicts           What each leg verdict means, and what to do about it");
+        builder.AppendLine("  DssHarness help ci                 How check-ci-legs finds a workflow's legs and budgets");
         builder.AppendLine();
         builder.AppendLine("Use 'DssHarness <command> --help' for a command's own options.");
 
@@ -615,6 +617,57 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("host-exec returns the exit code of the command it ran on the host, unchanged, or");
         builder.AppendLine($"{HarnessExit.HostUnavailable} when nothing ran there, or the command never reported how it finished.");
+
+        return builder.ToString();
+    }
+
+    private static string RenderCi()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("CI legs");
+        builder.AppendLine();
+        builder.AppendLine("check-ci-legs reads each leg's CI verdict from the forge's job metadata - through gh,");
+        builder.AppendLine("for GitHub Actions - and tells a real failure from a leg that ran out of its time");
+        builder.AppendLine("budget. It knows no workflow of its own: which jobs are legs, what a leg is called,");
+        builder.AppendLine("and which steps build and test it are what config.json's ci section declares, and");
+        builder.AppendLine($"until they are, it refuses ({HarnessExit.Refused}) and names what to set.");
+        builder.AppendLine();
+        builder.AppendLine("""  "ci": {""");
+        builder.AppendLine("""    "workflows": [".github/workflows/ci.yml"],""");
+        builder.AppendLine("""    "legJobPattern": "^test \\((?<leg>[^,)]+)(?:, (?<budget>[0-9]+)\\))?",""");
+        builder.AppendLine("""    "buildStep": "Build", "testStep": "Test",""");
+        builder.AppendLine("""    "workflowBudgetPattern": "leg: {leg}, minutes: (?<budget>[0-9]+)",""");
+        builder.AppendLine("""    "legBudgetMinutes": 45""");
+        builder.AppendLine("  }");
+        builder.AppendLine();
+        builder.AppendLine("  workflows              the workflow files whose runs are read; left empty, every");
+        builder.AppendLine("                         .yml and .yaml file directly in .github/workflows");
+        builder.AppendLine("  legJobPattern          a .NET regular expression matched against each job's name: a");
+        builder.AppendLine("                         job it matches is a leg, named by its 'leg' group, and a");
+        builder.AppendLine("                         'budget' group, where it has one, is the leg's budget in");
+        builder.AppendLine("                         minutes. GitHub names a matrix job '<job> (<values>)', the");
+        builder.AppendLine("                         values in the order the matrix declares them, and cuts a");
+        builder.AppendLine("                         long name short: keep what follows the leg's name optional,");
+        builder.AppendLine("                         as above, or a leg whose name was cut is not read at all");
+        builder.AppendLine("  buildStep, testStep    the steps a leg builds and tests in, by their exact names");
+        builder.AppendLine("  workflowBudgetPattern  optional: a .NET regular expression matched against each");
+        builder.AppendLine("                         workflow's text, for a leg whose job name gave no budget -");
+        builder.AppendLine("                         one the forge cut short - with {leg} standing for the leg's");
+        builder.AppendLine("                         name and a 'budget' group for the minutes");
+        builder.AppendLine("  legBudgetMinutes       optional: the budget of a leg nothing else gives one");
+        builder.AppendLine();
+        builder.AppendLine("A leg's budget comes from its job's name, then its workflow, then legBudgetMinutes. A");
+        builder.AppendLine("test step that failed at or past its budget is a possible overrun, whose budget is");
+        builder.AppendLine("to be re-derived; one that failed before reaching it is a real failure, to be fixed;");
+        builder.AppendLine("and one with no budget to measure it against is called neither, and counted apart.");
+        builder.AppendLine($"A green leg past {CiLegsService.WarningFraction * 100:0}% of its budget is warned about. A pattern that does not");
+        builder.AppendLine("compile, or lacks its group, is refused when the file is read; one that runs out of");
+        builder.AppendLine("time, or a budget group that captures anything but a whole number of minutes, is");
+        builder.AppendLine($"refused ({HarnessExit.ConfigInvalid}) when it is matched. Neither is ever read as no match.");
+        builder.AppendLine();
+        builder.AppendLine($"It exits {CiExit.LegRed} when a leg is red, and {CiExit.MatrixDidNotRun} when no job is a leg - the matrix did not run,");
+        builder.AppendLine("or legJobPattern matches none of its jobs - which is never read as every leg passing.");
 
         return builder.ToString();
     }

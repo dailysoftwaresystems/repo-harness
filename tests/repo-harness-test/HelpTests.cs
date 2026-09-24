@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
@@ -400,6 +401,32 @@ public sealed partial class HelpTests
         Assert.DoesNotContain("Unknown topic", result.StandardOutput, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// check-ci-legs assumes no workflow of its own, and its topic says what it reads a workflow by instead.
+    /// </summary>
+    [Fact]
+    public async Task CiTopic_SaysCheckCiLegsReadsOnlyWhatTheSettingsDeclare()
+    {
+        var result = await CliRunner.RunAsync(["help", "ci"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("It knows no workflow of its own", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("with {leg} standing for the leg's", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("A green leg past 80% of its", result.StandardOutput, StringComparison.Ordinal);
+
+        // The example reads what it says it reads: a leg and its budget from a whole job name, and the leg from one
+        // the forge cut short, which it would otherwise not read at all.
+        var example = new Regex(
+            JsonSerializer.Deserialize<string>(ExamplePattern().Match(result.StandardOutput).Groups["pattern"].Value)!,
+            RegexOptions.None,
+            TimeSpan.FromSeconds(1));
+        var whole = example.Match("test (linux-gcc-debug, 45)");
+        var cut = example.Match("test (linux-gcc-debug-with-a-name-long-enou");
+
+        Assert.Equal(("linux-gcc-debug", "45"), (whole.Groups["leg"].Value, whole.Groups["budget"].Value));
+        Assert.Equal(("linux-gcc-debug-with-a-name-long-enou", false), (cut.Groups["leg"].Value, cut.Groups["budget"].Success));
+    }
+
     [Fact]
     public async Task Overview_AdvertisesOnlyTopicsThatExist()
     {
@@ -497,4 +524,7 @@ public sealed partial class HelpTests
 
     [GeneratedRegex(@"DssHarness help (?<topic>[a-z-]+)")]
     private static partial Regex TopicPattern();
+
+    [GeneratedRegex(@"""legJobPattern"": (?<pattern>""(?:[^""\\]|\\.)*"")")]
+    private static partial Regex ExamplePattern();
 }

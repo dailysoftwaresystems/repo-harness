@@ -1581,6 +1581,26 @@ Beneath it, `logs:` names where the run's records are, and each leg another host
 that host's own; `--json` carries the same as `runDirectory`, at the top and on such a leg (see
 "Where a run's records live").
 
+## CI legs
+
+`check-ci-legs` reads each leg's verdict from the forge's job metadata, one job at a time and never
+from a run's rollup, and tells a test step that failed at or past its time budget - a possible
+overrun, whose budget is to be re-derived - from one that failed before reaching it, which is a real
+failure. It assumes no workflow of its own. Which jobs are legs, what a leg is called, and which
+steps build and test it are the repository's `ci` settings: `legJobPattern`, a regular expression
+whose `leg` group names the leg and whose optional `budget` group reads its budget from the job's
+name, and `buildStep` and `testStep`, by their exact names. Until they are set, the command refuses
+and names them. No forge fixes a leg's job name or a step's, and a command that assumed one
+workflow's would read every other as having no legs at all. A leg whose job name gave no budget - a
+long name the forge cut short, which a `legJobPattern` must still match, so what follows the leg's
+name in it is kept optional - takes it from its workflow's text through `workflowBudgetPattern`,
+where `{leg}` stands for the leg's name, and then from `legBudgetMinutes`. A failure with no budget
+from any of them is called neither, and counted apart in the summary: a discriminator that invents
+its denominator is worse than one that says it has none. A pattern that runs out of time, or a
+`budget` group that captures anything but a whole number of minutes, refuses the command as
+configuration rather than being read as no match, or as no budget, either of which would let a red
+leg pass unseen.
+
 ## Exit codes
 
 `0` always means success. "The thing you asked about failed" never shares a code
@@ -1608,9 +1628,9 @@ a defect in this tool. `install-missing-tools` exits `1` when a tool is missing,
 date or could not be installed, and `15` when a host could not be reached: a tool that is not
 there and a host that did not answer call for different things. `check-anchor-balance` and
 `check-anchor-citations` exit `1` on a finding, which is what they were asked to look for rather
-than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `2` when the
-matrix did not run at all — an empty answer is indistinguishable from every leg passing, and is
-never read as one. `host-exec` returns the exit code of the command it ran on the host,
+than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `2` when no job
+is a leg - the matrix did not run, or `legJobPattern` matches none of its jobs - an empty answer
+indistinguishable from every leg passing, and never read as one. `host-exec` returns the exit code of the command it ran on the host,
 unchanged, or 15 when that command never reported how it finished.
 `DssHarness help exit-codes` prints the shared table from the code itself; this copy, and the
 per-command codes above, are maintained by hand.
