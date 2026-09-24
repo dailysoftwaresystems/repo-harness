@@ -1162,15 +1162,8 @@ public sealed class SyncService(
         // looks right and only the host keeps the husk. Measured on a consumer's host after a wave
         // of twenty deletions: ten directories left, eight of them holding nothing at all, and the
         // checks that read that tree refused it for having a directory nothing in it answers to.
-        var emptied = plan.Deletes
-            .Select(path => path.Replace('\\', '/'))
-            .Select(path => path.LastIndexOf('/') is var cut and > 0 ? path[..cut] : string.Empty)
-            .Where(directory => directory.Length > 0)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-
         foreach (var directory in await transport
-            .RemoveEmptyDirectoriesAsync(destinationRoot, emptied, cancellationToken)
+            .RemoveEmptyDirectoriesAsync(destinationRoot, plan.Emptied, cancellationToken)
             .ConfigureAwait(false))
         {
             if (directory.Removed)

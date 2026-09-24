@@ -1200,13 +1200,6 @@ public sealed class SyncServiceTests
         Assert.Contains("quote it", refusal.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// A manifest answer that never arrived is refused, not read as a copy holding nothing. Empty is
-    /// the most dangerous answer available here: the deletion bound measures against what the copy
-    /// holds, so an empty one disables it, and the refusal then tells somebody that taking the
-    /// directory over would remove nothing — advice they act on, after which the read succeeds and
-    /// everything the host held goes.
-    /// </summary>
     [Fact]
     public async Task AManifestTheHostNeverAnswered_IsRefused_NotReadAsAnEmptyCopy()
     {
@@ -1469,6 +1462,39 @@ public sealed class SyncServiceTests
             // And its parent, which emptied with it.
             Assert.False(Directory.Exists(Path.Combine(copy, "scripts")));
             Assert.Contains("removed scripts/retired/", harness.StandardOutput.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A deletion in a directory that still holds the source's own files empties nothing: the directory
+    /// stays, as it must, and nothing says it held only files the sync does not manage. A consumer was
+    /// told exactly that of a directory whose files it then found identical to the source's.
+    /// </summary>
+    [Fact]
+    public async Task ADeletionBesideTheSourcesOwnFiles_EmptiesNothing_AndSaysNothingOfIt()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await MirrorAsync(temp.Path, copy, cancellationToken);
+
+            // A file the source no longer has, beside two it has.
+            await File.WriteAllTextAsync(Path.Combine(copy, "src", "retired.c"), "r\n", cancellationToken);
+
+            await service.SyncAsync(
+                temp.Path, Transport(harness), copy, new SyncOptions(Adopt: ["local"]), cancellationToken);
+
+            Assert.False(File.Exists(Path.Combine(copy, "src", "retired.c")));
+            Assert.True(File.Exists(Path.Combine(copy, "src", "a.c")));
+            Assert.DoesNotContain("does not manage", harness.StandardError.ToString() + harness.StandardOutput, StringComparison.Ordinal);
         }
         finally
         {

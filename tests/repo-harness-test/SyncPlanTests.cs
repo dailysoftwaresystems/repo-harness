@@ -66,6 +66,30 @@ public sealed class SyncPlanTests
         Assert.Empty(plan.Writes);
     }
 
+    /// <summary>
+    /// A deletion empties a directory only where the source keeps nothing in it, at any depth: one still
+    /// holding the source's own files is not emptied however many of its files went, and a file at the
+    /// root empties no directory at all.
+    /// </summary>
+    [Fact]
+    public void ADeletion_EmptiesOnlyADirectoryTheSourceKeepsNothingIn()
+    {
+        var source = Manifest(("docs/kept.md", "k"), ("lib/deep/kept.c", "d"));
+        var destination = Manifest(
+            ("docs/kept.md", "k"),
+            ("docs/gone.md", "g"),
+            ("lib/gone.c", "g"),
+            ("lib/deep/kept.c", "d"),
+            ("retired/one.c", "1"),
+            ("retired/nested/two.c", "2"),
+            ("top.txt", "t"));
+
+        var plan = SyncPlan.Between(source, destination, Default);
+
+        Assert.Equal(5, plan.Deletes.Count);
+        Assert.Equal(["retired", "retired/nested"], plan.Emptied.Order(StringComparer.Ordinal));
+    }
+
     [Theory]
     [InlineData(".git/config")]
     [InlineData(".harness-config/config.json")]
