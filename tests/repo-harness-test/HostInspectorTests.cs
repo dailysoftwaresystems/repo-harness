@@ -643,6 +643,111 @@ public sealed class HostInspectorTests
         Assert.Contains("using ", report.Reason, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Every ssh call a connection makes is given, while the pin holds, the address this machine resolved the
+    /// name ssh would look up to, so that name is looked up once, with retries, and not by ssh; the key is
+    /// looked up under the name, off port 22 as known_hosts spells such a host. An address declared as one is
+    /// dialled as it is, unpinned.
+    /// </summary>
+    [Theory]
+    [InlineData("host.invalid", "192.0.2.10", "[host.invalid]:2222")]
+    [InlineData("198.51.100.7", null, null)]
+    public async Task Ssh_IsGivenTheAddressThisMachineResolved_ForEveryCall(string address, string? pinned, string? alias)
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat(), address: address);
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.NotEmpty(fixture.Commands.Calls);
+        Assert.All([.. fixture.Commands.ShellProbes, .. fixture.Commands.Calls.Select(call => call.Connection)], connection =>
+        {
+            Assert.Equal(address, connection.Address);
+            Assert.Equal(pinned, connection.Pin?.Address);
+            Assert.Equal(alias, connection.Pin?.KeyAlias);
+        });
+    }
+
+    /// <summary>
+    /// ssh's own configuration decides what is looked up here and what is pinned. A HostName it maps the name
+    /// to is what is looked up, and names the key. Through a jump host or a command, which do their own
+    /// lookup, nothing is looked up here and nothing pinned - "none" is ssh's word for neither. An
+    /// alias of its own is kept; an address it dials anyway is not pinned; and where ssh cannot say what it
+    /// would do, the name declared is looked up, and ssh left to itself.
+    /// </summary>
+    [Theory]
+    [InlineData("hostname real.example.test\n", "real.example.test", "192.0.2.10", "[real.example.test]:2222")]
+    [InlineData("hostname host.invalid\nproxyjump bastion.test\n", null, null, null)]
+    [InlineData("hostname host.invalid\nproxycommand nc %h %p\n", null, null, null)]
+    [InlineData("hostname host.invalid\nproxyjump none\n", "host.invalid", "192.0.2.10", "[host.invalid]:2222")]
+    [InlineData("hostname host.invalid\nhostkeyalias fixed-alias\n", "host.invalid", "192.0.2.10", "fixed-alias")]
+    [InlineData("hostname 192.0.2.10\n", null, null, null)]
+    [InlineData(null, "host.invalid", null, null)]
+    public async Task WhatSshWouldDo_DecidesWhatIsLookedUp_AndWhatIsPinned(string? configured, string? lookedUp, string? pinned, string? alias)
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat());
+        fixture.Commands.SettingsPrinted = connection => configured is null
+            ? HostResults.Failed(255, "ssh: /home/dev/.ssh/config line 3: Bad configuration option: nonsense")
+            : HostResults.Ok(AsSshPrintsIt(configured, connection.Pin));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(lookedUp is null ? [] : [lookedUp], fixture.LookedUp);
+        Assert.All([.. fixture.Commands.ShellProbes, .. fixture.Commands.Calls.Select(call => call.Connection)], connection =>
+        {
+            Assert.Equal("host.invalid", connection.Address);
+            Assert.Equal(pinned, connection.Pin?.Address);
+            Assert.Equal(alias, connection.Pin?.KeyAlias);
+        });
+    }
+
+    /// <summary>
+    /// A pin that would change anything else ssh does is not made: measured, a Match block keyed by the
+    /// address turned agent forwarding on for a connection pinned to an address it matched. The name is still
+    /// looked up here, and a name that resolves to nothing still refused.
+    /// </summary>
+    [Fact]
+    public async Task APinThatWouldChangeAnythingElseSshDoes_IsNotMade()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat());
+        fixture.Commands.SettingsPrinted = connection => HostResults.Ok(connection.Pin is { Holds: true } pin
+            ? $"hostname {pin.Address}\nhostkeyalias {pin.KeyAlias}\nforwardagent yes\n"
+            : "hostname host.invalid\nforwardagent no\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(["host.invalid"], fixture.LookedUp);
+        Assert.Equal(2, fixture.Commands.SettingsReads.Count);
+        Assert.All(fixture.Commands.Calls, call => Assert.Null(call.Connection.Pin));
+    }
+
+    /// <summary>
+    /// A HostName ssh's own configuration maps the name to, and that resolves to nothing, is refused by that
+    /// name, with the name declared beside it: the fix is in ssh's configuration, not in the host's item.
+    /// </summary>
+    [Fact]
+    public async Task AHostNameThatResolvesToNothing_IsRefusedByThatName()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, respond: HostThat(), resolves: false);
+        fixture.Commands.SettingsPrinted = _ => HostResults.Ok("hostname real.example.test\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("'real.example.test', the HostName ssh's own configuration gives 'host.invalid', resolved to no address", report.Reason, StringComparison.Ordinal);
+        Assert.Empty(fixture.Commands.ShellProbes);
+    }
+
+    /// <summary>What ssh -G prints over a connection: its own configuration's lines, a holding pin's address and alias in place of its own.</summary>
+    private static string AsSshPrintsIt(string configured, SshPin? pin)
+        => pin is not { Holds: true }
+            ? configured
+            : string.Join('\n', configured.Split('\n').Where(line => !line.StartsWith("hostkeyalias ", StringComparison.Ordinal))
+                .Select(line => line.StartsWith("hostname ", StringComparison.Ordinal) ? $"hostname {pin.Address}" : line))
+                + $"hostkeyalias {pin.KeyAlias}\n";
+
     [Fact]
     public async Task Ssh_ConnectsWithTheHostsOwnItem_AndTheHostsSettings()
     {
@@ -799,12 +904,14 @@ public sealed class HostInspectorTests
     {
         private readonly HarnessContext _context;
         private readonly HostInspector _inspector;
+        private readonly FixedLookup _lookup;
 
         public Fixture(
             PlatformId platformId,
             Func<HostConnection, HostCommand, ProcessResult>? respond = null,
             bool writeItems = true,
-            bool resolves = true)
+            bool resolves = true,
+            string address = "host.invalid")
         {
             Repository = new TempDirectory();
 
@@ -826,7 +933,7 @@ public sealed class HostInspectorTests
                 Repository.WriteFile(Path.Combine(".harness-config", "wslDistros", Distro, ".env"), "DISTRO=Example-Linux\n");
                 Repository.WriteFile(
                     Path.Combine(".harness-config", "sshItems", SshName, ".env"),
-                    "ADDRESS=host.invalid\nUSER=harness\nPORT=2222\n");
+                    $"ADDRESS={address}\nUSER=harness\nPORT=2222\n");
                 Repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, ".key"), "not a real key");
                 Repository.WriteFile(Path.Combine(".harness-config", "sshItems", SshName, "known_hosts"), "host.invalid ssh-ed25519 AAAA\n");
             }
@@ -853,7 +960,8 @@ public sealed class HostInspectorTests
                 fileSystem,
                 new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
-            var addresses = new HostAddressResolver(new FixedLookup(resolves), TimeProvider.System, TimeSpan.Zero);
+            _lookup = new FixedLookup(resolves);
+            var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
             var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
 
@@ -863,6 +971,9 @@ public sealed class HostInspectorTests
         public TempDirectory Repository { get; }
 
         public ScriptedHostCommands Commands { get; }
+
+        /// <summary>Every name this machine looked up, in order, each once: the resolver keeps its answers.</summary>
+        public IReadOnlyList<string> LookedUp => _lookup.Names;
 
         public IFilePermissions Permissions { get; }
 
@@ -884,8 +995,28 @@ public sealed class HostInspectorTests
         /// <summary>A resolver that either answers for every name or for none, with no network involved.</summary>
         private sealed class FixedLookup(bool resolves) : INameLookup
         {
+            private readonly List<string> _names = [];
+
+            public IReadOnlyList<string> Names
+            {
+                get
+                {
+                    lock (_names)
+                    {
+                        return [.. _names.Distinct(StringComparer.Ordinal)];
+                    }
+                }
+            }
+
             public Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken = default)
-                => Task.FromResult<IReadOnlyList<string>>(resolves ? ["192.0.2.10"] : []);
+            {
+                lock (_names)
+                {
+                    _names.Add(name);
+                }
+
+                return Task.FromResult<IReadOnlyList<string>>(resolves ? ["192.0.2.10"] : []);
+            }
         }
     }
 }

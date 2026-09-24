@@ -256,6 +256,27 @@ public static partial class HostProbes
     }
 
     /// <summary>
+    /// Whether ssh failed, before any session began, for a reason the address it was given can be to blame
+    /// for - it never connected, or it refused the key the host showed - so that nothing ran there, and a
+    /// call made again runs nothing twice. A login refused is not one: the host whose key was accepted refused
+    /// it, and would refuse it again.
+    /// </summary>
+    /// <param name="result">What an ssh call produced.</param>
+    /// <remarks>
+    /// Measured with the same three clients: a key known_hosts does not hold, or holds another of, ends with
+    /// "Host key verification failed." from each.
+    /// </remarks>
+    public static bool FailedBeforeAnySession(ProcessResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return !result.TimedOut
+            && result.ExitCode == SshFailed
+            && (NeverConnected(result.StandardError) is not null
+                || result.StandardError.Contains("Host key verification failed.", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// Why a program a host was asked to run never reported how it finished: that the host could not be
     /// reached, as <see cref="Unreached"/> says it, where ssh never connected; otherwise that the program
     /// may not have run, or run only in part, with the exit the connection ended with and what it said last.

@@ -656,8 +656,21 @@ is not dependable on such a host.
   command that fixes them. Per-host files also confine that risk: one world-writable shared
   configuration file threatened every host at once.
 - **Names that resolve.** A host reached by an mDNS `.local` name on a DHCP network fails a
-  lookup as a matter of course. The lookup is retried and the answer cached briefly, so one
-  failed lookup never fails a leg.
+  lookup as a matter of course, and a name each ssh call looks up afresh is one each call can fail
+  to find. So ssh is asked first what it would do (`ssh -G`), and the name it would look up - the
+  address declared, or a HostName its own configuration gives it - is looked up here, retried,
+  with the answer cached briefly, so one failed lookup never fails a leg. Every ssh call is then
+  given the address as its `HostName`, while the pin holds, with the host's key looked up under
+  the name through `HostKeyAlias` - its configuration's own alias where it sets one, and
+  otherwise `[name]:port` off port 22, as known_hosts spells such a host - and `CheckHostIP` off,
+  so the address itself is neither checked against known_hosts nor written into it. The
+  destination stays the address declared, so a Host block written for it still applies. A host ssh
+  reaches through a `ProxyJump` or a `ProxyCommand` is neither looked up here nor pinned, since the
+  jump host or the command does its own lookup. One whose `ssh -G`, asked again pinned, shows
+  anything but the address changed, as a `Match` block keyed by the host would, is looked up here
+  but not pinned. A pinned call that fails before any session - the address takes no connection,
+  or shows a key the name is not known by - drops the pin for the rest of the connection and runs
+  again, with ssh looking the name up itself.
 - **PATH truth.** A login shell's PATH is not what a command sees: `/opt/homebrew/bin` is absent
   from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
   are resolved to an absolute path once per connection, measured rather than assumed, the same
@@ -817,9 +830,9 @@ there. That is the trust building the repository already asks for, since a build
 repository's own code.
 
 - An ssh host is reached only when the main checkout holds its directory under
-  `.harness-config/sshItems/`, which git ignores, and ssh reads no configuration file of its
-  own. A `config.json` that arrives through git cannot point the harness at a machine nobody
-  set up here.
+  `.harness-config/sshItems/`, which git ignores, and no ssh configuration file is named with
+  `-F`: ssh reads the user's and the system's own, as it does for anybody. A `config.json` that
+  arrives through git cannot point the harness at a machine nobody set up here.
 - A launcher and a required file are each a program name, found the way a leg's programs are -
   on the host's `PATH`, then in the searched directories - or an absolute path. A relative path would resolve against whichever directory a host
   starts programs in, and would let a file shipped in the repository stand in for the tool

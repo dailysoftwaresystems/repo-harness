@@ -168,7 +168,8 @@ public sealed class HostExecService(
 
     /// <summary>
     /// The host <paramref name="name"/> selects among <paramref name="hosts"/>, named as the configuration
-    /// declares it: ssh applies a Host entry only to the name spelt as the entry spells it.
+    /// declares it: its item is read from the directory of that name, which a case-sensitive file system
+    /// finds only as spelt, and every record names the host the same way.
     /// </summary>
     private static (HostId Host, string RepositoryPath) Resolve<THost>(
         Dictionary<string, THost> hosts,

@@ -40,26 +40,37 @@ public sealed class DnsNameLookup : INameLookup
 }
 
 /// <summary>What resolving one host's address found.</summary>
-/// <param name="Address">The address as the item declares it.</param>
+/// <param name="Address">
+/// The name looked up: the HostName ssh's own configuration gives the host, or the address its item
+/// declares where ssh could not say.
+/// </param>
 /// <param name="Resolved">Whether it names a machine this one can reach.</param>
 /// <param name="Attempts">How many lookups it took, so a name that needs retrying is visible.</param>
-public sealed record AddressResolution(string Address, bool Resolved, int Attempts);
+/// <param name="ResolvedTo">
+/// The address it resolved to - the literal itself, or an IPv4 one where the name resolved to any -
+/// which a pin gives ssh as its HostName; <see langword="null"/> where it resolved to none.
+/// </param>
+public sealed record AddressResolution(string Address, bool Resolved, int Attempts, string? ResolvedTo = null);
 
 /// <summary>
-/// Establishes that an ssh host's name resolves before ssh is started, retrying the lookup and keeping
-/// the answer for a short while.
+/// Looks an ssh host's name up before ssh is started, retrying the lookup and keeping the answer for a
+/// short while, and says which of its addresses a pin would give ssh.
 /// </summary>
 /// <remarks>
 /// Measured: a host on a DHCP LAN reached by an mDNS <c>.local</c> name fails a lookup as a matter of
 /// course - the responder does not answer the first query and answers the second - and ssh then exits
-/// with "Could not resolve hostname", which reads as a host that is switched off. Retrying here leaves
-/// the answer in this machine's own resolver, so the lookup ssh makes a moment later hits it, and a
-/// name that genuinely resolves to nothing is refused with that as the reason.
+/// with "Could not resolve hostname", which reads as a host that is switched off. So the name ssh would
+/// look up is looked up here, with retries, and ssh is given the address it resolved to, as an
+/// <see cref="SshPin"/> explains. A name that genuinely resolves to nothing is refused, with that as the
+/// reason.
 /// </remarks>
 public interface IHostAddressResolver
 {
     /// <summary>Resolves <paramref name="address"/>, retrying a miss.</summary>
-    /// <param name="address">The address the host's item declares.</param>
+    /// <param name="address">
+    /// The name to look up: the HostName ssh's own configuration gives the host, or the address its item
+    /// declares where ssh could not say.
+    /// </param>
     /// <param name="cancellationToken">Stops the lookups.</param>
     Task<AddressResolution> ResolveAsync(string address, CancellationToken cancellationToken = default);
 }
@@ -89,11 +100,14 @@ public sealed class HostAddressResolver(INameLookup lookup, TimeProvider clock, 
     /// <summary>
     /// How long an answer is reused. One command measures a host several times over, and paying the
     /// same miss for each is exactly the failure this exists to end; half a minute is far shorter than
-    /// any DHCP lease, so a machine that moved is still found again inside a single run.
+    /// any DHCP lease, so a connection opened later in the same command finds a machine that moved. Each
+    /// command is a process of its own, and keeps no answer past its end. A connection keeps the address
+    /// it was given for as long as the address takes its calls, and lets ssh look the name up once it
+    /// does not: see <see cref="SshPin.Drop"/>.
     /// </summary>
     public static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(30);
 
-    private readonly ConcurrentDictionary<string, (bool Resolved, DateTimeOffset Until)> _answers =
+    private readonly ConcurrentDictionary<string, (string? ResolvedTo, DateTimeOffset Until)> _answers =
         new(StringComparer.OrdinalIgnoreCase);
 
     private readonly INameLookup _lookup = lookup;
@@ -108,12 +122,12 @@ public sealed class HostAddressResolver(INameLookup lookup, TimeProvider clock, 
         // with no resolver at all, which is exactly the machine an address was written out for.
         if (IPAddress.TryParse(address, out _))
         {
-            return new AddressResolution(address, Resolved: true, Attempts: 0);
+            return new AddressResolution(address, Resolved: true, Attempts: 0, ResolvedTo: address);
         }
 
         if (_answers.TryGetValue(address, out var cached) && cached.Until > _clock.GetUtcNow())
         {
-            return new AddressResolution(address, cached.Resolved, Attempts: 0);
+            return new AddressResolution(address, cached.ResolvedTo is not null, Attempts: 0, cached.ResolvedTo);
         }
 
         for (var attempt = 1; attempt <= Attempts; attempt++)
@@ -123,27 +137,47 @@ public sealed class HostAddressResolver(INameLookup lookup, TimeProvider clock, 
                 await Task.Delay(_retryDelay, cancellationToken).ConfigureAwait(false);
             }
 
-            if ((await _lookup.LookupAsync(address, cancellationToken).ConfigureAwait(false)).Count > 0)
+            if (await _lookup.LookupAsync(address, cancellationToken).ConfigureAwait(false) is { Count: > 0 } found)
             {
-                _answers[address] = (true, _clock.GetUtcNow() + CacheLifetime);
-                return new AddressResolution(address, Resolved: true, attempt);
+                var resolvedTo = Preferred(found);
+
+                _answers[address] = (resolvedTo, _clock.GetUtcNow() + CacheLifetime);
+                return new AddressResolution(address, Resolved: true, attempt, resolvedTo);
             }
         }
 
         // A miss is cached too, so that a command measuring several legs on one switched-off machine
         // does not pay three lookups for each of them.
-        _answers[address] = (false, _clock.GetUtcNow() + CacheLifetime);
+        _answers[address] = (null, _clock.GetUtcNow() + CacheLifetime);
         return new AddressResolution(address, Resolved: false, Attempts);
     }
 
+    /// <summary>The one of <paramref name="addresses"/> a pin gives ssh: an IPv4 one where there is one.</summary>
+    /// <remarks>
+    /// IPv4 first: a name answered over mDNS often comes back with a link-local IPv6 address as well,
+    /// which reaches the machine only through the interface its scope names.
+    /// </remarks>
+    private static string Preferred(IReadOnlyList<string> addresses)
+        => addresses.FirstOrDefault(address => IPAddress.TryParse(address, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetwork)
+            ?? addresses[0];
+
     /// <summary>What a host that does not resolve is reported as, with what to do about it.</summary>
     /// <param name="resolution">The failed resolution.</param>
-    public static string Unresolved(AddressResolution resolution)
+    /// <param name="declared">
+    /// The address the host's item declares, where ssh's own configuration gives it another name to look up
+    /// - a HostName - and that name was the one looked up.
+    /// </param>
+    public static string Unresolved(AddressResolution resolution, string? declared = null)
     {
         ArgumentNullException.ThrowIfNull(resolution);
 
-        return $"'{resolution.Address}' resolved to no address in "
-            + $"{resolution.Attempts.ToString(CultureInfo.InvariantCulture)} lookups; check that the machine is on, "
-            + "and that ADDRESS in its item's .env is the name this machine's network answers for";
+        var lookups = resolution.Attempts.ToString(CultureInfo.InvariantCulture);
+
+        return declared is not null && !string.Equals(declared, resolution.Address, StringComparison.OrdinalIgnoreCase)
+            ? $"'{resolution.Address}', the HostName ssh's own configuration gives '{declared}', resolved to no address "
+                + $"in {lookups} lookups; check that the machine is on, and that the HostName is a name this machine's "
+                + "network answers for"
+            : $"'{resolution.Address}' resolved to no address in {lookups} lookups; check that the machine is on, "
+                + "and that ADDRESS in its item's .env is the name this machine's network answers for";
     }
 }
