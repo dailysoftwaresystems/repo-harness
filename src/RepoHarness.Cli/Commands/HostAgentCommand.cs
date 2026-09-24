@@ -32,11 +32,16 @@ internal static class HostAgentCommand
 
         command.SetAction(async (parseResult, cancellationToken) =>
         {
+            // Before anything the request runs: a run request goes back through the parser, and each
+            // command it starts must know it was asked for by another machine, not typed here.
+            CommandRunner.ServeAnotherMachine();
+
             // Never prompting here is the point, not a default: this process serves another machine,
             // its standard input already carries the request, and there is nobody at this end to ask.
             await using var services = HarnessServices.Build(
                 parseResult.GetValue(GlobalOptions.Verbose),
-                prompting: false);
+                prompting: false,
+                servesAnotherMachine: true);
 
             // The request was written as UTF-8, and is read as such whatever the console's own input
             // encoding happens to be.

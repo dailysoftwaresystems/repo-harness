@@ -859,6 +859,12 @@ internal static class HelpCommand
         builder.AppendLine("refused any host says so, and a sync that reaches none of the hosts its legs need");
         builder.AppendLine($"fails, exit {HarnessExit.HostUnavailable}, rather than reporting that no host needed a copy.");
         builder.AppendLine();
+        builder.AppendLine($"A host's {ToolPackage.Id} is brought to its dispatcher's version when that machine next");
+        builder.AppendLine("reaches it, and not before, so a command typed in a copy in between runs the old build.");
+        builder.AppendLine("Typed there, a command asks nuget.org which release is newest and warns when the build");
+        builder.AppendLine("running is older; it waits a few seconds at most, and says nothing when nuget.org does");
+        builder.AppendLine("not answer. A command the host agent runs for another machine asks nothing.");
+        builder.AppendLine();
         builder.AppendLine("Exit codes");
         builder.AppendLine($"  {HarnessExit.Success,3}  legs: every named leg can run and every host answered");
         builder.AppendLine($"  {HarnessExit.Incomplete,3}  legs: the legs that answered can run, and a host did not answer");

@@ -25,11 +25,13 @@ public static class CliRunner
     /// <param name="cancellationToken">Stops the run.</param>
     /// <param name="workingDirectory">The directory the CLI starts in, or the test's own.</param>
     /// <param name="standardInput">Text the CLI reads on standard input, as a host's DssHarness reads a request.</param>
+    /// <param name="environment">Variables to set for the CLI, or to remove where the value is null.</param>
     public static async Task<ProcessResult> RunAsync(
         string[] arguments,
         CancellationToken cancellationToken,
         string? workingDirectory = null,
-        string? standardInput = null)
+        string? standardInput = null,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         var runner = new ProcessRunner(new HostPlatform(), FilePermissionsFactory.Create());
 
@@ -40,6 +42,7 @@ public static class CliRunner
                 Arguments = ["exec", CliAssembly.Value, .. arguments],
                 WorkingDirectory = workingDirectory,
                 StandardInput = standardInput,
+                Environment = environment ?? new Dictionary<string, string?>(StringComparer.Ordinal),
 
                 // Held open as the machine that reaches a host holds it: the end of a host's input is how the
                 // host learns that machine has gone, so input closed at once would cancel the request.

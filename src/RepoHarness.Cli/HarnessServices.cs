@@ -37,9 +37,15 @@ internal static class HarnessServices
     /// Whether a password may be asked for at the terminal. False under <c>--no-prompt</c>, and for
     /// a process serving another machine, which has nobody to ask.
     /// </param>
-    internal static ServiceProvider Build(bool verbose, bool prompting)
+    /// <param name="servesAnotherMachine">
+    /// Whether the command was asked for by the DssHarness on another machine, through this one's host
+    /// agent, rather than typed here.
+    /// </param>
+    internal static ServiceProvider Build(bool verbose, bool prompting, bool servesAnotherMachine = false)
     {
         var services = new ServiceCollection();
+
+        services.AddSingleton(new CommandOrigin(servesAnotherMachine));
 
         // The only registrations that observe the operating system: which system this is, how it
         // expresses a file's permissions, and how it publishes its process table. Everything
@@ -61,6 +67,8 @@ internal static class HarnessServices
         services.AddSingleton<ManagedIgnoreCheck>();
         services.AddSingleton<IProjectDetector, ProjectDetector>();
         services.AddSingleton<IPathBudget, PathBudget>();
+        services.AddSingleton<IPublishedToolVersions, NuGetPublishedToolVersions>();
+        services.AddSingleton<SyncedCopyToolCheck>();
         services.AddSingleton<IHarnessContextLoader, HarnessContextLoader>();
         services.AddSingleton<IWorktreeService, WorktreeService>();
         services.AddSingleton<IAnchorRegistryLocator, AnchorRegistryLocator>();

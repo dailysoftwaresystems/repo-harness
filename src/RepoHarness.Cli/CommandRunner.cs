@@ -33,6 +33,23 @@ internal sealed record CommandContext(IServiceProvider Services, ParseResult Par
 /// </summary>
 internal static class CommandRunner
 {
+    /// <summary>
+    /// Whether the commands run from here on were asked for by the DssHarness on another machine,
+    /// through this one's host agent.
+    /// </summary>
+    /// <remarks>
+    /// Held for the flow of the request the agent serves, rather than for the process: a run request goes
+    /// back through this same parser, in the host's copy, and nothing in its command line may say who
+    /// asked for it without the command then answering to an argument its own user never typed.
+    /// </remarks>
+    private static readonly AsyncLocal<bool> Serving = new();
+
+    /// <summary>
+    /// Marks what this flow runs from here on as asked for by another machine. Set by the host agent
+    /// before it serves a request; nothing that flow runs is then taken for something typed here.
+    /// </summary>
+    internal static void ServeAnotherMachine() => Serving.Value = true;
+
     /// <summary>Wraps a command body into an action the parser can invoke.</summary>
     /// <param name="commandName">The command, which prefixes every line it writes.</param>
     /// <param name="body">What the command does.</param>
@@ -51,7 +68,7 @@ internal static class CommandRunner
         {
             var verbose = parseResult.GetValue(GlobalOptions.Verbose);
             var prompting = !parseResult.GetValue(GlobalOptions.NoPrompt);
-            await using var services = HarnessServices.Build(verbose, prompting);
+            await using var services = HarnessServices.Build(verbose, prompting, Serving.Value);
             var output = services.GetRequiredService<IHarnessOutput>();
             var answersWithLedger = ledger is not null && parseResult.GetValue(ledger);
 

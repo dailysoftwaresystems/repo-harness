@@ -30,6 +30,9 @@ public sealed class SemanticVersion
     /// <summary>The patch version.</summary>
     public int Patch { get; }
 
+    /// <summary>Whether this carries a prerelease label, and so sorts before the release it leads up to.</summary>
+    public bool IsPrerelease => _prerelease.Length > 0;
+
     /// <summary>Reads a version such as <c>1.2.3</c> or <c>1.2.3-beta</c>.</summary>
     public static bool TryParse(string? text, [NotNullWhen(true)] out SemanticVersion? version)
     {

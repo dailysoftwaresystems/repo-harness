@@ -179,12 +179,17 @@ public sealed class HarnessContextLoaderTests
     private readonly StringWriter _errors = new();
 
     private Task<HarnessContext> Load(string directory)
-        => new HarnessContextLoader(
+    {
+        var output = new ConsoleHarnessOutput(new StringWriter(), _errors, verbose: false);
+
+        return new HarnessContextLoader(
                 _locator,
                 _configStore,
                 _git,
                 _fileSystem,
                 new HostPlatform(),
-                new ConsoleHarnessOutput(new StringWriter(), _errors, verbose: false))
+                output,
+                new SyncedCopyToolCheck(new PublishedVersionsDouble(), new RunningToolDouble(), new CommandOrigin(ServesAnotherMachine: false), output))
             .LoadAsync(directory, TestContext.Current.CancellationToken);
+    }
 }
