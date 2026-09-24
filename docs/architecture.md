@@ -446,19 +446,27 @@ nothing. Every command that reads or changes anchors refuses a malformed registr
 rather than answer from rows it cannot trust, while `read-anchors --lint` and
 `check-anchor-balance` report the problem among their findings (exit 1).
 
-The Status cell is the only verdict: `🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED` or `✅ CLOSED`. A
+The Status cell is the only verdict that decides: `🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED` or `✅ CLOSED`. A
 row is closed exactly when its Status cell starts with ✅, and every other glyph, including
 one nobody anticipated, reads as open: a row wrongly read as open stays visible as work,
 while a row wrongly read as closed disappears from every count. Nothing is inferred from
-the prose cells.
+the prose cells. A registry whose rows open a closed Trigger with the closure itself can say
+so with `anchors.triggerCarriesVerdict`: a closed row's Trigger then opens with ✅ and no
+other row's does, the writing commands refuse a row whose two cells disagree, and the lint
+reports one, so that a row states its verdict once, even where it states it twice.
 
 ### Writing a row
 
 Commands take fields, never rows. Line breaks collapse and pipes are escaped, because a raw
 `|` adds a column and shifts every later cell, and a wrapped row hides its id from every
-search. A value that already holds an escaped pipe is refused: escaping it again would
-double the backslash, and it usually means someone copied a raw table line. Every composed
-row is read back through the same parser before anything is written.
+search. Only the breaks go - each, with the whitespace either side of it, as one space, at
+every boundary a reader of the file might split a line at - and so does whitespace at the
+value's very start and end; every other character is kept as given: a run of spaces or a tab
+inside a line is often a cell's evidence, quoted tool output or aligned figures. A value that already holds an escaped pipe is refused: escaping it
+again would double the backslash, and it usually means someone copied a raw table line. A
+cell given in a file is read as UTF-8, and a file that is not, or that opens with a byte-order
+mark, is refused by name rather than cleaned. Every composed row is read back through the same
+parser before anything is written.
 
 `set-anchor` rebuilds only the cells it was given and writes every other cell back byte for
 byte; a row whose cell count is wrong is refused rather than guessed at. A new id must match

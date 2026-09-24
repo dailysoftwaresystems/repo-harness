@@ -941,7 +941,7 @@ internal static class HelpCommand
         builder.AppendLine("tree the command runs in, so a change travels with that branch, and one git");
         builder.AppendLine("ignores is in the main checkout.");
         builder.AppendLine();
-        builder.AppendLine("Statuses. The Status cell is the only verdict a row carries:");
+        builder.AppendLine("Statuses. The Status cell is the only verdict that decides whether a row is closed:");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Open)}       live work that can be picked up now");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Gated)}      live work waiting on a trigger; when it fires, set it to open");
         builder.AppendLine($"  {AnchorStatus.Render(AnchorState.Disclosed)}  live debt that existed before anyone wrote it down");
@@ -949,6 +949,10 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("A row is closed exactly when its Status cell starts with the closed mark. Closing");
         builder.AppendLine("an anchor moves its row to the done registry, and any other status moves it back.");
+        builder.AppendLine("Nothing is read from the prose beside the Status, unless anchors.triggerCarriesVerdict");
+        builder.AppendLine("is true: then a closed row's Trigger opens with the closed mark and no other row's");
+        builder.AppendLine("does, write-anchor and set-anchor refuse a row whose two cells disagree, and");
+        builder.AppendLine("read-anchors --lint reports one.");
         builder.AppendLine("A row is added at the end of its table: rows are never sorted.");
         builder.AppendLine();
         builder.AppendLine($"Rows: {AnchorRegistryDocument.TableHeader}");
@@ -978,8 +982,12 @@ internal static class HelpCommand
         builder.AppendLine("--pending or --done limits set-anchor, read-anchor and a read-anchors listing to");
         builder.AppendLine("one registry; read-anchors --lint always checks both, and takes no filter.");
         builder.AppendLine("write-anchor and set-anchor write immediately; --anchor-dry-run shows the change");
-        builder.AppendLine("and writes nothing. Pass values as you mean them: pipes are escaped and line breaks");
-        builder.AppendLine("collapse for you, and a pipe you already escaped is refused.");
+        builder.AppendLine("and writes nothing. Pass values as you mean them: pipes are escaped for you, and a");
+        builder.AppendLine("pipe you already escaped is refused. A line break collapses, with the whitespace");
+        builder.AppendLine("either side of it, into one space, since a row is one line; every other character,");
+        builder.AppendLine("a run of spaces or a tab among them, is kept as given, but for whitespace at the");
+        builder.AppendLine("value's very start and end. A --<cell>-file is read as UTF-8: one that is not, or");
+        builder.AppendLine("that opens with a byte-order mark, is refused.");
         builder.AppendLine();
         builder.AppendLine($"check-anchor-balance compares the working tree with --base (default {AnchorBalanceService.DefaultBase}), by id");
         builder.AppendLine("across both registries, so moving a row counts as nothing. It fails when open");

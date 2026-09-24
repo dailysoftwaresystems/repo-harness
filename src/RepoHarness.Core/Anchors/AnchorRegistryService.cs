@@ -1,3 +1,4 @@
+using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Repository;
@@ -78,6 +79,7 @@ public sealed class AnchorRegistryService(
             AnchorCells.Format(request.CrossRefs, "Cross-refs"));
 
         VerifyRow(row, request.Id, rules);
+        RequireOneVerdict(row, context.Config.Anchors);
 
         var registries = await _locator.LocateAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -192,6 +194,7 @@ public sealed class AnchorRegistryService(
                 crossRefs ?? cells[5]);
 
             VerifyRow(row, existing.Id, rules);
+            RequireOneVerdict(row, context.Config.Anchors);
 
             var fields = new List<AnchorFieldChange>();
             AddChange(fields, "priority", existing.Priority, priority);
@@ -319,7 +322,7 @@ public sealed class AnchorRegistryService(
 
             foreach (var row in document.Rows)
             {
-                findings.AddRange(LintRow(row, registry, rules));
+                findings.AddRange(LintRow(row, registry, rules, context.Config.Anchors));
             }
         }
 
@@ -340,7 +343,7 @@ public sealed class AnchorRegistryService(
             .ThenBy(finding => finding.LineNumber)];
     }
 
-    private static IEnumerable<AnchorFinding> LintRow(AnchorRow row, AnchorRegistry registry, AnchorIdRules rules)
+    private static IEnumerable<AnchorFinding> LintRow(AnchorRow row, AnchorRegistry registry, AnchorIdRules rules, AnchorSettings settings)
     {
         AnchorFinding Finding(string message) =>
             new(registry.RelativePath, row.LineNumber, AnchorFindingSeverity.Fatal, message);
@@ -369,6 +372,11 @@ public sealed class AnchorRegistryService(
         if (row.Trigger.Length == 0)
         {
             yield return Finding("the Trigger cell is empty, so the row explains nothing");
+        }
+
+        if (settings.TriggerCarriesVerdict && AnchorStatus.SplitVerdict(row.Status, row.Trigger) is { } split)
+        {
+            yield return Finding($"{split}: anchors.triggerCarriesVerdict holds a row to one verdict, stated in both");
         }
 
         if (registry.Misfiling(row) is { } misfiled)
@@ -472,6 +480,25 @@ public sealed class AnchorRegistryService(
         }
     }
 
+    /// <summary>
+    /// Refuses a row whose Trigger states another verdict than its Status, where the repository holds a
+    /// Trigger to its row's verdict: see <see cref="AnchorSettings.TriggerCarriesVerdict"/>.
+    /// </summary>
+    /// <param name="row">The row as it would be written.</param>
+    /// <param name="settings">The repository's anchor settings.</param>
+    private static void RequireOneVerdict(string row, AnchorSettings settings)
+    {
+        var cells = AnchorCells.Split(row);
+
+        if (settings.TriggerCarriesVerdict && AnchorStatus.SplitVerdict(cells[3].Trim(), cells[4].Trim()) is { } split)
+        {
+            throw Usage(
+                $"The row would state two verdicts: {split}. anchors.triggerCarriesVerdict holds a row's Trigger to "
+                + $"the verdict its Status states: open a closed row's Trigger with {AnchorStatus.ClosedMark}, and no "
+                + "other row's, or set the status the Trigger means.");
+        }
+    }
+
     private static void AddChange(List<AnchorFieldChange> fields, string field, string before, string? after)
     {
         if (after is null)
@@ -479,7 +506,7 @@ public sealed class AnchorRegistryService(
             return;
         }
 
-        var shown = AnchorCells.Collapse(after);
+        var shown = AnchorCells.Flatten(after);
         if (!string.Equals(before, shown, StringComparison.Ordinal))
         {
             fields.Add(new AnchorFieldChange(field, before, shown));
@@ -498,7 +525,10 @@ public sealed class AnchorRegistryService(
 
     private static void RequireTrigger(string? trigger)
     {
-        if (string.IsNullOrWhiteSpace(trigger))
+        // Judged as it will be written. A cell's line breaks are written as spaces, and some of them - a file,
+        // group or record separator - are not whitespace to .NET: a Trigger of nothing else would pass as
+        // text here, and be written as an empty cell.
+        if (trigger is null || string.IsNullOrWhiteSpace(AnchorCells.Flatten(trigger)))
         {
             throw Usage(
                 "The Trigger is empty. A row says what is wrong and what would make it worth doing; a status "

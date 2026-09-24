@@ -24,6 +24,18 @@ public sealed class AnchorSettings
     public string IdPrefix { get; init; } = "D";
 
     /// <summary>
+    /// Whether a row's Trigger carries its verdict too. When true, a closed row's Trigger opens with the
+    /// closed mark, as its Status does, and no other row's does: write-anchor and set-anchor refuse a row
+    /// whose two cells disagree, and read-anchors --lint reports one. False, the default: the Status cell
+    /// is the only verdict, and nothing is read from the prose beside it.
+    /// </summary>
+    /// <remarks>
+    /// For a registry whose rows open a closed Trigger with the closure itself - the mark, when, and what
+    /// closed it - where the two cells can state two verdicts, and each reader believes the one it reads.
+    /// </remarks>
+    public bool TriggerCarriesVerdict { get; init; }
+
+    /// <summary>
     /// Fewest hyphen-separated segments after the prefix that a NEW id may have. Existing ids are
     /// never checked against it: an id is permanent once written, because renaming one orphans
     /// every citation of it.

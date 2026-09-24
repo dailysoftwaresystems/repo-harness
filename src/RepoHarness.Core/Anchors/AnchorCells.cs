@@ -43,8 +43,9 @@ public static partial class AnchorCells
     }
 
     /// <summary>
-    /// Turns a value into a cell: whitespace, line breaks included, collapses to single spaces, every
-    /// pipe is escaped, and the result is padded the way the table's own rows are.
+    /// Turns a value into a cell: its line breaks collapse, as <see cref="Flatten"/> collapses them, every
+    /// pipe is escaped, and the result is padded the way the table's own rows are. Every other character
+    /// is kept as given, but for whitespace at the value's very start and end.
     /// </summary>
     /// <param name="text">The value exactly as its author means it, pipes as plain pipes.</param>
     /// <param name="field">The column, named in the refusal.</param>
@@ -54,7 +55,7 @@ public static partial class AnchorCells
     /// </exception>
     public static string Format(string? text, string field)
     {
-        var flat = Collapse(text ?? string.Empty);
+        var flat = Flatten(text ?? string.Empty);
         var escaped = flat.IndexOf(@"\|", StringComparison.Ordinal);
 
         if (escaped >= 0)
@@ -86,7 +87,37 @@ public static partial class AnchorCells
             .Replace("~", string.Empty, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A value put on one line: each line break, with the whitespace either side of it, becomes one space,
+    /// a blank line vanishes, and so does whitespace at the value's very start and end. Every other
+    /// character is kept as given - a run of spaces, a tab, a no-break space.
+    /// </summary>
+    /// <param name="text">The value exactly as its author means it.</param>
+    /// <remarks>
+    /// A row is one physical line, and a break inside it wraps the row, hiding its id from every search:
+    /// so the breaks go, and nothing else does. A run of spaces or a tab inside a line is often what a cell
+    /// holds as its evidence - quoted tool output, aligned figures - and collapsing every run rewrote such a
+    /// cell. Every boundary
+    /// a reader of the file might split a line at counts: a carriage return, a line feed and the two
+    /// together, the vertical tab and the form feed, the file, group and record separators, the next line,
+    /// and the line and paragraph separators.
+    /// </remarks>
+    public static string Flatten(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        return string.Join(' ', text
+            .Split(LineBreaks, StringSplitOptions.None)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0));
+    }
+
+    /// <summary>Every boundary a line can end at, a carriage return and line feed together first, so they are one.</summary>
+    private static readonly string[] LineBreaks =
+        ["\r\n", "\r", "\n", "\v", "\f", "\u001c", "\u001d", "\u001e", "\u0085", "\u2028", "\u2029"];
+
     /// <summary>Collapses every run of whitespace, line breaks included, to one space, and trims.</summary>
+    /// <remarks>For reading a cell and quoting one: never for writing one, which keeps its runs.</remarks>
     public static string Collapse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);

@@ -67,6 +67,31 @@ public sealed class AnchorStatusTests
         Assert.False(AnchorStatus.IsCanonical("⏳ gated"));
         Assert.False(AnchorStatus.IsCanonical("✅ CLOSED 2026-01-02"));
     }
+
+    /// <summary>
+    /// A Status and a Trigger state one verdict where both read closed, or neither does, emphasis ignored as
+    /// the closed test ignores it; each other pair states two, and says which reads closed.
+    /// </summary>
+    [Theory]
+    [InlineData("✅ CLOSED", "✅ **CLOSED 2026-09-23** - fixed", null)]
+    [InlineData("🟠 OPEN", "tokens expire mid-request", null)]
+    [InlineData("✅ CLOSED", "tokens expire mid-request", "the Status reads closed")]
+    [InlineData("🟠 OPEN", "✅ **CLOSED** - fixed", "the Trigger opens with the closed mark")]
+    [InlineData("⏳ GATED", "**✅ CLOSED**", "the Trigger opens with the closed mark")]
+    [InlineData("✅ CLOSED", "CLOSED in words, with no mark", "the Status reads closed")]
+    public void SplitVerdict_IsAPairThatReadsClosedOnOneSideOnly(string status, string trigger, string? expected)
+    {
+        var split = AnchorStatus.SplitVerdict(status, trigger);
+
+        if (expected is null)
+        {
+            Assert.Null(split);
+            return;
+        }
+
+        Assert.NotNull(split);
+        Assert.StartsWith(expected, split, StringComparison.Ordinal);
+    }
 }
 
 public sealed class AnchorPriorityTests
@@ -190,7 +215,44 @@ public sealed class AnchorCellsTests
     public void Format_EscapesPipes_AndCollapsesLineBreaks()
     {
         // Unescaped, the pipe would add a column; the line break would split the row in two.
-        Assert.Equal(@" a \| b c d ", AnchorCells.Format("a | b\nc\t d", "Trigger"));
+        Assert.Equal(" a \\| b c\t d ", AnchorCells.Format("a | b\nc\t d", "Trigger"));
+    }
+
+    /// <summary>
+    /// Every character of a line is kept as given - a run of spaces, a tab, no-break spaces - since a cell's
+    /// runs are often its evidence: quoted tool output, aligned figures. Each was stored as one space.
+    /// </summary>
+    [Theory]
+    [InlineData("line one  keeps  its runs")]
+    [InlineData("a\tb")]
+    [InlineData("4  +  38")]
+    [InlineData("two\u00a0\u00a0no-break\u00a0spaces")]
+    public void Format_KeepsEveryCharacterOfALine(string value)
+    {
+        Assert.Equal($" {value} ", AnchorCells.Format(value, "Trigger"));
+    }
+
+    /// <summary>
+    /// A line break goes, with the whitespace either side of it, as one space, at every boundary a reader
+    /// of the file might split a line at, and a blank line vanishes: a row is one physical line.
+    /// </summary>
+    [Theory]
+    [InlineData("a  \r\n  b")]
+    [InlineData("a\rb")]
+    [InlineData("a\nb")]
+    [InlineData("a\vb")]
+    [InlineData("a\fb")]
+    [InlineData("a\u001cb")]
+    [InlineData("a\u001db")]
+    [InlineData("a\u001eb")]
+    [InlineData("a\u0085b")]
+    [InlineData("a\u2028b")]
+    [InlineData("a\u2029b")]
+    [InlineData("a\n\n \n\tb")]
+    [InlineData("\n  a\n\nb  \n")]
+    public void Flatten_CollapsesEveryLineBreak_WithTheWhitespaceEitherSide(string value)
+    {
+        Assert.Equal("a b", AnchorCells.Flatten(value));
     }
 
     [Fact]
