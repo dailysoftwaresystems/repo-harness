@@ -459,6 +459,34 @@ public sealed partial class HelpTests
             word => commands.Contains(word) || word.StartsWith('<')));
     }
 
+    /// <summary>
+    /// The usage line of a command's own help is spelt as the package installs it, as the help topics are.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here writes that line: the command-line library builds it from the executable's own name, which is
+    /// why the assembly is named for the command and not for the product. One mechanism serves every command, so a
+    /// few stand for all of them rather than starting a process per command.
+    /// </remarks>
+    [Theory]
+    [InlineData()]
+    [InlineData("init")]
+    [InlineData("build")]
+    [InlineData("help")]
+    public async Task ACommandsOwnHelp_SpellsItsUsageAsTheToolInstallsIt(params string[] command)
+    {
+        var rendered = await CliRunner.RunAsync([.. command, "--help"], TestContext.Current.CancellationToken);
+
+        var usage = rendered.StandardOutput
+            .Split('\n')
+            .SkipWhile(line => !line.StartsWith("Usage:", StringComparison.Ordinal))
+            .Skip(1)
+            .FirstOrDefault(line => line.Trim().Length > 0)
+            ?.Trim();
+
+        Assert.NotNull(usage);
+        Assert.StartsWith(ToolPackage.Command + " ", usage, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Overview_AdvertisesOnlyTopicsThatExist()
     {

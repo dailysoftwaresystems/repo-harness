@@ -3,7 +3,11 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>RepoHarness.Cli</RootNamespace>
-    <AssemblyName>DssHarness</AssemblyName>
+    <!-- The command the package installs, not the product's name. System.CommandLine builds the usage
+         line of every command's own help from the executable's name, so an assembly called DssHarness
+         had each one tell the reader to type a spelling that runs nothing on a case-sensitive
+         filesystem. The product keeps its name in PackageId and Product below. -->
+    <AssemblyName>dssharness</AssemblyName>
 
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dssharness</ToolCommandName>
