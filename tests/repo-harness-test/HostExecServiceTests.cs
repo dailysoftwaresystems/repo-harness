@@ -184,6 +184,36 @@ public sealed class HostExecServiceTests
     }
 
     /// <summary>
+    /// The command that holds the host awake travels with the request, as a sync's own requests carry it: a
+    /// command run here is the host's work for as long as it takes, and a host that sleeps part way through
+    /// leaves the reader a command that never said how it finished.
+    /// </summary>
+    [Fact]
+    public async Task ACommandRunOnAHost_CarriesWhatHoldsThatHostAwake()
+    {
+        HostAgentRequest? asked = null;
+
+        var fixture = Create(
+            report: host => Reachable(host) with
+            {
+                KeepAwake = ["caffeinate", "-dimsu", "-w", "{pid}"],
+                KeepAwakeEnvironment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["HOMEBREW_PREFIX"] = "/opt/homebrew" },
+                ProgramDirectories = ["/opt/homebrew/bin"],
+            },
+            respond: (_, command) =>
+            {
+                asked = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput!, HostAgentProtocol.JsonOptions);
+                return HostResults.Finished(command, 0);
+            });
+
+        await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(["caffeinate", "-dimsu", "-w", "{pid}"], asked!.KeepAwake);
+        Assert.Equal("/opt/homebrew", asked.KeepAwakeEnvironment["HOMEBREW_PREFIX"]);
+        Assert.Equal(["/opt/homebrew/bin"], asked.KeepAwakeDirectories);
+    }
+
+    /// <summary>
     /// A host that refuses before it can read the request writes no marker - it has no nonce to mark with -
     /// and its refusal is the whole of what the reader has to go on, so it is relayed all the same.
     /// </summary>
@@ -337,6 +367,25 @@ public sealed class HostExecServiceTests
         Assert.Equal("/srv/repo.worktree-feature", JsonSerializer.Deserialize<HostAgentRequest>(sent.StandardInput, HostAgentProtocol.JsonOptions)!.Directory);
     }
 
+    /// <summary>A host reached, with a session a request can travel on.</summary>
+    private static HostReport Reachable(HostId host) => new()
+    {
+        Host = host,
+        Os = "linux",
+        Processor = "x86_64",
+        Session = new HostSession(
+            new HostConnection
+            {
+                Host = host,
+                Distribution = "Example-Linux",
+                Address = "host.invalid",
+                User = "harness",
+                KeyFile = "/repo/.key",
+                KnownHostsFile = "/repo/known_hosts",
+            },
+            ".dotnet/tools/dssharness"),
+    };
+
     private static Fixture Create(
         Func<HostId, HostReport>? report = null,
         Func<HostConnection, HostCommand, ProcessResult>? respond = null,
@@ -344,23 +393,7 @@ public sealed class HostExecServiceTests
         bool verbose = false,
         IHarnessContextLoader? loader = null)
     {
-        var inspector = new RecordingInspector(report ?? (host => new HostReport
-        {
-            Host = host,
-            Os = "linux",
-            Processor = "x86_64",
-            Session = new HostSession(
-                new HostConnection
-                {
-                    Host = host,
-                    Distribution = "Example-Linux",
-                    Address = "host.invalid",
-                    User = "harness",
-                    KeyFile = "/repo/.key",
-                    KnownHostsFile = "/repo/known_hosts",
-                },
-                ".dotnet/tools/dssharness"),
-        }));
+        var inspector = new RecordingInspector(report ?? Reachable);
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
         var error = new StringWriter();

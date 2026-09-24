@@ -117,6 +117,13 @@ public sealed class HostExecService(
                 Kind = HostAgentRequestKind.Run,
                 Directory = HostCopies.For(target.RepositoryPath, context.Layout, context.Layout.RepositoryRoot, _platform.PathComparison),
                 Arguments = [.. arguments],
+
+                // As a sync's own requests carry it: a command run here is the host's work for as long as it
+                // takes, and a host that sleeps part way through leaves the reader a command that never said
+                // how it finished. Read from this machine's configuration, which is the one that has it.
+                KeepAwake = [.. report.KeepAwake],
+                KeepAwakeEnvironment = new(report.KeepAwakeEnvironment, StringComparer.Ordinal),
+                KeepAwakeDirectories = [.. report.ProgramDirectories],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
