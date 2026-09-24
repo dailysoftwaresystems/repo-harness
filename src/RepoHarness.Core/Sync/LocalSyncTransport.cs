@@ -124,6 +124,14 @@ public sealed class LocalSyncTransport(
     }
 
     /// <inheritdoc/>
+    public Task IndexAsync(string root, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        return _gitClient.IndexExactlyAsync(Home(root), paths, cancellationToken);
+    }
+
+    /// <inheritdoc/>
     public Task<SyncManifest> ReadManifestAsync(
         string root,
         IReadOnlyList<string> withheld,

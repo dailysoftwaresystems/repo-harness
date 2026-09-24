@@ -198,6 +198,60 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A tree git tracks nothing in - as a copy a sync made was, its files written and none staged - is
+    /// said as that: nothing is watched while it builds, and the record it leaves holds no fingerprint,
+    /// so the next build starts from clean and says why. Measured on a consumer's host copy: every build
+    /// after the first rebuilt from clean, naming no cause but the empty record.
+    /// </summary>
+    [Fact]
+    public async Task ATreeGitTracksNothingIn_IsSaidAsThat_AndItsNextBuildStartsFromClean()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        var emptied = await factory.GitClient.RunAsync(temp.Path, ["read-tree", "--empty"], cancellationToken: token);
+        Assert.True(emptied.Succeeded, emptied.FailureMessage);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+        Assert.Contains($"git tracks no file in '{temp.Path}'", factory.StandardError.ToString(), StringComparison.Ordinal);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.NotNull(again.RebuiltFromClean);
+        Assert.StartsWith(
+            "no record to compare: the previous build recorded no input fingerprint - git tracked none of its inputs",
+            again.RebuiltFromClean,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same tree with its index put right, as each sync now puts a copy's: its build fingerprints its
+    /// inputs, and the next build keeps the warm directory rather than starting from clean.
+    /// </summary>
+    [Fact]
+    public async Task ATreeWhoseIndexWasPutRight_KeepsItsWarmBuildDirectory()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var (factory, request) = await TrackedTreeAsync(temp, token);
+
+        IReadOnlyList<string> files = [.. (await factory.GitClient.ListIndexAsync(temp.Path, token)).Select(entry => entry.Path)];
+
+        var emptied = await factory.GitClient.RunAsync(temp.Path, ["read-tree", "--empty"], cancellationToken: token);
+        Assert.True(emptied.Succeeded, emptied.FailureMessage);
+
+        await factory.GitClient.IndexExactlyAsync(temp.Path, files, token);
+
+        Assert.Equal(LegVerdict.Passed, (await BuildOnceAsync(factory, request, token)).Verdict.Verdict);
+
+        var again = await BuildOnceAsync(factory, request, token);
+
+        Assert.Null(again.RebuiltFromClean);
+        Assert.DoesNotContain("git tracks no file", factory.StandardError.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// An edit to something the build reads, dated after the build as an edit is, is the build
     /// system's to act on: newer than every output the build left, it rebuilds whatever reads it, and
     /// the warm directory is kept. Rebuilt from clean instead, one edit to one input cost a consumer

@@ -648,6 +648,23 @@ public sealed class SyncService(
         await PlaceConfigurationAsync(context, transport, destinationRoot, cancellationToken)
             .ConfigureAwait(false);
 
+        // The copy's own record of which files are its own: every file this sync carried, and the
+        // configuration it placed. Written without staging one, a copy's index named nothing, so a build
+        // there fingerprinted no inputs and started every build after the first from clean, and every
+        // guard watching the inputs watched nothing. On every sync, so a copy made before this is put
+        // right by the next, whatever that one carries. A file written through a link in the copy is
+        // outside it, where git cannot hold it; that write was warned of above, and the verification
+        // below says the copy does not hold it.
+        await transport
+            .IndexAsync(
+                destinationRoot,
+                [
+                    .. source.Paths.Where(path => !BeyondALink(path, destination.Links)),
+                    $"{HarnessLayout.DirectoryName}/{HarnessLayout.ConfigFileName}",
+                ],
+                cancellationToken)
+            .ConfigureAwait(false);
+
         // Throws when the copy does not match, so reaching the next line is what verified means.
         await VerifyAsync(transport, destinationRoot, source, exclusions, cancellationToken)
             .ConfigureAwait(false);
@@ -707,6 +724,13 @@ public sealed class SyncService(
             .Select(path => path.TrimEnd('/'))
             .Where(path => path.Length > 0)];
     }
+
+    /// <summary>Whether <paramref name="path"/> is a link of the copy, or under one.</summary>
+    /// <param name="path">A path relative to the copy's root, with forward separators.</param>
+    /// <param name="links">The copy's links, as its manifest names them.</param>
+    private static bool BeyondALink(string path, IReadOnlyList<string> links)
+        => links.Any(link => string.Equals(path, link, StringComparison.Ordinal)
+            || path.StartsWith(link + "/", StringComparison.Ordinal));
 
     /// <summary>
     /// Puts the <c>config.json</c> this command read into the copy.

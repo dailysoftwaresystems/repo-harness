@@ -369,6 +369,47 @@ public sealed class GitClientTests
     /// characters beyond ASCII, a byte order mark dropped as reading the file on its own drops it, and
     /// bytes that are not text as the replacement they decode to.
     /// </summary>
+    /// <summary>
+    /// An index made to hold exactly a set of files holds them - each staged as it stands on disk, a name
+    /// no command line would carry among them - and no other: an entry the set does not name is removed,
+    /// and a named file that is not there is not held.
+    /// </summary>
+    [Fact]
+    public async Task IndexExactlyAsync_LeavesTheIndexHoldingExactlyTheFilesNamed()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: cancellationToken);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        temp.WriteFile(Path.Combine("src", "a.c"), "a\n");
+        temp.WriteFile(Path.Combine("src", "-b.c"), "b\n");
+        temp.WriteFile("stale.txt", "old\n");
+
+        async Task<IReadOnlyList<string>> IndexedAsync()
+            => [.. (await harness.GitClient.ListIndexAsync(temp.Path, cancellationToken)).Select(entry => entry.Path).Order(StringComparer.Ordinal)];
+
+        await harness.GitClient.IndexExactlyAsync(temp.Path, ["src/a.c", "src/-b.c", "stale.txt"], cancellationToken);
+        Assert.Equal(["src/-b.c", "src/a.c", "stale.txt"], await IndexedAsync());
+
+        // A second set replaces the first: what it drops leaves, and a file named but gone is not held.
+        await harness.GitClient.IndexExactlyAsync(temp.Path, ["src/a.c", "src/-b.c", "missing.c"], cancellationToken);
+        Assert.Equal(["src/-b.c", "src/a.c"], await IndexedAsync());
+
+        // Staged as it stands: a file changed on disk is staged again, so the index is not stale about it.
+        temp.WriteFile(Path.Combine("src", "a.c"), "changed\n");
+        await harness.GitClient.IndexExactlyAsync(temp.Path, ["src/a.c", "src/-b.c"], cancellationToken);
+
+        var status = await harness.GitClient.RunAsync(temp.Path, ["status", "--porcelain", "--untracked-files=no"], cancellationToken: cancellationToken);
+        Assert.DoesNotContain(" M src/a.c", status.StandardOutput, StringComparison.Ordinal);
+
+        // And an empty set empties it.
+        await harness.GitClient.IndexExactlyAsync(temp.Path, [], cancellationToken);
+        Assert.Empty(await IndexedAsync());
+    }
+
     [Fact]
     public async Task ReadFilesAtCommitAsync_ReadsEveryFile_ThroughOneProcess()
     {

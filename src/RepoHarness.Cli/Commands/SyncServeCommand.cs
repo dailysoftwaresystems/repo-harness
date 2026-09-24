@@ -67,6 +67,12 @@ internal static class SyncServeCommand
                     await transport.InitialiseRepositoryAsync(root, cancellationToken).ConfigureAwait(false);
                     return Done();
 
+                case SyncServe.Index:
+                    await transport
+                        .IndexAsync(root, SyncServe.CarriedPaths(Required(arguments, 1, operation)), cancellationToken)
+                        .ConfigureAwait(false);
+                    return Done();
+
                 case SyncServe.RemoveCopy:
                     return Answer(new SyncRemoveAnswer(
                         await transport.RemoveCopyAsync(root, cancellationToken).ConfigureAwait(false)));

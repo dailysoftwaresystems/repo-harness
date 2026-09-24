@@ -43,6 +43,85 @@ public sealed class SyncServiceTests
     }
 
     /// <summary>
+    /// A copy's git index holds every file the sync carried and the configuration it placed, and nothing
+    /// else: a file the tree drops leaves it on the next sync. Written without staging one, a copy's index
+    /// named nothing, so every build there fingerprinted no input and each after the first started from
+    /// clean, while every guard watching the inputs watched nothing.
+    /// </summary>
+    [Fact]
+    public async Task ACopysIndex_HoldsExactlyWhatTheSyncCarried()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        async Task<IReadOnlyList<string>> IndexedAsync()
+            => [.. (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path).Order(StringComparer.Ordinal)];
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            var indexed = await IndexedAsync();
+            Assert.Contains("src/a.c", indexed);
+            Assert.Contains("src/b.c", indexed);
+            Assert.Contains(".gitignore", indexed);
+            Assert.Contains(".harness-config/config.json", indexed);
+
+            // Nothing the copy holds that the sync did not carry: the marker is the harness's own.
+            Assert.DoesNotContain($".harness-config/{HarnessLayout.SyncedCopyMarkerName}", indexed);
+
+            File.Delete(Path.Combine(temp.Path, "src", "a.c"));
+            await harness.CommitAllAsync(temp.Path, "drop a", cancellationToken);
+
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.DoesNotContain("src/a.c", await IndexedAsync());
+            Assert.Contains("src/b.c", await IndexedAsync());
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
+    /// A copy made before its index was kept - one whose index names nothing - is put right by the next
+    /// sync, even one that carries nothing: the consumer's copies are all such copies, and waiting for a
+    /// file to change before a build can keep its directory would leave them rebuilding from clean.
+    /// </summary>
+    [Fact]
+    public async Task ACopyWhoseIndexNamesNothing_IsPutRightByASyncThatCarriesNothing()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, service) = await PrepareAsync(temp, cancellationToken);
+        var copy = Path.Combine(temp.Path, "..", "copy-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            // As every copy made before this was: its files there, and its index naming none of them.
+            var emptied = await harness.GitClient.RunAsync(copy, ["read-tree", "--empty"], cancellationToken: cancellationToken);
+            Assert.True(emptied.Succeeded, emptied.FailureMessage);
+            Assert.Empty(await harness.GitClient.ListIndexAsync(copy, cancellationToken));
+
+            var again = await service.SyncAsync(temp.Path, Transport(harness), copy, new SyncOptions(), cancellationToken);
+
+            Assert.Empty(again.Plan.Writes);
+            Assert.Contains(
+                "src/a.c",
+                (await harness.GitClient.ListIndexAsync(copy, cancellationToken)).Select(entry => entry.Path));
+        }
+        finally
+        {
+            DeleteIfPresent(copy);
+        }
+    }
+
+    /// <summary>
     /// A sync carries its writes in batches, so the far side is asked once for many files rather than once
     /// for each. Over a connection one asking is one session, and a session costs a connection, an
     /// authentication and whatever the host's login profile does: a file at a time, a consumer's first sync
@@ -2244,6 +2323,46 @@ public sealed class SyncServiceTests
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// The far side makes a copy's index hold what it is told, through the real parser: what the asking
+    /// machine's sync carried is what a build there fingerprints. A list it cannot read - null, naming a
+    /// blank path, or not a list at all - is refused and touches nothing: read as none, it would unstage
+    /// every file the copy has.
+    /// </summary>
+    [Fact]
+    public async Task TheAgentIndexesExactlyWhatItIsTold_AndRefusesAListItCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var harness = new HarnessFactory();
+
+        var created = await harness.GitClient.RunAsync(temp.Path, ["init", "--quiet", "."], cancellationToken: token);
+        Assert.True(created.Succeeded, created.FailureMessage);
+
+        temp.WriteFile(Path.Combine("src", "a.c"), "a\n");
+        temp.WriteFile("notes.txt", "n\n");
+
+        async Task<IReadOnlyList<string>> IndexedAsync()
+            => [.. (await harness.GitClient.ListIndexAsync(temp.Path, token)).Select(entry => entry.Path)];
+
+        var result = await CliRunner.RunAsync(
+            ["sync-serve", SyncServe.Index, temp.Path, SyncServe.CarryPaths(["src/a.c"])],
+            token);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+        Assert.Equal(["src/a.c"], await IndexedAsync());
+
+        foreach (var unreadable in new[] { "null", """["src/a.c", " "]""", "not a list" })
+        {
+            var refused = await CliRunner.RunAsync(["sync-serve", SyncServe.Index, temp.Path, unreadable], token);
+
+            Assert.Equal(HarnessExit.UsageError, refused.ExitCode);
+            Assert.Contains("The files to index arrived in a shape this build cannot read", refused.StandardError, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(["src/a.c"], await IndexedAsync());
     }
 
     /// <summary>

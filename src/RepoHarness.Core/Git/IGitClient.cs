@@ -73,6 +73,21 @@ public interface IGitClient
     /// <exception cref="HarnessException">git could not read the index.</exception>
     Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(string directory, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Makes the index of the repository at <paramref name="directory"/> hold exactly <paramref name="paths"/>,
+    /// each as it is on disk: every one staged as it stands, and every entry they do not name removed.
+    /// </summary>
+    /// <param name="directory">The repository's work tree.</param>
+    /// <param name="paths">The files the index is to hold, relative to <paramref name="directory"/>, with forward separators.</param>
+    /// <param name="cancellationToken">Cancels the git processes.</param>
+    /// <exception cref="HarnessException">git could not read or write the index.</exception>
+    /// <remarks>
+    /// For a tree whose files some other process placed, and whose index is its record of which files
+    /// are its own: a copy a sync made has its files written and none of them staged, and everything that
+    /// reads "the files git tracks" there then reads none.
+    /// </remarks>
+    Task IndexExactlyAsync(string directory, IReadOnlyCollection<string> paths, CancellationToken cancellationToken = default);
+
     /// <summary>The index file git uses for the work tree at <paramref name="directory"/>, as an absolute path.</summary>
     /// <exception cref="HarnessException">git could not say.</exception>
     Task<string> GetIndexFileAsync(string directory, CancellationToken cancellationToken = default);

@@ -228,6 +228,59 @@ public sealed class GitClient(IProcessRunner processRunner, IHarnessOutput outpu
         return new GitLocation(lines[0].TrimEnd('\r'), NormalizeDirectory(lines[1].TrimEnd('\r')));
     }
 
+    public async Task IndexExactlyAsync(
+        string directory,
+        IReadOnlyCollection<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var wanted = new HashSet<string>(paths, StringComparer.Ordinal);
+
+        // What the index holds that the set does not name, removed first: a file the tree no longer has,
+        // or never had from whoever placed it, is not one of its own.
+        var stale = (await ListIndexAsync(directory, cancellationToken).ConfigureAwait(false))
+            .Select(entry => entry.Path)
+            .Where(path => !wanted.Contains(path))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        // The paths travel on standard input, NUL-separated, so no list of them outgrows a command line
+        // and no name is read as an option or a pathspec.
+        if (stale.Count > 0)
+        {
+            var removed = await RunCoreAsync(
+                directory,
+                ["update-index", "--force-remove", "-z", "--stdin"],
+                echoOutput: false,
+                untranslated: false,
+                indexFile: null,
+                string.Join('\0', stale) + '\0',
+                cancellationToken).ConfigureAwait(false);
+
+            Ensure(removed, "remove from the index what the tree does not hold");
+        }
+
+        if (wanted.Count == 0)
+        {
+            return;
+        }
+
+        // Each staged as it stands on disk: added where the index lacks it, refreshed where it holds an
+        // older version, and removed where the file is not there after all.
+        var staged = await RunCoreAsync(
+            directory,
+            ["update-index", "--add", "--remove", "-z", "--stdin"],
+            echoOutput: false,
+            untranslated: false,
+            indexFile: null,
+            string.Join('\0', wanted.Order(StringComparer.Ordinal)) + '\0',
+            cancellationToken).ConfigureAwait(false);
+
+        Ensure(staged, "stage what the tree holds");
+    }
+
     public async Task<IReadOnlyList<GitIndexEntry>> ListIndexAsync(
         string directory,
         CancellationToken cancellationToken = default)

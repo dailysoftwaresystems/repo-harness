@@ -793,12 +793,27 @@ public sealed class RunnerRunService(
         {
             var index = await _gitClient.ListIndexAsync(request.TreeRoot, cancellationToken).ConfigureAwait(false);
 
-            return (
-                [.. index
+            IReadOnlyList<string> tracked =
+            [
+                .. index
                     .Where(entry => entry.IsRegularFile)
                     .Select(entry => entry.Path)
-                    .Distinct(StringComparer.Ordinal)],
-                null);
+                    .Distinct(StringComparer.Ordinal),
+            ];
+
+            // Said rather than passed over: a step asked for its inputs to be held still, and a guard with
+            // nothing to watch is off. A copy a sync made was exactly such a tree, until each sync staged
+            // what it carried.
+            if (tracked.Count == 0)
+            {
+                _output.Warn(
+                    CommandName,
+                    $"{request.Leg}: git tracks no file in '{request.TreeRoot}', so requireInputsUnmoved watches "
+                    + "nothing: nothing here can say the tree held still. A host's copy has what each sync "
+                    + "carries staged by that sync.");
+            }
+
+            return (tracked, null);
         }
         catch (HarnessException ex)
         {

@@ -97,6 +97,9 @@ public static class SyncServe
     /// </summary>
     public const int MostFilesInABatch = 512;
 
+    /// <summary>Makes the copy's git index hold exactly the files the sync placed there.</summary>
+    public const string Index = "index";
+
     /// <summary>Deletes one file from the copy.</summary>
     public const string Delete = "delete";
 
@@ -209,6 +212,39 @@ public static class SyncServe
             throw new HarnessException(
                 HarnessExit.UsageError,
                 $"The files to write arrived in a shape this build cannot read: {ex.Message}. The two ends "
+                + "are different builds.");
+        }
+    }
+
+    /// <summary>The paths an index request carries.</summary>
+    /// <param name="paths">Every file the copy holds from the sync, relative to its root.</param>
+    public static string CarryPaths(IReadOnlyList<string> paths) => JsonSerializer.Serialize(paths, JsonOptions);
+
+    /// <summary>The paths an index request carries, read back.</summary>
+    /// <param name="carried">What <see cref="CarryPaths"/> wrote.</param>
+    /// <exception cref="HarnessException">The request is in a shape this build cannot read.</exception>
+    /// <remarks>
+    /// Refused rather than read as none, as a batch of files is: an index made to hold nothing would
+    /// unstage every file the copy has, and every build there would then fingerprint nothing again.
+    /// </remarks>
+    public static IReadOnlyList<string> CarriedPaths(string carried)
+    {
+        ArgumentNullException.ThrowIfNull(carried);
+
+        try
+        {
+            var paths = JsonSerializer.Deserialize<IReadOnlyList<string>>(carried, JsonOptions)
+                ?? throw new JsonException("the paths to index are null");
+
+            return paths.Any(string.IsNullOrWhiteSpace)
+                ? throw new JsonException("a path to index is blank")
+                : paths;
+        }
+        catch (JsonException ex)
+        {
+            throw new HarnessException(
+                HarnessExit.UsageError,
+                $"The files to index arrived in a shape this build cannot read: {ex.Message}. The two ends "
                 + "are different builds.");
         }
     }

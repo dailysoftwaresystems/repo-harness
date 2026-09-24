@@ -1406,6 +1406,17 @@ directory here cannot drift apart.
 - **The copy is a git repository,** because the DssHarness on that host finds everything through
   git. It is made one after the transfer, so a copy that failed part way is never left looking
   complete.
+- **The copy's index holds what the sync carried,** and nothing else: every file of the transfer and
+  the configuration placed with it, staged as they stand, and anything the index held that the sync
+  did not carry removed - on every sync, so a copy made before this is put right by the next one,
+  whatever that carries. Everything on the host that reads "the files git tracks" reads the index: a
+  build's input fingerprint, which lets the next build keep its directory, and the guards that hold
+  a build's or a step's inputs still. Written without staging one, a copy's index named nothing, so
+  every build there after the first started from clean and every such guard watched nothing,
+  without a word. A file written through a link in the copy is outside it and is not staged; the
+  write is warned of, and the verification refuses the copy. A tree git tracks nothing in is now
+  said, by a build and by a step that asked for its inputs held still. The copy's history stays its
+  own.
 - **Content, never timestamps.** A file is written only when its content differs. An unchanged
   file is not touched, so its modification time does not move and an incremental build on that
   host stays correct; a changed file is rewritten now, so its time advances. Nothing compares two

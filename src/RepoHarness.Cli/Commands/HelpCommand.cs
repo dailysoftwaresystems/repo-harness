@@ -1288,10 +1288,12 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("A leg on a host reached through WSL or ssh runs in that host's copy of its tree:");
         builder.AppendLine("the files the sync writes there from this tree, in a git repository of the host's own -");
-        builder.AppendLine("one the sync made, or one it took over - whose index and history are not this");
-        builder.AppendLine("checkout's. A test that checks this checkout's state has nothing to say about that");
-        builder.AppendLine("copy, so an invocation's remoteExcludes are given to every leg a host runs, beside");
-        builder.AppendLine("--exclude's, and to none this machine runs:");
+        builder.AppendLine("one the sync made, or one it took over - whose history is not this checkout's. Each");
+        builder.AppendLine("sync makes its index hold the files it carried, so a build there fingerprints its");
+        builder.AppendLine("inputs and keeps its directory as a build here does. A test that checks this");
+        builder.AppendLine("checkout's state has nothing to say about that copy, so an invocation's");
+        builder.AppendLine("remoteExcludes are given to every leg a host runs, beside --exclude's, and to none");
+        builder.AppendLine("this machine runs:");
         builder.AppendLine();
         builder.AppendLine("  \"all\": {");
         builder.AppendLine("    \"runner\": \"ctest\", \"successPattern\": \"...\",");

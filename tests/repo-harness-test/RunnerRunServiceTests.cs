@@ -1188,6 +1188,41 @@ public sealed class RunnerRunServiceTests
     }
 
     /// <summary>
+    /// A step asking for its inputs to be held still, in a tree git tracks nothing in - as a copy a sync
+    /// made was, its files written and none staged - is told its guard watches nothing, rather than having
+    /// it pass over in silence: a guard that is off must never be off quietly.
+    /// </summary>
+    [Fact]
+    public async Task AGuardWithNothingToWatch_IsSaidAsThat()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        await WriteActionAsync(factory, temp, """
+            name: corpus
+            steps:
+              - name: build
+                requireInputsUnmoved: true
+                run: |
+                  dotnet --version
+            """);
+
+        var config = Config();
+        config.Tools.Add(new ToolConfig { Name = "dotnet" });
+
+        var result = await Service(factory).RunAsync(
+            config,
+            Request(temp, new RunnerConfig { Action = "corpus/corpus.yml" }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(LegVerdict.Passed, result.Verdict.Verdict);
+        Assert.Contains(
+            $"run: WARN - {Leg}: git tracks no file in '{temp.Path}', so requireInputsUnmoved watches nothing",
+            factory.StandardError.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A run that names no step leaves a manual one out before anything reads it - here a program nobody
     /// declared, which the policy refuses the whole file over where the step runs - and says so as it runs
     /// and on the leg's line, so a plain run is never read as having done the manual work.
