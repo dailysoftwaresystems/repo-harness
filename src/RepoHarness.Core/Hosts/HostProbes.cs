@@ -324,10 +324,19 @@ public static partial class HostProbes
     {
         ArgumentNullException.ThrowIfNull(said);
 
-        return through is { Pin.Address: { Length: > 0 } pinned, Address: { Length: > 0 } declared }
-            && !string.Equals(pinned, declared, StringComparison.OrdinalIgnoreCase)
-                ? said.Replace(pinned, declared, StringComparison.OrdinalIgnoreCase)
-                : said;
+        if (through is not { Pin.Address: { Length: > 0 } pinned, Address: { Length: > 0 } declared }
+            || string.Equals(pinned, declared, StringComparison.OrdinalIgnoreCase))
+        {
+            return said;
+        }
+
+        // Only where the address stands as a whole word. An unbounded replacement of '10.0.0.5' rewrites the
+        // '10.0.0.50' a command itself printed, handing the reader an address that never existed, and does
+        // the same to an IPv6 pin inside a longer one. This runs over every line a host writes, not only
+        // over ssh's, so a line that merely contains the address as part of something else is left alone.
+        return AddressLike().Replace(
+            said,
+            match => string.Equals(match.Value, pinned, StringComparison.OrdinalIgnoreCase) ? declared : match.Value);
     }
 
     /// <summary>
@@ -345,6 +354,10 @@ public static partial class HostProbes
 
         return joined.Length <= ExcerptLength ? joined : "..." + joined[^ExcerptLength..];
     }
+
+    /// <summary>One run of the characters a host name or an address is spelt from, which nothing else adjoins.</summary>
+    [GeneratedRegex(@"[0-9A-Za-z.:%_-]+", RegexOptions.CultureInvariant)]
+    private static partial Regex AddressLike();
 
     [GeneratedRegex(@"^(?:ssh(?:\.exe)?: (?:Could not resolve hostname |connect to host \S+ port \S+: )|banner exchange: Connection to UNKNOWN port -1: )", RegexOptions.CultureInvariant)]
     private static partial Regex SshNeverConnected();

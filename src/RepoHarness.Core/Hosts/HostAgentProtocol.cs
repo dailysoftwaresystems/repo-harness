@@ -104,6 +104,28 @@ public static class HostAgentProtocol
     }
 
     /// <summary>
+    /// <paramref name="text"/> from the agent's started line on, or the whole of it where that line is not
+    /// in it: what a message quotes from a whole captured stream, rather than the host's login shell too.
+    /// </summary>
+    /// <param name="text">Everything a stream carried.</param>
+    /// <param name="nonce">The request's nonce.</param>
+    /// <remarks>
+    /// The capture is kept whole for the reader who asks for it, and trimmed wherever it is quoted into
+    /// something the harness says: a host that never reached its agent has nothing else to show, so there
+    /// the whole of it is the answer. One consumer's profile prints the account's home layout on every
+    /// session, and an excerpt of a short stream is otherwise nothing but that.
+    /// </remarks>
+    public static string SinceServing(string text, string nonce)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nonce);
+
+        var started = text.LastIndexOf(StartedLine(nonce), StringComparison.Ordinal);
+
+        return started < 0 ? text : text[(started + StartedLine(nonce).Length)..].TrimStart('\r', '\n');
+    }
+
+    /// <summary>
     /// Whether <paramref name="line"/> is one the agent itself wrote under its own name, which is relayed
     /// even before the started line: a request refused before it could be read carries no nonce to mark.
     /// </summary>

@@ -382,9 +382,13 @@ public sealed class RemoteSyncTransport(
 
         if (exitCode != HarnessExit.Success)
         {
+            // From the agent's own output on, and under the name the configuration declares, as every other
+            // reason built here is: the whole capture holds whatever the host's login shell printed first,
+            // and a pinned connection has ssh name the address this machine resolved.
             throw new HarnessException(
                 exitCode,
-                $"{Host}: '{arguments[0]}' exited {exitCode}{HostProbes.Detail(result.StandardError)}");
+                $"{Host}: '{arguments[0]}' exited {exitCode}"
+                + HostProbes.Detail(HostProbes.AsConfigured(HostAgentProtocol.SinceServing(result.StandardError, nonce), _session.Connection)));
         }
 
         return answer;

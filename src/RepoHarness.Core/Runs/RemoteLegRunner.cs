@@ -150,6 +150,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                             return;
                         }
 
+                        // Under the name the configuration declares, before it is either kept or shown: a
+                        // pinned connection has ssh name the address this machine resolved, and the kept
+                        // copy is the one that reaches the leg's reason, the ledger and --json.
+                        line = HostProbes.AsConfigured(line, session.Connection);
+
                         // Kept as well as shown: a command that refuses before any leg has a
                         // verdict leaves no entry, and its failure is then all it said about why -
                         // from its failure line to the end, because a message runs over several
@@ -167,9 +172,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
                             failure.Add(line);
                         }
 
-                        // ssh writes here too, and a pinned connection has it name an address this
-                        // machine resolved rather than the one the configuration declares.
-                        _output.RawError(HostProbes.AsConfigured(line, session.Connection));
+                        _output.RawError(line);
                     },
                 },
                 cancellationToken)

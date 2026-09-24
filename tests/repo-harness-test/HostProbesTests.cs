@@ -210,6 +210,26 @@ public sealed class HostProbesTests
     }
 
     /// <summary>
+    /// Only the address itself is rewritten, never a longer one that merely begins with it: a line the
+    /// command's own work printed would otherwise name an address that never existed.
+    /// </summary>
+    [Theory]
+    [InlineData("connecting to 10.0.0.50:8080", "connecting to 10.0.0.50:8080")]
+    [InlineData("ssh: connect to host 10.0.0.5 port 22: Connection timed out", "ssh: connect to host mac.invalid port 22: Connection timed out")]
+    [InlineData("at 10.0.0.5, not 10.0.0.51", "at mac.invalid, not 10.0.0.51")]
+    public void ALongerAddressThatMerelyBeginsWithThePinned_IsLeftAlone(string said, string expected)
+    {
+        var pinned = new HostConnection
+        {
+            Host = HostId.Ssh("mac"),
+            Address = "mac.invalid",
+            Pin = new SshPin("10.0.0.5", "mac.invalid"),
+        };
+
+        Assert.Equal(expected, HostProbes.AsConfigured(said, pinned));
+    }
+
+    /// <summary>
     /// Nothing is rewritten where there is no pin, where the pin gave ssh the address the configuration
     /// declares anyway, or where there is no connection at all: those words are already the reader's own.
     /// </summary>
