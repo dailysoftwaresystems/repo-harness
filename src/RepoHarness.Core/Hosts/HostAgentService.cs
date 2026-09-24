@@ -111,7 +111,13 @@ public sealed class HostAgentService(
                 await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
             }
 
-            var info = await DescribeAsync(request.Emulators, request.DeveloperEnvironments, request.Programs, request.ToolSearchDirectories, abandoned.Token)
+            var info = await DescribeAsync(
+                    request.Emulators,
+                    request.DeveloperEnvironments,
+                    request.Programs,
+                    request.ToolSearchDirectories,
+                    new RoomQuestions(request.SpaceAt, request.Builds),
+                    abandoned.Token)
                 .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -129,18 +135,21 @@ public sealed class HostAgentService(
     /// <param name="developerEnvironments">The developer environments to look for, by name.</param>
     /// <param name="programs">The programs to find, the way a leg here will start them.</param>
     /// <param name="searchDirectories">The repository's <c>toolSearchDirectories</c>, of which this machine takes its own platform's.</param>
+    /// <param name="room">Where to measure the room here, and which build directories to measure and read the record of.</param>
     /// <param name="cancellationToken">Stops the checks.</param>
     public async Task<HostAgentInfo> DescribeAsync(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         IReadOnlyDictionary<string, List<string>> searchDirectories,
+        RoomQuestions room,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(emulators);
         ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
         ArgumentNullException.ThrowIfNull(searchDirectories);
+        ArgumentNullException.ThrowIfNull(room);
 
         // By the function the leg's own run uses, on the machine that will run it. Answered from
         // anywhere else this would be a second opinion about this machine's PATH, and a second
@@ -169,6 +178,10 @@ public sealed class HostAgentService(
 
         var current = _identity.Current;
 
+        // Measured here, where the builds will write, and cheaply: the room is the filesystem's own count,
+        // and what a build directory holds is what the build that last finished there recorded, never a walk.
+        var (space, unmeasured) = room.SpaceAt is { Length: > 0 } spaceAt ? Room(ResolveDirectory(spaceAt)) : (null, null);
+
         return new HostAgentInfo
         {
             Version = current.Version,
@@ -179,7 +192,50 @@ public sealed class HostAgentService(
             DeveloperEnvironments = environments,
             Programs = [.. found.Found.Values],
             ProgramDirectories = [.. found.Directories],
+            Space = space,
+            SpaceUnmeasured = unmeasured,
+            Builds = [.. room.Builds.Distinct(StringComparer.Ordinal).Select(BuildRoom)],
         };
+    }
+
+    /// <summary>The room on the filesystem <paramref name="path"/> is on, or why it could not be measured.</summary>
+    private (DiskSpace? Space, string? Unmeasured) Room(string path)
+    {
+        try
+        {
+            return (_fileSystem.SpaceAt(path), null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (null, ex.Message.TrimEnd('.'));
+        }
+    }
+
+    /// <summary>
+    /// What the build directory <paramref name="asked"/> holds, as the build that last finished there recorded
+    /// it, and the room where it is: a record that cannot be read records nothing.
+    /// </summary>
+    private BuildDirectoryRoom BuildRoom(string asked)
+    {
+        var directory = ResolveDirectory(asked);
+        var record = Path.Combine(directory, Build.BuildRecord.FileName);
+        long? recorded = null;
+
+        try
+        {
+            if (_fileSystem.FileExists(record))
+            {
+                recorded = Build.BuildRecord.Parse(_fileSystem.ReadAllText(record)).Bytes;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A record nobody can read says nothing about what the directory holds, as none says nothing.
+        }
+
+        var (space, unmeasured) = Room(directory);
+
+        return new BuildDirectoryRoom(asked, _fileSystem.DirectoryExists(directory), recorded, space, unmeasured);
     }
 
     /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>

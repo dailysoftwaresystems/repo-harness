@@ -894,6 +894,12 @@ public static partial class HarnessConfigValidator
                 problems.Add($"{owner} worktree: {worktreeError}");
             }
 
+            // Not a number, or no room at all, is no need anybody measured: zero is left out instead.
+            if (leg.BuildSpaceGiB is { } room && !(room > 0 && double.IsFinite(room)))
+            {
+                problems.Add($"{owner} buildSpaceGiB must be a positive number of GiB, found {room.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            }
+
             ValidateTest(leg.Test, owner, config, problems);
         }
 

@@ -202,7 +202,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             path,
             recursive: true,
             (ref FileSystemEntry entry) => !entry.IsDirectory,
-            (ref FileSystemEntry entry) => new WrittenFile(entry.ToSpecifiedFullPath(), entry.LastWriteTimeUtc.UtcDateTime)));
+            (ref FileSystemEntry entry) => new WrittenFile(entry.ToSpecifiedFullPath(), entry.LastWriteTimeUtc.UtcDateTime) { Length = entry.Length }));
 
     /// <summary>
     /// <paramref name="walked"/>, each dated by the walk's own reading of its time where the walk had one,
@@ -231,17 +231,19 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             }
 
             DateTime written;
+            long length;
 
             try
             {
                 written = LastWriteTimeUtc(file.Path);
+                length = new FileInfo(file.Path).Length;
             }
             catch (FileNotFoundException)
             {
                 continue;
             }
 
-            yield return file with { LastWriteTimeUtc = written };
+            yield return file with { LastWriteTimeUtc = written, Length = length };
         }
     }
 

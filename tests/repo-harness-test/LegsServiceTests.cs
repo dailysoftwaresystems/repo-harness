@@ -1,4 +1,6 @@
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Output;
@@ -256,10 +258,126 @@ public sealed class LegsServiceTests
         Witness = new EmulatorWitness { Command = ["/opt/arm64/uname"], Pattern = "aarch64" },
     };
 
+    /// <summary>
+    /// A leg whose host lacks the room its build needs is turned away before it starts, skipped-unavailable,
+    /// saying what is free there and what it needs: started, it died with the disk full half way through.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseHostLacksTheRoomItsBuildNeeds_IsTurnedAway_SayingWhatIsFreeAndWhatItNeeds()
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 8 } },
+            rooms: (_, path) => Room(path, exists: false, recorded: null, free: 3));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+        var placement = Assert.Single(report.Placements);
+
+        Assert.False(placement.Runnable);
+        Assert.Equal(LegVerdict.SkippedUnavailable, placement.Verdict);
+        Assert.Equal("ssh pi: 3 GiB free on '/', and this leg needs ~8 GiB, as its buildSpaceGiB, 8, declares", placement.Reason);
+    }
+
+    /// <summary>
+    /// Legs building on one filesystem of one host are counted together, in the order they were selected,
+    /// because every build directory stays once built: a leg that does not fit beside those before it is turned
+    /// away, naming them, and they are kept.
+    /// </summary>
+    [Fact]
+    public async Task LegsSharingAHostsRoom_AreCountedTogether_AndTheOneThatNoLongerFitsIsTurnedAway()
+    {
+        var fixture = Create(
+            new()
+            {
+                ["arm-debug"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 5 },
+                ["arm-release"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "release", BuildSpaceGiB = 5 },
+            },
+            configure: config => config.BuildConfigs["release"] = new BuildConfiguration(),
+            rooms: (_, path) => Room(path, exists: false, recorded: null, free: 8));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.True(report.Placements.Single(placement => placement.Leg.Name == "arm-debug").Runnable);
+
+        var turned = report.Placements.Single(placement => placement.Leg.Name == "arm-release");
+        Assert.False(turned.Runnable);
+        Assert.EndsWith(", beside the ~5 GiB 'arm-debug' need there", turned.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A worktree's first build of a variant needs what the main checkout's copy of that variant came to on the
+    /// same host - what a consumer's first builds of a new worktree's copy needed, and did not have.
+    /// </summary>
+    [Fact]
+    public async Task AWorktreesFirstBuild_NeedsWhatTheMainCheckoutsCopyOfTheVariantCameTo()
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", Worktree = "feature" } },
+            rooms: (_, path) => path.Contains(".worktree-", StringComparison.Ordinal)
+                ? Room(path, exists: false, recorded: null, free: 6)
+                : Room(path, exists: true, recorded: 7L << 30, free: 6));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+        var placement = Assert.Single(report.Placements);
+
+        Assert.False(placement.Runnable);
+        Assert.Equal(
+            "ssh pi: 6 GiB free on '/', and this leg needs ~7 GiB, what the main checkout's copy of the same variant came to there",
+            placement.Reason);
+    }
+
+    /// <summary>
+    /// What a build directory already holds counts against its need: one its own last build recorded needs no
+    /// more room than it has, and one no build of this version recorded holds an amount nothing measured, so
+    /// both are placed as they always were, however little is free.
+    /// </summary>
+    [Theory]
+    [InlineData(8L << 30, null)]
+    [InlineData(null, 100.0)]
+    public async Task ABuildDirectoryAlreadyThere_CountsAgainstItsNeed_OrLeavesItUnknown(long? recorded, double? declared)
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = declared } },
+            rooms: (_, path) => Room(path, exists: true, recorded: recorded, free: 1));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.True(Assert.Single(report.Placements).Runnable);
+    }
+
+    /// <summary>
+    /// A host is asked the room where its copies are kept and each build directory a leg would fill there; a
+    /// command that builds nothing asks about none, and turns nothing away for room: clean is how room is made.
+    /// </summary>
+    [Fact]
+    public async Task ACommandThatBuildsNothing_AsksAboutNoBuildDirectory_AndTurnsNothingAwayForRoom()
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 100 } },
+            rooms: (_, path) => Room(path, exists: false, recorded: null, free: 1));
+
+        var copying = await fixture.Service.CheckAsync(Root, null, LegWorkload.Copy, here: null, TestContext.Current.CancellationToken);
+
+        Assert.True(Assert.Single(copying.Placements).Runnable);
+
+        var asked = fixture.Inspector.RoomAsked.Single(entry => entry.Host == HostId.Ssh("pi")).Room;
+        Assert.Equal("/home/pi/repo", asked.SpaceAt);
+        Assert.Empty(asked.Builds);
+
+        await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        var building = fixture.Inspector.RoomAsked.Last(entry => entry.Host == HostId.Ssh("pi")).Room;
+        Assert.StartsWith("/home/pi/repo", Assert.Single(building.Builds), StringComparison.Ordinal);
+    }
+
+    /// <summary>What a host answers about a build directory: whether it is there, what it recorded, the room on '/'.</summary>
+    private static BuildDirectoryRoom Room(string path, bool exists, long? recorded, long free)
+        => new(path, exists, recorded, new DiskSpace(free << 30, 48L << 30, "/"), null);
+
     private static Fixture Create(
         Dictionary<string, LegConfig> legs,
         Action<HarnessConfig>? configure = null,
-        Func<HostId, HostReport>? inspect = null)
+        Func<HostId, HostReport>? inspect = null,
+        Func<HostId, string, BuildDirectoryRoom>? rooms = null)
     {
         var config = new HarnessConfig
         {
@@ -278,11 +396,11 @@ public sealed class LegsServiceTests
 
         configure?.Invoke(config);
 
-        var inspector = new RecordingInspector(inspect ?? (host => Measurements[host]));
+        var inspector = new RecordingInspector(inspect ?? (host => Measurements[host])) { BuildRooms = rooms };
         var output = new StringWriter();
         var error = new StringWriter();
 
-        var service = new LegsService(HostDoubles.Loader(config, Root), inspector, new ConsoleHarnessOutput(output, error, verbose: false));
+        var service = new LegsService(HostDoubles.Loader(config, Root), inspector, HostDoubles.Platform(), new ConsoleHarnessOutput(output, error, verbose: false));
 
         return new Fixture(service, inspector, output, error);
     }

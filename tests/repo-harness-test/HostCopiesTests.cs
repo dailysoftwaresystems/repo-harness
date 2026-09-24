@@ -903,7 +903,7 @@ public sealed class HostCopiesTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Local(harness),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Output),
+            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,

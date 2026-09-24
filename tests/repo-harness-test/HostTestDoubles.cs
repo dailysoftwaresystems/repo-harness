@@ -220,7 +220,25 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
 /// <summary>Reports a fixed measurement for each host, and records which hosts were measured, and for which emulators.</summary>
 internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHostInspector
 {
-    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyDictionary<string, DeveloperEnvironmentConfig> Environments, IReadOnlyList<string> Programs)> _inspected = [];
+    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyDictionary<string, DeveloperEnvironmentConfig> Environments, IReadOnlyList<string> Programs, RoomQuestions Room)> _inspected = [];
+
+    /// <summary>What each measurement was asked about the room on the host, in the order the hosts were measured.</summary>
+    public IReadOnlyList<(HostId Host, RoomQuestions Room)> RoomAsked
+    {
+        get
+        {
+            lock (_inspected)
+            {
+                return [.. _inspected.Select(entry => (entry.Host, entry.Room))];
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a host answers about each build directory it is asked about, where a test scripts it; unscripted,
+    /// a host answers for none.
+    /// </summary>
+    public Func<HostId, string, BuildDirectoryRoom>? BuildRooms { get; init; }
 
     /// <summary>Every host measured, in order.</summary>
     public IReadOnlyList<HostId> Inspected
@@ -276,14 +294,20 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default)
     {
         lock (_inspected)
         {
-            _inspected.Add((host, emulators, developerEnvironments, programs));
+            _inspected.Add((host, emulators, developerEnvironments, programs, room ?? RoomQuestions.None));
         }
 
         var answer = report(host);
+
+        if (BuildRooms is { } rooms && answer.Available)
+        {
+            answer = answer with { Builds = [.. (room ?? RoomQuestions.None).Builds.Select(path => rooms(host, path))] };
+        }
 
         // Likewise a host that says nothing about developer environments can set up every one it was
         // asked about; a test about one missing scripts it.
@@ -424,6 +448,7 @@ internal static class HostDoubles
             _ => throw new ArgumentOutOfRangeException(nameof(current), current, "Only Windows and Linux stand-ins are needed."),
         });
         platform.Processor.Returns(processor);
+        platform.PathComparison.Returns(current == PlatformId.Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         platform.HomeDirectory.Returns(home ?? TestHost.TemporaryRoot);
         return platform;
     }

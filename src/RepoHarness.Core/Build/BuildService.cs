@@ -388,10 +388,14 @@ public sealed class BuildService(
             // Contention is doubt too: a build that shared its directory once wrote no record at all, so
             // the previous build's clean one survived it, and running it again with nothing changed
             // built on top of objects this tool had just called untrustworthy.
+            //
+            // With what the directory came to, which is the room its next build from clean needs, and the
+            // room a first build of this variant in another copy on this machine needs: see LegRoom.
             Record(buildDirectory, recorded with
             {
                 Unordered = recorded.Unordered ?? Unordered(phases, seen, guards.Opening),
                 Newest = left.Newest,
+                Bytes = left.Bytes,
             });
 
             return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies) { Compilers = compilers };
@@ -487,7 +491,10 @@ public sealed class BuildService(
     /// The longest path below the directory that this build did not write, as the host spells it; empty
     /// where every path is this build's, or where the walk was not given when the build began.
     /// </param>
-    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable, string Leftover = "");
+    /// <param name="Bytes">
+    /// What the files in it hold, together; <see langword="null"/> where it could not all be read.
+    /// </param>
+    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable, string Leftover = "", long? Bytes = 0);
 
     /// <summary>
     /// Walks <paramref name="buildDirectory"/> once for what is in it: the deepest path below it and the
@@ -522,6 +529,7 @@ public sealed class BuildService(
         var mine = began?.AddSeconds(-2);
         var deepest = string.Empty;
         var leftover = string.Empty;
+        var bytes = 0L;
         WrittenFile? newest = null;
 
         try
@@ -529,6 +537,7 @@ public sealed class BuildService(
             foreach (var file in _fileSystem.EnumerateWrittenFiles(buildDirectory))
             {
                 var below = Path.GetRelativePath(buildDirectory, file.Path);
+                bytes += file.Length;
 
                 if (mine is null || file.LastWriteTimeUtc >= mine)
                 {
@@ -550,10 +559,10 @@ public sealed class BuildService(
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new Left(string.Empty, null, ex.Message);
+            return new Left(string.Empty, null, ex.Message, Bytes: null);
         }
 
-        return new Left(deepest, newest, null, leftover);
+        return new Left(deepest, newest, null, leftover, bytes);
     }
 
     /// <summary>

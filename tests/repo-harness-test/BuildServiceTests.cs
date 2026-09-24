@@ -77,6 +77,31 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A build records what its directory came to, from the walk it already makes of it, so that the room
+    /// its next build from clean needs - and a first build of its variant in another copy - is known without
+    /// walking the directory again.
+    /// </summary>
+    [Fact]
+    public async Task ABuild_RecordsWhatItsDirectoryCameTo()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        string[] leaves = [Path.Combine("bin", "app.dll"), Path.Combine("obj", "a.o"), Path.Combine("obj", "b.o")];
+        var (service, _) = await TrackedWithFactoryAsync(temp, token, leaves: leaves);
+
+        Assert.Equal(LegVerdict.Passed, (await service.BuildAsync(Config(), request, token)).Verdict.Verdict);
+
+        var recorded = BuildRecord.Parse(await File.ReadAllTextAsync(RecordOf(request, temp), token)).Bytes;
+        var directory = request.Variant.DirectoryUnder(temp.Path);
+
+        // Every file the build left, and the record as it was begun; never more than the directory now holds,
+        // whose record has since grown by what it records.
+        Assert.NotNull(recorded);
+        Assert.InRange(recorded.Value, leaves.Length * "built".Length, new PhysicalFileSystem(FilePermissionsFactory.Create()).DirectorySize(directory));
+    }
+
+    /// <summary>
     /// A path an earlier build left is reported as a leftover, with the remedy for one, and never as
     /// something this build produced.
     /// </summary>

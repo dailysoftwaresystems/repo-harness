@@ -419,6 +419,9 @@ public sealed partial class HelpTests
         Assert.Contains("--dry-run", text, StringComparison.Ordinal);
         Assert.Contains("A build directory that is a link is left alone", text, StringComparison.Ordinal);
         Assert.Contains("both full and behind has to be freed by hand once", text, StringComparison.Ordinal);
+        Assert.Contains("A leg is placed only where its host has the room its build still needs", text, StringComparison.Ordinal);
+        Assert.Contains("the leg's buildSpaceGiB", text, StringComparison.Ordinal);
+        Assert.Contains("Commands that build nothing - sync, clean - need no room.", text, StringComparison.Ordinal);
     }
 
     /// <summary>

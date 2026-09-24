@@ -944,6 +944,24 @@ internal static class HelpCommand
         builder.AppendLine("A host whose DssHarness is older than this machine's is updated first, as for any");
         builder.AppendLine("command, and the update needs room: a host that is both full and behind has to be");
         builder.AppendLine("freed by hand once.");
+        builder.AppendLine();
+        builder.AppendLine("A leg is placed only where its host has the room its build still needs, as it is");
+        builder.AppendLine("only where the programs it starts are: a build that fills a disk dies half way, and");
+        builder.AppendLine("takes any other leg building there with it. What a build needs is what its");
+        builder.AppendLine("directory comes to once built - the leg's buildSpaceGiB, or, left out, what a build");
+        builder.AppendLine("of its variant recorded as it finished: in this tree's copy, or else in the main");
+        builder.AppendLine("checkout's copy on that host - less what the directory already holds. Legs building");
+        builder.AppendLine("on one filesystem of a host are counted together, in the order they were selected,");
+        builder.AppendLine("since every build directory stays once built; one that does not fit beside those");
+        builder.AppendLine("before it is skipped-unavailable:");
+        builder.AppendLine();
+        builder.AppendLine("  ssh vps: 3.2 GiB free on '/', and this leg needs ~8 GiB, what the main");
+        builder.AppendLine("  checkout's copy of the same variant came to there");
+        builder.AppendLine();
+        builder.AppendLine("A leg nothing has measured that declares no buildSpaceGiB is placed as it always");
+        builder.AppendLine("was, and so is one whose directory no build of this version recorded. Nothing is");
+        builder.AppendLine("walked to decide: the room is the filesystem's own count, and what a directory holds");
+        builder.AppendLine("is what its build recorded. Commands that build nothing - sync, clean - need no room.");
 
         return builder.ToString();
     }
@@ -1225,7 +1243,8 @@ internal static class HelpCommand
         builder.AppendLine("  developerEnvironments  what a toolchain's legs start in, set up on the host");
         builder.AppendLine("                 that runs them: visualStudio runs that instance's vcvarsall.bat");
         builder.AppendLine("  legs           units of work: os + processor (+ emulator) + project + toolchain");
-        builder.AppendLine("                 + config (+ sanitizer)");
+        builder.AppendLine("                 + config (+ sanitizer); buildSpaceGiB, the room a leg's build");
+        builder.AppendLine("                 comes to, is 'help space'");
         builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
         builder.AppendLine("  predefinedRunners  multi-phase procedures such as a corpus test or a benchmark");

@@ -1025,6 +1025,7 @@ public sealed class ToolResolutionTests
             new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
             ["cmake", "ninja", "absent"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase) { [platform.PlatformKey] = [searched] },
+            RoomQuestions.None,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ProgramFound.OnPath, Answer(info, "cmake").Found);

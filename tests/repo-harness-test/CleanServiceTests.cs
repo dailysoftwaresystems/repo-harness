@@ -335,7 +335,7 @@ public sealed class CleanServiceTests
                 Host = host,
                 Os = harness.Platform.PlatformKey,
                 Processor = harness.Platform.Processor,
-            }), harness.Output),
+            }), harness.Platform, harness.Output),
             runLock ?? new RunLock(harness.FileSystem, harness.Output, harness.Identity),
             transports,
             new RemoteLegRunner(hosts ?? new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),

@@ -318,6 +318,19 @@ public sealed class ConfigStoreTests
         Assert.Equal("leg: {leg}, minutes: (?<budget>[0-9]+)", config.Ci.WorkflowBudgetPattern);
     }
 
+    /// <summary>A leg's buildSpaceGiB is a positive number of GiB: none, or less, is no need anybody measured.</summary>
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-2")]
+    public void Load_RejectsABuildSpaceThatIsNoRoom(string room)
+    {
+        var exception = LoadInvalid(
+            "{ \"buildConfigs\": { \"debug\": {} }, \"legs\": { \"native\": { \"os\": \"linux\", \"processor\": \"x86_64\", \"config\": \"debug\", \"buildSpaceGiB\": "
+            + room + " } } }");
+
+        Assert.Contains($"leg 'native' buildSpaceGiB must be a positive number of GiB, found {room}", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Load_RejectsAPathLimitBelowOne()
     {

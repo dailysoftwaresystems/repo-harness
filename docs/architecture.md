@@ -1388,6 +1388,31 @@ A host whose DssHarness is older than this machine's is brought to this build fi
 every command that asks it anything, and that write needs room. A host that is both full and
 behind is freed by hand, once.
 
+### Room before a build
+
+A leg is placed only where its host has the room its build still needs, as it is only where the
+programs it starts are. A consumer's two variants - the first builds of a new worktree's copy -
+filled a host's disk half way through and died writing an object, while `legs` said the host
+could run them.
+
+- **What a build needs** is what its build directory comes to once built: the leg's
+  `buildSpaceGiB`, or, left out, what a build of its variant recorded as it finished - in the
+  tree's own copy on that host, or else in the main checkout's copy there - less what the
+  directory already holds. A build records what its directory came to in its `.harness-build`,
+  summed from the walk it already makes of the directory as it finishes.
+- **Nothing is walked to decide.** Each host is asked, in the same measuring that finds its
+  programs, the room on the filesystem its copies are kept on and, for a command that builds,
+  what each leg's build directory - and the main checkout's copy of the same variant - holds as
+  recorded, with the room where each is. The room is the filesystem's own count.
+- **Legs sharing a filesystem add up.** Legs building on one filesystem of one host are counted
+  together, in the order they were selected, because every build directory stays once built. A
+  leg that does not fit beside the ones before it is `skipped-unavailable`, naming what is free,
+  what it needs and why, and what the legs before it need; they are kept.
+- **Unknown is not refused.** A leg nothing has measured that declares no `buildSpaceGiB` is
+  placed as it always was, and so is one whose directory no build of this version recorded,
+  since what that directory holds is an amount nothing measured.
+- **Only a command that builds.** `sync` and `clean` need no room: clean is how room is made.
+
 ## Syncing a tree
 
 `sync` puts a host's copy of the repository in step with this tree. It is the same code path

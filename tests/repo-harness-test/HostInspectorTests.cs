@@ -604,6 +604,42 @@ public sealed class HostInspectorTests
     }
 
     /// <summary>
+    /// What a host is asked about the room on it travels to it as asked, and what it answers - the room where
+    /// its copies are kept, and each build directory's record and room - comes back on its report.
+    /// </summary>
+    [Fact]
+    public async Task TheRoomAHostIsAskedAbout_TravelsToIt_AndWhatItAnswersComesBack()
+    {
+        HostAgentRequest? asked = null;
+        var disk = new DiskSpace(3L << 30, 48L << 30, "/");
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        {
+            asked = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
+
+            return HostResults.Ok(JsonSerializer.Serialize(
+                new HostAgentInfo
+                {
+                    Version = Root.Version,
+                    AssemblySha256 = Root.AssemblySha256,
+                    Os = "linux",
+                    Processor = "x86_64",
+                    Space = disk,
+                    Builds = [new BuildDirectoryRoom("~/repo/build/x86_64-gcc-debug", true, 4096, disk, null)],
+                },
+                HostAgentProtocol.JsonOptions));
+        }));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro), room: new RoomQuestions("~/repo", ["~/repo/build/x86_64-gcc-debug"]));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal("~/repo", asked!.SpaceAt);
+        Assert.Equal(["~/repo/build/x86_64-gcc-debug"], asked.Builds);
+        Assert.Equal(disk, report.Space);
+        Assert.Equal(4096, Assert.Single(report.Builds).RecordedBytes);
+    }
+
+    /// <summary>
     /// The developer environments a host is asked about travel to it, what it found comes back under
     /// the names they were asked by, and each one gives the host the time vswhere may take to answer.
     /// </summary>
@@ -1080,13 +1116,15 @@ public sealed class HostInspectorTests
             HostId host,
             IReadOnlyDictionary<string, EmulatorConfig>? emulators = null,
             IReadOnlyList<string>? programs = null,
-            IReadOnlyDictionary<string, DeveloperEnvironmentConfig>? environments = null)
+            IReadOnlyDictionary<string, DeveloperEnvironmentConfig>? environments = null,
+            RoomQuestions? room = null)
             => _inspector.InspectAsync(
                 _context,
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
                 environments ?? new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
                 programs ?? [],
+                room,
                 TestContext.Current.CancellationToken);
 
         public void Dispose() => Repository.Dispose();

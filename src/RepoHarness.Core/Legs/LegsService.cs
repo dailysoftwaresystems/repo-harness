@@ -4,6 +4,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
+using RepoHarness.Core.Platform;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -59,13 +60,14 @@ public sealed record LegsReport(IReadOnlyList<LegPlacement> Placements, IReadOnl
 /// that provides its operating system, its processor and its emulator - turning it away there when
 /// that host lacks a program the command requires.
 /// </summary>
-public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspector inspector, IHarnessOutput output)
+public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspector inspector, IHostPlatform platform, IHarnessOutput output)
 {
     /// <summary>The command's name, which prefixes what it reports.</summary>
     public const string CommandName = "legs";
 
     private readonly IHarnessContextLoader _contextLoader = contextLoader;
     private readonly IHostInspector _inspector = inspector;
+    private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
 
     /// <summary>
@@ -100,6 +102,12 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         var candidates = selection.Legs.Select(leg => (leg, Hosts: LegPlacement.Candidates(config, leg.Leg, here is not null))).ToList();
         var reports = new Dictionary<HostId, HostReport>();
 
+        // Asked in the same measuring, for nothing: the room on each host, and - for a command that builds -
+        // what the build directories it would fill hold there. A command that builds nothing needs no room,
+        // so it asks about no build directory and none of its legs is turned away for room: clean, above all,
+        // is how room is made.
+        var room = LegRoom.Questions(context, candidates, here, _platform.PathComparison, workload.Build);
+
         // This machine costs nothing to reach, so it is measured first. Other hosts are measured only
         // for the legs it cannot take at all - the wrong machine, or an emulator that does not work
         // here - and all of those hosts at once. A leg it can take goes nowhere else, whatever
@@ -107,7 +115,7 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         if (candidates.Any(entry => entry.Hosts.Contains(HostId.Local)))
         {
             reports[HostId.Local] = await _inspector
-                .InspectAsync(context, HostId.Local, emulators, environments, programs, cancellationToken)
+                .InspectAsync(context, HostId.Local, emulators, environments, programs, room.GetValueOrDefault(HostId.Local), cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -119,12 +127,19 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
             .Distinct()
             .ToList();
 
-        foreach (var report in await InspectAllAsync(context, remote, emulators, environments, programs, cancellationToken).ConfigureAwait(false))
+        foreach (var report in await InspectAllAsync(context, remote, emulators, environments, programs, room, cancellationToken).ConfigureAwait(false))
         {
             reports[report.Host] = report;
         }
 
-        var placements = selection.Legs.Select(leg => LegPlacement.Place(config, leg, workload, reports, here)).ToList();
+        // A leg is refused a host without the room its build needs before it starts, as it is one without the
+        // programs: started, it died with the disk full half way through, and took any other leg building there
+        // with it.
+        var placements = LegRoom.Apply(
+            context,
+            [.. selection.Legs.Select(leg => LegPlacement.Place(config, leg, workload, reports, here))],
+            here,
+            _platform.PathComparison);
 
         // Each leg that cannot run is its own warning, naming it and saying why, while the others go on.
         foreach (var placement in placements.Where(placement => !placement.Runnable))
@@ -146,9 +161,10 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> environments,
         IReadOnlyList<string> programs,
+        IReadOnlyDictionary<HostId, RoomQuestions> room,
         CancellationToken cancellationToken)
     {
-        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, environments, programs, cancellationToken)).ToList();
+        var inspections = hosts.Select(host => InspectOneAsync(context, host, emulators, environments, programs, room.GetValueOrDefault(host), cancellationToken)).ToList();
 
         try
         {
@@ -168,8 +184,9 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> environments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room,
         CancellationToken cancellationToken)
-        => await _inspector.InspectAsync(context, host, emulators, environments, programs, cancellationToken).ConfigureAwait(false);
+        => await _inspector.InspectAsync(context, host, emulators, environments, programs, room, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Reports what the measurements that finished changed, warns about every failure but one, and raises that

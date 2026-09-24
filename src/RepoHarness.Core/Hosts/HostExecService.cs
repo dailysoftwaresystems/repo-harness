@@ -108,7 +108,7 @@ public sealed class HostExecService(
                 new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
                 new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
                 [],
-                cancellationToken)
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         foreach (var action in report.Actions)

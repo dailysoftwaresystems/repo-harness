@@ -239,10 +239,10 @@ public sealed class PhysicalFileSystemTests
     }
 
     /// <summary>
-    /// A file the walk listed but could not stat is asked again directly, and one gone since the walk
-    /// listed it - its directory gone too, or not - is left out rather than failing the walk: on Linux and
-    /// macOS a file removed between the listing and the stat is exactly that, and one deleted at the wrong
-    /// moment left a build nothing to date its changes against.
+    /// A file the walk listed but could not stat is asked again directly, for when it was written and what
+    /// it holds, and one gone since the walk listed it - its directory gone too, or not - is left out rather
+    /// than failing the walk: on Linux and macOS a file removed between the listing and the stat is exactly
+    /// that, and one deleted at the wrong moment left a build nothing to date its changes against.
     /// </summary>
     [Fact]
     public void Dated_AsksAgainAFileTheWalkCouldNotStat_AndLeavesOutOneGoneSince()
@@ -261,7 +261,7 @@ public sealed class PhysicalFileSystemTests
             new WrittenFile(temp.Combine("gone", "scratch.o"), unstatted),
         ]).ToList();
 
-        Assert.Equal([new WrittenFile(kept, keptTime)], dated);
+        Assert.Equal([new WrittenFile(kept, keptTime) { Length = 1 }], dated);
     }
 
     /// <summary>

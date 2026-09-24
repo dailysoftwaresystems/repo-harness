@@ -88,6 +88,18 @@ public sealed record HostReport
     /// <summary>What inspection changed on the host, such as installing DssHarness.</summary>
     public IReadOnlyList<string> Actions { get; init; } = [];
 
+    /// <summary>
+    /// The room on the filesystem its copies of the repository are kept on - the tree the command was typed
+    /// in, for this machine - or <see langword="null"/> where it was not asked, or could not be measured.
+    /// </summary>
+    public FileSystem.DiskSpace? Space { get; init; }
+
+    /// <summary>Why <see cref="Space"/> could not be measured, where it could not.</summary>
+    public string? SpaceUnmeasured { get; init; }
+
+    /// <summary>What each build directory it was asked about holds, as its record says, and the room where it is.</summary>
+    public IReadOnlyList<BuildDirectoryRoom> Builds { get; init; } = [];
+
     /// <summary>How to reach DssHarness there; <see langword="null"/> for this machine and for a host that is unavailable.</summary>
     public HostSession? Session { get; init; }
 }
@@ -109,6 +121,7 @@ public interface IHostInspector
     /// <param name="emulators">The emulators to check there, by name.</param>
     /// <param name="developerEnvironments">The developer environments to look for there, by name.</param>
     /// <param name="programs">The programs to find there, the way a leg there will start them.</param>
+    /// <param name="room">Where to measure the room there, and which build directories; none where left out.</param>
     /// <param name="cancellationToken">Stops the measuring.</param>
     Task<HostReport> InspectAsync(
         HarnessContext context,
@@ -116,7 +129,23 @@ public interface IHostInspector
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>What a host is asked about the room on it.</summary>
+/// <param name="SpaceAt">
+/// Where to measure the room on its filesystem - where its copies of the repository are kept - absolute or
+/// from the home directory; <see langword="null"/> to measure none.
+/// </param>
+/// <param name="Builds">
+/// The build directories there whose room to measure and whose record to read, absolute or from the home
+/// directory.
+/// </param>
+public sealed record RoomQuestions(string? SpaceAt, IReadOnlyList<string> Builds)
+{
+    /// <summary>Nothing asked.</summary>
+    public static RoomQuestions None { get; } = new(null, []);
 }
 
 /// <summary>What a host is asked when it is measured.</summary>
@@ -124,11 +153,13 @@ public interface IHostInspector
 /// <param name="DeveloperEnvironments">The developer environments to look for, by name.</param>
 /// <param name="Programs">The programs to find.</param>
 /// <param name="SearchDirectories">The repository's <c>toolSearchDirectories</c>.</param>
+/// <param name="Room">Where to measure the room, and which build directories.</param>
 internal sealed record HostQuestions(
     IReadOnlyDictionary<string, EmulatorConfig> Emulators,
     IReadOnlyDictionary<string, DeveloperEnvironmentConfig> DeveloperEnvironments,
     IReadOnlyList<string> Programs,
-    IReadOnlyDictionary<string, List<string>> SearchDirectories);
+    IReadOnlyDictionary<string, List<string>> SearchDirectories,
+    RoomQuestions Room);
 
 /// <inheritdoc cref="IHostInspector"/>
 public sealed class HostInspector(
@@ -157,6 +188,7 @@ public sealed class HostInspector(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -165,7 +197,7 @@ public sealed class HostInspector(
         ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
 
-        var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories);
+        var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories, room ?? RoomQuestions.None);
 
         return host.Kind == HostKind.Local
             ? InspectLocalAsync(questions, cancellationToken)
@@ -176,7 +208,7 @@ public sealed class HostInspector(
     private async Task<HostReport> InspectLocalAsync(HostQuestions questions, CancellationToken cancellationToken)
     {
         var info = await _agent
-            .DescribeAsync(questions.Emulators, questions.DeveloperEnvironments, questions.Programs, questions.SearchDirectories, cancellationToken)
+            .DescribeAsync(questions.Emulators, questions.DeveloperEnvironments, questions.Programs, questions.SearchDirectories, questions.Room, cancellationToken)
             .ConfigureAwait(false);
 
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
@@ -382,6 +414,8 @@ public sealed class HostInspector(
                 ToolSearchDirectories = new Dictionary<string, List<string>>(
                     questions.SearchDirectories,
                     StringComparer.OrdinalIgnoreCase),
+                SpaceAt = questions.Room.SpaceAt,
+                Builds = [.. questions.Room.Builds],
             },
             HostAgentProtocol.JsonOptions);
 
@@ -552,6 +586,9 @@ public sealed class HostInspector(
             .GroupBy(location => location.Program, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal),
         ProgramDirectories = info.ProgramDirectories,
+        Space = info.Space,
+        SpaceUnmeasured = info.SpaceUnmeasured,
+        Builds = info.Builds,
         Session = session,
     };
 
