@@ -101,12 +101,13 @@ public sealed class LocalHostConfig : HostSettings
 {
 }
 
-/// <summary>A host reached through a transport, which keeps a copy of the repository of its own.</summary>
+/// <summary>A host reached through a transport, which keeps copies of the repository's trees of its own.</summary>
 public abstract class RemoteHostConfig : HostSettings
 {
     /// <summary>
-    /// Where this host keeps its copy of the repository: an absolute path, or one starting with
-    /// <c>~/</c> for the home directory of the user the host is reached as.
+    /// Where this host keeps its copy of the main checkout: an absolute path, or one starting with
+    /// <c>~/</c> for the home directory of the user the host is reached as. Each worktree's copy is
+    /// kept beside it: see <see cref="Sync.HostCopies"/>.
     /// </summary>
     public required string RepositoryPath { get; init; }
 }

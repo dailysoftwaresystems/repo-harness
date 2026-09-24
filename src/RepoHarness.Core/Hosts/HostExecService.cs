@@ -5,12 +5,13 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Sync;
 
 namespace RepoHarness.Core.Hosts;
 
 /// <summary>
-/// Runs one DssHarness command on a WSL distribution or an ssh host, in that host's copy of the
-/// repository, with its output streamed here as it is written.
+/// Runs one DssHarness command on a WSL distribution or an ssh host, in that host's copy of the tree
+/// it is typed in, with its output streamed here as it is written.
 /// </summary>
 public sealed class HostExecService(
     IHarnessContextLoader contextLoader,
@@ -114,7 +115,7 @@ public sealed class HostExecService(
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Run,
-                Directory = target.RepositoryPath,
+                Directory = HostCopies.For(target.RepositoryPath, context.Layout, context.Layout.RepositoryRoot, _platform.PathComparison),
                 Arguments = [.. arguments],
                 Nonce = nonce,
             },

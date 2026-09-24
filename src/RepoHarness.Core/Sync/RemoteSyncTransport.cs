@@ -47,6 +47,19 @@ public sealed class RemoteSyncTransport(
         => AskAsync<object>(root, [SyncServe.InitRepository, root], cancellationToken);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Asked from the home directory, not from the directory the copy is kept in: a removal is asked where that
+    /// directory may be gone - a repositoryPath changed since, a distribution reinstalled - and a copy whose
+    /// directory is gone is not there, which is the answer. Asked from it, the agent would refuse to start, and the
+    /// copy would stay recorded for good.
+    /// </remarks>
+    public async Task<CopyRemoval> RemoveCopyAsync(string root, CancellationToken cancellationToken = default)
+        => (await AskAsync<SyncRemoveAnswer>(root, [SyncServe.RemoveCopy, root], cancellationToken, HomeDirectory).ConfigureAwait(false))?.Removal
+            ?? throw new HarnessException(
+                HarnessExit.HostUnavailable,
+                $"{Host} did not answer whether it removed '{root}'.");
+
+    /// <inheritdoc/>
     public async Task<SyncManifest> ReadManifestAsync(
         string root,
         IReadOnlyList<string> withheld,
@@ -211,7 +224,13 @@ public sealed class RemoteSyncTransport(
     /// command's result. A line that never arrives means the operation may not have run, or run only
     /// in part, which is exactly what must not be reported as a success.
     /// </remarks>
-    private async Task<T?> AskAsync<T>(string root, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    /// <param name="root">The copy the operation acts on.</param>
+    /// <param name="arguments">The operation and its arguments.</param>
+    /// <param name="cancellationToken">Stops the operation here and there.</param>
+    /// <param name="startIn">
+    /// Where the agent starts, when not in the directory the copy is kept in, which a first sync needs to be there.
+    /// </param>
+    private async Task<T?> AskAsync<T>(string root, IReadOnlyList<string> arguments, CancellationToken cancellationToken, string? startIn = null)
         where T : class
     {
         var nonce = HostAgentProtocol.NewNonce();
@@ -223,7 +242,7 @@ public sealed class RemoteSyncTransport(
 
                 // The operation names the tree it acts on in its own arguments, and the agent starts
                 // in a directory that may not exist yet on a first sync.
-                Directory = ParentOf(root),
+                Directory = startIn ?? ParentOf(root),
                 Arguments = [SyncServe.CommandName, .. arguments],
                 Nonce = nonce,
             },
@@ -277,6 +296,9 @@ public sealed class RemoteSyncTransport(
     /// The directory the agent starts in. A first sync creates the copy, so the agent cannot start
     /// inside it; its parent is where the operation is served from instead.
     /// </summary>
+    /// <summary>The home directory, as the agent is asked to start in it.</summary>
+    private const string HomeDirectory = "~";
+
     private static string ParentOf(string root)
     {
         var trimmed = root.Replace('\\', '/').TrimEnd('/');

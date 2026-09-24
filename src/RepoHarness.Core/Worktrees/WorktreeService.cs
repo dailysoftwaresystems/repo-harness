@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
@@ -92,7 +93,8 @@ public sealed class WorktreeService(
     IFileSystem fileSystem,
     IPathBudget pathBudget,
     IHostPlatform platform,
-    IHarnessOutput output) : IWorktreeService
+    IHarnessOutput output,
+    IHostCopyRemover hostCopies) : IWorktreeService
 {
     /// <summary>The command a deletion reports under.</summary>
     internal const string DeleteCommand = "delete-worktree";
@@ -128,6 +130,7 @@ public sealed class WorktreeService(
     private readonly IPathBudget _pathBudget = pathBudget;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
+    private readonly IHostCopyRemover _hostCopies = hostCopies;
 
     /// <summary>
     /// How long a deletion may run after an interruption before git is stopped, just before the
@@ -380,9 +383,18 @@ public sealed class WorktreeService(
             var cleared = await ClearRecordAsync(layout, worktreeName, path, force, inspector, cancellationToken)
                 .ConfigureAwait(false);
 
+            // Nothing here and nothing in git's record: deleted already, or never made. Copies of it can
+            // still be on hosts that could not be asked to remove them when it was deleted, and asking
+            // them again is what deleting it again is for.
+            if (cleared is null)
+            {
+                return await AndItsHostCopiesAsync(context, worktreeName, path, treeConfig: null, deleted: null, cancellationToken).ConfigureAwait(false);
+            }
+
             if (cleared.Succeeded)
             {
                 await ForgetBaseCommitAsync(layout, worktreeName, CancellationToken.None).ConfigureAwait(false);
+                return await AndItsHostCopiesAsync(context, worktreeName, path, treeConfig: null, cleared, cancellationToken).ConfigureAwait(false);
             }
 
             return cleared;
@@ -454,35 +466,44 @@ public sealed class WorktreeService(
             holdsSubmodules = findings.HoldsSubmodules;
         }
 
+        // Read while the worktree is still there: its branch may declare a host the configuration
+        // this command runs in does not, and its copy there is reached through it.
+        var treeConfig = await OwnConfigurationAsync(layout, path, cancellationToken).ConfigureAwait(false);
+
         // The last moment an interruption can stop this cleanly. From here the deletion goes on
         // after an interruption, which is reported at once; it can still be left partly done, and
         // --force then finishes it.
         cancellationToken.ThrowIfCancellationRequested();
 
-        using var stopping = new CancellationTokenSource();
-        using var interruption = WarnIfInterrupted(worktreeName, cancellationToken, stopping);
+        WorktreeOutcome outcome;
 
-        try
+        // The warning an interruption gives, that the deletion may be left half done, is about this
+        // part alone: once it is over, the worktree is gone or the outcome says what is left.
+        using (var stopping = new CancellationTokenSource())
+        using (WarnIfInterrupted(worktreeName, cancellationToken, stopping))
         {
-            var outcome = force
-                ? await RemoveForcedAsync(layout, worktreeName, path, identity.AdministrativeDirectory, inspector, stopping.Token).ConfigureAwait(false)
-                : await RemoveCheckedAsync(layout, worktreeName, path, identity.AdministrativeDirectory!, holdsSubmodules, stopping.Token).ConfigureAwait(false);
-
-            if (outcome.Succeeded)
+            try
             {
-                // Only once the worktree is really gone. Forgetting it earlier would lose the record
-                // of a worktree a failed removal left in place. Not cancelled: the removal is past
-                // its point of no return, and a record left behind would answer for a later
-                // worktree of the same name.
-                await ForgetBaseCommitAsync(layout, worktreeName, CancellationToken.None).ConfigureAwait(false);
+                outcome = force
+                    ? await RemoveForcedAsync(layout, worktreeName, path, identity.AdministrativeDirectory, inspector, stopping.Token).ConfigureAwait(false)
+                    : await RemoveCheckedAsync(layout, worktreeName, path, identity.AdministrativeDirectory!, holdsSubmodules, stopping.Token).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+            {
+                return Stopped(worktreeName, path, identity.AdministrativeDirectory, checksRan: !force);
+            }
+        }
 
+        if (!outcome.Succeeded)
+        {
             return outcome;
         }
-        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
-        {
-            return Stopped(worktreeName, path, identity.AdministrativeDirectory, checksRan: !force);
-        }
+
+        // Only once the worktree is really gone. Forgetting it earlier would lose the record of a
+        // worktree a failed removal left in place. Not cancelled: the removal is past its point of
+        // no return, and a record left behind would answer for a later worktree of the same name.
+        await ForgetBaseCommitAsync(layout, worktreeName, CancellationToken.None).ConfigureAwait(false);
+        return await AndItsHostCopiesAsync(context, worktreeName, path, treeConfig, outcome, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<WorktreeListing>> ListAsync(
@@ -787,7 +808,8 @@ public sealed class WorktreeService(
     /// or a directory removed by hand leaves it. The record alone keeps the name from ever being
     /// created again, and its git directory can still hold the only copy of some work.
     /// </summary>
-    private async Task<WorktreeOutcome> ClearRecordAsync(
+    /// <returns>What clearing it did, or <see langword="null"/> when git holds no record of it either.</returns>
+    private async Task<WorktreeOutcome?> ClearRecordAsync(
         HarnessLayout layout,
         string name,
         string path,
@@ -820,7 +842,7 @@ public sealed class WorktreeService(
 
         if (record is null)
         {
-            return Refused($"No worktree named '{name}'.");
+            return null;
         }
 
         if (findings is { StopsDeletion: true })
@@ -854,6 +876,79 @@ public sealed class WorktreeService(
         {
             return StoppedClearing(name);
         }
+    }
+
+    /// <summary>
+    /// Asks each host holding a copy of worktree <paramref name="name"/> to remove it, as the last part of deleting
+    /// it, and adds what they did to <paramref name="deleted"/>.
+    /// </summary>
+    /// <param name="context">The repository.</param>
+    /// <param name="name">The worktree.</param>
+    /// <param name="path">The worktree's directory, whose copies these are.</param>
+    /// <param name="treeConfig">The configuration it ran on, read before it was deleted, where it could be.</param>
+    /// <param name="deleted">What deleting it here did, or <see langword="null"/> when it was gone already.</param>
+    /// <param name="cancellationToken">Stops the asking; a copy not yet asked about stays recorded.</param>
+    /// <remarks>
+    /// The worktree stays deleted whatever the hosts answer. A copy not dealt with - its host cannot be asked, a run
+    /// holds it, or removing it failed - stays recorded, and the command fails, naming it, so that whoever deleted
+    /// the worktree learns there is still something of it on a host; deleting the worktree again asks once more.
+    /// </remarks>
+    private async Task<WorktreeOutcome> AndItsHostCopiesAsync(
+        HarnessContext context,
+        string name,
+        string path,
+        HarnessConfig? treeConfig,
+        WorktreeOutcome? deleted,
+        CancellationToken cancellationToken)
+    {
+        var done = deleted is null ? $"Worktree '{name}' is gone already" : $"Worktree '{name}' was deleted";
+        var again = $"'{ToolPackage.Command} {DeleteCommand} {name}'";
+        IReadOnlyList<string> before = deleted?.Outcome.Details ?? [];
+        HostCopyRemoval removal;
+
+        try
+        {
+            removal = await _hostCopies.RemoveAsync(context, name, path, treeConfig, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HarnessException ex)
+        {
+            // With no record to read there is no telling whether a worktree of this name ever had a copy on a
+            // host, so one that is gone already is not said to have been deleted: it may never have existed.
+            return Deleted(CommandOutcome.Failed(
+                ex.ExitCode,
+                deleted is null
+                    ? $"No worktree named '{name}' is here or in git's record, and whether a host holds a copy of one cannot be told: {ex.Message}"
+                    : $"{done}, and none of its copies on hosts was removed: {ex.Message}",
+                before));
+        }
+
+        if (removal.Lines.Count == 0 && !removal.Interrupted)
+        {
+            return deleted ?? Refused(removal.LeftFor is [var other, ..]
+                ? $"No worktree named '{name}' is here or in git's record. The copies kept under that name on hosts are the "
+                    + $"worktree's at '{other}', which still exists, so they were left for it."
+                : $"No worktree named '{name}'.");
+        }
+
+        IReadOnlyList<string> details = [.. before, .. removal.Lines];
+
+        return Deleted(removal switch
+        {
+            { Interrupted: true } => CommandOutcome.Failed(
+                HarnessExit.Cancelled,
+                $"{done}, and the interruption came before every host holding a copy of it had been asked to remove it: "
+                + $"run {again} to ask the rest.",
+                details),
+            { Unfinished.Count: > 0 } => CommandOutcome.Failed(
+                removal.ExitCode,
+                $"{done}, and {removal.Unfinished.Count} of its copies on hosts are not yet dealt with: run {again} once "
+                + "what keeps each is gone.",
+                details),
+            _ when deleted is null => CommandOutcome.Ok($"{done}; each copy of it left on a host is dealt with.", details),
+            _ => deleted.Outcome with { Details = details },
+        });
+
+        WorktreeOutcome Deleted(CommandOutcome outcome) => new(outcome, name, deleted?.Path ?? string.Empty);
     }
 
     /// <summary>Confirms git's record is gone, by the administrative directory the record lives in.</summary>
@@ -1085,6 +1180,30 @@ public sealed class WorktreeService(
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The configuration the worktree at <paramref name="path"/> runs on, or <see langword="null"/> where it cannot be
+    /// read, or is another repository's.
+    /// </summary>
+    /// <remarks>
+    /// Read only to reach the hosts that hold its copies, so one that cannot be read deletes nothing less: its copies
+    /// are reached through the configuration the command runs in, and a host only it declared is said to be declared
+    /// by none. A directory another repository holds, which --force deletes all the same, runs on that repository's
+    /// configuration, and nothing of this one's is reached through it.
+    /// </remarks>
+    private async Task<HarnessConfig?> OwnConfigurationAsync(HarnessLayout layout, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var own = await _contextLoader.LoadAsync(path, cancellationToken).ConfigureAwait(false);
+
+            return PathsEqual(own.Layout.MainCheckoutRoot, layout.MainCheckoutRoot) ? own.Config : null;
+        }
+        catch (Exception ex) when (ex is HarnessException or ConfigException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private bool PathsEqual(string left, string right)

@@ -67,6 +67,9 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// <summary>Name of the run lock file.</summary>
     public const string LockFileName = "lock.json";
 
+    /// <summary>Name of the directory holding the record of which hosts hold a copy of which worktree.</summary>
+    public const string HostCopiesDirectoryName = "host-copies";
+
     /// <summary>
     /// Where one run of an action writes while it runs, relative to a tree root.
     /// </summary>
@@ -280,7 +283,7 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     public string RunsDirectory => Path.Combine(HarnessDirectory, RunsDirectoryName);
 
     /// <summary>
-    /// The ignore file the runs directory holds for itself, whose one rule, <see cref="RunsIgnoreRule"/>,
+    /// The ignore file the runs directory holds for itself, whose one rule, <see cref="SelfIgnoreRule"/>,
     /// keeps everything in that directory - itself included - out of git.
     /// </summary>
     /// <remarks>
@@ -291,8 +294,11 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// </remarks>
     public string RunsIgnoreFile => Path.Combine(RunsDirectory, ".gitignore");
 
-    /// <summary>What <see cref="RunsIgnoreFile"/> holds.</summary>
-    public const string RunsIgnoreRule = "*\n";
+    /// <summary>
+    /// What a directory of the harness's own state holds in its ignore file - <see cref="RunsIgnoreFile"/>, or
+    /// <see cref="HostCopiesIgnoreFile"/> - so that it keeps itself, and all it holds, out of git.
+    /// </summary>
+    public const string SelfIgnoreRule = "*\n";
 
     /// <summary>One run's directory, named by its id.</summary>
     /// <param name="runId">The run's id.</param>
@@ -303,6 +309,21 @@ public sealed record HarnessLayout(string RepositoryRoot, string MainCheckoutRoo
     /// inside a worktree and one started from the root contend over the same file.
     /// </summary>
     public string LockFile => Path.Combine(MainHarnessDirectory, LockFileName);
+
+    /// <summary>
+    /// Where this machine records which hosts hold a copy of which worktree: in the main checkout, as the lock is.
+    /// </summary>
+    /// <remarks>
+    /// One record for every tree, because a worktree's syncs write it and the command that deletes the worktree -
+    /// run from any tree - reads it; and at a place no configuration moves, where the worktrees root is wherever a
+    /// branch's configuration puts it, so a record kept there by one branch's sync would be missed by another's
+    /// deletion. It ignores itself (<see cref="HostCopiesIgnoreFile"/>), as the runs directory does, so it never
+    /// shows in git status whatever the tree's own .gitignore says, and no sync carries it.
+    /// </remarks>
+    public string HostCopiesDirectory => Path.Combine(MainHarnessDirectory, HostCopiesDirectoryName);
+
+    /// <summary>The ignore file <see cref="HostCopiesDirectory"/> holds for itself: <see cref="SelfIgnoreRule"/>.</summary>
+    public string HostCopiesIgnoreFile => Path.Combine(HostCopiesDirectory, ".gitignore");
 
     /// <summary>
     /// Directory of one named worktree under the default root. Callers validate the name first; the

@@ -15,7 +15,7 @@ public static class ContentionRequests
     /// <param name="config">The whole configuration.</param>
     /// <param name="leg">The leg being watched.</param>
     /// <param name="buildDirectory">The leg's own build directory.</param>
-    /// <param name="treeRoot">The tree the leg builds, which every other leg on this machine builds in too.</param>
+    /// <param name="treeRoot">The tree the leg builds, which every other leg of that tree on this machine builds in too.</param>
     /// <param name="platformKey">This machine's platform, which decides each other leg's variant.</param>
     public static ContentionRequest For(
         HarnessConfig config,
@@ -46,9 +46,10 @@ public static class ContentionRequests
     /// <remarks>
     /// What lets a process be said to belong to a sibling. Each leg a host runs is run by a harness
     /// process of its own, so a sibling's compilers are outside this leg's process tree and read, to
-    /// this leg, exactly as a stranger's would. Legs placed on one host build in one copy, so every
-    /// sibling's directory is under the same root as this leg's. Only legs of this machine's
-    /// operating system are listed: no other kind ever builds here.
+    /// this leg, exactly as a stranger's would. Legs of one tree placed on one host build in its one
+    /// copy there, so every sibling's directory is under the same root as this leg's; a leg of another
+    /// worktree builds in that worktree's own copy, and reads as another process, which it is. Only legs
+    /// of this machine's operating system are listed: no other kind ever builds here.
     /// </remarks>
     private static IReadOnlyDictionary<string, string> OtherLegs(
         HarnessConfig config,

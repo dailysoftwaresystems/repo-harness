@@ -1195,9 +1195,37 @@ while a gate ran turned a green suite red, with four test processes live at once
 - An ssh host bounds how long a connection may take to open and how long it may go
   unanswered (`connectTimeoutSeconds`, `keepAliveSeconds`). Without both, a dead link
   hangs a leg indefinitely, with no output and no verdict.
-- A host's copy of the repository is a git repository sync creates at its `repositoryPath`: the
-  working tree being tested is transferred into it file by file, compared by content hash, so what
-  the host holds is this tree including its uncommitted changes. Nothing is pushed and it is never
+- A host's copy of a tree is a git repository sync creates: the main checkout's at the host's
+  `repositoryPath`, and each worktree's beside it, at `<repositoryPath>.worktree-<name>`, named for
+  the worktree's directory as a worktree's name is spelt. One copy per host had every worktree whose
+  legs reached a host wait for every other's, under one lock, each sync replacing the tree the one
+  before had put there. Beside the main copy rather than inside it, because the agent a sync starts
+  begins in the copy's parent, which must already be there, and a copy inside another would be taken
+  for part of it by git. This machine records which hosts hold a copy of which worktree, and of
+  which tree on this machine, in `.harness-config/host-copies` in the main checkout - as the lock is,
+  at a place no branch's configuration moves - which ignores itself, as the runs directory does, so
+  git never sees it and no sync carries it. A sync claims its copy there before it writes anything,
+  so a first sync that stops part way is recorded too, and is refused one another worktree of the
+  same name - made by hand, or by another tool, outside the worktrees root - still holds: synced by
+  both, each would replace the tree the other put there. Deleting a worktree asks each host that
+  holds one of its copies to remove it, only where the harness made it, and no other host. A host is
+  reached through the worktree's own configuration, read before it goes - its branch may declare a
+  host the configuration the command runs in does not - or else through that one; a host neither
+  declares is not asked, and its copy is forgotten, named. Each copy is removed under the lock a leg
+  this machine runs there takes, the record read again once it is held, so a copy another worktree
+  of the name has claimed since is left for it; it is forgotten before that lock is let go, and its
+  marker goes last, so a removal that stops part way leaves the rest marked as the harness's. The
+  host is asked from its home directory, which is there when the directory the copy was kept in is
+  not, so a copy whose directory is gone is answered as not there, and forgotten.
+  A copy that cannot be removed then stays recorded, and the deletion fails naming it though the
+  worktree is gone, with the highest code a copy was left with - 13 where a run holds one or it was
+  refused, 15 where its host is unreachable, 20 where the removal failed there - so whoever deleted
+  it learns something of it is left; deleting the worktree again finishes the job, and for a name
+  whose worktree is gone removes what any worktree of that name left, never the copies of one that
+  still exists. On a host a leg was sent to,
+  the copy it was sent to is its tree, whatever worktree the leg names. The working tree being tested
+  is transferred into its copy file by file, compared by content hash, so what the host holds is this
+  tree including its uncommitted changes. Nothing is pushed and it is never
   a clone from a remote, either of which would need credentials on the host and neither of which
   could carry a change nobody has committed. It is made a git repository because the host's
   DssHarness finds everything through git, and sync never writes into a directory it did not

@@ -29,7 +29,7 @@ internal static class HostExecCommand
     {
         var command = new Command(
             Name,
-            "Run a DssHarness command on a WSL distribution or an ssh host, in that host's copy of the repository, installing or updating DssHarness there first when it is behind.");
+            "Run a DssHarness command on a WSL distribution or an ssh host, in that host's copy of the tree it is typed in, installing or updating DssHarness there first when it is behind.");
 
         command.Options.Add(SshOption);
         command.Options.Add(WslOption);

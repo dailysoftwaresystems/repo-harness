@@ -5,6 +5,7 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
+using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Tests;
 
@@ -232,6 +233,13 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
                     StringComparer.Ordinal),
             });
     }
+}
+
+/// <summary>Removes no copy from any host, and records none: a deletion that reaches no host.</summary>
+internal sealed class NoHostCopies : IHostCopyRemover
+{
+    public Task<HostCopyRemoval> RemoveAsync(HarnessContext context, string worktree, string tree, HarnessConfig? treeConfig, CancellationToken cancellationToken = default)
+        => Task.FromResult(HostCopyRemoval.None);
 }
 
 /// <summary>

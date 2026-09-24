@@ -11,6 +11,7 @@ using RepoHarness.Core.Platform;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runners;
+using RepoHarness.Core.Sync;
 using RepoHarness.Core.Tools;
 
 namespace RepoHarness.Cli.Commands;
@@ -823,8 +824,17 @@ internal static class HelpCommand
         builder.AppendLine("request on standard input, held open while the host works: interrupting host-exec");
         builder.AppendLine("ends it, and the host cancels the command. The command line ssh hands a remote");
         builder.AppendLine("shell holds only fixed words, so no argument is ever reinterpreted by sh, cmd or");
-        builder.AppendLine("PowerShell. host-exec runs in the host's copy of the repository at repositoryPath,");
-        builder.AppendLine("which 'DssHarness sync' creates and keeps in step with this tree.");
+        builder.AppendLine("PowerShell. host-exec runs in the host's copy of the tree it is typed in, which");
+        builder.AppendLine("'DssHarness sync' creates and keeps in step with that tree.");
+        builder.AppendLine();
+        builder.AppendLine("A host keeps a copy of each tree whose legs it runs: the main checkout's at its");
+        builder.AppendLine($"repositoryPath, and each worktree's beside it, at <repositoryPath>{HostCopies.WorktreeSuffix}<name>,");
+        builder.AppendLine("named for the worktree's directory. So worktrees do not share a copy on a host, or");
+        builder.AppendLine("the lock on it, and their legs there run side by side; each worktree's first sync to");
+        builder.AppendLine("a host carries its whole tree. A worktree made elsewhere, under the name of one that");
+        builder.AppendLine("has a copy, is refused that copy while the other exists. This machine records which");
+        builder.AppendLine($"hosts hold a copy of which worktree, in {HarnessLayout.DirectoryName}/{HarnessLayout.HostCopiesDirectoryName} in the main");
+        builder.AppendLine("checkout, and delete-worktree asks each of them to remove it.");
         builder.AppendLine();
         builder.AppendLine("An emulator declares the hosts it runs on (hostOs, hostProcessor), the processor it");
         builder.AppendLine("runs programs for, the launcher placed in front of each program (such as");
@@ -849,7 +859,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {HarnessExit.InternalError,3}  legs: whether a leg can run was never established, through a defect in this tool");
         builder.AppendLine($"  {HarnessExit.UsageError,3}  --legs names something that is neither a leg nor a leg set, or no name at all");
         builder.AppendLine($"  {HarnessExit.Refused,3}  a host runs a newer {ToolPackage.Id} than this machine");
-        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the repository,");
+        builder.AppendLine($"  {HarnessExit.HostUnavailable,3}  host-exec: the host cannot run {ToolPackage.Id}, has no copy of the tree it is typed in,");
         builder.AppendLine("       or the command never reported how it finished, so it may have run only in part");
         builder.AppendLine("       host-exec otherwise returns the exit code of the command it ran");
 
@@ -915,6 +925,22 @@ internal static class HelpCommand
         builder.AppendLine();
         builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
         builder.AppendLine("running delete-worktree again with --force finishes it.");
+        builder.AppendLine();
+        builder.AppendLine("A worktree synced to a host has a copy there of its own, beside the main checkout's,");
+        builder.AppendLine("and deleting the worktree asks each host that holds one to remove it, where the");
+        builder.AppendLine("harness made it: a copy it took over with --adopt, or a directory with no mark of");
+        builder.AppendLine("the harness's, is left where it is, and said to be. A copy is removed under the lock");
+        builder.AppendLine("a leg this machine runs there takes, and its marker goes last, so a removal that");
+        builder.AppendLine("stops part way leaves the rest still the harness's to remove. A host is reached");
+        builder.AppendLine("through the worktree's own configuration, read before it goes, or else through the");
+        builder.AppendLine("one the command runs in; one neither declares is not asked, and its copy is");
+        builder.AppendLine("forgotten, and named.");
+        builder.AppendLine("A copy that cannot be removed now stays recorded, and the worktree is deleted all the");
+        builder.AppendLine("same, but the command fails, naming each, with the highest code among them:");
+        builder.AppendLine($"{HarnessExit.Refused} where a run holds one or it was refused, {HarnessExit.HostUnavailable} where its host cannot be reached,");
+        builder.AppendLine($"{HarnessExit.CommandFailed} where removing it failed there; or {HarnessExit.Cancelled} when interrupted. Running delete-worktree");
+        builder.AppendLine("again removes what it left. For a name whose worktree is gone, it removes what any");
+        builder.AppendLine("worktree of that name left, and never the copies of one that still exists.");
 
         return builder.ToString();
     }
@@ -1050,6 +1076,8 @@ internal static class HelpCommand
         builder.AppendLine("  .harness-config/runs/              ignored; one directory of records per run, in");
         builder.AppendLine("                                     the tree that ran it");
         builder.AppendLine("  .harness-config/lock.json          ignored; records in-progress runs");
+        builder.AppendLine($"  {HarnessLayout.DirectoryName}/{HarnessLayout.HostCopiesDirectoryName}/       ignores itself; which hosts hold a copy of");
+        builder.AppendLine("                                     which worktree, in the main checkout");
         builder.AppendLine($"  {AnchorSettings.DefaultPendingAnchorsPath}");
         builder.AppendLine("                                     tracked; live anchors (anchors.pendingAnchorsPath)");
         builder.AppendLine($"  {AnchorSettings.DefaultDoneAnchorsPath}");
@@ -1217,7 +1245,7 @@ internal static class HelpCommand
         builder.AppendLine("where they stand: to each -LE's, and to the last -E's. An empty excludeJoin gives each");
         builder.AppendLine("its own excludeArg over a join the shared section declares.");
         builder.AppendLine();
-        builder.AppendLine("A leg on a host reached through WSL or ssh runs in that host's copy of the repository:");
+        builder.AppendLine("A leg on a host reached through WSL or ssh runs in that host's copy of its tree:");
         builder.AppendLine("the files the sync writes there from this tree, in a git repository of the host's own -");
         builder.AppendLine("one the sync made, or one it took over - whose index and history are not this");
         builder.AppendLine("checkout's. A test that checks this checkout's state has nothing to say about that");

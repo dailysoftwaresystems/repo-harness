@@ -490,7 +490,7 @@ public sealed class LegRunServiceTests
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.True(Directory.Exists(RunDirectoryOf(outcome, json: true)));
         Assert.Equal(string.Empty, status.StandardOutput.Trim());
-        Assert.Equal(HarnessLayout.RunsIgnoreRule, File.ReadAllText(temp.Combine(".harness-config", "runs", ".gitignore")));
+        Assert.Equal(HarnessLayout.SelfIgnoreRule, File.ReadAllText(temp.Combine(".harness-config", "runs", ".gitignore")));
     }
 
     /// <summary>

@@ -128,6 +128,19 @@ public interface ISyncTransport
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Removes the whole copy at <paramref name="root"/>, where the harness made it. One it took over was
+    /// somebody's directory before it was a copy, and one holding no mark of the harness's is nothing it
+    /// knows it may remove: each is left where it is, and answered for.
+    /// </summary>
+    /// <param name="root">The copy's root.</param>
+    /// <param name="cancellationToken">Stops the removal.</param>
+    /// <exception cref="HarnessException">
+    /// The copy could not be removed whole, <see cref="HarnessExit.CommandFailed"/>; or its marker cannot be read,
+    /// refused.
+    /// </exception>
+    Task<CopyRemoval> RemoveCopyAsync(string root, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Reads one file out of the copy: one a sync or a carry sends on, one it checks after writing, or a
     /// leg's output brought home.
     /// </summary>

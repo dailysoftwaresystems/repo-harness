@@ -77,6 +77,9 @@ public static class SyncServe
     /// <summary>Reads one file out of the copy.</summary>
     public const string Read = "read";
 
+    /// <summary>Removes a whole copy the harness made, as deleting the worktree it holds asks.</summary>
+    public const string RemoveCopy = "remove-copy";
+
     /// <summary>
     /// The largest file one request can carry, in bytes.
     /// </summary>
@@ -238,6 +241,29 @@ public sealed record EmptiedDirectory
 /// <summary>What the far side did with the directories a deletion emptied.</summary>
 /// <param name="Directories">One entry per directory considered.</param>
 public sealed record SyncPruneAnswer(IReadOnlyList<EmptiedDirectory> Directories);
+
+/// <summary>What removing a copy found there, and so did.</summary>
+/// <param name="Removal">What was at the path.</param>
+public sealed record SyncRemoveAnswer(CopyRemoval Removal);
+
+/// <summary>What removing a copy found at its path, and so did.</summary>
+public enum CopyRemoval
+{
+    /// <summary>
+    /// A copy the harness made, or a directory holding nothing at all - what a removal whose last step failed
+    /// leaves: removed.
+    /// </summary>
+    Removed,
+
+    /// <summary>Nothing: there was nothing to remove.</summary>
+    Absent,
+
+    /// <summary>A directory the harness took over, somebody's before it was a copy: left where it is.</summary>
+    Adopted,
+
+    /// <summary>A directory holding no mark of the harness's: left where it is.</summary>
+    NotACopy,
+}
 
 /// <summary>What the far side's root looks like.</summary>
 /// <param name="Exists">Whether the root directory is there.</param>

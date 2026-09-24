@@ -46,8 +46,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
     /// <summary>Runs <paramref name="commandName"/> for one leg on its host, and returns its entry.</summary>
     /// <param name="commandName">The command to run there, which is the one running here.</param>
-    /// <param name="leg">The placed leg, whose host and repository path say where and what.</param>
-    /// <param name="repositoryPath">The host's copy of the repository, which sync created.</param>
+    /// <param name="leg">The placed leg: its host, and the host's copy of its tree, which sync made, that it runs in.</param>
     /// <param name="arguments">The command's own options, without <c>--legs</c> or <c>--json</c>.</param>
     /// <param name="cancellationToken">Stops the command on the host as well as here.</param>
     /// <exception cref="HarnessException">
@@ -59,7 +58,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
     public async Task<LegEntry> RunAsync(
         string commandName,
         PlacedLeg leg,
-        string repositoryPath,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken = default)
     {
@@ -78,7 +76,7 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
             new HostAgentRequest
             {
                 Kind = HostAgentRequestKind.Run,
-                Directory = repositoryPath,
+                Directory = leg.HostTreeRoot,
                 Arguments = [commandName, "--legs", leg.Name, "--json", HereOption, leg.Host.Host.ToString(), .. arguments],
                 Nonce = nonce,
             },

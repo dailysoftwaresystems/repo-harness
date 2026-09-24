@@ -52,7 +52,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `init [--install-tools]` | Create `.harness-config` in the tree it runs in, a worktree's included, seed `config.json`, add ignore rules; installs tools only when asked |
 | `verify-git` | Check git is installed and this is a repository |
 | `create-worktree <name>` | Create a worktree (`--random` generates the name) |
-| `delete-worktree <name> [--force]` | Remove a worktree and everything under it; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
+| `delete-worktree <name> [--force]` | Remove a worktree and everything under it, and its copies on hosts; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without `--force` |
 | `list-worktree` | List existing worktrees with the commit each was made from |
 | `check-root-litter` | Report files left loose at the root of the checkout, ignored ones included |
 | `write-anchor <id> --priority P --trigger TEXT` | Add an anchor: to the pending registry, or to done when closed |
@@ -65,7 +65,7 @@ detected it seeds no legs, and `legs` fails until some are declared.
 | `check-ci-legs` | Report each CI leg, separating a real failure from a budget overrun, by the job and step names `ci` declares (`help ci`) |
 | `legs [--legs a,b]` | Measure the hosts and show where each leg can run, or why it cannot |
 | `install-missing-tools [--legs a,b] [--dry-run]` | Install or update what each configured leg's host is missing; `--dry-run` names each command and runs none |
-| `sync` | Put a host's copy of the repository in step with this tree, deletions included |
+| `sync` | Put a host's copy of this tree in step with it, deletions included: each worktree has a copy of its own |
 | `build [--legs a,b] [--time]` | Build every selected leg, in its own variant-keyed build directory |
 | `test [--legs a,b] [--time]` | Build and test every selected leg, with a witness for each verdict |
 | `run <runner> [--legs a,b] [--time] [--input name=value]` | Run a predefined runner across the legs it declares, giving its action's inputs values for this run |
@@ -253,7 +253,10 @@ whichever of its legs asked first, and each leg is then told what it finds. On a
 tool its own `PATH` lacks is unknown for a leg in a developer environment, since this command
 sets one up only on the machine it runs on, and nothing is installed for it. `--dry-run` asks
 every host and installs nothing, naming each command that would run. `sync` creates the host's copy
-of the repository at its `repositoryPath` and keeps it in step, deletions included. An
+of the tree it runs in and keeps it in step, deletions included: the main checkout's at the host's
+`repositoryPath`, and each worktree's beside it, so worktrees do not wait for each other on a host.
+Deleting a worktree removes its copies from the hosts that hold one, and fails, naming it, while one
+stays. An
 emulator counts only once its witness proves it runs programs for its processor.
 
 `legs` runs the witness of each emulator the selected legs use, and both commands install
