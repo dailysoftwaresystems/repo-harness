@@ -10,7 +10,7 @@ using RepoHarness.Core.Worktrees;
 using var consoleEncoding = ConsoleEncoding.UseUtf8();
 
 var root = new RootCommand(
-    "DssHarness - cross-platform repository harness. Run 'DssHarness help' for reference material.");
+    $"{ToolPackage.Id} - cross-platform repository harness. Run '{ToolPackage.Command} help' for reference material.");
 
 root.Subcommands.Add(InitCommand.Create());
 root.Subcommands.Add(VerifyGitCommand.Create());
@@ -59,7 +59,7 @@ async Task<int> RunAsync(string[] arguments, CancellationToken cancellationToken
             Console.Error.WriteLine(error.Message);
         }
 
-        Console.Error.WriteLine("Run 'DssHarness --help' for usage.");
+        Console.Error.WriteLine($"Run '{ToolPackage.Command} --help' for usage.");
         return HarnessExit.UsageError;
     }
 

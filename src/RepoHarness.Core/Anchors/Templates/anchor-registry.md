@@ -40,13 +40,13 @@ An id is permanent: renaming one orphans every citation of it.
 Do not edit the table by hand. A raw pipe inside a cell silently adds a column, and a wrapped
 id disappears from every search; the commands escape, validate and move rows for you.
 
-- `DssHarness write-anchor` adds an anchor.
-- `DssHarness set-anchor` changes one, and changing its status moves it between registries.
-- `DssHarness read-anchor` shows anchors in full, and `DssHarness read-anchors` lists them.
-- `DssHarness check-anchor-balance` confirms a change did not open more anchors than it
+- `dssharness write-anchor` adds an anchor.
+- `dssharness set-anchor` changes one, and changing its status moves it between registries.
+- `dssharness read-anchor` shows anchors in full, and `dssharness read-anchors` lists them.
+- `dssharness check-anchor-balance` confirms a change did not open more anchors than it
   closed.
 
-Run `DssHarness help anchors` for the details.
+Run `dssharness help anchors` for the details.
 
 ## Anchors
 

@@ -2,6 +2,7 @@ using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Projects;
 using RepoHarness.Core.Repository;
@@ -497,7 +498,7 @@ public sealed class InitService(
             if (!report.Passed)
             {
                 actions.Add(
-                    "tools   some legs are missing tools; run 'DssHarness install-missing-tools' for the detail");
+                    $"tools   some legs are missing tools; run '{ToolPackage.Command} install-missing-tools' for the detail");
             }
 
             return false;
@@ -528,8 +529,8 @@ public sealed class InitService(
         if (config.Legs.Count > 0)
         {
             actions.Add(
-                $"tools   not checked; 'DssHarness {ToolProvisionService.CommandName} --dry-run' lists what each leg's "
-                + $"host is missing, and 'DssHarness {ToolProvisionService.CommandName}' or 'DssHarness init "
+                $"tools   not checked; '{ToolPackage.Command} {ToolProvisionService.CommandName} --dry-run' lists what each leg's "
+                + $"host is missing, and '{ToolPackage.Command} {ToolProvisionService.CommandName}' or '{ToolPackage.Command} init "
                 + "--install-tools' installs it");
         }
 

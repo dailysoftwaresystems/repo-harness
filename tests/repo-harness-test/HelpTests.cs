@@ -427,6 +427,34 @@ public sealed partial class HelpTests
         Assert.Equal(("linux-gcc-debug-with-a-name-long-enou", false), (cut.Groups["leg"].Value, cut.Groups["budget"].Success));
     }
 
+    /// <summary>
+    /// Every command the help tells a reader to type - in the overview's list, its examples and every topic - is spelt
+    /// as the package installs it, lower case: a Linux filesystem is case-sensitive, and the product's name,
+    /// capitalised, runs nothing there. The product's name in prose is no command, and stays as it is.
+    /// </summary>
+    [Fact]
+    public async Task EveryCommandTheHelpSaysToType_IsSpeltAsTheToolInstallsIt()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var overview = await CliRunner.RunAsync(["help"], cancellationToken);
+        var texts = new List<string> { overview.StandardOutput };
+
+        foreach (Match topic in TopicPattern().Matches(overview.StandardOutput))
+        {
+            texts.Add((await CliRunner.RunAsync(["help", topic.Groups["topic"].Value], cancellationToken)).StandardOutput);
+        }
+
+        var commands = InstalledCommandPattern().Matches(overview.StandardOutput)
+            .Select(match => match.Groups["verb"].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("legs", commands);
+        Assert.Contains("help", commands);
+        Assert.All(texts, text => Assert.DoesNotContain(
+            ProductNamePattern().Matches(text).Select(match => match.Groups["verb"].Value),
+            commands.Contains));
+    }
+
     [Fact]
     public async Task Overview_AdvertisesOnlyTopicsThatExist()
     {
@@ -522,8 +550,14 @@ public sealed partial class HelpTests
     [GeneratedRegex(@"^\s{2}(?<name>\S+)(\s+<\S+>)?\s{2,}(?<description>.+)$")]
     private static partial Regex CommandLinePattern();
 
-    [GeneratedRegex(@"DssHarness help (?<topic>[a-z-]+)")]
+    [GeneratedRegex(ToolPackage.Command + @" help (?<topic>[a-z-]+)")]
     private static partial Regex TopicPattern();
+
+    [GeneratedRegex(@"^\s{2}" + ToolPackage.Command + @" (?<verb>[a-z-]+)", RegexOptions.Multiline)]
+    private static partial Regex InstalledCommandPattern();
+
+    [GeneratedRegex(ToolPackage.Id + @" (?<verb>[a-z-]+)\b")]
+    private static partial Regex ProductNamePattern();
 
     [GeneratedRegex(@"""legJobPattern"": (?<pattern>""(?:[^""\\]|\\.)*"")")]
     private static partial Regex ExamplePattern();

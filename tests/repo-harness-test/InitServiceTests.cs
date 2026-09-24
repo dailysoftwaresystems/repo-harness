@@ -255,8 +255,8 @@ public sealed class InitServiceTests
         }
 
         Assert.Equal(
-            "tools   not checked; 'DssHarness install-missing-tools --dry-run' lists what each leg's host is missing, "
-            + "and 'DssHarness install-missing-tools' or 'DssHarness init --install-tools' installs it",
+            "tools   not checked; 'dssharness install-missing-tools --dry-run' lists what each leg's host is missing, "
+            + "and 'dssharness install-missing-tools' or 'dssharness init --install-tools' installs it",
             Assert.Single(pointer));
     }
 

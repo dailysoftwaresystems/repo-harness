@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -406,7 +407,7 @@ public sealed class CiLegsService(
                     HarnessExit.Refused,
                     "check-ci-legs reads legs by the names this repository's workflows give their jobs and steps, and "
                     + $"{string.Join(", ", missing)} {(missing.Count == 1 ? "is" : "are")} not set in config.json's ci "
-                    + "section, so CI was NOT read. This is not a pass. Run 'DssHarness help ci' for what each says.");
+                    + $"section, so CI was NOT read. This is not a pass. Run '{ToolPackage.Command} help ci' for what each says.");
             }
 
             return new Conventions(

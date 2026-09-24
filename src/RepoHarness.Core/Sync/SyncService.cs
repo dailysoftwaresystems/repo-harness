@@ -329,7 +329,7 @@ public sealed class SyncService(
                 + $"run '{options.Artifact}' was carried nowhere. A carry writes an existing copy's "
                 + "own files and nothing else: it creates no directory and takes none over, because "
                 + "a repositoryPath that is a typo would otherwise be filled in rather than "
-                + "noticed. Run 'DssHarness sync' first, adding '--adopt \"<host>\"' where a "
+                + $"noticed. Run '{ToolPackage.Command} sync' first, adding '--adopt \"<host>\"' where a "
                 + "directory is already there. Nothing was changed.",
                 unreachable);
         }

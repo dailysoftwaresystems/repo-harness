@@ -2,6 +2,7 @@ using RepoHarness.Core.Anchors;
 using RepoHarness.Core.Ci;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Git;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Tools;
@@ -114,6 +115,14 @@ public sealed class ExitCodeContractTests
             Assert.Contains(verdict, result.StandardOutput, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>
+    /// The command a reader is told to type is spelt as the package installs it, lower case: a Linux filesystem is
+    /// case-sensitive, and the product's name, capitalised, runs nothing there.
+    /// </summary>
+    [Fact]
+    public void ANotInitialisedRepository_SaysToTypeTheCommandAsInstalled()
+        => Assert.Contains($"run '{ToolPackage.Command} init'", HarnessExit.Describe(HarnessExit.NotInitialized)?.Explanation, StringComparison.Ordinal);
 
     [Fact]
     public void Describe_FindsASharedCode_AndIgnoresACommandSpecificOne()

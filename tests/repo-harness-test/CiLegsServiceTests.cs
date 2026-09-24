@@ -306,7 +306,7 @@ public sealed class CiLegsServiceTests
         Assert.Equal(HarnessExit.Refused, refusal.ExitCode);
         Assert.Contains(expected, refusal.Message, StringComparison.Ordinal);
         Assert.Contains("This is not a pass.", refusal.Message, StringComparison.Ordinal);
-        Assert.Contains("'DssHarness help ci'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'dssharness help ci'", refusal.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

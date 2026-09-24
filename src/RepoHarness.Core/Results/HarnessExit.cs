@@ -1,4 +1,5 @@
 using System.Reflection;
+using RepoHarness.Core.Hosts;
 
 namespace RepoHarness.Core.Results;
 
@@ -93,7 +94,7 @@ public static class HarnessExit
         {
             [nameof(Success)] = "The command did what was asked.",
             [nameof(UsageError)] = "Arguments were missing, unknown, or mutually exclusive.",
-            [nameof(NotInitialized)] = "No harness configuration found; run 'DssHarness init'.",
+            [nameof(NotInitialized)] = $"No harness configuration found; run '{ToolPackage.Command} init'.",
             [nameof(ConfigInvalid)] = "config.json is missing, unparseable, or failed validation.",
             [nameof(Refused)] = "A precondition refused the request (dirty tree, name taken, lock held).",
             [nameof(ToolMissing)] = "A required external tool is not installed, or could not be started.",

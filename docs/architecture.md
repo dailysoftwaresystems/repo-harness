@@ -1668,7 +1668,7 @@ than a failure of the command. `check-ci-legs` exits `1` when a leg is red and `
 is a leg - the matrix did not run, or `legJobPattern` matches none of its jobs - an empty answer
 indistinguishable from every leg passing, and never read as one. `host-exec` returns the exit code of the command it ran on the host,
 unchanged, or 15 when that command never reported how it finished.
-`DssHarness help exit-codes` prints the shared table from the code itself; this copy, and the
+`dssharness help exit-codes` prints the shared table from the code itself; this copy, and the
 per-command codes above, are maintained by hand.
 
 Commands that run legs (`build`, `run`, `test`) use four codes from the range reserved for

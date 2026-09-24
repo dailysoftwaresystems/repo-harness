@@ -5,7 +5,7 @@ work — configured entirely from a file in the repository, not compiled into th
 
 ```bash
 dotnet tool install --global DssHarness
-DssHarness --help
+dssharness --help
 ```
 
 ## Why
@@ -23,10 +23,10 @@ configuration, that is a defect.
 ## Getting started
 
 ```bash
-DssHarness verify-git     # is git installed, and is this a repository?
-DssHarness init           # create .harness-config in this tree and seed config.json
-DssHarness legs           # where each leg can run, or why it cannot
-DssHarness help           # reference material: exit codes, config, legs, layout
+dssharness verify-git     # is git installed, and is this a repository?
+dssharness init           # create .harness-config in this tree and seed config.json
+dssharness legs           # where each leg can run, or why it cannot
+dssharness help           # reference material: exit codes, config, legs, layout
 ```
 
 Every CMake configure is asked which compilers it resolved, and each leg's line names them —
@@ -103,7 +103,7 @@ Three principles the implementation actually holds to:
 
 **Fail loud.** Zero always means success, and "the thing you asked about failed"
 never shares an exit code with "the harness could not run" — the remedies differ.
-Run `DssHarness help exit-codes` for the full table, which is generated from the
+Run `dssharness help exit-codes` for the full table, which is generated from the
 code rather than written by hand. A configuration file with an unknown key or a
 reference to something undeclared is rejected when it is read, with every problem
 listed at once.
@@ -186,9 +186,9 @@ its emulator - and is turned away there when that host lacks a program its comma
 ```
 
 ```bash
-DssHarness legs                                       # every leg: where it runs, or why it cannot
-DssHarness legs --legs linux-release,mac-x64-release
-DssHarness host-exec --ssh mac-mini -- verify-git
+dssharness legs                                       # every leg: where it runs, or why it cannot
+dssharness legs --legs linux-release,mac-x64-release
+dssharness host-exec --ssh mac-mini -- verify-git
 ```
 
 A host's section can also give its own `buildCores` and `testCores`, and an `env` that every
@@ -261,7 +261,7 @@ emulator counts only once its witness proves it runs programs for its processor.
 
 `legs` runs the witness of each emulator the selected legs use, and both commands install
 or update DssHarness on the hosts they reach, as `config.json` declares. That is the
-trust building the repository already asks for. Run `DssHarness help legs` for the rules.
+trust building the repository already asks for. Run `dssharness help legs` for the rules.
 
 ## Anchors
 
@@ -271,17 +271,17 @@ disclosed anchors, and done, the archive of closed ones. Their paths are set in
 `config.json` under `anchors`, and `init` creates each one that is missing.
 
 ```bash
-DssHarness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
-DssHarness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
-DssHarness read-anchor D-AUTH-TOKEN-REFRESH
-DssHarness read-anchors --open --band P0 P1
-DssHarness check-anchor-balance --base main
+dssharness write-anchor D-AUTH-TOKEN-REFRESH --priority P1 --trigger "tokens expire mid-request"
+dssharness set-anchor D-AUTH-TOKEN-REFRESH --status closed   # moves it to the done registry
+dssharness read-anchor D-AUTH-TOKEN-REFRESH
+dssharness read-anchors --open --band P0 P1
+dssharness check-anchor-balance --base main
 ```
 
 The Status cell (`🟠 OPEN`, `⏳ GATED`, `🔵 DISCLOSED`, `✅ CLOSED`) is the only verdict a
 row carries. Closing an anchor moves its row to the done registry, and
 `check-anchor-balance` fails a change that leaves more open anchors than it found. Run
-`DssHarness help anchors` for the rules.
+`dssharness help anchors` for the rules.
 
 ## Building from source
 
