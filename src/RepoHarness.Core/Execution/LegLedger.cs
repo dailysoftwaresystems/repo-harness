@@ -118,8 +118,9 @@ public sealed record LegEntry
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
     /// <summary>
-    /// The steps of the runner's action this leg ran, by name, in the order they ran: each one whose work
-    /// began, in this attempt or an earlier one of the same run, and none after the one that stopped it.
+    /// The steps this leg ran - its runner's action's, or the runner's own phases - by name, in the order
+    /// they ran: each one whose work began, in this attempt or an earlier one of the same run, and none
+    /// after the one that stopped it.
     /// </summary>
     public IReadOnlyList<string> RanSteps { get; init; } = [];
 

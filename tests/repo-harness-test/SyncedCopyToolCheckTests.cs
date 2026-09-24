@@ -97,7 +97,7 @@ public sealed class SyncedCopyToolCheckTests
         Assert.Single(fixture.Error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
     }
 
-    /// <summary>A build whose version cannot be read - one from source - has nothing to compare, and asks nothing.</summary>
+    /// <summary>A build whose version cannot be read has nothing to compare, and asks nothing.</summary>
     [Fact]
     public async Task ARunningVersionThatCannotBeRead_NeverAsks()
     {

@@ -365,11 +365,6 @@ public sealed class GitClientTests
     }
 
     /// <summary>
-    /// Every file of a commit is read by one git process, as it was committed: its line breaks, its
-    /// characters beyond ASCII, a byte order mark dropped as reading the file on its own drops it, and
-    /// bytes that are not text as the replacement they decode to.
-    /// </summary>
-    /// <summary>
     /// An index made to hold exactly a set of files holds them - each staged as it stands on disk, a name
     /// no command line would carry among them - and no other: an entry the set does not name is removed,
     /// and a named file that is not there is not held.
@@ -532,6 +527,11 @@ public sealed class GitClientTests
         Assert.Equal(trustsModes ? "100755" : "100644", modes["run.sh"]);
     }
 
+    /// <summary>
+    /// Every file of a commit is read by one git process, as it was committed: its line breaks, its
+    /// characters beyond ASCII, a byte order mark dropped as reading the file on its own drops it, and
+    /// bytes that are not text as the replacement they decode to.
+    /// </summary>
     [Fact]
     public async Task ReadFilesAtCommitAsync_ReadsEveryFile_ThroughOneProcess()
     {

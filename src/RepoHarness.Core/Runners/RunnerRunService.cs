@@ -765,9 +765,9 @@ public sealed class RunnerRunService(
     /// </summary>
     /// <param name="file">The action as it was read.</param>
     /// <param name="fillable">
-    /// The names this run can supply a step beyond the built-in vocabulary: the action's declared inputs
-    /// and the step's own, already resolved, so the check refuses exactly what the expansion would not
-    /// fill in.
+    /// The names this run can supply a step beyond the built-in vocabulary: those the runner value
+    /// directories hold, the action's declared inputs and the step's own, already resolved, so the check
+    /// refuses exactly what the expansion would not fill in.
     /// </param>
     /// <exception cref="HarnessException">A step names a placeholder nothing supplies.</exception>
     /// <remarks>

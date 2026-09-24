@@ -46,7 +46,7 @@ public sealed record LedgerLine(
     /// <summary>The steps the leg's operating system does not run, by name.</summary>
     public IReadOnlyList<string> SkippedSteps { get; init; } = [];
 
-    /// <summary>The steps of the runner's action the leg ran, by name, in the order they ran.</summary>
+    /// <summary>The steps the leg ran - its runner's action's, or the runner's own phases - by name, in the order they ran.</summary>
     public IReadOnlyList<string> RanSteps { get; init; } = [];
 
     /// <summary>The manual steps the leg ran, by name.</summary>
@@ -498,9 +498,9 @@ public sealed class LedgerReport
                 // Only where a step was left out for the leg's operating system.
                 SkippedSteps = line.SkippedSteps.Count > 0 ? line.SkippedSteps : null,
 
-                // Only where the leg ran a manual step, and only where the run left a step of its
-                // action out: a plain run lists the manual steps it did not run, so it is never read
-                // as having run them.
+                // Each only where it names something: the steps the leg began, the manual ones among
+                // them, and the steps the run left out - a plain run lists the manual steps it did not
+                // run, so it is never read as having run them.
                 RanSteps = line.RanSteps.Count > 0 ? line.RanSteps : null,
                 ManualSteps = line.ManualSteps.Count > 0 ? line.ManualSteps : null,
                 UnselectedSteps = line.UnselectedSteps.Count > 0 ? line.UnselectedSteps : null,
