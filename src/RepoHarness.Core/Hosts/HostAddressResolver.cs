@@ -157,7 +157,7 @@ public sealed class HostAddressResolver(INameLookup lookup, TimeProvider clock, 
     /// IPv4 first: a name answered over mDNS often comes back with a link-local IPv6 address as well,
     /// which reaches the machine only through the interface its scope names.
     /// </remarks>
-    private static string Preferred(IReadOnlyList<string> addresses)
+    internal static string Preferred(IReadOnlyList<string> addresses)
         => addresses.FirstOrDefault(address => IPAddress.TryParse(address, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetwork)
             ?? addresses[0];
 
@@ -167,11 +167,15 @@ public sealed class HostAddressResolver(INameLookup lookup, TimeProvider clock, 
     /// The address the host's item declares, where ssh's own configuration gives it another name to look up
     /// - a HostName - and that name was the one looked up.
     /// </param>
-    public static string Unresolved(AddressResolution resolution, string? declared = null)
+    /// <param name="window">The window the host's <c>wakeWaitSeconds</c> gave the lookups, where it gave one.</param>
+    public static string Unresolved(AddressResolution resolution, string? declared = null, TimeSpan? window = null)
     {
         ArgumentNullException.ThrowIfNull(resolution);
 
-        var lookups = resolution.Attempts.ToString(CultureInfo.InvariantCulture);
+        var lookups = resolution.Attempts.ToString(CultureInfo.InvariantCulture)
+            + (window is { } waited
+                ? string.Create(CultureInfo.InvariantCulture, $" over the {waited.TotalSeconds:0} seconds wakeWaitSeconds gives it to wake")
+                : string.Empty);
 
         return declared is not null && !string.Equals(declared, resolution.Address, StringComparison.OrdinalIgnoreCase)
             ? $"'{resolution.Address}', the HostName ssh's own configuration gives '{declared}', resolved to no address "

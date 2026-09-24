@@ -128,4 +128,17 @@ public sealed class SshHostConfig : RemoteHostConfig
 
     /// <summary>Seconds between ssh keep-alive probes; an unanswered probe ends the connection.</summary>
     public int KeepAliveSeconds { get; init; } = 30;
+
+    /// <summary>
+    /// Seconds to keep trying a host that does not answer yet - its name resolving to nothing, a connection
+    /// nothing took or that timed out - before its legs are skipped as unavailable. Zero, the default, tries
+    /// as every host is tried: three lookups within a second, and one connection.
+    /// </summary>
+    /// <remarks>
+    /// For a machine that sleeps: a personal Mac reached by its mDNS name falls back asleep between commands
+    /// and answers again moments later, and three quick lookups miss it. Never for a host that is simply off,
+    /// which then costs this long on every command. A key refused, or one the name is not known by, is the
+    /// host answering, and is never tried again.
+    /// </remarks>
+    public int WakeWaitSeconds { get; init; }
 }

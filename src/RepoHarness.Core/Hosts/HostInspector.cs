@@ -235,6 +235,10 @@ public sealed class HostInspector(
             // itself awake: its own copy has no configuration to read until a first sync has put one there.
             KeepAwake = context.Config.Hosts.SettingsFor(host).KeepAwake is { Count: > 0 } awake ? [.. awake] : [],
             KeepAwakeEnvironment = new Dictionary<string, string>(context.Config.Hosts.SettingsFor(host).Env, StringComparer.OrdinalIgnoreCase),
+
+            // Said with what inspection did there, so how long a host took to wake is seen beside the window
+            // it was given.
+            Actions = opened.Woke is { } woke ? [woke] : [],
         };
 
         if (opened.Connection is not { } connection)
@@ -301,7 +305,7 @@ public sealed class HostInspector(
             return found with { Reason = reason };
         }
 
-        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, questions, root, cancellationToken)
+        return await AskAsync(found with { Actions = action is null ? found.Actions : [.. found.Actions, action] }, connection, windowsHost, questions, root, cancellationToken)
             .ConfigureAwait(false);
     }
 

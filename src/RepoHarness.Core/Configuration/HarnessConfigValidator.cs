@@ -693,6 +693,11 @@ public static partial class HarnessConfigValidator
             CheckRepositoryPath(host.RepositoryPath, owner, allowWindowsPaths: true, problems);
             RequireAtLeastOne(host.ConnectTimeoutSeconds, $"{owner} connectTimeoutSeconds", problems);
             RequireAtLeastOne(host.KeepAliveSeconds, $"{owner} keepAliveSeconds", problems);
+
+            if (host.WakeWaitSeconds < 0)
+            {
+                problems.Add($"{owner} wakeWaitSeconds cannot be negative, found {host.WakeWaitSeconds}");
+            }
         }
     }
 

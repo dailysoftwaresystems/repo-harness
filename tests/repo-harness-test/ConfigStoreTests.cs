@@ -318,6 +318,16 @@ public sealed class ConfigStoreTests
         Assert.Equal("leg: {leg}, minutes: (?<budget>[0-9]+)", config.Ci.WorkflowBudgetPattern);
     }
 
+    /// <summary>A host's wake window is some seconds or none: a negative one is no window.</summary>
+    [Fact]
+    public void Load_RejectsANegativeWakeWindow()
+    {
+        var exception = LoadInvalid(
+            "{ \"sshItems\": [\"mac\"], \"hosts\": { \"ssh\": { \"mac\": { \"repositoryPath\": \"/Users/me/repo\", \"wakeWaitSeconds\": -1 } } } }");
+
+        Assert.Contains("hosts.ssh 'mac' wakeWaitSeconds cannot be negative, found -1", exception.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>A leg's buildSpaceGiB is a positive number of GiB: none, or less, is no need anybody measured.</summary>
     [Theory]
     [InlineData("0")]

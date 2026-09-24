@@ -604,6 +604,73 @@ public sealed class HostInspectorTests
     }
 
     /// <summary>
+    /// A host that sleeps, given a window, is looked up again until its name answers, and connected to again
+    /// until a connection is taken: it is reached, and its report says how long it took to wake.
+    /// </summary>
+    [Fact]
+    public async Task AHostGivenAWindow_IsWaitedForUntilItWakes_AndSaysHowLongItTook()
+    {
+        var wakeLookup = new WakingLookup(answersOnCall: 2);
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeWaitSeconds: 30, wakeLookup: wakeLookup);
+        fixture.Commands.ShellProbesFirst.Enqueue(HostResults.Failed(HostProbes.SshFailed, "ssh: connect to host host.invalid port 2222: Connection refused\n"));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(2, wakeLookup.Calls);
+        Assert.Contains(report.Actions, action => action.StartsWith("answered after ", StringComparison.Ordinal)
+            && action.EndsWith("(5 lookup(s) of its name, 2 connection attempt(s))", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A host whose window runs out is refused naming the window it was given; asked for again in the same
+    /// command, it is refused at once, rather than waited for again by every leg placed there. A host given no
+    /// window is looked up as every host is, and asked nothing more.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseWindowRunsOut_IsRefusedNamingIt_AndIsNotWaitedForAgain()
+    {
+        var wakeLookup = new WakingLookup(answersOnCall: int.MaxValue, takes: TimeSpan.FromSeconds(1));
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeWaitSeconds: 1, wakeLookup: wakeLookup);
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        var calls = wakeLookup.Calls;
+        var again = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("over the 1 seconds wakeWaitSeconds gives it to wake", report.Reason, StringComparison.Ordinal);
+        Assert.True(calls > 0);
+        Assert.Equal(report.Reason, again.Reason);
+        Assert.Equal(calls, wakeLookup.Calls);
+
+        using var unwaited = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeLookup: wakeLookup);
+        var plain = await unwaited.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.DoesNotContain("wakeWaitSeconds", plain.Reason, StringComparison.Ordinal);
+        Assert.Equal(calls, wakeLookup.Calls);
+    }
+
+    /// <summary>A name that answers from a given lookup on, each lookup taking the time it is told to.</summary>
+    private sealed class WakingLookup(int answersOnCall, TimeSpan takes = default) : INameLookup
+    {
+        public int Calls { get; private set; }
+
+        public async Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+
+            if (takes > TimeSpan.Zero)
+            {
+                await Task.Delay(takes, cancellationToken);
+            }
+
+            return Calls >= answersOnCall ? ["192.0.2.7"] : [];
+        }
+    }
+
+    /// <summary>
     /// What a host is asked about the room on it travels to it as asked, and what it answers - the room where
     /// its copies are kept, and each build directory's record and room - comes back on its report.
     /// </summary>
@@ -1040,7 +1107,9 @@ public sealed class HostInspectorTests
             bool writeItems = true,
             bool resolves = true,
             string address = "host.invalid",
-            bool syncedCopy = false)
+            bool syncedCopy = false,
+            int wakeWaitSeconds = 0,
+            INameLookup? wakeLookup = null)
         {
             Repository = new TempDirectory();
 
@@ -1079,7 +1148,7 @@ public sealed class HostInspectorTests
                 Hosts = new HostsConfig
                 {
                     Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } },
-                    Ssh = { [SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 } },
+                    Ssh = { [SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5, WakeWaitSeconds = wakeWaitSeconds } },
                 },
             };
 
@@ -1098,7 +1167,14 @@ public sealed class HostInspectorTests
             _lookup = new FixedLookup(resolves);
             var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
-            var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
+            var connector = new HostConnector(
+                platform,
+                processRunner,
+                Commands,
+                secrets,
+                addresses,
+                programs,
+                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero));
 
             _inspector = new HostInspector(Commands, connector, identity, agent);
         }

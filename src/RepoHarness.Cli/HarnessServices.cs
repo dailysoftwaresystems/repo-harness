@@ -92,6 +92,10 @@ internal static class HarnessServices
             provider.GetRequiredService<INameLookup>(),
             TimeProvider.System,
             HostAddressResolver.DefaultRetryDelay));
+        services.AddSingleton(provider => new SshWakeWindow(
+            provider.GetRequiredService<INameLookup>(),
+            TimeProvider.System,
+            SshWakeWindow.DefaultPollDelay));
         services.AddSingleton<LocalProgramResolver>();
         services.AddSingleton<IHostProgramResolver, HostProgramResolver>();
         services.AddSingleton<IHostConnector, HostConnector>();

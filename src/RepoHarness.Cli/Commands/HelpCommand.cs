@@ -848,6 +848,15 @@ internal static class HelpCommand
         builder.AppendLine("stops taking the connection, or shows a key the name is not known by, is dropped, and");
         builder.AppendLine("ssh looks the name up itself.");
         builder.AppendLine();
+        builder.AppendLine("A host that sleeps between commands can be given hosts.ssh.<name>.wakeWaitSeconds.");
+        builder.AppendLine($"Its name is then looked up again, and a connection nothing took or that timed out");
+        builder.AppendLine($"tried again, every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed, before its");
+        builder.AppendLine("legs are skipped; a key or a login the host refuses is never tried again. Reached,");
+        builder.AppendLine("its report says how long it took to wake; not reached, its reason names the window,");
+        builder.AppendLine("and the rest of that command is refused it at once rather than waiting again. Left");
+        builder.AppendLine("at 0, a host is looked up three times within a second and connected to once. Never");
+        builder.AppendLine("for a host that is simply off, which would then cost the window on every command.");
+        builder.AppendLine();
         builder.AppendLine("Every WSL distribution and ssh host runs DssHarness itself, installed as a global");
         builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
         builder.AppendLine("a host that is behind is installed or updated to this version, never downgraded,");

@@ -679,6 +679,16 @@ is not dependable on such a host.
   but not pinned. A pinned call that fails before any session - the address takes no connection,
   or shows a key the name is not known by - drops the pin for the rest of the connection and runs
   again, with ssh looking the name up itself.
+- **Hosts that sleep.** A personal Mac reached by its mDNS name falls back asleep between commands
+  and answers again moments later; three quick lookups miss it, and a consumer saw a run skip it
+  seconds after a check had reached it, three times in fifteen minutes. A host given
+  `wakeWaitSeconds` is looked up again, and a connection nothing took or that timed out is tried
+  again, every few seconds until the window ends, before its legs are skipped. What a host that is
+  awake says - a key it shows that the name is not known by, a login refused - is never tried again.
+  A host reached after waiting says how long it took, among what measuring it did; one whose window
+  ran out is refused naming the window, and, for the half minute a name's answer is kept, refused
+  at once to the rest of the command rather than waited for by every leg placed there. Left at 0,
+  the default, nothing changes.
 - **PATH truth.** A login shell's PATH is not what a command sees: `/opt/homebrew/bin` is absent
   from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
   are resolved to an absolute path once per connection, measured rather than assumed, the same

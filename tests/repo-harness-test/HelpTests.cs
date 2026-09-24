@@ -404,6 +404,20 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
+    /// The legs topic says what a wake window retries and what it never does, with the delay the code uses.
+    /// </summary>
+    [Fact]
+    public async Task LegsTopic_SaysWhatAWakeWindowTriesAgain_AndWhatItNeverDoes()
+    {
+        var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("hosts.ssh.<name>.wakeWaitSeconds", text, StringComparison.Ordinal);
+        Assert.Contains($"every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed", text, StringComparison.Ordinal);
+        Assert.Contains("a key or a login the host refuses is never tried again", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The space topic says what clean leaves alone and why it frees a full disk: nothing is written first,
     /// a build of the leg holds it off, and a host behind this machine's build needs room to be updated.
     /// </summary>

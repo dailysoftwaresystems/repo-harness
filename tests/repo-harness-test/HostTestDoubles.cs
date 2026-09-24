@@ -78,6 +78,9 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
+    /// <summary>What the shell probe answers first, one per probe, before <see cref="ShellProbe"/>: a host that takes a while to wake.</summary>
+    public Queue<ProcessResult> ShellProbesFirst { get; } = new();
+
     /// <summary>
     /// Writes <paramref name="output"/> where a host writes what a command it ran said: standard
     /// output. Standard error carries the protocol's completion line, so an answer written there would
@@ -200,7 +203,9 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             _shellProbes.Add(connection);
         }
 
-        return ShellProbeRaises is { } raised ? Task.FromException<ProcessResult>(raised) : Task.FromResult(ShellProbe);
+        return ShellProbeRaises is { } raised
+            ? Task.FromException<ProcessResult>(raised)
+            : Task.FromResult(ShellProbesFirst.TryDequeue(out var first) ? first : ShellProbe);
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)

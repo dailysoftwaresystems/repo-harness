@@ -1141,7 +1141,7 @@ public sealed class ToolProvisionServiceTests
                 commands,
                 new HostSecretsStore(fileSystem, permissions, platform),
                 new HostAddressResolver(Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero),
-                programs);
+                programs, new SshWakeWindow(Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero));
 
             _service = new ToolProvisionService(
                 HostDoubles.Loader(config, _repository.Path),
@@ -1473,7 +1473,7 @@ public sealed class ToolProvisionServiceTests
             var secrets = new HostSecretsStore(fileSystem, permissions, platform);
             var addresses = new HostAddressResolver(new NoLookup(), TimeProvider.System, TimeSpan.Zero);
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, permissions, () => "/usr/bin"), commands);
-            var connector = new HostConnector(platform, processRunner, commands, secrets, addresses, programs);
+            var connector = new HostConnector(platform, processRunner, commands, secrets, addresses, programs, new SshWakeWindow(Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero));
 
             // No developer environment is looked at or set up here: a leg starts in one only on this
             // machine, and only where a test says so, which it does with VisualStudioHere.
