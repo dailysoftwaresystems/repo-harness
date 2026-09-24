@@ -962,6 +962,10 @@ internal static class HelpCommand
         builder.AppendLine("was, and so is one whose directory no build of this version recorded. Nothing is");
         builder.AppendLine("walked to decide: the room is the filesystem's own count, and what a directory holds");
         builder.AppendLine("is what its build recorded. Commands that build nothing - sync, clean - need no room.");
+        builder.AppendLine();
+        builder.AppendLine($"'{ToolPackage.Command} legs -v' says the room on each host it measured - where its copies are");
+        builder.AppendLine("kept, and the tree it is typed in for this machine - so a host that is nearly full");
+        builder.AppendLine("shows before a run fills it; --json always carries it, as each host's 'space'.");
 
         return builder.ToString();
     }

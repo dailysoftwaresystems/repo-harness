@@ -23,7 +23,7 @@ public static class LegsReports
     };
 
     /// <summary>What <c>legs</c> reports.</summary>
-    public static CommandOutcome Render(LegsReport report, bool json)
+    public static CommandOutcome Render(LegsReport report, bool json, bool verbose = false)
     {
         ArgumentNullException.ThrowIfNull(report);
 
@@ -68,6 +68,11 @@ public static class LegsReports
                     host.ToolVersion,
                     host.ToolPath,
                     host.Actions,
+
+                    // The room where its copies are kept - the tree the command was typed in, for this machine -
+                    // or why it could not be measured: whole here, where -v adds nothing a script has to ask for.
+                    host.Space,
+                    host.SpaceUnmeasured,
                 }),
             };
 
@@ -89,6 +94,13 @@ public static class LegsReports
             {
                 details.Add($"{host.Host}: cannot run legs: {reason}");
             }
+
+            // Asked for with -v: a host that is nearly full shows before a run that fills it, and before the
+            // legs its builds would no longer fit are turned away.
+            if (verbose && Room(host) is { } room)
+            {
+                details.Add($"{host.Host}: {room}");
+            }
         }
 
         var width = report.Placements.Count == 0 ? 0 : report.Placements.Max(placement => placement.Leg.Name.Length);
@@ -103,6 +115,14 @@ public static class LegsReports
 
         return new CommandOutcome(exitCode, message, details);
     }
+
+    /// <summary>The room on <paramref name="host"/>, or why it could not be measured; <see langword="null"/> where it was not asked.</summary>
+    private static string? Room(HostReport host)
+        => host.Space is { } space
+            ? space.Describe()
+            : host.SpaceUnmeasured is { } why
+                ? $"the room there could not be measured: {why}"
+                : null;
 
     private static string Summary(LegsReport report, IReadOnlyList<HostReport> silent)
     {

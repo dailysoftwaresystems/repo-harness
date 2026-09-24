@@ -422,6 +422,7 @@ public sealed partial class HelpTests
         Assert.Contains("A leg is placed only where its host has the room its build still needs", text, StringComparison.Ordinal);
         Assert.Contains("the leg's buildSpaceGiB", text, StringComparison.Ordinal);
         Assert.Contains("Commands that build nothing - sync, clean - need no room.", text, StringComparison.Ordinal);
+        Assert.Contains("legs -v' says the room on each host it measured", text, StringComparison.Ordinal);
     }
 
     /// <summary>

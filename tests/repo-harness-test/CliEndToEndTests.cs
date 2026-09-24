@@ -643,6 +643,24 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// legs -v, through the real binary, says the room on this machine where the tree is; without -v it says
+    /// nothing of it.
+    /// </summary>
+    [Fact]
+    public async Task LegsVerbose_SaysTheRoomOnEachHost()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var verbose = await CliRunner.RunAsync(["legs", "--legs", "native", "-v", "-C", temp.Path], TestContext.Current.CancellationToken);
+        var quiet = await CliRunner.RunAsync(["legs", "--legs", "native", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, verbose.ExitCode);
+        Assert.Matches(@"local: [0-9.]+ [KMGT]?i?B(ytes)? free of [0-9.]+ [KMGT]?i?B(ytes)? on '", verbose.StandardOutput);
+        Assert.DoesNotContain(" free of ", quiet.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// clean, through the real binary, removes a leg's build directory in the tree it is typed in and says
     /// what it removed as data; a leg no host can take is said as that, and nothing of it is touched.
     /// </summary>
