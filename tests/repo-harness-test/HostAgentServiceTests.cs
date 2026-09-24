@@ -68,8 +68,12 @@ public sealed class HostAgentServiceTests
         Assert.NotNull(ranWith);
         Assert.Equal(["read-anchor", "D-A B", "--json"], ranWith);
 
-        // And the last line says so, where the machine that asked reads it instead of from ssh's exit code.
-        Assert.Equal(HostAgentProtocol.CompletionLine(Nonce, 4), error.ToString().TrimEnd());
+        // The first line marks where this request's own output begins, so that whatever the host's login
+        // shell wrote to the same stream before the agent ran is not taken for it; the last says how the
+        // command finished, where the machine that asked reads it instead of from ssh's exit code.
+        Assert.Equal(
+            [HostAgentProtocol.StartedLine(Nonce), HostAgentProtocol.CompletionLine(Nonce, 4)],
+            error.ToString().TrimEnd().Split('\n').Select(line => line.TrimEnd('\r')));
     }
 
     [Fact]

@@ -308,6 +308,11 @@ public sealed class RemoteSyncTransport(
         T? answer = null;
         int? finished = null;
 
+        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
+        // the host's login shell, which is the host's business and not this sync's output.
+        var serving = false;
+        var reporting = false;
+
         var result = await _hostCommands.RunAsync(
                 _session.Connection,
                 new HostCommand
@@ -316,9 +321,27 @@ public sealed class RemoteSyncTransport(
                     Arguments = [HostAgentProtocol.CommandName],
                     StandardInput = request + "\n",
                     HoldStandardInputOpen = true,
-                    OnOutputLine = line => answer ??= SyncServe.ReadAnswer<T>(line),
+                    OnOutputLine = line =>
+                    {
+                        if (!reporting)
+                        {
+                            reporting = HostAgentProtocol.IsStartedLine(line, nonce);
+                            return;
+                        }
+
+                        answer ??= SyncServe.ReadAnswer<T>(line);
+                    },
                     OnErrorLine = line =>
                     {
+                        // Nothing the host said before its agent began is this sync's output: a login shell
+                        // writes to the same stream, and one consumer's printed the account's home layout on
+                        // every session, which a relayed line then published.
+                        if (!serving)
+                        {
+                            serving = HostAgentProtocol.IsStartedLine(line, nonce);
+                            return;
+                        }
+
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;

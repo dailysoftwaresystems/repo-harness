@@ -109,7 +109,7 @@ public sealed class HostAgentService(
             return HarnessExit.Success;
         }
 
-        return await RunAsync(request, error, run, abandoned.Token).ConfigureAwait(false);
+        return await RunAsync(request, output, error, run, abandoned.Token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -177,8 +177,28 @@ public sealed class HostAgentService(
     /// Serves a run request, then writes its completion line last. The machine that asked reads the command's
     /// exit code from that line, and a line that never arrives tells it the connection failed first.
     /// </summary>
+    /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>
+    /// <param name="output">Where a command's own standard output is forwarded.</param>
+    /// <param name="error">Where a command's own standard error, and the completion line, are forwarded.</param>
+    /// <param name="nonce">The request's nonce, which the marker carries so no other output is taken for it.</param>
+    /// <remarks>
+    /// Written whatever has been cancelled since, as the completion line is: the machine that asked relays
+    /// nothing until it has seen this, so a marker withheld because the input had already ended would lose
+    /// the whole of what the request then says about itself - including why it refused.
+    /// </remarks>
+    private static async Task WriteStartedAsync(TextWriter output, TextWriter error, string nonce)
+    {
+        var started = HostAgentProtocol.StartedLine(nonce);
+
+        await output.WriteLineAsync(started).ConfigureAwait(false);
+        await output.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        await error.WriteLineAsync(started).ConfigureAwait(false);
+        await error.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
     private async Task<int> RunAsync(
         HostAgentRequest request,
+        TextWriter output,
         TextWriter error,
         Func<string, string[], CancellationToken, Task<int>> run,
         CancellationToken cancellationToken)
@@ -190,6 +210,12 @@ public sealed class HostAgentService(
                 HarnessExit.UsageError,
                 "the run request carries no nonce, so how its command finished could not be reported").ConfigureAwait(false);
         }
+
+        // Written on both streams before anything this request says, so the machine that asked can drop
+        // whatever the host's login shell wrote to either of them before the agent ever ran. A profile is the
+        // host's business and not this run's output: one consumer's printed the account's home layout on
+        // every session, and a relayed line published it.
+        await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
 
         var exitCode = await ServeRunAsync(request, error, run, cancellationToken).ConfigureAwait(false);
 

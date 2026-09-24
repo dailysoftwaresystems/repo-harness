@@ -127,6 +127,36 @@ public sealed class HostExecServiceTests
         Assert.DoesNotContain(": finished ", fixture.Error.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// What a host's login shell writes before its agent runs is the host's own business, and never reaches
+    /// this command's output on either stream.
+    /// </summary>
+    /// <remarks>
+    /// A shell startup writes to the same streams the command does, and does it first. One consumer's Mac
+    /// sources emsdk's environment script on every session, which prints the account's home layout - the
+    /// user's name among it - and a machine relaying that output published it into a ledger, a CI log and a
+    /// chat transcript. Only what the agent wrote, from its own marker on, is this command's.
+    /// </remarks>
+    [Fact]
+    public async Task WhatTheHostsLoginShellPrintsBeforeItsAgentRuns_ReachesNoOutput()
+    {
+        const string profile = "PATH += /Users/someone/Library/emsdk";
+
+        var fixture = Create(respond: (_, command) => HostResults.Finished(command, 0, "create-worktree: OK\n"));
+
+        // Written before the agent runs, and so before its marker, as a login shell writes.
+        fixture.Commands.LoginShellPrints = _ => profile;
+
+        var outcome = await fixture.Service.RunAsync(Root, "vps", null, ["create-worktree", "x"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, outcome.ExitCode);
+        Assert.DoesNotContain("someone", fixture.Error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", fixture.Output.ToString(), StringComparison.Ordinal);
+
+        // And what the agent did say still travels, so nothing is suppressed but the host's own noise.
+        Assert.Contains("create-worktree: OK", fixture.Error.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ACommandThatNeverSaysHowItFinished_IsUnavailable_RatherThanTheConnectionsExitCode()
     {
@@ -281,16 +311,17 @@ public sealed class HostExecServiceTests
 
         var commands = new ScriptedHostCommands(respond ?? ((_, command) => throw HostResults.Unexpected(command)));
         var error = new StringWriter();
+        var output = new StringWriter();
 
         var service = new HostExecService(
             loader ?? HostDoubles.Loader(Config, Root),
             inspector,
             commands,
             platform ?? HostDoubles.Platform(),
-            new ConsoleHarnessOutput(new StringWriter(), error, verbose));
+            new ConsoleHarnessOutput(output, error, verbose));
 
-        return new Fixture(service, inspector, commands, error);
+        return new Fixture(service, inspector, commands, error, output);
     }
 
-    private sealed record Fixture(HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands, StringWriter Error);
+    private sealed record Fixture(HostExecService Service, RecordingInspector Inspector, ScriptedHostCommands Commands, StringWriter Error, StringWriter Output);
 }

@@ -84,6 +84,11 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
         var ledger = new System.Text.StringBuilder();
         int? finished = null;
+
+        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
+        // the host's login shell, which is the host's business and not this run's output.
+        var serving = false;
+        var reporting = false;
         var failure = new List<string>();
 
         // A transport that will not start leaves the host unavailable, raised as that by the runner
@@ -101,9 +106,27 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
                     // Kept rather than echoed: the host writes its ledger to standard output, and
                     // this end reports one ledger for the whole run rather than one per machine.
-                    OnOutputLine = line => ledger.AppendLine(line),
+                    OnOutputLine = line =>
+                    {
+                        if (!reporting)
+                        {
+                            reporting = HostAgentProtocol.IsStartedLine(line, nonce);
+                            return;
+                        }
+
+                        ledger.AppendLine(line);
+                    },
                     OnErrorLine = line =>
                     {
+                        // Nothing the host said before its agent began is this run's output: a login shell
+                        // writes to the same stream, and one consumer's printed the account's home layout on
+                        // every session, which a relayed leg line then published.
+                        if (!serving)
+                        {
+                            serving = HostAgentProtocol.IsStartedLine(line, nonce);
+                            return;
+                        }
+
                         if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
                         {
                             finished = code;

@@ -74,6 +74,29 @@ public static class HostAgentProtocol
     public static string CompletionLine(string nonce, int exitCode)
         => $"{CommandName}: finished {nonce} {exitCode.ToString(CultureInfo.InvariantCulture)}";
 
+    /// <summary>
+    /// The line a host writes to standard error first, before it serves a run request, so that the machine
+    /// that asked can tell what the agent says from what the host's login shell said before it.
+    /// </summary>
+    /// <remarks>
+    /// A login shell writes to the same streams the command does, and whatever it writes arrives first. One
+    /// consumer's Mac sources emsdk's environment script on every session, which prints the account's home
+    /// layout - the user's name among it - and a machine relaying a leg's output published it into a ledger,
+    /// a CI log and a chat transcript. What a host's profile says is not this run's output and does not
+    /// belong in it; the agent's own words, from here on, are.
+    /// </remarks>
+    public static string StartedLine(string nonce)
+        => $"{CommandName}: serving {nonce}";
+
+    /// <summary>Whether <paramref name="line"/> is the started line of the request that carried <paramref name="nonce"/>.</summary>
+    public static bool IsStartedLine(string line, string nonce)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nonce);
+
+        return string.Equals(line.TrimEnd(), StartedLine(nonce), StringComparison.Ordinal);
+    }
+
     /// <summary>Reads <paramref name="line"/> as the completion line of the request that carried <paramref name="nonce"/>.</summary>
     public static bool TryReadCompletionLine(string line, string nonce, out int exitCode)
     {
