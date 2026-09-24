@@ -268,7 +268,9 @@ public sealed class RemoteSyncTransport(
                         }
                         else
                         {
-                            _output.RawError(line);
+                            // ssh writes here too, and a pinned connection has it name an address this machine
+                            // resolved rather than the one the configuration declares.
+                            _output.RawError(HostProbes.AsConfigured(line, _session.Connection));
                         }
                     },
                 },

@@ -201,7 +201,7 @@ public static partial class HostProbes
         }
 
         var said = string.IsNullOrWhiteSpace(result.StandardError) ? result.StandardOutput : result.StandardError;
-        return $"{what} (exit {result.ExitCode}): {Excerpt(said)}";
+        return $"{what} (exit {result.ExitCode}): {Excerpt(AsConfigured(said, through))}";
     }
 
     /// <summary>
@@ -225,7 +225,7 @@ public static partial class HostProbes
             && through?.Host.Kind == HostKind.Ssh
             && result.ExitCode == SshFailed
             && NeverConnected(result.StandardError) is { } said
-                ? CouldNotReach(said)
+                ? CouldNotReach(AsConfigured(said, through))
                 : null;
     }
 
@@ -291,7 +291,7 @@ public static partial class HostProbes
 
         return Unreached(result, through)
             ?? $"{what} never reported how it finished, so it may not have run, or run only in part; "
-                + $"the connection ended with exit {result.ExitCode}{Detail(result.StandardError)}";
+                + $"the connection ended with exit {result.ExitCode}{Detail(AsConfigured(result.StandardError, through))}";
     }
 
     /// <summary>
@@ -304,6 +304,30 @@ public static partial class HostProbes
         var said = Excerpt(standardError);
 
         return said.Length == 0 ? string.Empty : ": " + said;
+    }
+
+    /// <summary>
+    /// <paramref name="said"/> with the address a pin gave ssh written as the configuration declares the host,
+    /// which is what the reader named and what everything else about the host is said in terms of.
+    /// </summary>
+    /// <param name="said">What ssh printed.</param>
+    /// <param name="through">The connection it printed for, or <see langword="null"/> where there is none.</param>
+    /// <remarks>
+    /// A pinned connection hands ssh the address this machine resolved the declared name to, so ssh names that
+    /// address when it fails - "Connection to 198.51.100.7 port 22 timed out" - and the harness relays its words
+    /// as they are. An address this machine worked out is not the reader's to publish: it reaches a leg's reason,
+    /// the text and the JSON, and whatever keeps them. Only the pinned address is rewritten, and only into what
+    /// the configuration itself declares, so nothing else ssh said is touched; where the two are the same, or
+    /// there is no pin, the words are already the reader's own.
+    /// </remarks>
+    public static string AsConfigured(string said, HostConnection? through)
+    {
+        ArgumentNullException.ThrowIfNull(said);
+
+        return through is { Pin.Address: { Length: > 0 } pinned, Address: { Length: > 0 } declared }
+            && !string.Equals(pinned, declared, StringComparison.OrdinalIgnoreCase)
+                ? said.Replace(pinned, declared, StringComparison.OrdinalIgnoreCase)
+                : said;
     }
 
     /// <summary>

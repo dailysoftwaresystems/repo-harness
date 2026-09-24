@@ -183,6 +183,56 @@ public sealed class HostProbesTests
     }
 
     /// <summary>
+    /// Where a connection is pinned, ssh names the address this machine resolved, and every line the harness
+    /// relays names the host as the configuration declares it instead: a reason, a quotation and a raw line
+    /// alike. An address this machine worked out is not the reader's to publish.
+    /// </summary>
+    [Fact]
+    public void APinnedAddress_IsRelayedAsTheConfigurationDeclaresTheHost()
+    {
+        const string resolved = "198.51.100.7";
+        var pinned = new HostConnection
+        {
+            Host = HostId.Ssh("mac"),
+            Address = "mac.invalid",
+            Pin = new SshPin(resolved, "mac.invalid"),
+        };
+        var timedOut = HostResults.Failed(255, $"ssh: connect to host {resolved} port 22: Connection timed out\n");
+
+        Assert.Equal(
+            "the host could not be reached: ssh said ssh: connect to host mac.invalid port 22: Connection timed out",
+            HostProbes.Unreached(timedOut, pinned));
+        Assert.DoesNotContain(resolved, HostProbes.NeverFinished("'build'", timedOut, pinned), StringComparison.Ordinal);
+        Assert.DoesNotContain(resolved, HostProbes.Failure("'build'", timedOut, pinned), StringComparison.Ordinal);
+        Assert.Equal(
+            $"Connection to mac.invalid port 22 timed out",
+            HostProbes.AsConfigured($"Connection to {resolved} port 22 timed out", pinned));
+    }
+
+    /// <summary>
+    /// Nothing is rewritten where there is no pin, where the pin gave ssh the address the configuration
+    /// declares anyway, or where there is no connection at all: those words are already the reader's own.
+    /// </summary>
+    [Fact]
+    public void WithNoPinToRewrite_SshsWordsAreRelayedAsTheyAre()
+    {
+        const string said = "ssh: connect to host mac.invalid port 22: Connection timed out";
+
+        Assert.Equal(said, HostProbes.AsConfigured(said, null));
+        Assert.Equal(said, HostProbes.AsConfigured(said, new HostConnection { Host = HostId.Ssh("mac"), Address = "mac.invalid" }));
+        Assert.Equal(
+            said,
+            HostProbes.AsConfigured(
+                said,
+                new HostConnection
+                {
+                    Host = HostId.Ssh("mac"),
+                    Address = "mac.invalid",
+                    Pin = new SshPin("mac.invalid", "mac.invalid"),
+                }));
+    }
+
+    /// <summary>
     /// A program whose end never came back is said as a host that could not be reached where ssh never
     /// connected, and otherwise as a program that may have run only in part, with what the connection said.
     /// </summary>
