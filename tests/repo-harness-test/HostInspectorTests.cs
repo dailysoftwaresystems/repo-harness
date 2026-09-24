@@ -1,3 +1,5 @@
+using RepoHarness.Core.Output;
+using RepoHarness.Core.Execution;
 using System.Text.Json;
 using NSubstitute;
 using RepoHarness.Core.Configuration;
@@ -958,7 +960,8 @@ public sealed class HostInspectorTests
                 new EmulatorProbe(platform, processRunner, fileSystem),
                 new DeveloperEnvironmentProbe(platform, processRunner),
                 fileSystem,
-                new LocalProgramResolver(platform, FilePermissionsFactory.Create()));
+                new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
+                new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
             _lookup = new FixedLookup(resolves);
             var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);

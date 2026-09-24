@@ -129,6 +129,19 @@ public sealed class HostAgentRequest
     public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The command that keeps the host awake while this request is served, as the configuration declares it
+    /// for that host, or empty where it declares none. Run only for a <see cref="HostAgentRequestKind.Run"/>.
+    /// </summary>
+    /// <remarks>
+    /// Carried rather than read there, because the host's copy has no configuration until a first sync has
+    /// put one in it - and a first sync is the longest one, the one that most needs the host to stay awake.
+    /// Measured by a consumer: a first sync of a worktree's copy to a Mac ran past the host's wake and the
+    /// legs were left unavailable. The command's <c>{pid}</c> becomes the agent's own process there, so it
+    /// ends with the request whatever happens to this end of the connection.
+    /// </remarks>
+    public List<string> KeepAwake { get; init; } = [];
+
+    /// <summary>
     /// The directory the command starts in on the host, absolute or from the home directory: the host's copy of the
     /// tree it runs in, or, for a sync's own operations, the directory that copy is kept in, which is there before the
     /// copy is. Run only.

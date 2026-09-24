@@ -46,6 +46,17 @@ public sealed record HostReport
     /// </remarks>
     public string? ToolPath { get; init; }
 
+    /// <summary>
+    /// The command that keeps this host awake, as the configuration declares it for the host, or empty
+    /// where it declares none.
+    /// </summary>
+    /// <remarks>
+    /// Carried on the report so that what is sent to the host - a sync above all - can have the host hold
+    /// itself awake while it works. The host's own copy cannot be asked: it has no configuration until a
+    /// first sync has put one there, and a first sync is the longest one.
+    /// </remarks>
+    public IReadOnlyList<string> KeepAwake { get; init; } = [];
+
     /// <summary>What checking each emulator found there, by name.</summary>
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
@@ -175,7 +186,16 @@ public sealed class HostInspector(
         CancellationToken cancellationToken)
     {
         var opened = await _connector.ConnectAsync(context, host, [DotnetProgram], cancellationToken).ConfigureAwait(false);
-        var found = new HostReport { Host = host, Os = opened.Os, Processor = opened.Processor };
+        var found = new HostReport
+        {
+            Host = host,
+            Os = opened.Os,
+            Processor = opened.Processor,
+
+            // Read here, where the configuration is, so that what is sent to this host can have it hold
+            // itself awake: its own copy has no configuration to read until a first sync has put one there.
+            KeepAwake = context.Config.Hosts.SettingsFor(host).KeepAwake is { Count: > 0 } awake ? [.. awake] : [],
+        };
 
         if (opened.Connection is not { } connection)
         {

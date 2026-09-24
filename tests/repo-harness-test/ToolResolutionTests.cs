@@ -1,3 +1,4 @@
+using RepoHarness.Core.Output;
 using NSubstitute;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
@@ -1003,7 +1004,8 @@ public sealed class ToolResolutionTests
             new EmulatorProbe(platform, processRunner, fileSystem),
             new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
-            new LocalProgramResolver(platform, Permissions(), () => onPath));
+            new LocalProgramResolver(platform, Permissions(), () => onPath),
+            new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
 
         // An emulator for another kind of host, so the witness never runs: only the search is measured.
         var emulators = new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase)

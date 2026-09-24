@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
@@ -18,7 +19,8 @@ public sealed class HostAgentService(
     EmulatorProbe emulatorProbe,
     DeveloperEnvironmentProbe developerEnvironmentProbe,
     IFileSystem fileSystem,
-    LocalProgramResolver programs)
+    LocalProgramResolver programs,
+    KeepAwake keepAwake)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
@@ -26,6 +28,7 @@ public sealed class HostAgentService(
     private readonly DeveloperEnvironmentProbe _developerEnvironmentProbe = developerEnvironmentProbe;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly LocalProgramResolver _programs = programs;
+    private readonly KeepAwake _keepAwake = keepAwake;
 
     /// <summary>Reads one request from <paramref name="input"/> and serves it.</summary>
     /// <param name="input">
@@ -229,6 +232,17 @@ public sealed class HostAgentService(
                 HarnessExit.HostUnavailable,
                 $"this host has no copy of the repository at '{directory}'").ConfigureAwait(false);
         }
+
+        // Held for as long as this request is served, by the command the machine that asked carries for
+        // this host. A sync is many requests, and its first one to a fresh copy is the longest work a host
+        // does without a leg of its own running there - which is the only thing that used to hold it awake.
+        // The command names this process, so it ends with the request however the connection ends.
+        await using var awake = _keepAwake.Hold(
+            HostAgentProtocol.CommandName,
+            request.Arguments[0],
+            new LocalHostConfig { KeepAwake = [.. request.KeepAwake] },
+            [],
+            cancellationToken);
 
         try
         {

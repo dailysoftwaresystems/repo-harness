@@ -21,11 +21,19 @@ public sealed class RemoteSyncTransport(
     HostId host,
     HostSession session,
     IHostCommandRunner hostCommands,
-    IHarnessOutput output) : ISyncTransport
+    IHarnessOutput output,
+    IReadOnlyList<string>? keepAwake = null) : ISyncTransport
 {
     private readonly HostSession _session = session;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
     private readonly IHarnessOutput _output = output;
+
+    /// <summary>
+    /// What keeps the host awake while it serves each of this sync's requests, as the configuration
+    /// declares it for that host. A sync to a fresh copy is the longest work a host does with no leg of
+    /// its own running there, and a leg's own hold was all that ever kept one awake.
+    /// </summary>
+    private readonly IReadOnlyList<string> _keepAwake = keepAwake ?? [];
 
     /// <inheritdoc/>
     public HostId Host { get; } = host;
@@ -292,6 +300,7 @@ public sealed class RemoteSyncTransport(
                 // in a directory that may not exist yet on a first sync.
                 Directory = startIn ?? ParentOf(root),
                 Arguments = [SyncServe.CommandName, .. arguments],
+                KeepAwake = [.. _keepAwake],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);
