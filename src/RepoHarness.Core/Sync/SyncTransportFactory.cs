@@ -48,6 +48,13 @@ public sealed class SyncTransportFactory(
             HarnessExit.HostUnavailable,
             $"{host.Host} was not reached, so nothing can be written there: {host.Reason ?? "no reason was recorded"}.");
 
-        return new RemoteSyncTransport(host.Host, session, _hostCommandRunner, _output, host.KeepAwake);
+        return new RemoteSyncTransport(
+            host.Host,
+            session,
+            _hostCommandRunner,
+            _output,
+            host.KeepAwake,
+            host.KeepAwakeEnvironment,
+            host.ProgramDirectories);
     }
 }

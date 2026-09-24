@@ -22,7 +22,9 @@ public sealed class RemoteSyncTransport(
     HostSession session,
     IHostCommandRunner hostCommands,
     IHarnessOutput output,
-    IReadOnlyList<string>? keepAwake = null) : ISyncTransport
+    IReadOnlyList<string>? keepAwake = null,
+    IReadOnlyDictionary<string, string>? keepAwakeEnvironment = null,
+    IReadOnlyList<string>? keepAwakeDirectories = null) : ISyncTransport
 {
     private readonly HostSession _session = session;
     private readonly IHostCommandRunner _hostCommands = hostCommands;
@@ -34,6 +36,13 @@ public sealed class RemoteSyncTransport(
     /// its own running there, and a leg's own hold was all that ever kept one awake.
     /// </summary>
     private readonly IReadOnlyList<string> _keepAwake = keepAwake ?? [];
+
+    /// <summary>What the host declares under <c>env</c>, which its keepAwake command starts under.</summary>
+    private readonly IReadOnlyDictionary<string, string> _keepAwakeEnvironment =
+        keepAwakeEnvironment ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Where the survey found the host's programs, which its keepAwake command is looked for in.</summary>
+    private readonly IReadOnlyList<string> _keepAwakeDirectories = keepAwakeDirectories ?? [];
 
     /// <inheritdoc/>
     public HostId Host { get; } = host;
@@ -301,6 +310,8 @@ public sealed class RemoteSyncTransport(
                 Directory = startIn ?? ParentOf(root),
                 Arguments = [SyncServe.CommandName, .. arguments],
                 KeepAwake = [.. _keepAwake],
+                KeepAwakeEnvironment = new(_keepAwakeEnvironment, StringComparer.Ordinal),
+                KeepAwakeDirectories = [.. _keepAwakeDirectories],
                 Nonce = nonce,
             },
             HostAgentProtocol.JsonOptions);

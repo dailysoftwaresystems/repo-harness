@@ -31,7 +31,7 @@ public static class HostAgentProtocol
     /// and its own version. With the number left as it was, the same host refuses the request over
     /// whichever field it happens not to know, which says nothing about why.
     /// </remarks>
-    public const int Version = 3;
+    public const int Version = 4;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -203,6 +203,23 @@ public sealed class HostAgentRequest
     /// ends with the request whatever happens to this end of the connection.
     /// </remarks>
     public List<string> KeepAwake { get; init; } = [];
+
+    /// <summary>
+    /// What the host declares under <c>env</c> for itself, which the <see cref="KeepAwake"/> command starts
+    /// under, as a leg's own work does. Empty where the host declares none.
+    /// </summary>
+    /// <remarks>
+    /// Carried with the command, for the same reason the command is: the host's copy has no configuration to
+    /// read until a first sync has put one there. Without it a command that starts for a leg - because a leg
+    /// supplies the host's environment - would not start here.
+    /// </remarks>
+    public Dictionary<string, string> KeepAwakeEnvironment { get; init; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Where the survey found this host's programs, which the <see cref="KeepAwake"/> command is looked for
+    /// in, as a leg's own programs are. Empty where nothing was surveyed.
+    /// </summary>
+    public List<string> KeepAwakeDirectories { get; init; } = [];
 
     /// <summary>
     /// The directory the command starts in on the host, absolute or from the home directory: the host's copy of the

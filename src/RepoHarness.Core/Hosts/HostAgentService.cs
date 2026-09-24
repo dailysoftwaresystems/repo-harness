@@ -259,19 +259,26 @@ public sealed class HostAgentService(
                 $"this host has no copy of the repository at '{directory}'").ConfigureAwait(false);
         }
 
-        // Held for as long as this request is served, by the command the machine that asked carries for
-        // this host. A sync is many requests, and its first one to a fresh copy is the longest work a host
-        // does without a leg of its own running there - which is the only thing that used to hold it awake.
-        // The command names this process, so it ends with the request however the connection ends.
-        await using var awake = _keepAwake.Hold(
-            HostAgentProtocol.CommandName,
-            request.Arguments[0],
-            new LocalHostConfig { KeepAwake = [.. request.KeepAwake] },
-            [],
-            cancellationToken);
-
         try
         {
+            // Held for as long as this request is served, by the command the machine that asked carries for
+            // this host, under the environment and the program directories it carries with it: a host's copy
+            // has no configuration to read until a first sync has put one there, and a keepAwake program
+            // found only through the host's own env or a searched directory would not start without them.
+            // A sync is many requests, and its first to a fresh copy is the longest work a host does with no
+            // leg of its own running there - which is the only thing that used to hold it awake. The command
+            // names this process, so it ends with the request however the connection ends.
+            //
+            // Inside the try, because filling the command's placeholders refuses a request that names one
+            // this build cannot fill, and a refusal raised outside it would be reported as a request that
+            // never said how it finished rather than as the configuration error it is.
+            await using var awake = _keepAwake.Hold(
+                HostAgentProtocol.CommandName,
+                request.Arguments[0],
+                new LocalHostConfig { KeepAwake = [.. request.KeepAwake], Env = new(request.KeepAwakeEnvironment, StringComparer.OrdinalIgnoreCase) },
+                [.. request.KeepAwakeDirectories],
+                cancellationToken);
+
             return await run(directory, [.. request.Arguments], cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
@@ -282,6 +289,12 @@ public sealed class HostAgentService(
                 error,
                 HarnessExit.HostUnavailable,
                 $"this host's copy of the repository at '{directory}' could not be entered: {ex.Message}").ConfigureAwait(false);
+        }
+        catch (HarnessException ex)
+        {
+            // What the request itself asked for could not be done - a keepAwake command naming a placeholder
+            // this build cannot fill, above all. Said as the refusal it is, under this host's name.
+            return await RefuseAsync(error, ex.ExitCode, ex.Message).ConfigureAwait(false);
         }
     }
 

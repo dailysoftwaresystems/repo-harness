@@ -57,6 +57,13 @@ public sealed record HostReport
     /// </remarks>
     public IReadOnlyList<string> KeepAwake { get; init; } = [];
 
+    /// <summary>
+    /// What the host declares under <c>env</c> for itself, which its <see cref="KeepAwake"/> command starts
+    /// under, as a leg's own work does. Empty where it declares none.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> KeepAwakeEnvironment { get; init; }
+        = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>What checking each emulator found there, by name.</summary>
     public IReadOnlyDictionary<string, EmulatorCheck> Emulators { get; init; }
         = new Dictionary<string, EmulatorCheck>(StringComparer.OrdinalIgnoreCase);
@@ -195,6 +202,7 @@ public sealed class HostInspector(
             // Read here, where the configuration is, so that what is sent to this host can have it hold
             // itself awake: its own copy has no configuration to read until a first sync has put one there.
             KeepAwake = context.Config.Hosts.SettingsFor(host).KeepAwake is { Count: > 0 } awake ? [.. awake] : [],
+            KeepAwakeEnvironment = new Dictionary<string, string>(context.Config.Hosts.SettingsFor(host).Env, StringComparer.OrdinalIgnoreCase),
         };
 
         if (opened.Connection is not { } connection)
