@@ -673,10 +673,6 @@ public sealed partial class CliEndToEndTests
     [Fact]
     public async Task AHold_OutlivesTheAgentThatStartedIt_AndEndsWhenItIsEnded()
     {
-        Assert.SkipWhen(
-            OperatingSystem.IsWindows(),
-            "On Windows the hold's process inherits the agent's standard streams, so the connection that asked for the hold stays open until the hold ends.");
-
         using var temp = new TempDirectory();
         var token = TestContext.Current.CancellationToken;
         var watched = temp.Combine("watched.txt");
