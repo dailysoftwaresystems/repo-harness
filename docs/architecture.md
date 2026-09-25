@@ -1851,7 +1851,10 @@ exists because a wrapper that reports success without evidence is indistinguisha
 from one that never ran, and it was measured happening three separate ways: a suite
 that printed `failed=0` while exiting 2, an exit code read after a pipe, and a test
 command that exited 0 having run no tests at all. An emulator's witness applies the same
-rule to the emulator itself.
+rule to the emulator itself. A pattern is matched against each line as the log keeps it,
+whatever ended the line: a Windows program ends its lines with CRLF, and a `$` that matched
+before the line feed left the carriage return between the text and the end, so a pattern that
+passed on Linux and macOS never matched on a Windows leg.
 
 ## Timeouts
 

@@ -6,6 +6,7 @@ using RepoHarness.Core.Configuration;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 
@@ -281,7 +282,9 @@ public sealed class CiLegsService(
                     $"ci.workflows names '{path}', which is not a file, so CI was NOT read. This is not a pass.");
             }
 
-            var text = _fileSystem.ReadAllText(path);
+            // Each line as it reads, whatever ended it: a checkout that writes CRLF would otherwise keep a
+            // budget pattern ending in $ from matching the line it describes.
+            var text = LineText.Of(_fileSystem.ReadAllText(path));
             var declared = WorkflowName.Match(text);
 
             workflows.Add(new CiWorkflow(

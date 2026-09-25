@@ -30,6 +30,28 @@ public sealed class PhaseRunnerTests
         Assert.False(result.Stalled);
     }
 
+    /// <summary>
+    /// A pattern ending in $ matches a line a program ended with CRLF, as it matches one ended with LF: matched
+    /// against the raw text, the carriage return stood between the line and the end, and a consumer's Windows
+    /// leg was unwitnessed having printed exactly the line its pattern described - which its log showed.
+    /// </summary>
+    [Fact]
+    public async Task APatternEndingInADollar_MatchesALineEndedWithCrlf()
+    {
+        using var temp = new TempDirectory();
+        var factory = new HarnessFactory();
+
+        var result = await Runner(factory).RunAsync(
+            Child("echo-crlf", temp.Combine("write.log"), "census: repaired 14 figure(s). Re-run to verify.") with
+            {
+                SuccessPattern = @"^census: repaired [0-9]+ figure\(s\)\. Re-run to verify\.$",
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Witnessed);
+        Assert.Equal(LegVerdict.Passed, result.Verdict().Verdict);
+    }
+
     [Fact]
     public async Task APatternThatOnlyMatchesWhatTheHarnessWrote_LeavesThePhaseUnwitnessed()
     {

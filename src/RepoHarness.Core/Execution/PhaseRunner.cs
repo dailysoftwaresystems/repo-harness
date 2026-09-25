@@ -217,8 +217,10 @@ public sealed class PhaseRunner(
 
         // Matched against what the child wrote and nothing else. The log above also holds the header
         // this run wrote, and a header that echoes the command line contains the pattern whenever
-        // the command does, so a phase that never ran would witness itself.
-        var childOutput = Combine(result.StandardOutput, result.StandardError);
+        // the command does, so a phase that never ran would witness itself. Each line as the log keeps
+        // it, whatever ended it: a Windows program's carriage return otherwise stands between a line's
+        // text and the $ a pattern ends with, and the pattern never matches there.
+        var childOutput = LineText.Of(Combine(result.StandardOutput, result.StandardError));
 
         if (childOutput.Length == 0)
         {

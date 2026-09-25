@@ -381,8 +381,9 @@ internal static class HelpCommand
         builder.AppendLine("A step passes when each of its lines exits 0; one that declares successPattern must");
         builder.AppendLine("also have its last line print something the pattern matches, since a program that");
         builder.AppendLine("exits 0 has not shown it did anything. The pattern is a .NET regular expression,");
-        builder.AppendLine("matched with ^ and $ at each line, against that line's standard output and standard");
-        builder.AppendLine("error read together, after secrets are redacted. One that does not compile, or that");
+        builder.AppendLine("matched with ^ and $ at each line - whether a line ends in CRLF or LF, as its log");
+        builder.AppendLine("keeps it - against that line's standard output and standard error read together,");
+        builder.AppendLine("after secrets are redacted. One that does not compile, or that");
         builder.AppendLine("is empty and so matches anything, is refused when the file is read. The earlier lines");
         builder.AppendLine("of a run block answer with their exit codes alone: the witness belongs to the step,");
         builder.AppendLine("and its last line finishing is its work being done.");

@@ -285,6 +285,28 @@ public sealed class CiLegsServiceTests
     }
 
     /// <summary>
+    /// A workflow a checkout wrote with CRLF gives a leg its budget from a pattern ending in $, as one written
+    /// with LF does: each line is read without the carriage return that ends it.
+    /// </summary>
+    [Fact]
+    public async Task AWorkflowWrittenWithCrlf_GivesALegItsBudget_ToAPatternEndingInADollar()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(
+            temp,
+            budgetMinutes: 0,
+            workflow: "    - { leg: mac-arm, minutes: 3 }\r\n",
+            workflowBudget: "leg: {leg}, minutes: (?<budget>[0-9]+) }$");
+
+        var run = Run(new CiJob("unit (mac-arm)", CiConclusions.Failure, [new CiStep("Test", CiConclusions.Failure, Moment(0), Moment(200))]));
+
+        var report = await Service(harness, run).CheckAsync(temp.Path, Request(), cancellationToken);
+
+        Assert.Equal(180, Assert.Single(report.Legs, leg => leg.Leg == "mac-arm").BudgetSeconds);
+    }
+
+    /// <summary>
     /// A repository whose settings do not say how its workflows name legs and steps is refused, naming what
     /// to set, and never read by names this tool made up: those are some other workflow's, and would find
     /// no leg here, or the wrong ones.

@@ -24,6 +24,19 @@ public sealed class EmulatorProbeTests
         Assert.Equal("[aarch64]", check.Witnessed);
     }
 
+    /// <summary>A witness pattern ending in $ matches a line its witness ended with CRLF, as a Windows program ends one.</summary>
+    [Fact]
+    public async Task CheckAsync_MatchesAWitnessLineEndedWithCrlf()
+    {
+        var emulator = Emulator(prints: "aarch64", pattern: "^aarch64$");
+        emulator.Env[TestHost.ChildModeVariable] = "echo-crlf";
+        emulator.Witness.Command.Add("witnessed");
+
+        var check = await Probe().CheckAsync(emulator, Found(emulator), TestContext.Current.CancellationToken);
+
+        Assert.True(check.Available, check.Reason);
+    }
+
     [Fact]
     public async Task CheckAsync_Refuses_AWitnessWhoseOutputDoesNotMatch()
     {

@@ -26,6 +26,7 @@ internal static class TestChild
         return mode switch
         {
             "echo-args" => EchoArguments(standardOutput, arguments),
+            "echo-crlf" => EchoLinesEndedWithCrlf(standardOutput, arguments),
             "echo-stdin" => EchoStandardInput(standardOutput),
             "read-line-then-watch" => ReadLineThenWatch(standardOutput, arguments),
             "sleep" => Sleep(arguments),
@@ -75,6 +76,17 @@ internal static class TestChild
     }
 
     /// <summary>Writes each argument on its own line between brackets, so an empty one is visible.</summary>
+    /// <summary>Writes each argument as a line of its own ended with CRLF, as a Windows program writes one.</summary>
+    private static int EchoLinesEndedWithCrlf(TextWriter output, string[] arguments)
+    {
+        foreach (var argument in arguments)
+        {
+            output.Write(argument + "\r\n");
+        }
+
+        return 0;
+    }
+
     private static int EchoArguments(TextWriter output, string[] arguments)
     {
         foreach (var argument in arguments)

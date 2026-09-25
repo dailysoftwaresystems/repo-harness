@@ -119,7 +119,8 @@ public sealed class EmulatorProbe(IHostPlatform platform, IProcessRunner process
                 $"its witness exited {result.ExitCode}: {HostProbes.Excerpt(result.StandardError + "\n" + result.StandardOutput)}");
         }
 
-        var output = result.TrimmedOutput;
+        // Each line as it reads, whatever ended it, so a witness pattern ending in $ means the same on Windows.
+        var output = LineText.Of(result.TrimmedOutput);
 
         try
         {

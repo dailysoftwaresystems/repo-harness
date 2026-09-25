@@ -164,15 +164,16 @@ public sealed partial class HelpTests
     public async Task RunnersTopic_SaysWhatAStepsSuccessPatternIsMatchedAgainst()
     {
         var result = await CliRunner.RunAsync(["help", "runners"], TestContext.Current.CancellationToken);
+        var words = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
         foreach (var text in new[]
         {
-            "successPattern: <regular expression>   what the step's last line must print",
-            "matched with ^ and $ at each line, against that line's standard output and standard",
-            "error read together, after secrets are redacted.",
+            "successPattern: <regular expression> what the step's last line must print",
+            "matched with ^ and $ at each line - whether a line ends in CRLF or LF, as its log keeps it - against that "
+                + "line's standard output and standard error read together, after secrets are redacted.",
         })
         {
-            Assert.Contains(text, result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains(text, words, StringComparison.Ordinal);
         }
     }
 
