@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
@@ -97,6 +98,16 @@ public sealed record HostReport
     /// <summary>Why <see cref="Space"/> could not be measured, where it could not.</summary>
     public string? SpaceUnmeasured { get; init; }
 
+    /// <summary>
+    /// For a WSL distribution, the room on this machine's drive holding the distribution's disk, which grows
+    /// there as the distribution writes whatever room it measures for itself; <see langword="null"/> for any
+    /// other host, or where it was not asked or could not be measured.
+    /// </summary>
+    public FileSystem.DiskSpace? DiskImageSpace { get; init; }
+
+    /// <summary>Why <see cref="DiskImageSpace"/> could not be measured, where it was asked and could not.</summary>
+    public string? DiskImageUnmeasured { get; init; }
+
     /// <summary>What each build directory it was asked about holds, as its record says, and the room where it is.</summary>
     public IReadOnlyList<BuildDirectoryRoom> Builds { get; init; } = [];
 
@@ -173,7 +184,9 @@ public sealed class HostInspector(
     IHostConnector connector,
     IToolIdentityProvider identity,
     HostAgentService agent,
-    HoldAwakeRegistry holds) : IHostInspector
+    HoldAwakeRegistry holds,
+    IWslDiskImages wslDiskImages,
+    IFileSystem fileSystem) : IHostInspector
 {
     /// <summary>The program every host needs before DssHarness can be installed or run there.</summary>
     public const string DotnetProgram = "dotnet";
@@ -189,6 +202,8 @@ public sealed class HostInspector(
     private readonly IToolIdentityProvider _identity = identity;
     private readonly HostAgentService _agent = agent;
     private readonly HoldAwakeRegistry _holds = holds;
+    private readonly IWslDiskImages _wslDiskImages = wslDiskImages;
+    private readonly IFileSystem _fileSystem = fileSystem;
 
     public Task<HostReport> InspectAsync(
         HarnessContext context,
@@ -207,9 +222,36 @@ public sealed class HostInspector(
 
         var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories, room ?? RoomQuestions.None);
 
-        return host.Kind == HostKind.Local
-            ? InspectLocalAsync(questions, cancellationToken)
-            : InspectRemoteAsync(context, host, questions, cancellationToken);
+        return host.Kind switch
+        {
+            HostKind.Local => InspectLocalAsync(questions, cancellationToken),
+            HostKind.Wsl when questions.Room.SpaceAt is not null => WithDiskImageAsync(InspectRemoteAsync(context, host, questions, cancellationToken)),
+            _ => InspectRemoteAsync(context, host, questions, cancellationToken),
+        };
+    }
+
+    /// <summary>
+    /// <paramref name="inspecting"/>'s report of a WSL distribution, with the room on this machine's drive that
+    /// holds the distribution's disk: what the distribution measures is its virtual disk's room, which a full
+    /// drive does not shrink.
+    /// </summary>
+    private async Task<HostReport> WithDiskImageAsync(Task<HostReport> inspecting)
+    {
+        var report = await inspecting.ConfigureAwait(false);
+
+        if (report.Session is null)
+        {
+            return report;
+        }
+
+        if (_wslDiskImages.DirectoryOf(report.Host.Name) is not { Length: > 0 } directory)
+        {
+            return report with { DiskImageUnmeasured = "WSL names no directory holding its disk" };
+        }
+
+        var (space, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
+
+        return report with { DiskImageSpace = space, DiskImageUnmeasured = unmeasured };
     }
 
     /// <summary>This machine is measured in-process: the build doing the measuring is the one that would run its legs.</summary>

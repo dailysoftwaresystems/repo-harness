@@ -977,9 +977,14 @@ internal static class HelpCommand
         builder.AppendLine("walked to decide: the room is the filesystem's own count, and what a directory holds");
         builder.AppendLine("is what its build recorded. Commands that build nothing - sync, clean - need no room.");
         builder.AppendLine();
+        builder.AppendLine("A WSL distribution's disk is a file that grows on a drive of this machine, whatever");
+        builder.AppendLine("room the distribution measures for itself - a terabyte, by default. A WSL leg needs");
+        builder.AppendLine("its room on that drive too, which this machine's own legs on the drive fill as well.");
+        builder.AppendLine();
         builder.AppendLine($"'{ToolPackage.Command} legs -v' says the room on each host it measured - where its copies are");
-        builder.AppendLine("kept, and the main checkout for this machine - so a host that is nearly full");
-        builder.AppendLine("shows before a run fills it; --json always carries it, as each host's 'space'.");
+        builder.AppendLine("kept, and the main checkout for this machine, with the drive a WSL distribution's");
+        builder.AppendLine("disk grows on - so a host that is nearly full shows before a run fills it; --json");
+        builder.AppendLine("always carries it, as each host's 'space' and a WSL distribution's 'diskImageSpace'.");
 
         return builder.ToString();
     }

@@ -2,6 +2,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Results;
 
@@ -73,6 +74,10 @@ public static class LegsReports
                     // or why it could not be measured: whole here, where -v adds nothing a script has to ask for.
                     host.Space,
                     host.SpaceUnmeasured,
+
+                    // For a WSL distribution, the drive of this machine its disk grows on.
+                    host.DiskImageSpace,
+                    host.DiskImageUnmeasured,
                 }),
             };
 
@@ -118,11 +123,21 @@ public static class LegsReports
 
     /// <summary>The room on <paramref name="host"/>, or why it could not be measured; <see langword="null"/> where it was not asked.</summary>
     private static string? Room(HostReport host)
-        => host.Space is { } space
+    {
+        var room = host.Space is { } space
             ? space.Describe()
             : host.SpaceUnmeasured is { } why
                 ? $"the room there could not be measured: {why}"
                 : null;
+
+        var image = host.DiskImageSpace is { } drive
+            ? $"its disk grows on this machine's '{drive.Filesystem}', {DiskSpace.Size(drive.FreeBytes)} free"
+            : host.DiskImageUnmeasured is { } unmeasured
+                ? $"the room on this machine's drive its disk grows on could not be measured: {unmeasured}"
+                : null;
+
+        return image is null ? room : room is null ? image : $"{room}; {image}";
+    }
 
     private static string Summary(LegsReport report, IReadOnlyList<HostReport> silent)
     {

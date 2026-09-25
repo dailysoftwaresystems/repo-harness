@@ -818,6 +818,36 @@ public sealed class HostInspectorTests
         Assert.Equal(4096, Assert.Single(report.Builds).RecordedBytes);
     }
 
+    /// <summary>The directory WSL registers for a distribution's disk is read without the prefix it sometimes writes.</summary>
+    [Theory]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local\Docker\wsl\main", @"C:\Users\me\AppData\Local\Docker\wsl\main")]
+    [InlineData(@"C:\Users\me\AppData\Local\Packages\Ubuntu\LocalState", @"C:\Users\me\AppData\Local\Packages\Ubuntu\LocalState")]
+    public void TheDirectoryWslRegistersForADisk_IsReadWithoutItsPrefix(string registered, string plain)
+        => Assert.Equal(plain, WslDiskImages.Plain(registered));
+
+    /// <summary>
+    /// A WSL distribution asked about its room also has the room measured on this machine's drive where WSL keeps
+    /// its disk: the distribution measures its virtual disk, a terabyte by default, whatever that drive has left.
+    /// A host of any other kind is asked nothing of it.
+    /// </summary>
+    [Fact]
+    public async Task AWslDistributionsRoom_IsAlsoMeasuredWhereWslKeepsItsDisk()
+    {
+        using var images = new TempDirectory();
+        var diskImages = Substitute.For<IWslDiskImages>();
+        diskImages.DirectoryOf(Distro).Returns(images.Path);
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), diskImages: diskImages);
+
+        var wsl = await fixture.InspectAsync(HostId.Wsl(Distro), room: new RoomQuestions("~/repo", []));
+        var ssh = await fixture.InspectAsync(HostId.Ssh(SshName), room: new RoomQuestions("/srv/repo", []));
+
+        Assert.True(wsl.Available, wsl.Reason);
+        Assert.Equal(new PhysicalFileSystem(FilePermissionsFactory.Create()).SpaceAt(images.Path).Filesystem, wsl.DiskImageSpace?.Filesystem);
+        Assert.Null(ssh.DiskImageSpace);
+        Assert.Null(ssh.DiskImageUnmeasured);
+    }
+
     /// <summary>
     /// The developer environments a host is asked about travel to it, what it found comes back under
     /// the names they were asked by, and each one gives the host the time vswhere may take to answer.
@@ -1223,7 +1253,8 @@ public sealed class HostInspectorTests
             int wakeWaitSeconds = 0,
             INameLookup? wakeLookup = null,
             int holdAwakeSeconds = 0,
-            TimeSpan? wakePoll = null)
+            TimeSpan? wakePoll = null,
+            IWslDiskImages? diskImages = null)
         {
             Repository = new TempDirectory();
 
@@ -1305,7 +1336,7 @@ public sealed class HostInspectorTests
                 CopyRefusals);
 
             Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false), stopsWithin: TimeSpan.Zero);
-            _inspector = new HostInspector(Commands, connector, identity, agent, Holds);
+            _inspector = new HostInspector(Commands, connector, identity, agent, Holds, diskImages ?? Substitute.For<IWslDiskImages>(), fileSystem);
         }
 
         private readonly StringWriter _copyNotices = new();

@@ -107,14 +107,6 @@ public static class LegRoom
                 continue;
             }
 
-            if (need.Disk is not { } disk)
-            {
-                unmeasured.Add(
-                    $"leg '{placement.Leg.Name}' was placed on {host.Host} without its room checked, which could not be "
-                    + $"measured there: {need.Unmeasured}");
-                continue;
-            }
-
             // Counted once however many legs name it: two legs building one directory are refused as that when
             // the run is planned, and would otherwise be refused here for room the second never takes.
             if (!directories.Add((host.Host, need.Directory)))
@@ -122,11 +114,31 @@ public static class LegRoom
                 continue;
             }
 
-            var key = (host.Host, disk.Filesystem);
-            var before = taken.TryGetValue(key, out var counted) ? counted : (Bytes: 0L, Legs: new List<string>());
+            // Where the leg's build fills: the filesystem its build directory is on, and for a WSL distribution
+            // the drive of this machine its disk grows on, which this machine's own legs fill too.
+            var rooms = new List<(HostId Machine, DiskSpace Disk, string Where)>();
 
-            if (before.Bytes + need.Bytes > disk.FreeBytes)
+            foreach (var (machine, disk, why, where) in Rooms(host, need))
             {
+                if (disk is null)
+                {
+                    unmeasured.Add(where.Length == 0
+                        ? $"leg '{placement.Leg.Name}' was placed on {host.Host} without its room checked, which could not be measured there: {why}"
+                        : $"leg '{placement.Leg.Name}' was placed on {host.Host} without the room checked on this machine's drive where WSL "
+                            + $"keeps its disk, which could not be measured: {why}");
+                    continue;
+                }
+
+                rooms.Add((machine, disk, where));
+            }
+
+            var lacking = rooms
+                .Select(room => (Room: room, Before: taken.TryGetValue((room.Machine, room.Disk.Filesystem), out var counted) ? counted : (Bytes: 0L, Legs: new List<string>())))
+                .FirstOrDefault(room => room.Before.Bytes + need.Bytes > room.Room.Disk.FreeBytes);
+
+            if (lacking.Room.Disk is { } full)
+            {
+                var before = lacking.Before;
                 var beside = before.Legs.Count == 0
                     ? string.Empty
                     : $", beside the ~{DiskSpace.Size(before.Bytes)} {string.Join(" and ", before.Legs.Select(name => $"'{name}'"))} need there";
@@ -135,7 +147,7 @@ public static class LegRoom
                     placement.Leg,
                     null,
                     (here is null ? $"{host.Host}: " : string.Empty)
-                    + $"{DiskSpace.Size(disk.FreeBytes)} free on '{disk.Filesystem}', and this leg needs ~{DiskSpace.Size(need.Bytes)}, "
+                    + $"{DiskSpace.Size(full.FreeBytes)} free on '{full.Filesystem}'{lacking.Room.Where}, and this leg needs ~{DiskSpace.Size(need.Bytes)}, "
                     + $"{need.Source}{beside}")
                 {
                     Verdict = LegVerdict.SkippedUnavailable,
@@ -144,10 +156,31 @@ public static class LegRoom
                 continue;
             }
 
-            taken[key] = (before.Bytes + need.Bytes, [.. before.Legs, placement.Leg.Name]);
+            foreach (var room in rooms)
+            {
+                var key = (room.Machine, room.Disk.Filesystem);
+                var before = taken.TryGetValue(key, out var counted) ? counted : (Bytes: 0L, Legs: new List<string>());
+                taken[key] = (before.Bytes + need.Bytes, [.. before.Legs, placement.Leg.Name]);
+            }
         }
 
         return (placed, unmeasured);
+    }
+
+    /// <summary>
+    /// Each room <paramref name="need"/> takes on <paramref name="host"/>: the filesystem of its build directory,
+    /// and for a WSL distribution this machine's drive holding its disk - keyed by this machine, since this
+    /// machine's own legs fill it too - each with why it could not be measured where it could not, and how a
+    /// reason names it.
+    /// </summary>
+    private static IEnumerable<(HostId Machine, DiskSpace? Disk, string? Why, string Where)> Rooms(HostReport host, Needed need)
+    {
+        yield return (host.Host, need.Disk, need.Unmeasured, string.Empty);
+
+        if (host.Host.Kind == HostKind.Wsl && (host.DiskImageSpace is not null || host.DiskImageUnmeasured is not null))
+        {
+            yield return (HostId.Local, host.DiskImageSpace, host.DiskImageUnmeasured, ", where WSL keeps its disk");
+        }
     }
 
     /// <summary>What a leg's build still needs on its host, and what is known of the room there.</summary>

@@ -1446,10 +1446,17 @@ could run them.
   placed as it always was, and so is one whose directory no build of this version recorded,
   since what that directory holds is an amount nothing measured.
 - **Only a command that builds.** `sync` and `clean` need no room: clean is how room is made.
+- **A WSL distribution's disk grows on this machine's drive.** WSL 2 keeps a distribution's
+  filesystem in a virtual disk file, and what the distribution measures is that disk's own room -
+  a terabyte by default - whatever the drive holding it has left: measured, a distribution said
+  814 GiB free while its drive had 563 GiB. So the room is also measured on the drive WSL
+  registers as holding the disk, a WSL leg needs its room on both, and the drive is counted with
+  this machine's own legs on it, which fill the same room.
 
 `legs -v` says the room on each host it measured - where its copies are kept, and the main
-checkout for this machine - or why it could not be measured, so a host that is nearly
-full shows before a run fills it. `--json` always carries it, as each host's `space`.
+checkout for this machine, with the drive a WSL distribution's disk grows on - or why it could not
+be measured, so a host that is nearly full shows before a run fills it. `--json` always carries
+it, as each host's `space` and a WSL distribution's `diskImageSpace`.
 
 ## Syncing a tree
 

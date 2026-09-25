@@ -407,6 +407,40 @@ public sealed class LegsServiceTests
     }
 
     /// <summary>
+    /// A WSL leg needs its room on this machine's drive where WSL keeps the distribution's disk as well as on the
+    /// disk itself, and shares that drive with this machine's own legs: turned away where the drive lacks it,
+    /// however much the virtual disk says it has.
+    /// </summary>
+    [Fact]
+    public async Task AWslLeg_NeedsItsRoomOnTheDriveWhereWslKeepsItsDisk_BesideThisMachinesOwnLegs()
+    {
+        var drive = new DiskSpace(8L << 30, 500L << 30, "C:\\");
+        var fixture = Create(
+            new()
+            {
+                ["native"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug", BuildSpaceGiB = 5 },
+                ["wsl"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "release", Wsl = "Ubuntu", BuildSpaceGiB = 5 },
+            },
+            configure: config => config.BuildConfigs["release"] = new BuildConfiguration(),
+            inspect: host => host.Kind == HostKind.Wsl
+                ? Measurements[host] with { DiskImageSpace = drive }
+                : Measurements[host],
+            rooms: (host, path) => host.Kind == HostKind.Local
+                ? new BuildDirectoryRoom(path, false, null, drive, null)
+                : Room(path, exists: false, recorded: null, free: 800));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.True(report.Placements.Single(placement => placement.Leg.Name == "native").Runnable);
+
+        var turned = report.Placements.Single(placement => placement.Leg.Name == "wsl");
+        Assert.False(turned.Runnable);
+        Assert.Equal(
+            "wsl Ubuntu: 8 GiB free on 'C:\\', where WSL keeps its disk, and this leg needs ~5 GiB, as its buildSpaceGiB, 5, declares, beside the ~5 GiB 'native' need there",
+            turned.Reason);
+    }
+
+    /// <summary>
     /// A leg whose need is known, on a host whose room could not be measured, is placed - nothing says it will
     /// not fit - and said to be unchecked, with why, rather than placed as though it had been checked.
     /// </summary>
