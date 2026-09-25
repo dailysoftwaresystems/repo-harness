@@ -323,12 +323,10 @@ public sealed class SyncService(
             }
 
             // Each host's own reason was warned with the legs it stopped, so it is named here and not said
-            // again; in a copy, where that reason is the same for every host, the conclusion says it once.
-            var conclusion = $"no host a leg is placed on could be reached, so nothing was copied: {string.Join(", ", unreached)}";
-
+            // again; in a copy, where that reason is the same for every host, the command ends saying it once.
             return CommandOutcome.Failed(
                 HarnessExit.HostUnavailable,
-                context.IsSyncedCopy ? Hosts.HostConnector.InACopy(conclusion) : conclusion);
+                $"no host a leg is placed on could be reached, so nothing was copied: {string.Join(", ", unreached)}");
         }
 
         var details = new List<string>();
@@ -465,12 +463,10 @@ public sealed class SyncService(
         {
             return null;
         }
-        var conclusion = $"{done}; {unplaced.Count} leg(s) could not be placed on any host, so no copy was made for "
-            + $"them: {string.Join(", ", unplaced)}";
-
         return CommandOutcome.Failed(
             report.Defect is not null ? Verdicts.ExitCodeFor(LegVerdict.Poisoned) : Legs.LegsExit.Unavailable,
-            context.IsSyncedCopy ? HostConnector.InACopy(conclusion) : conclusion,
+            $"{done}; {unplaced.Count} leg(s) could not be placed on any host, so no copy was made for "
+                + $"them: {string.Join(", ", unplaced)}",
             details);
     }
 

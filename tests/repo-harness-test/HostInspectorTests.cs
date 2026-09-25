@@ -74,12 +74,13 @@ public sealed class HostInspectorTests
         Assert.Empty(fixture.Commands.Calls);
 
         // Nothing about a copy, in a checkout somebody works in: there the machine is simply the wrong one.
-        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, report.Reason, StringComparison.Ordinal);
+        fixture.CopyRefusals.SayOnce("legs");
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, report.Reason + fixture.CopyNotices, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// A host of any kind that a command typed in a synced copy cannot reach is refused in its own words,
-    /// then with where the command belongs. Only the ssh kind's missing item once said so: a WSL leg in the
+    /// A host of any kind that a command typed in a synced copy cannot reach is refused in its own words, and
+    /// the command then says where it belongs. Only the ssh kind's missing item once said so: a WSL leg in the
     /// same copy - on Linux, where there is no WSL - was refused as WSL existing solely on Windows, true
     /// and no help to somebody who had typed the command in the wrong tree.
     /// </summary>
@@ -92,18 +93,32 @@ public sealed class HostInspectorTests
 
         var report = await fixture.InspectAsync(kind == "wsl" ? HostId.Wsl(Distro) : HostId.Ssh(SshName));
 
-        Assert.Equal($"{own}. {HostConnector.SyncedCopyNotice}", report.Reason);
+        Assert.Equal(own, report.Reason);
         Assert.DoesNotContain("create it", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.Calls);
+
+        fixture.CopyRefusals.SayOnce("legs");
+        Assert.Contains(HostConnector.SyncedCopyNotice, fixture.CopyNotices, StringComparison.Ordinal);
     }
 
-    /// <summary>A refusal that ends its own sentence is joined to the notice with one full stop, not two.</summary>
-    [Theory]
-    [InlineData("the host could not be reached")]
-    [InlineData("the host could not be reached.")]
-    [InlineData("the host could not be reached. ")]
-    public void ARefusalFromACopy_MeetsTheNoticeWithOneFullStop(string refusal)
-        => Assert.Equal($"the host could not be reached. {HostConnector.SyncedCopyNotice}", HostConnector.InACopy(refusal));
+    /// <summary>
+    /// Every host a command in a synced copy cannot reach is refused for the same reason, so the command says
+    /// where it belongs once, however many hosts it was refused: each refusal once carried the whole notice.
+    /// </summary>
+    [Fact]
+    public async Task HostsACopyCannotReach_AreFollowedByTheNoticeOnce()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, writeItems: false, syncedCopy: true);
+
+        var wsl = await fixture.InspectAsync(HostId.Wsl(Distro));
+        var ssh = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        fixture.CopyRefusals.SayOnce("legs");
+        fixture.CopyRefusals.SayOnce("legs");
+
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, wsl.Reason + ssh.Reason, StringComparison.Ordinal);
+        Assert.Single(fixture.CopyNotices.Split(HostConnector.SyncedCopyNotice)[1..]);
+    }
 
     [Fact]
     public async Task Wsl_IsUnavailable_WhenNoItemDeclaresWhichDistributionItIs()
@@ -1220,6 +1235,7 @@ public sealed class HostInspectorTests
             _lookup = new FixedLookup(resolves);
             var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
+            CopyRefusals = new SyncedCopyRefusals(new ConsoleHarnessOutput(new StringWriter(), _copyNotices, verbose: false));
             var connector = new HostConnector(
                 platform,
                 processRunner,
@@ -1227,11 +1243,14 @@ public sealed class HostInspectorTests
                 secrets,
                 addresses,
                 programs,
-                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero));
+                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero),
+                CopyRefusals);
 
             Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false));
             _inspector = new HostInspector(Commands, connector, identity, agent, Holds);
         }
+
+        private readonly StringWriter _copyNotices = new();
 
         public TempDirectory Repository { get; }
 
@@ -1239,6 +1258,12 @@ public sealed class HostInspectorTests
 
         /// <summary>The hosts reached that are to be held awake between commands.</summary>
         public HoldAwakeRegistry Holds { get; }
+
+        /// <summary>Whether a host was refused from a synced copy, which the command ends saying once.</summary>
+        public SyncedCopyRefusals CopyRefusals { get; }
+
+        /// <summary>What <see cref="CopyRefusals"/> has said.</summary>
+        public string CopyNotices => _copyNotices.ToString();
 
         /// <summary>Every name this machine looked up, in order, each once: the resolver keeps its answers.</summary>
         public IReadOnlyList<string> LookedUp => _lookup.Names;

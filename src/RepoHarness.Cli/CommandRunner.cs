@@ -96,6 +96,9 @@ internal static class CommandRunner
             }
             finally
             {
+                // Last, after each host's own refusal and the command's conclusion: the same for every host.
+                services.GetRequiredService<SyncedCopyRefusals>().SayOnce(commandName);
+
                 // However the command ended, a host it reached that asks to be held awake between commands is
                 // held: the next command's own keepAwake ends the hold there. Asked apart from the command's
                 // own token, so an interrupted command still leaves its holds.

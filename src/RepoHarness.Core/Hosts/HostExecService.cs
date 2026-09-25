@@ -18,7 +18,8 @@ public sealed class HostExecService(
     IHostInspector inspector,
     IHostCommandRunner hostCommands,
     IHostPlatform platform,
-    IHarnessOutput output)
+    IHarnessOutput output,
+    SyncedCopyRefusals copyRefusals)
 {
     /// <summary>The command's name, which prefixes what it reports.</summary>
     public const string CommandName = "host-exec";
@@ -31,6 +32,7 @@ public sealed class HostExecService(
     private readonly IHostCommandRunner _hostCommands = hostCommands;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
+    private readonly SyncedCopyRefusals _copyRefusals = copyRefusals;
 
     /// <summary>Runs <paramref name="arguments"/> with DssHarness on the host.</summary>
     /// <param name="directory">A directory in the repository whose configuration declares the host.</param>
@@ -91,9 +93,10 @@ public sealed class HostExecService(
             }
             catch (HarnessException ex) when (context.IsSyncedCopy && ex.ExitCode == HarnessExit.HostUnavailable)
             {
-                // Asked of WSL before any connection is opened, so the connector never sees it: said here as
-                // it says every host a synced copy cannot reach - WSL's own words, then where this belongs.
-                throw new HarnessException(ex.ExitCode, HostConnector.InACopy(ex.Message), ex);
+                // Asked of WSL before any connection is opened, so the connector never sees it: recorded here as
+                // it records every host a synced copy cannot reach, and the command ends saying where it belongs.
+                _copyRefusals.Refused();
+                throw;
             }
 
             target = Resolve(hosts.Wsl, "wsl", distribution, HostId.Wsl);

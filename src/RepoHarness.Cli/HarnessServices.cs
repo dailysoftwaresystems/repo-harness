@@ -95,6 +95,7 @@ internal static class HarnessServices
         services.AddSingleton(provider => new HoldAwakeStore(provider.GetRequiredService<IFileSystem>(), HoldAwakeStore.DefaultPath));
         services.AddSingleton<IDetachedProcessLauncher, DetachedProcessLauncher>();
         services.AddSingleton<HoldAwakeRegistry>();
+        services.AddSingleton<SyncedCopyRefusals>();
         services.AddSingleton(provider => new HoldAwakeService(
             provider.GetRequiredService<HoldAwakeStore>(),
             provider.GetRequiredService<KeepAwake>(),

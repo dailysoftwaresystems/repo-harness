@@ -10,6 +10,7 @@ using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Tools;
@@ -737,6 +738,45 @@ public sealed partial class CliEndToEndTests
         Assert.Equal(HarnessExit.Success, verbose.ExitCode);
         Assert.Matches(@"local: [0-9.]+ [KMGT]?i?B(ytes)? free of [0-9.]+ [KMGT]?i?B(ytes)? on '", verbose.StandardOutput);
         Assert.DoesNotContain(" free of ", quiet.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A command typed in a copy the harness synced to a host, whose legs name hosts it cannot reach, says each
+    /// host's own refusal and then where the command belongs - once, through the real binary, however many
+    /// hosts refused it.
+    /// </summary>
+    [Fact]
+    public async Task ACommandInASyncedCopy_SaysWhereItBelongsOnce_HoweverManyHostsItCannotReach()
+    {
+        using var temp = new TempDirectory();
+
+        await new HarnessFactory().InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            SshItems = { "pi", "mac" },
+            Hosts = new HostsConfig
+            {
+                Ssh =
+                {
+                    ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" },
+                    ["mac"] = new SshHostConfig { RepositoryPath = "/Users/harness/repo" },
+                },
+            },
+            Legs =
+            {
+                ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", Ssh = "pi" },
+                ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "mac" },
+            },
+        });
+
+        temp.WriteFile(Path.Combine(HarnessLayout.DirectoryName, HarnessLayout.SyncedCopyMarkerName), "{}");
+
+        var result = await CliRunner.RunAsync(["legs", "--legs", "arm,mac", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("sshItems/pi", result.StandardError + result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("sshItems/mac", result.StandardError + result.StandardOutput, StringComparison.Ordinal);
+        Assert.Single((result.StandardError + result.StandardOutput).Split(HostConnector.SyncedCopyNotice)[1..]);
     }
 
     /// <summary>

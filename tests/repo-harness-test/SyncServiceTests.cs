@@ -1369,8 +1369,8 @@ public sealed class SyncServiceTests
         Assert.Contains("ssh pi", outcome.Message, StringComparison.Ordinal);
         Assert.Contains("ssh mac", outcome.Message, StringComparison.Ordinal);
 
-        var notices = outcome.Message.Split(HostConnector.SyncedCopyNotice).Length - 1;
-        Assert.Equal(syncedCopy ? 1 : 0, notices);
+        // Said once as the command ends, never in its conclusion, where it once repeated each host's refusal.
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, outcome.Message, StringComparison.Ordinal);
 
         factory.DidNotReceive().For(Arg.Any<HostReport>());
     }
