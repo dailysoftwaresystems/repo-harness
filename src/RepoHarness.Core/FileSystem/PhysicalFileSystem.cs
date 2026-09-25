@@ -119,6 +119,138 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         }
     }
 
+    public void MoveDirectory(string source, string destination) => Directory.Move(source, destination);
+
+    public bool IsLink(string path) => new FileInfo(path).LinkTarget is not null;
+
+    public long DirectorySize(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return 0;
+        }
+
+        var total = 0L;
+
+        // A directory this user cannot read counts as nothing, rather than ending the count: a leftover of a
+        // build run as another user would otherwise stop every clean of the directory it is in.
+        foreach (var length in Walk(path, recursive: true, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.Length, ignoreInaccessible: true))
+        {
+            total += length;
+        }
+
+        return total;
+    }
+
+    public DiskSpace SpaceAt(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        // A directory not made yet will be made on the filesystem of the nearest one above it that exists,
+        // which is the room it has: a copy a first sync has still to create, the build directory of a leg
+        // that never built.
+        var existing = Path.GetFullPath(path);
+
+        while (!Directory.Exists(existing) && Path.GetDirectoryName(existing) is { } parent)
+        {
+            existing = parent;
+        }
+
+        // Where it leads, through every link along it: a build directory linked onto another disk is on that
+        // disk, and measured through the path as written it was the room of the disk the link sits on.
+        existing = Followed(existing);
+
+        try
+        {
+            // Windows measures a volume through its root, and refuses a longer path; elsewhere the call
+            // answers for any path on the filesystem.
+            var drive = new DriveInfo(OperatingSystem.IsWindows() ? Path.GetPathRoot(existing) ?? existing : existing);
+
+            return new DiskSpace(drive.AvailableFreeSpace, drive.TotalSize, MountOf(existing));
+        }
+        catch (ArgumentException ex)
+        {
+            throw new IOException($"The room on the filesystem of '{path}' cannot be asked: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="path"/>, with each directory link along it - a symbolic link, or a junction on Windows -
+    /// replaced by where it finally leads; the path as it is where a link cannot be followed.
+    /// </summary>
+    private static string Followed(string path)
+    {
+        var current = path;
+
+        try
+        {
+            // Bounded, as the system bounds a chain of links: one that loops is left as it is.
+            for (var hops = 0; hops < 40 && LinkAlong(current) is var (link, rest); hops++)
+            {
+                if (new DirectoryInfo(link).ResolveLinkTarget(returnFinalTarget: true) is not { } target)
+                {
+                    break;
+                }
+
+                current = rest.Length == 0 ? target.FullName : Path.Join(target.FullName, rest);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Measured where it is written: a link nobody may read is still somewhere.
+        }
+
+        return current;
+    }
+
+    /// <summary>The first directory link along <paramref name="path"/>, and what follows it; none where there is none.</summary>
+    private static (string Link, string After)? LinkAlong(string path)
+    {
+        var root = Path.GetPathRoot(path) ?? string.Empty;
+        var parts = path[root.Length..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        var prefix = root;
+
+        for (var index = 0; index < parts.Length; index++)
+        {
+            prefix = Path.Join(prefix, parts[index]);
+
+            if (new DirectoryInfo(prefix).LinkTarget is not null)
+            {
+                return (prefix, string.Join(Path.DirectorySeparatorChar, parts[(index + 1)..]));
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Where the filesystem <paramref name="path"/> is on is mounted, as a reader would look it up: its
+    /// drive on Windows, and elsewhere the deepest mount point above it.
+    /// </summary>
+    private static string MountOf(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Path.GetPathRoot(path) ?? path;
+        }
+
+        try
+        {
+            return DriveInfo.GetDrives()
+                .Select(drive => Path.TrimEndingDirectorySeparator(drive.RootDirectory.FullName))
+                .Where(root => root == "/" || path == root || path.StartsWith(root + "/", StringComparison.Ordinal))
+                .OrderByDescending(root => root.Length)
+                .FirstOrDefault() ?? path;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Named by the path itself where the mounts cannot be listed: the room is still measured.
+            return path;
+        }
+    }
+
     public IEnumerable<string> EnumerateFiles(string path, bool recursive)
         => Walk(path, recursive, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.ToSpecifiedFullPath());
 
@@ -127,7 +259,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             path,
             recursive: true,
             (ref FileSystemEntry entry) => !entry.IsDirectory,
-            (ref FileSystemEntry entry) => new WrittenFile(entry.ToSpecifiedFullPath(), entry.LastWriteTimeUtc.UtcDateTime)));
+            (ref FileSystemEntry entry) => new WrittenFile(entry.ToSpecifiedFullPath(), entry.LastWriteTimeUtc.UtcDateTime) { Length = entry.Length }));
 
     /// <summary>
     /// <paramref name="walked"/>, each dated by the walk's own reading of its time where the walk had one,
@@ -156,17 +288,19 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             }
 
             DateTime written;
+            long length;
 
             try
             {
                 written = LastWriteTimeUtc(file.Path);
+                length = new FileInfo(file.Path).Length;
             }
             catch (FileNotFoundException)
             {
                 continue;
             }
 
-            yield return file with { LastWriteTimeUtc = written };
+            yield return file with { LastWriteTimeUtc = written, Length = length };
         }
     }
 
@@ -191,7 +325,8 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         string path,
         bool recursive,
         FileSystemEnumerable<T>.FindPredicate include,
-        FileSystemEnumerable<T>.FindTransform transform)
+        FileSystemEnumerable<T>.FindTransform transform,
+        bool ignoreInaccessible = false)
         => new(
             path,
             transform,
@@ -199,7 +334,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             {
                 RecurseSubdirectories = recursive,
                 AttributesToSkip = 0,
-                IgnoreInaccessible = false,
+                IgnoreInaccessible = ignoreInaccessible,
                 MatchType = MatchType.Win32,
             })
         {

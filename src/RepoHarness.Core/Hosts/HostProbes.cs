@@ -256,6 +256,20 @@ public static partial class HostProbes
     }
 
     /// <summary>
+    /// Whether ssh failed in a way a host still waking up explains: it never connected - the name did not
+    /// resolve, or nothing took the connection at the address - or no answer came in time. Narrower than
+    /// <see cref="FailedBeforeAnySession"/> on purpose, and never to be merged with it: a key the host showed
+    /// that the name is not known by is the host answering, and would be refused again however long it waited.
+    /// </summary>
+    /// <param name="result">What an ssh call produced.</param>
+    public static bool MayBeWaking(ProcessResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.TimedOut || (result.ExitCode == SshFailed && NeverConnected(result.StandardError) is not null);
+    }
+
+    /// <summary>
     /// Whether ssh failed, before any session began, for a reason the address it was given can be to blame
     /// for - it never connected, or it refused the key the host showed - so that nothing ran there, and a
     /// call made again runs nothing twice. A login refused is not one: the host whose key was accepted refused

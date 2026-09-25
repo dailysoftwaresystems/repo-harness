@@ -2,6 +2,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Results;
 
@@ -23,7 +24,7 @@ public static class LegsReports
     };
 
     /// <summary>What <c>legs</c> reports.</summary>
-    public static CommandOutcome Render(LegsReport report, bool json)
+    public static CommandOutcome Render(LegsReport report, bool json, bool verbose = false)
     {
         ArgumentNullException.ThrowIfNull(report);
 
@@ -68,6 +69,15 @@ public static class LegsReports
                     host.ToolVersion,
                     host.ToolPath,
                     host.Actions,
+
+                    // The room where its copies are kept - the main checkout, for this machine -
+                    // or why it could not be measured: whole here, where -v adds nothing a script has to ask for.
+                    host.Space,
+                    host.SpaceUnmeasured,
+
+                    // For a WSL distribution, the drive of this machine its disk grows on.
+                    host.DiskImageSpace,
+                    host.DiskImageUnmeasured,
                 }),
             };
 
@@ -89,6 +99,13 @@ public static class LegsReports
             {
                 details.Add($"{host.Host}: cannot run legs: {reason}");
             }
+
+            // Asked for with -v: a host that is nearly full shows before a run that fills it, and before the
+            // legs its builds would no longer fit are turned away.
+            if (verbose && Room(host) is { } room)
+            {
+                details.Add($"{host.Host}: {room}");
+            }
         }
 
         var width = report.Placements.Count == 0 ? 0 : report.Placements.Max(placement => placement.Leg.Name.Length);
@@ -102,6 +119,24 @@ public static class LegsReports
         }
 
         return new CommandOutcome(exitCode, message, details);
+    }
+
+    /// <summary>The room on <paramref name="host"/>, or why it could not be measured; <see langword="null"/> where it was not asked.</summary>
+    private static string? Room(HostReport host)
+    {
+        var room = host.Space is { } space
+            ? space.Describe()
+            : host.SpaceUnmeasured is { } why
+                ? $"the room there could not be measured: {why}"
+                : null;
+
+        var image = host.DiskImageSpace is { } drive
+            ? $"its disk grows on this machine's '{drive.Filesystem}', {DiskSpace.Size(drive.FreeBytes)} free"
+            : host.DiskImageUnmeasured is { } unmeasured
+                ? $"the room on this machine's drive its disk grows on could not be measured: {unmeasured}"
+                : null;
+
+        return image is null ? room : room is null ? image : $"{room}; {image}";
     }
 
     private static string Summary(LegsReport report, IReadOnlyList<HostReport> silent)

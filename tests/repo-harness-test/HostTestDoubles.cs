@@ -78,6 +78,9 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
     /// <summary>What the ssh shell probe answers; by default a shell that is not cmd.</summary>
     public ProcessResult ShellProbe { get; set; } = HostResults.Ok("%COMSPEC%\n");
 
+    /// <summary>What the shell probe answers first, one per probe, before <see cref="ShellProbe"/>: a host that takes a while to wake.</summary>
+    public Queue<ProcessResult> ShellProbesFirst { get; } = new();
+
     /// <summary>
     /// Writes <paramref name="output"/> where a host writes what a command it ran said: standard
     /// output. Standard error carries the protocol's completion line, so an answer written there would
@@ -200,7 +203,9 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
             _shellProbes.Add(connection);
         }
 
-        return ShellProbeRaises is { } raised ? Task.FromException<ProcessResult>(raised) : Task.FromResult(ShellProbe);
+        return ShellProbeRaises is { } raised
+            ? Task.FromException<ProcessResult>(raised)
+            : Task.FromResult(ShellProbesFirst.TryDequeue(out var first) ? first : ShellProbe);
     }
 
     public Task<ProcessResult> ProbeDefaultWslDistributionAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -220,7 +225,25 @@ internal sealed class ScriptedHostCommands(Func<HostConnection, HostCommand, Pro
 /// <summary>Reports a fixed measurement for each host, and records which hosts were measured, and for which emulators.</summary>
 internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHostInspector
 {
-    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyDictionary<string, DeveloperEnvironmentConfig> Environments, IReadOnlyList<string> Programs)> _inspected = [];
+    private readonly List<(HostId Host, IReadOnlyDictionary<string, EmulatorConfig> Emulators, IReadOnlyDictionary<string, DeveloperEnvironmentConfig> Environments, IReadOnlyList<string> Programs, RoomQuestions Room)> _inspected = [];
+
+    /// <summary>What each measurement was asked about the room on the host, in the order the hosts were measured.</summary>
+    public IReadOnlyList<(HostId Host, RoomQuestions Room)> RoomAsked
+    {
+        get
+        {
+            lock (_inspected)
+            {
+                return [.. _inspected.Select(entry => (entry.Host, entry.Room))];
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a host answers about each build directory it is asked about, where a test scripts it; unscripted,
+    /// a host answers for none.
+    /// </summary>
+    public Func<HostId, string, BuildDirectoryRoom>? BuildRooms { get; init; }
 
     /// <summary>Every host measured, in order.</summary>
     public IReadOnlyList<HostId> Inspected
@@ -276,14 +299,20 @@ internal sealed class RecordingInspector(Func<HostId, HostReport> report) : IHos
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default)
     {
         lock (_inspected)
         {
-            _inspected.Add((host, emulators, developerEnvironments, programs));
+            _inspected.Add((host, emulators, developerEnvironments, programs, room ?? RoomQuestions.None));
         }
 
         var answer = report(host);
+
+        if (BuildRooms is { } rooms && answer.Available)
+        {
+            answer = answer with { Builds = [.. (room ?? RoomQuestions.None).Builds.Select(path => rooms(host, path))] };
+        }
 
         // Likewise a host that says nothing about developer environments can set up every one it was
         // asked about; a test about one missing scripts it.
@@ -424,6 +453,7 @@ internal static class HostDoubles
             _ => throw new ArgumentOutOfRangeException(nameof(current), current, "Only Windows and Linux stand-ins are needed."),
         });
         platform.Processor.Returns(processor);
+        platform.PathComparison.Returns(current == PlatformId.Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         platform.HomeDirectory.Returns(home ?? TestHost.TemporaryRoot);
         return platform;
     }
@@ -446,4 +476,38 @@ internal static class HostDoubles
 
     /// <summary>A leg that needs <paramref name="os"/> on <paramref name="processor"/>, built in the "debug" configuration.</summary>
     public static LegConfig Leg(string os, string processor) => new() { Os = os, Processor = processor, Config = "debug" };
+}
+
+/// <summary>Records what this tool was asked to start detached, and starts nothing.</summary>
+internal sealed class RecordingLauncher : IDetachedProcessLauncher
+{
+    private readonly List<IReadOnlyList<string>> _started = [];
+
+    /// <summary>What was started, in order.</summary>
+    public IReadOnlyList<IReadOnlyList<string>> Started
+    {
+        get
+        {
+            lock (_started)
+            {
+                return [.. _started];
+            }
+        }
+    }
+
+    /// <summary>What starting raises, where a test scripts it.</summary>
+    public Exception? Raises { get; init; }
+
+    public void StartSelf(IReadOnlyList<string> arguments)
+    {
+        if (Raises is { } raised)
+        {
+            throw raised;
+        }
+
+        lock (_started)
+        {
+            _started.Add(arguments);
+        }
+    }
 }

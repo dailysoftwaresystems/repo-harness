@@ -74,12 +74,13 @@ public sealed class HostInspectorTests
         Assert.Empty(fixture.Commands.Calls);
 
         // Nothing about a copy, in a checkout somebody works in: there the machine is simply the wrong one.
-        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, report.Reason, StringComparison.Ordinal);
+        fixture.CopyRefusals.SayOnce("legs");
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, report.Reason + fixture.CopyNotices, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// A host of any kind that a command typed in a synced copy cannot reach is refused in its own words,
-    /// then with where the command belongs. Only the ssh kind's missing item once said so: a WSL leg in the
+    /// A host of any kind that a command typed in a synced copy cannot reach is refused in its own words, and
+    /// the command then says where it belongs. Only the ssh kind's missing item once said so: a WSL leg in the
     /// same copy - on Linux, where there is no WSL - was refused as WSL existing solely on Windows, true
     /// and no help to somebody who had typed the command in the wrong tree.
     /// </summary>
@@ -92,18 +93,32 @@ public sealed class HostInspectorTests
 
         var report = await fixture.InspectAsync(kind == "wsl" ? HostId.Wsl(Distro) : HostId.Ssh(SshName));
 
-        Assert.Equal($"{own}. {HostConnector.SyncedCopyNotice}", report.Reason);
+        Assert.Equal(own, report.Reason);
         Assert.DoesNotContain("create it", report.Reason, StringComparison.Ordinal);
         Assert.Empty(fixture.Commands.Calls);
+
+        fixture.CopyRefusals.SayOnce("legs");
+        Assert.Contains(HostConnector.SyncedCopyNotice, fixture.CopyNotices, StringComparison.Ordinal);
     }
 
-    /// <summary>A refusal that ends its own sentence is joined to the notice with one full stop, not two.</summary>
-    [Theory]
-    [InlineData("the host could not be reached")]
-    [InlineData("the host could not be reached.")]
-    [InlineData("the host could not be reached. ")]
-    public void ARefusalFromACopy_MeetsTheNoticeWithOneFullStop(string refusal)
-        => Assert.Equal($"the host could not be reached. {HostConnector.SyncedCopyNotice}", HostConnector.InACopy(refusal));
+    /// <summary>
+    /// Every host a command in a synced copy cannot reach is refused for the same reason, so the command says
+    /// where it belongs once, however many hosts it was refused: each refusal once carried the whole notice.
+    /// </summary>
+    [Fact]
+    public async Task HostsACopyCannotReach_AreFollowedByTheNoticeOnce()
+    {
+        using var fixture = new Fixture(PlatformId.Linux, writeItems: false, syncedCopy: true);
+
+        var wsl = await fixture.InspectAsync(HostId.Wsl(Distro));
+        var ssh = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        fixture.CopyRefusals.SayOnce("legs");
+        fixture.CopyRefusals.SayOnce("legs");
+
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, wsl.Reason + ssh.Reason, StringComparison.Ordinal);
+        Assert.Single(fixture.CopyNotices.Split(HostConnector.SyncedCopyNotice)[1..]);
+    }
 
     [Fact]
     public async Task Wsl_IsUnavailable_WhenNoItemDeclaresWhichDistributionItIs()
@@ -456,6 +471,42 @@ public sealed class HostInspectorTests
         AssertToolUntouched(fixture);
     }
 
+    /// <summary>
+    /// A host that is behind, whose only DssHarness running is the hold a command left there, has the hold ended
+    /// through its DssHarness and is updated: nothing else ends a hold before its seconds run out, and every
+    /// command was otherwise turned away from the host, as though a run were going on there.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatIsBehind_WhoseOnlyDssHarnessIsAHold_HasItEnded_AndIsUpdated()
+    {
+        var ended = false;
+        var info = HostThat(installed: "1.1.9");
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: (connection, command) =>
+        {
+            if (command.Program is "ps" or "tasklist")
+            {
+                return HostResults.Ok(ended ? "bash\n" : "bash\nDssHarness\n");
+            }
+
+            if (command.Arguments.FirstOrDefault() == HostAgentProtocol.CommandName
+                && JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions) is { Kind: HostAgentRequestKind.Hold, HoldAwakeSeconds: 0 } end)
+            {
+                ended = true;
+                command.OnErrorLine?.Invoke(HostAgentProtocol.CompletionLine(end.Nonce!, HarnessExit.Success));
+                return HostResults.Ok(string.Empty);
+            }
+
+            return info(connection, command);
+        });
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.True(ended);
+        Assert.Equal(["updated DssHarness 1.1.9 to 1.2.0"], report.Actions);
+    }
+
     [Fact]
     public async Task AHostThatIsBehind_IsNotUpdated_WhenItsProcessesCannotBeListed()
     {
@@ -601,6 +652,200 @@ public sealed class HostInspectorTests
 
         Assert.True(report.Available, report.Reason);
         Assert.True(report.Emulators["QEMU-ARM64"].Available);
+    }
+
+    /// <summary>
+    /// A host that sleeps, given a window, is looked up again until its name answers, and connected to again
+    /// until a connection is taken: it is reached, and its report says how long it took to wake.
+    /// </summary>
+    [Fact]
+    public async Task AHostGivenAWindow_IsWaitedForUntilItWakes_AndSaysHowLongItTook()
+    {
+        var wakeLookup = new WakingLookup(answersOnCall: 2);
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeWaitSeconds: 30, wakeLookup: wakeLookup);
+        fixture.Commands.ShellProbesFirst.Enqueue(HostResults.Failed(HostProbes.SshFailed, "ssh: connect to host host.invalid port 2222: Connection refused\n"));
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal(2, wakeLookup.Calls);
+        Assert.Contains(report.Actions, action => action.StartsWith("answered after ", StringComparison.Ordinal)
+            && action.EndsWith("(5 lookup(s) of its name, 2 connection attempt(s))", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A host whose window runs out is refused naming the window it was given; asked for again in the same
+    /// command, it is refused at once, rather than waited for again by every leg placed there. A host given no
+    /// window is looked up as every host is, and asked nothing more.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseWindowRunsOut_IsRefusedNamingIt_AndIsNotWaitedForAgain()
+    {
+        var wakeLookup = new WakingLookup(answersOnCall: int.MaxValue, takes: TimeSpan.FromSeconds(1));
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeWaitSeconds: 1, wakeLookup: wakeLookup);
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        var calls = wakeLookup.Calls;
+        var again = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("over the 1 seconds wakeWaitSeconds gives it to wake", report.Reason, StringComparison.Ordinal);
+        Assert.True(calls > 0);
+        Assert.Equal(report.Reason, again.Reason);
+        Assert.Equal(calls, wakeLookup.Calls);
+
+        using var unwaited = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, wakeLookup: wakeLookup);
+        var plain = await unwaited.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.DoesNotContain("wakeWaitSeconds", plain.Reason, StringComparison.Ordinal);
+        Assert.Equal(calls, wakeLookup.Calls);
+    }
+
+    /// <summary>
+    /// A host whose name answers but whose connections go untaken for the whole window is refused naming the
+    /// window, and, asked for again in the same command, refused at once rather than connected to again.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseConnectionsGoUntakenForTheWindow_IsRefusedNamingIt_AndIsNotTriedAgain()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), wakeWaitSeconds: 1, wakePoll: TimeSpan.FromMilliseconds(100));
+        fixture.Commands.ShellProbe = HostResults.Failed(HostProbes.SshFailed, "ssh: connect to host host.invalid port 2222: Connection refused\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        var probes = fixture.Commands.ShellProbes.Count;
+        var again = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("over the 1 seconds wakeWaitSeconds gives it to wake", report.Reason, StringComparison.Ordinal);
+        Assert.True(probes > 1);
+        Assert.Equal(report.Reason, again.Reason);
+        Assert.Equal(probes, fixture.Commands.ShellProbes.Count);
+    }
+
+    /// <summary>
+    /// An ssh host that asks to be held awake between commands is held once it has been reached, with its
+    /// keepAwake and its seconds, as the command ends; one that could not be reached is asked nothing.
+    /// </summary>
+    [Fact]
+    public async Task AReachedHostThatAsksForAHold_IsHeldAsTheCommandEnds_AndOneNeverReachedIsNot()
+    {
+        var holds = new List<HostAgentRequest>();
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        {
+            var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions)!;
+
+            if (request.Kind != HostAgentRequestKind.Hold)
+            {
+                return HostResults.Ok(JsonSerializer.Serialize(
+                    new HostAgentInfo { Version = Root.Version, AssemblySha256 = Root.AssemblySha256, Os = "linux", Processor = "x86_64" },
+                    HostAgentProtocol.JsonOptions));
+            }
+
+            holds.Add(request);
+            command.OnErrorLine?.Invoke(HostAgentProtocol.CompletionLine(request.Nonce!, HarnessExit.Success));
+            return HostResults.Ok(string.Empty);
+        }), holdAwakeSeconds: 600);
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        await fixture.Holds.LeaveHoldsAsync("test", TestContext.Current.CancellationToken);
+
+        Assert.True(report.Available, report.Reason);
+        var hold = Assert.Single(holds);
+        Assert.Equal(600, hold.HoldAwakeSeconds);
+        Assert.Equal(["caffeinate", "-w", "{pid}"], hold.KeepAwake);
+
+        using var unreached = new Fixture(PlatformId.Windows, respond: HostThat(), resolves: false, holdAwakeSeconds: 600);
+        await unreached.InspectAsync(HostId.Ssh(SshName));
+        await unreached.Holds.LeaveHoldsAsync("test", TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(unreached.Commands.Calls, call => call.Command.StandardInput.Contains("\"hold\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>A name that answers from a given lookup on, each lookup taking the time it is told to.</summary>
+    private sealed class WakingLookup(int answersOnCall, TimeSpan takes = default) : INameLookup
+    {
+        public int Calls { get; private set; }
+
+        public async Task<IReadOnlyList<string>> LookupAsync(string name, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+
+            if (takes > TimeSpan.Zero)
+            {
+                await Task.Delay(takes, cancellationToken);
+            }
+
+            return Calls >= answersOnCall ? ["192.0.2.7"] : [];
+        }
+    }
+
+    /// <summary>
+    /// What a host is asked about the room on it travels to it as asked, and what it answers - the room where
+    /// its copies are kept, and each build directory's record and room - comes back on its report.
+    /// </summary>
+    [Fact]
+    public async Task TheRoomAHostIsAskedAbout_TravelsToIt_AndWhatItAnswersComesBack()
+    {
+        HostAgentRequest? asked = null;
+        var disk = new DiskSpace(3L << 30, 48L << 30, "/");
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(agent: command =>
+        {
+            asked = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions);
+
+            return HostResults.Ok(JsonSerializer.Serialize(
+                new HostAgentInfo
+                {
+                    Version = Root.Version,
+                    AssemblySha256 = Root.AssemblySha256,
+                    Os = "linux",
+                    Processor = "x86_64",
+                    Space = disk,
+                    Builds = [new BuildDirectoryRoom("~/repo/build/x86_64-gcc-debug", true, 4096, disk, null)],
+                },
+                HostAgentProtocol.JsonOptions));
+        }));
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro), room: new RoomQuestions("~/repo", ["~/repo/build/x86_64-gcc-debug"]));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.Equal("~/repo", asked!.SpaceAt);
+        Assert.Equal(["~/repo/build/x86_64-gcc-debug"], asked.Builds);
+        Assert.Equal(disk, report.Space);
+        Assert.Equal(4096, Assert.Single(report.Builds).RecordedBytes);
+    }
+
+    /// <summary>The directory WSL registers for a distribution's disk is read without the prefix it sometimes writes.</summary>
+    [Theory]
+    [InlineData(@"\\?\C:\Users\me\AppData\Local\Docker\wsl\main", @"C:\Users\me\AppData\Local\Docker\wsl\main")]
+    [InlineData(@"C:\Users\me\AppData\Local\Packages\Ubuntu\LocalState", @"C:\Users\me\AppData\Local\Packages\Ubuntu\LocalState")]
+    public void TheDirectoryWslRegistersForADisk_IsReadWithoutItsPrefix(string registered, string plain)
+        => Assert.Equal(plain, WslDiskImages.Plain(registered));
+
+    /// <summary>
+    /// A WSL distribution asked about its room also has the room measured on this machine's drive where WSL keeps
+    /// its disk: the distribution measures its virtual disk, a terabyte by default, whatever that drive has left.
+    /// A host of any other kind is asked nothing of it.
+    /// </summary>
+    [Fact]
+    public async Task AWslDistributionsRoom_IsAlsoMeasuredWhereWslKeepsItsDisk()
+    {
+        using var images = new TempDirectory();
+        var diskImages = Substitute.For<IWslDiskImages>();
+        diskImages.DirectoryOf(Distro).Returns(images.Path);
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), diskImages: diskImages);
+
+        var wsl = await fixture.InspectAsync(HostId.Wsl(Distro), room: new RoomQuestions("~/repo", []));
+        var ssh = await fixture.InspectAsync(HostId.Ssh(SshName), room: new RoomQuestions("/srv/repo", []));
+
+        Assert.True(wsl.Available, wsl.Reason);
+        Assert.Equal(new PhysicalFileSystem(FilePermissionsFactory.Create()).SpaceAt(images.Path).Filesystem, wsl.DiskImageSpace?.Filesystem);
+        Assert.Null(ssh.DiskImageSpace);
+        Assert.Null(ssh.DiskImageUnmeasured);
     }
 
     /// <summary>
@@ -1004,7 +1249,12 @@ public sealed class HostInspectorTests
             bool writeItems = true,
             bool resolves = true,
             string address = "host.invalid",
-            bool syncedCopy = false)
+            bool syncedCopy = false,
+            int wakeWaitSeconds = 0,
+            INameLookup? wakeLookup = null,
+            int holdAwakeSeconds = 0,
+            TimeSpan? wakePoll = null,
+            IWslDiskImages? diskImages = null)
         {
             Repository = new TempDirectory();
 
@@ -1043,7 +1293,17 @@ public sealed class HostInspectorTests
                 Hosts = new HostsConfig
                 {
                     Wsl = { [Distro] = new WslHostConfig { RepositoryPath = "~/repo" } },
-                    Ssh = { [SshName] = new SshHostConfig { RepositoryPath = "/srv/repo", ConnectTimeoutSeconds = 5 } },
+                    Ssh =
+                    {
+                        [SshName] = new SshHostConfig
+                        {
+                            RepositoryPath = "/srv/repo",
+                            ConnectTimeoutSeconds = 5,
+                            WakeWaitSeconds = wakeWaitSeconds,
+                            HoldAwakeSeconds = holdAwakeSeconds,
+                            KeepAwake = holdAwakeSeconds > 0 ? ["caffeinate", "-w", "{pid}"] : null,
+                        },
+                    },
                 },
             };
 
@@ -1057,19 +1317,42 @@ public sealed class HostInspectorTests
                 new DeveloperEnvironmentProbe(platform, processRunner),
                 fileSystem,
                 new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
-                new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
+                new KeepAwake(processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)),
+                new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), Path.Combine(TestHost.TemporaryRoot, "holds", Guid.NewGuid().ToString("N") + ".json")),
+                new RecordingLauncher());
             var secrets = new HostSecretsStore(fileSystem, Permissions, platform);
             _lookup = new FixedLookup(resolves);
             var addresses = new HostAddressResolver(_lookup, TimeProvider.System, TimeSpan.Zero);
             var programs = new HostProgramResolver(new LocalProgramResolver(platform, FilePermissionsFactory.Create()), Commands);
-            var connector = new HostConnector(platform, processRunner, Commands, secrets, addresses, programs);
+            CopyRefusals = new SyncedCopyRefusals(new ConsoleHarnessOutput(new StringWriter(), _copyNotices, verbose: false));
+            var connector = new HostConnector(
+                platform,
+                processRunner,
+                Commands,
+                secrets,
+                addresses,
+                programs,
+                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, wakePoll ?? TimeSpan.Zero),
+                CopyRefusals);
 
-            _inspector = new HostInspector(Commands, connector, identity, agent);
+            Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false), stopsWithin: TimeSpan.Zero);
+            _inspector = new HostInspector(Commands, connector, identity, agent, Holds, diskImages ?? Substitute.For<IWslDiskImages>(), fileSystem);
         }
+
+        private readonly StringWriter _copyNotices = new();
 
         public TempDirectory Repository { get; }
 
         public ScriptedHostCommands Commands { get; }
+
+        /// <summary>The hosts reached that are to be held awake between commands.</summary>
+        public HoldAwakeRegistry Holds { get; }
+
+        /// <summary>Whether a host was refused from a synced copy, which the command ends saying once.</summary>
+        public SyncedCopyRefusals CopyRefusals { get; }
+
+        /// <summary>What <see cref="CopyRefusals"/> has said.</summary>
+        public string CopyNotices => _copyNotices.ToString();
 
         /// <summary>Every name this machine looked up, in order, each once: the resolver keeps its answers.</summary>
         public IReadOnlyList<string> LookedUp => _lookup.Names;
@@ -1080,13 +1363,15 @@ public sealed class HostInspectorTests
             HostId host,
             IReadOnlyDictionary<string, EmulatorConfig>? emulators = null,
             IReadOnlyList<string>? programs = null,
-            IReadOnlyDictionary<string, DeveloperEnvironmentConfig>? environments = null)
+            IReadOnlyDictionary<string, DeveloperEnvironmentConfig>? environments = null,
+            RoomQuestions? room = null)
             => _inspector.InspectAsync(
                 _context,
                 host,
                 emulators ?? new Dictionary<string, EmulatorConfig>(StringComparer.OrdinalIgnoreCase),
                 environments ?? new Dictionary<string, DeveloperEnvironmentConfig>(StringComparer.OrdinalIgnoreCase),
                 programs ?? [],
+                room,
                 TestContext.Current.CancellationToken);
 
         public void Dispose() => Repository.Dispose();

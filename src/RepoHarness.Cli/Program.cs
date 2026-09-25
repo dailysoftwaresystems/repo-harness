@@ -32,6 +32,7 @@ root.Subcommands.Add(SyncCommand.Create());
 root.Subcommands.Add(BuildCommand.Create());
 root.Subcommands.Add(TestCommand.Create());
 root.Subcommands.Add(RunCommand.Create());
+root.Subcommands.Add(CleanCommand.Create());
 root.Subcommands.Add(HostExecCommand.Create());
 root.Subcommands.Add(HelpCommand.Create());
 
@@ -42,6 +43,9 @@ root.Subcommands.Add(SyncServeCommand.Create());
 // Served on a host, for the DssHarness on the machine that reaches it. A run request goes back
 // through this same parser, in the host's copy of the repository, which is why it is wired here.
 root.Subcommands.Add(HostAgentCommand.Create(RunInAsync));
+
+// Started by a host agent asked to hold its machine awake between commands, detached, and never typed.
+root.Subcommands.Add(HostHoldCommand.Create());
 
 return await RunAsync(args, CancellationToken.None).ConfigureAwait(false);
 

@@ -64,6 +64,12 @@ public sealed record LedgerLine(
     /// <summary>The developer environment the leg's processes started in, where it was set up.</summary>
     public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
 
+    /// <summary>What the leg's build directory held and the room on its filesystem, as <see cref="LegEntry.Space"/> says.</summary>
+    public BuildSpace? Space { get; init; }
+
+    /// <summary>Each file the leg's steps kept, as <see cref="LegEntry.KeptOutputs"/> says.</summary>
+    public IReadOnlyList<string> KeptOutputs { get; init; } = [];
+
     /// <summary>
     /// The project whose tests the leg counted, as the test that reached its runner recorded it;
     /// <see langword="null"/> where no test counted any, or the leg resolves no project.
@@ -276,6 +282,8 @@ public sealed class LedgerReport
                     LogTail = entry.LogTail,
                     Compilers = entry.Compilers,
                     DeveloperEnvironment = entry.DeveloperEnvironment,
+                    Space = entry.Space,
+                    KeptOutputs = entry.KeptOutputs,
                     Project = entry.Project,
                     TestSet = entry.TestSet,
                     TestCountNote = counts.GetValueOrDefault(entry.Leg),
@@ -515,6 +523,12 @@ public sealed class LedgerReport
 
                 // Only where the leg's toolchain names a developer environment and it was set up.
                 line.DeveloperEnvironment,
+
+                // Only where the command measured the leg's build directory: clean.
+                line.Space,
+
+                // Only where a step kept something, each as sync --pull takes it.
+                KeptOutputs = line.KeptOutputs.Count > 0 ? line.KeptOutputs : null,
                 Timings = line.Timings.Select(timing => new
                 {
                     timing.Phase,

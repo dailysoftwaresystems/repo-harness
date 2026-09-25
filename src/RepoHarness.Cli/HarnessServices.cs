@@ -92,6 +92,21 @@ internal static class HarnessServices
             provider.GetRequiredService<INameLookup>(),
             TimeProvider.System,
             HostAddressResolver.DefaultRetryDelay));
+        services.AddSingleton(provider => new HoldAwakeStore(provider.GetRequiredService<IFileSystem>(), HoldAwakeStore.DefaultPath));
+        services.AddSingleton<IDetachedProcessLauncher, DetachedProcessLauncher>();
+        services.AddSingleton<HoldAwakeRegistry>();
+        services.AddSingleton<SyncedCopyRefusals>();
+        services.AddSingleton<IWslDiskImages, WslDiskImages>();
+        services.AddSingleton<CommandEnd>();
+        services.AddSingleton(provider => new HoldAwakeService(
+            provider.GetRequiredService<HoldAwakeStore>(),
+            provider.GetRequiredService<KeepAwake>(),
+            TimeProvider.System,
+            HoldAwakeService.PollInterval));
+        services.AddSingleton(provider => new SshWakeWindow(
+            provider.GetRequiredService<INameLookup>(),
+            TimeProvider.System,
+            SshWakeWindow.DefaultPollDelay));
         services.AddSingleton<LocalProgramResolver>();
         services.AddSingleton<IHostProgramResolver, HostProgramResolver>();
         services.AddSingleton<IHostConnector, HostConnector>();
@@ -120,6 +135,7 @@ internal static class HarnessServices
         services.AddSingleton<RemoteLegRunner>();
         services.AddSingleton<KeepAwake>();
         services.AddSingleton<LegRunService>();
+        services.AddSingleton<CleanService>();
 
         services.AddSingleton<BuildDirectoryGuard>();
         services.AddSingleton<CMakeToolchainReader>();
@@ -127,6 +143,7 @@ internal static class HarnessServices
         services.AddSingleton<DeveloperEnvironmentProbe>();
         services.AddSingleton<DeveloperEnvironmentProvider>();
         services.AddSingleton<NinjaDependencyCheck>();
+        services.AddSingleton<NinjaDeadOutputCheck>();
         services.AddSingleton<IBuildService, BuildService>();
 
         // Sync. The local transport is registered as the interface because it is also what a host

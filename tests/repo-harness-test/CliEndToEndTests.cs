@@ -1,13 +1,16 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using RepoHarness.Core.Build;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Git;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
+using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
 using RepoHarness.Core.Runs;
 using RepoHarness.Core.Tools;
@@ -639,6 +642,172 @@ public sealed partial class CliEndToEndTests
         var leg = Assert.Single(root.GetProperty("legs").EnumerateArray());
         Assert.Equal("elsewhere", leg.GetProperty("leg").GetString());
         Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString());
+    }
+
+    /// <summary>
+    /// A hold asked of the DssHarness on a host, served by the real binary as a host agent serves it, goes on once
+    /// the agent has answered and ended - a process of its own - holding the machine with its keepAwake, given that
+    /// process; and it ends when it is ended, as a command's own keepAwake ends it there, taking its keepAwake with it.
+    /// </summary>
+    [Fact]
+    public async Task AHold_OutlivesTheAgentThatStartedIt_AndEndsWhenItIsEnded()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsWindows(),
+            "Windows keeps a user's application data where no environment can move it, so a test cannot keep a hold apart from the machine's own.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var home = temp.Combine("home");
+        var watched = temp.Combine("watched.txt");
+        Directory.CreateDirectory(home);
+
+        var environment = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["HOME"] = home,
+            ["XDG_DATA_HOME"] = Path.Combine(home, ".local", "share"),
+        };
+
+        var request = JsonSerializer.Serialize(
+            new HostAgentRequest
+            {
+                Kind = HostAgentRequestKind.Hold,
+                HoldAwakeSeconds = 60,
+                KeepAwake = [TestHost.DotnetExecutable, "exec", TestHost.AssemblyPath, watched, "{pid}"],
+                KeepAwakeEnvironment = new() { [TestHost.ChildModeVariable] = "watch-process" },
+                Nonce = "0123456789abcdef0123456789abcdef",
+            },
+            HostAgentProtocol.JsonOptions);
+
+        var served = await CliRunner.RunAsync(["host-agent"], token, standardInput: request + "\n", environment: environment);
+
+        Assert.Equal(HarnessExit.Success, served.ExitCode);
+
+        // The agent has answered and ended; the hold it started holds the machine on.
+        await EventuallyAsync(() => File.Exists(watched) && File.ReadAllText(watched).StartsWith("started ", StringComparison.Ordinal), token);
+
+        var holder = int.Parse(File.ReadAllText(watched)["started ".Length..].Trim(), CultureInfo.InvariantCulture);
+        Assert.NotEqual(Environment.ProcessId, holder);
+
+        await Task.Delay(TimeSpan.FromSeconds(1), token);
+        Assert.True(Running(holder), "the hold ended before anything ended it");
+
+        var state = Assert.Single(Directory.EnumerateFiles(home, "hold-awake.json", SearchOption.AllDirectories));
+        new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), state).End();
+
+        await EventuallyAsync(() => !Running(holder), token);
+
+        static bool Running(int id)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(id);
+                return !process.HasExited;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Waits, a little at a time, for <paramref name="done"/>, and fails the test when it never comes.</summary>
+    private static async Task EventuallyAsync(Func<bool> done, CancellationToken cancellationToken)
+    {
+        for (var waited = 0; waited < 600 && !done(); waited++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+
+        Assert.True(done(), "what was waited for did not happen within a minute");
+    }
+
+    /// <summary>
+    /// legs -v, through the real binary, says the room on this machine where the tree is; without -v it says
+    /// nothing of it.
+    /// </summary>
+    [Fact]
+    public async Task LegsVerbose_SaysTheRoomOnEachHost()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var verbose = await CliRunner.RunAsync(["legs", "--legs", "native", "-v", "-C", temp.Path], TestContext.Current.CancellationToken);
+        var quiet = await CliRunner.RunAsync(["legs", "--legs", "native", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, verbose.ExitCode);
+        Assert.Matches(@"local: [0-9.]+ [KMGT]?i?B(ytes)? free of [0-9.]+ [KMGT]?i?B(ytes)? on '", verbose.StandardOutput);
+        Assert.DoesNotContain(" free of ", quiet.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A command typed in a copy the harness synced to a host, whose legs name hosts it cannot reach, says each
+    /// host's own refusal and then where the command belongs - once, through the real binary, however many
+    /// hosts refused it.
+    /// </summary>
+    [Fact]
+    public async Task ACommandInASyncedCopy_SaysWhereItBelongsOnce_HoweverManyHostsItCannotReach()
+    {
+        using var temp = new TempDirectory();
+
+        await new HarnessFactory().InitializeHarnessAsync(temp.Path, TestContext.Current.CancellationToken, new HarnessConfig
+        {
+            BuildConfigs = { ["debug"] = new BuildConfiguration() },
+            SshItems = { "pi", "mac" },
+            Hosts = new HostsConfig
+            {
+                Ssh =
+                {
+                    ["pi"] = new SshHostConfig { RepositoryPath = "/home/pi/repo" },
+                    ["mac"] = new SshHostConfig { RepositoryPath = "/Users/harness/repo" },
+                },
+            },
+            Legs =
+            {
+                ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", Ssh = "pi" },
+                ["mac"] = new LegConfig { Os = "macos", Processor = "arm64", Config = "debug", Ssh = "mac" },
+            },
+        });
+
+        temp.WriteFile(Path.Combine(HarnessLayout.DirectoryName, HarnessLayout.SyncedCopyMarkerName), "{}");
+
+        var result = await CliRunner.RunAsync(["legs", "--legs", "arm,mac", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(HarnessExit.Success, result.ExitCode);
+        Assert.Contains("sshItems/pi", result.StandardError + result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("sshItems/mac", result.StandardError + result.StandardOutput, StringComparison.Ordinal);
+        Assert.Single((result.StandardError + result.StandardOutput).Split(HostConnector.SyncedCopyNotice)[1..]);
+    }
+
+    /// <summary>
+    /// clean, through the real binary, removes a leg's build directory in the tree it is typed in and says
+    /// what it removed as data; a leg no host can take is said as that, and nothing of it is touched.
+    /// </summary>
+    [Fact]
+    public async Task Clean_RemovesALegsBuildDirectory_AndSaysWhatItRemoved()
+    {
+        using var temp = new TempDirectory();
+        await PrepareRunnerAsync(temp);
+
+        var platform = new HarnessFactory().Platform;
+        var leg = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug" };
+        var directory = VariantKey
+            .For(new HarnessConfig { BuildConfigs = { ["debug"] = new BuildConfiguration() }, Legs = { ["native"] = leg } }, leg, platform.PlatformKey)
+            .DirectoryUnder(temp.Path);
+
+        temp.WriteFile(Path.Combine(Path.GetRelativePath(temp.Path, directory), "obj", "a.o"), new string('a', 300));
+
+        var result = await CliRunner.RunAsync(["clean", "--legs", "native", "--json", "-C", temp.Path], TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, result.ExitCode);
+
+        using var document = JsonDocument.Parse(result.StandardOutput);
+        var line = Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray());
+
+        Assert.Equal("passed", line.GetProperty("verdict").GetString());
+        Assert.Equal(300, line.GetProperty("space").GetProperty("buildBytes").GetInt64());
+        Assert.True(line.GetProperty("space").GetProperty("removed").GetBoolean());
+        Assert.False(Directory.Exists(directory));
     }
 
     /// <summary>
@@ -1316,6 +1485,84 @@ public sealed partial class CliEndToEndTests
                 Assert.False(string.IsNullOrEmpty(configured.GetProperty("id").GetString()), result.StandardError);
                 Assert.Contains("compiler: ", result.StandardError, StringComparison.Ordinal);
             }
+        }
+        catch (Exception ex) when (!clock.Held)
+        {
+            Assert.Skip($"Its builds did not run on an honest clock - {clock.Seen}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// A real incremental build, by the cmake, ninja and C compiler on this machine, of a tree one of whose targets
+    /// was renamed away since its last build: that target's object is still in the build directory, deeper than the
+    /// path budget's reserve, and ninja says no target produces it any more. It is left out of the check and noted,
+    /// naming what removes it, and the warning a consumer's builds gave every time is not given. Skipped where this
+    /// machine has no CMake, no Ninja, or no C compiler.
+    /// </summary>
+    [Fact]
+    public async Task ARealIncrementalBuild_LeavesATargetRenamedAwayOutOfThePathBudget()
+    {
+        const string Renamed = "a_target_with_a_long_name_that_a_later_commit_renames_away_from_the_project";
+
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var compiler = OperatingSystem.IsWindows() ? "gcc" : "cc";
+
+        Assert.SkipUnless(
+            harness.ProcessRunner.FindExecutable("cmake") is not null
+                && harness.ProcessRunner.FindExecutable("ninja") is not null
+                && harness.ProcessRunner.FindExecutable(compiler) is not null,
+            $"This machine lacks cmake, ninja or {compiler}, which a real build needs.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        // Real builds, which ninja orders by the times of the files they write: on a clock that steps, what they
+        // do proves nothing here.
+        using var clock = new ClockWatch();
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Generator = "Ninja", Env = { ["CC"] = compiler } } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    BuildOutputs = [BuildOutput.Keyed([new("windows", "probe.exe"), new("all", "probe")])],
+                },
+            },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+
+            // Past everything a build of this tree writes but the renamed target's object.
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 80, PathBudgetMargin = 2 },
+        });
+
+        // Ignored, as a repository ignores its builds: committed, a build's own files would be inputs it changes.
+        temp.WriteFile(".gitignore", "build/\n");
+        temp.WriteFile("main.c", "int main(void) { return 0; }\n");
+        temp.WriteFile("other.c", "int main(void) { return 1; }\n");
+        temp.WriteFile("CMakeLists.txt", $"cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\nadd_executable({Renamed} other.c)\n");
+        await harness.CommitAllAsync(temp.Path, "two targets", token);
+
+        try
+        {
+            var first = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            Assert.True(first.ExitCode == HarnessExit.Success, first.StandardError + first.StandardOutput);
+
+            temp.WriteFile("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\nadd_executable(short other.c)\n");
+            await harness.CommitAllAsync(temp.Path, "one renamed", token);
+
+            var second = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            Assert.True(second.ExitCode == HarnessExit.Success, second.StandardError + second.StandardOutput);
+            Assert.Contains("output(s) below this build directory are ones no target of this build produces any more", second.StandardError, StringComparison.Ordinal);
+            Assert.Contains(Renamed, second.StandardError, StringComparison.Ordinal);
+            Assert.DoesNotContain("WARN - native: the deepest path below this build directory", second.StandardError, StringComparison.Ordinal);
         }
         catch (Exception ex) when (!clock.Held)
         {

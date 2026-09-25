@@ -182,18 +182,7 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
                 "A shared lock takes the tree and one variant, and no variant was named; a whole tree is taken exclusively.");
         }
 
-        var entry = new LockEntry(
-            request.Host,
-            request.Tree,
-            request.Variant,
-            request.Scope,
-            new LockHolder(
-                _identity.CurrentMachine,
-                _identity.CurrentId,
-                _identity.Current,
-                request.RunId.Value,
-                DateTimeOffset.UtcNow,
-                request.Command));
+        var entry = Entry(request);
 
         string? heldBy = null;
 
@@ -203,7 +192,7 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
                 layout,
                 entries =>
                 {
-                    var kept = Live(entries, entry, request.Force);
+                    var kept = Live(entries, entry, request.Force, reclaim: true);
 
                     if (kept.FirstOrDefault(existing => Conflicts(existing, entry)) is { } holder)
                     {
@@ -227,6 +216,65 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
 
     /// <summary>What leaves an update when another run holds what was asked for, writing nothing.</summary>
     private sealed class LockHeldException : Exception;
+
+    /// <summary>
+    /// Which run holds what <paramref name="request"/> asks for, without taking it; and, where no run does,
+    /// <paramref name="whileFree"/>, done before any run can take it. The lock file is only read.
+    /// </summary>
+    /// <param name="layout">The repository, whose main checkout holds the lock file.</param>
+    /// <param name="request">What would be taken. Never forced: nothing is taken, so there is nothing to take over.</param>
+    /// <param name="whileFree">
+    /// What to do while nothing holds it - rename a build directory out of a build's way, say - under the
+    /// same machine-wide mutex a run takes the lock under, so no run can take it in between. Synchronous,
+    /// as everything under that mutex is.
+    /// </param>
+    /// <returns>Which run holds it, said as a refusal says it, or <see langword="null"/> where none does.</returns>
+    /// <remarks>
+    /// For work that must write nothing before it can free anything: removing a build directory from a disk
+    /// that is full. A lock taken writes the lock file, so such work is kept from a run's way by holding the
+    /// mutex a run needs to take the lock, for as long as a rename takes. An entry of a run that has ended is
+    /// passed over and left: taking it back would write the file.
+    /// </remarks>
+    /// <exception cref="HarnessException">The lock file could not be read, or another process kept it for too long.</exception>
+    public string? HeldBy(HarnessLayout layout, LockRequest request, Action? whileFree = null)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.Force)
+        {
+            throw new ArgumentException("Asking which run holds a lock takes nothing, so it cannot be forced.", nameof(request));
+        }
+
+        var wanted = Entry(request);
+        var path = Path.GetFullPath(layout.LockFile);
+
+        return MachineWideFile.Update(path, UpdateWindow, () =>
+        {
+            if (Live(ReadFile(path), wanted, force: false, reclaim: false).FirstOrDefault(existing => Conflicts(existing, wanted)) is { } holder)
+            {
+                return $"{Describe(wanted)} is held by {holder.Describe()}.";
+            }
+
+            whileFree?.Invoke();
+            return (string?)null;
+        });
+    }
+
+    /// <summary>The entry <paramref name="request"/> would record, naming this process.</summary>
+    private LockEntry Entry(LockRequest request)
+        => new(
+            request.Host,
+            request.Tree,
+            request.Variant,
+            request.Scope,
+            new LockHolder(
+                _identity.CurrentMachine,
+                _identity.CurrentId,
+                _identity.Current,
+                request.RunId.Value,
+                DateTimeOffset.UtcNow,
+                request.Command));
 
     /// <summary>Every entry currently recorded, live or not.</summary>
     /// <param name="layout">The repository whose main checkout holds the lock file.</param>
@@ -302,7 +350,14 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
     /// reported, and a holder on another machine stands until <c>--force-lock</c> says otherwise,
     /// because nothing here can ask that machine whether it is still running.
     /// </summary>
-    private IReadOnlyList<LockEntry> Live(IReadOnlyList<LockEntry> entries, LockEntry wanted, bool force)
+    /// <param name="entries">What the lock file records.</param>
+    /// <param name="wanted">What is asked for.</param>
+    /// <param name="force">Whether to drop the entries in its way, as <c>--force-lock</c> says to.</param>
+    /// <param name="reclaim">
+    /// Whether what is left is written back, so that a dead holder's entry is reclaimed and said to be;
+    /// where nothing is written, it is passed over without a word, and stays until a run takes a lock.
+    /// </param>
+    private IReadOnlyList<LockEntry> Live(IReadOnlyList<LockEntry> entries, LockEntry wanted, bool force, bool reclaim)
     {
         var kept = new List<LockEntry>();
 
@@ -337,7 +392,10 @@ public sealed class RunLock(IFileSystem fileSystem, IHarnessOutput output, IProc
 
             // Reported rather than done quietly: a lock that disappears without a word is
             // indistinguishable from one that was never taken.
-            _output.Info(CommandName, $"Reclaimed {Describe(entry)} from {entry.Describe()}, which is no longer running.");
+            if (reclaim)
+            {
+                _output.Info(CommandName, $"Reclaimed {Describe(entry)} from {entry.Describe()}, which is no longer running.");
+            }
         }
 
         return kept;

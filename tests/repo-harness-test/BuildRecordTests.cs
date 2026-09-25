@@ -33,6 +33,23 @@ public sealed class BuildRecordTests
     }
 
     /// <summary>
+    /// What the directory came to as the build finished is read back as written; a record that never said,
+    /// as an earlier version's never did, says nothing about it.
+    /// </summary>
+    [Fact]
+    public void WhatTheDirectoryCameTo_ReadsBackAsWritten_AndARecordThatNeverSaidSaysNothing()
+    {
+        var record = new BuildRecord(null, "x86_64-gcc-debug", null, new Dictionary<string, string>(), new Dictionary<string, DateTime>())
+        {
+            Bytes = 8L << 30,
+        };
+
+        Assert.Equal(8L << 30, BuildRecord.Parse(record.Write()).Bytes);
+        Assert.Null(BuildRecord.Parse("clean\nx86_64-gcc-debug\nin abc123 src/app.cpp\n").Bytes);
+        Assert.Null(BuildRecord.Parse("clean\nx86_64-gcc-debug\nsize many\n").Bytes);
+    }
+
+    /// <summary>
     /// A record 0.5.8 wrote: its mark, its variant and a fingerprint line per input, nothing newer. It
     /// reads as a build that never said it finished, with nothing recorded of when its inputs were written.
     /// </summary>

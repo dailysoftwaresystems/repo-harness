@@ -792,7 +792,7 @@ public sealed class LegRunServiceTests
 
         var service = new LegRunService(
             loader,
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             new LegExecutor(harness.Platform, harness.Output),
             runLock ?? new RunLock(harness.FileSystem, harness.Output, harness.Identity),
             logs ?? new LogOwnership(harness.FileSystem, harness.Output, harness.Identity),

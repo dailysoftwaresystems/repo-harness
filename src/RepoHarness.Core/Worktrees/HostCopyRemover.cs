@@ -227,7 +227,7 @@ public sealed class HostCopyRemover(
                 try
                 {
                     var report = await _inspector
-                        .InspectAsync(through, host, NoEmulators, NoEnvironments, [], cancellationToken)
+                        .InspectAsync(through, host, NoEmulators, NoEnvironments, [], cancellationToken: cancellationToken)
                         .ConfigureAwait(false);
 
                     if (!report.Available)

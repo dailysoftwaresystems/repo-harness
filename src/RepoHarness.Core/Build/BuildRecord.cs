@@ -38,6 +38,12 @@ internal sealed record BuildRecord(
     public const string FileName = ".harness-build";
 
     /// <summary>
+    /// What the directory's files held together as the build finished; <see langword="null"/> for a build
+    /// that never finished, whose directory could not then be read, or that an earlier version recorded.
+    /// </summary>
+    public long? Bytes { get; init; }
+
+    /// <summary>
     /// Why a record an earlier version marked unordered starts the next build from clean: it never said
     /// what made it so.
     /// </summary>
@@ -62,6 +68,8 @@ internal sealed record BuildRecord(
     /// <summary>What every line holding when an input had last been written starts with.</summary>
     private const string WrittenPrefix = "at ";
 
+    private const string BytesPrefix = "size ";
+
     /// <summary>The record as the file holds it.</summary>
     public string Write()
     {
@@ -80,6 +88,11 @@ internal sealed record BuildRecord(
             text.Append(NewestPrefix).Append(Ticks(Newest.LastWriteTimeUtc)).Append(' ').Append(Newest.Path).Append('\n');
         }
 
+        if (Bytes is { } bytes)
+        {
+            text.Append(BytesPrefix).Append(bytes.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        }
+
         foreach (var (path, content) in Contents.OrderBy(pair => pair.Key, StringComparer.Ordinal))
         {
             text.Append(ContentPrefix).Append(content).Append(' ').Append(path).Append('\n');
@@ -91,6 +104,28 @@ internal sealed record BuildRecord(
         }
 
         return text.ToString();
+    }
+
+    /// <summary>
+    /// What the build that last finished in <paramref name="buildDirectory"/> recorded it came to, or
+    /// <see langword="null"/> where nothing did: a record nobody can read says no more than none.
+    /// </summary>
+    /// <param name="fileSystem">Reads the record.</param>
+    /// <param name="buildDirectory">The build directory.</param>
+    public static long? BytesIn(IFileSystem fileSystem, string buildDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+
+        var record = Path.Combine(buildDirectory, FileName);
+
+        try
+        {
+            return fileSystem.FileExists(record) ? Parse(fileSystem.ReadAllText(record)).Bytes : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The record <paramref name="text"/> holds, in this version's words or an earlier one's.</summary>
@@ -111,6 +146,7 @@ internal sealed record BuildRecord(
 
         var variant = next < lines.Count ? lines[next] : string.Empty;
         WrittenFile? newest = null;
+        long? bytes = null;
         var contents = new Dictionary<string, string>(StringComparer.Ordinal);
         var written = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
@@ -119,6 +155,11 @@ internal sealed record BuildRecord(
             if (Split(line, NewestPrefix) is (var newestTicks, var newestPath) && Time(newestTicks) is { } newestTime)
             {
                 newest = new WrittenFile(newestPath, newestTime);
+            }
+            else if (line.StartsWith(BytesPrefix, StringComparison.Ordinal)
+                && long.TryParse(line.AsSpan(BytesPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var size))
+            {
+                bytes = size;
             }
             else if (Split(line, ContentPrefix) is (var content, var path))
             {
@@ -140,7 +181,7 @@ internal sealed record BuildRecord(
                 + "can be ordered nor that it cannot",
         };
 
-        return new BuildRecord(unordered, variant, newest, contents, written);
+        return new BuildRecord(unordered, variant, newest, contents, written) { Bytes = bytes };
     }
 
     /// <summary>

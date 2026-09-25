@@ -693,6 +693,20 @@ public static partial class HarnessConfigValidator
             CheckRepositoryPath(host.RepositoryPath, owner, allowWindowsPaths: true, problems);
             RequireAtLeastOne(host.ConnectTimeoutSeconds, $"{owner} connectTimeoutSeconds", problems);
             RequireAtLeastOne(host.KeepAliveSeconds, $"{owner} keepAliveSeconds", problems);
+
+            if (host.WakeWaitSeconds < 0)
+            {
+                problems.Add($"{owner} wakeWaitSeconds cannot be negative, found {host.WakeWaitSeconds}");
+            }
+
+            if (host.HoldAwakeSeconds < 0)
+            {
+                problems.Add($"{owner} holdAwakeSeconds cannot be negative, found {host.HoldAwakeSeconds}");
+            }
+            else if (host.HoldAwakeSeconds > 0 && host.KeepAwake is not { Count: > 0 })
+            {
+                problems.Add($"{owner} holdAwakeSeconds holds the host awake with its keepAwake, and it declares none");
+            }
         }
     }
 
@@ -892,6 +906,12 @@ public static partial class HarnessConfigValidator
                 && !WorktreeName.ValidateFormat(worktree).TryGetName(out _, out var worktreeError))
             {
                 problems.Add($"{owner} worktree: {worktreeError}");
+            }
+
+            // Not a number, or no room at all, is no need anybody measured: zero is left out instead.
+            if (leg.BuildSpaceGiB is { } room && !(room > 0 && double.IsFinite(room)))
+            {
+                problems.Add($"{owner} buildSpaceGiB must be a positive number of GiB, found {room.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
             }
 
             ValidateTest(leg.Test, owner, config, problems);

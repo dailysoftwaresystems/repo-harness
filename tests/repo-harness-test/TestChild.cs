@@ -33,6 +33,7 @@ internal static class TestChild
             "spawn-grandchild" => SpawnGrandchild(arguments),
             "print-env" => PrintEnvironment(standardOutput, arguments),
             "write-file" => WriteFile(arguments),
+            "watch-process" => WatchProcess(arguments),
             "link-directory" => LinkDirectory(arguments),
             "exit" => int.Parse(arguments[0], CultureInfo.InvariantCulture),
             _ => 99,
@@ -110,6 +111,40 @@ internal static class TestChild
 
         output.Write(ended ? "ended\n" : "held\n");
         return 0;
+    }
+
+    /// <summary>
+    /// Writes <c>started</c> and the process <c>arguments[1]</c> names into the file <c>arguments[0]</c> names,
+    /// then waits for that process to end and adds <c>ended</c>: what caffeinate -w does with the process it is
+    /// given, for a keepAwake that holds a machine awake exactly as long as that process lives.
+    /// </summary>
+    private static int WatchProcess(string[] arguments)
+    {
+        var id = int.Parse(arguments[1], CultureInfo.InvariantCulture);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(arguments[0]) ?? ".");
+        File.WriteAllText(arguments[0], $"started {id}\n");
+
+        for (var waited = 0; waited < 1200 && Running(id); waited++)
+        {
+            Thread.Sleep(100);
+        }
+
+        File.AppendAllText(arguments[0], "ended\n");
+        return 0;
+
+        static bool Running(int id)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(id);
+                return !process.HasExited;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
     }
 
     private static int Sleep(string[] arguments)

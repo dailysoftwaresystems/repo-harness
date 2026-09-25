@@ -150,6 +150,18 @@ public sealed record LegEntry
     /// </summary>
     public Hosts.DeveloperEnvironmentFact? DeveloperEnvironment { get; init; }
 
+    /// <summary>
+    /// What the leg's build directory held and the room on its filesystem, where the command measured
+    /// them: <c>clean</c>, whether it removed the directory or only looked.
+    /// </summary>
+    public BuildSpace? Space { get; init; }
+
+    /// <summary>
+    /// Each file the leg's steps kept, relative to its tree with forward slashes: the path <c>sync --pull</c>
+    /// takes to bring it back from the host that kept it.
+    /// </summary>
+    public IReadOnlyList<string> KeptOutputs { get; init; } = [];
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }

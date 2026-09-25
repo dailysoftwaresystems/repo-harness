@@ -30,7 +30,7 @@ internal static class HelpCommand
 
     private static readonly Argument<string?> TopicArgument = new("topic")
     {
-        Description = "Topic to explain: exit-codes, config, legs, worktrees, anchors, layout, secrets, tools, runners, verdicts. Omit for an overview.",
+        Description = "Topic to explain: exit-codes, config, legs, space, worktrees, anchors, layout, secrets, tools, runners, verdicts. Omit for an overview.",
         Arity = ArgumentArity.ZeroOrOne,
     };
 
@@ -80,8 +80,9 @@ internal static class HelpCommand
         "runners" or "runner" or "actions" => RenderRunners(),
         "verdicts" or "verdict" => RenderVerdicts(),
         "ci" or "check-ci-legs" => RenderCi(),
+        "space" or "disk" or "clean" => RenderSpace(),
         null or "" => RenderOverview(),
-        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, worktrees, anchors, layout, "
+        _ => $"{UnknownTopicPrefix} '{topic}'. Try: exit-codes, config, legs, space, worktrees, anchors, layout, "
             + $"secrets, tools, runners, verdicts, ci.{Environment.NewLine}",
     };
 
@@ -188,6 +189,7 @@ internal static class HelpCommand
         builder.AppendLine("  test    those, and the test runner; with --no-build, the runner alone");
         builder.AppendLine("  run     what the runner's steps start, and the build's too with requireBuild");
         builder.AppendLine("  sync    nothing: a copy starts no program");
+        builder.AppendLine("  clean   nothing: removing a directory starts no program");
         builder.AppendLine("  legs    what build and test start");
         builder.AppendLine();
         builder.AppendLine("A missing program never moves a leg to another host: that would measure a machine");
@@ -444,6 +446,10 @@ internal static class HelpCommand
         builder.AppendLine("emptied when the action finishes, whatever the verdict, so anything a later run");
         builder.AppendLine("needs has to say 'persist'.");
         builder.AppendLine();
+        builder.AppendLine("A leg's line in --json names each file its steps kept as keptOutputs, relative to the");
+        builder.AppendLine($"tree - the path '{ToolPackage.Command} sync --pull' takes to bring it back from the host that");
+        builder.AppendLine("kept it.");
+        builder.AppendLine();
         builder.AppendLine("Outputs are kept as soon as the step that made them passes, not at the end of the");
         builder.AppendLine("run, because a later step reads them. A step that FAILED keeps nothing, although it");
         builder.AppendLine("may have written the file: carrying evidence out of work that did not pass is what");
@@ -575,6 +581,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} build                   Build every selected leg");
         builder.AppendLine($"  {ToolPackage.Command} test                    Build and test every selected leg");
         builder.AppendLine($"  {ToolPackage.Command} run <runner>            Run a predefined runner across its legs");
+        builder.AppendLine($"  {ToolPackage.Command} clean                   Remove selected legs' build directories where they run");
         builder.AppendLine($"  {ToolPackage.Command} list-worktree           Show existing worktrees");
         builder.AppendLine($"  {ToolPackage.Command} read-anchors            List the deferred work recorded as anchors");
         builder.AppendLine();
@@ -586,6 +593,7 @@ internal static class HelpCommand
         builder.AppendLine($"  {ToolPackage.Command} help exit-codes         What each exit code means");
         builder.AppendLine($"  {ToolPackage.Command} help config             What config.json declares");
         builder.AppendLine($"  {ToolPackage.Command} help legs               Hosts, emulators, and how a leg finds where it runs");
+        builder.AppendLine($"  {ToolPackage.Command} help space              Freeing a full disk, and the room a build needs");
         builder.AppendLine($"  {ToolPackage.Command} help worktrees          Naming rules, the path budget, and when deleting refuses");
         builder.AppendLine($"  {ToolPackage.Command} help anchors            Anchor registries and the commands that change them");
         builder.AppendLine($"  {ToolPackage.Command} help layout             What init creates, and what git tracks");
@@ -844,6 +852,16 @@ internal static class HelpCommand
         builder.AppendLine("stops taking the connection, or shows a key the name is not known by, is dropped, and");
         builder.AppendLine("ssh looks the name up itself.");
         builder.AppendLine();
+        builder.AppendLine("A host that sleeps between commands can be given hosts.ssh.<name>.wakeWaitSeconds.");
+        builder.AppendLine($"Its name is then looked up again, and a connection nothing took or that timed out");
+        builder.AppendLine($"tried again, every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed, before its");
+        builder.AppendLine("legs are skipped; a key or a login the host refuses is never waited on. Reached,");
+        builder.AppendLine("its report says how long it took to wake; not reached, its reason names the window,");
+        builder.AppendLine("and for the half minute a name's answer is kept the command is refused it at once");
+        builder.AppendLine("rather than waiting again. Left at 0, a host is looked up three times within a second");
+        builder.AppendLine("and never waited for. Never for a host that is simply off, which would then cost the");
+        builder.AppendLine("window on every command.");
+        builder.AppendLine();
         builder.AppendLine("Every WSL distribution and ssh host runs DssHarness itself, installed as a global");
         builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
         builder.AppendLine("a host that is behind is installed or updated to this version, never downgraded,");
@@ -915,6 +933,62 @@ internal static class HelpCommand
         return builder.ToString();
     }
 
+    private static string RenderSpace()
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Disk space");
+        builder.AppendLine();
+        builder.AppendLine("clean removes each selected leg's build directory where the leg runs: in this");
+        builder.AppendLine("machine's tree, or in a WSL distribution's or an ssh host's copy of the tree it is");
+        builder.AppendLine("typed in.");
+        builder.AppendLine();
+        builder.AppendLine($"  {ToolPackage.Command} clean --legs linux-arm64-debug,linux-arm64-release");
+        builder.AppendLine($"  {ToolPackage.Command} clean --legs linux-arm64-debug --dry-run");
+        builder.AppendLine();
+        builder.AppendLine("It writes nothing where it removes before it has removed - no sync, no lock entry,");
+        builder.AppendLine("no run records - so it frees a disk a build filled. A leg a run is building is");
+        builder.AppendLine("refused-locked, naming the run: the lock file is read, never written. The directory");
+        builder.AppendLine("is renamed aside, then removed, so a build started meanwhile starts in a new one; what");
+        builder.AppendLine("an interrupted removal left aside, the next clean of that leg removes. A build");
+        builder.AppendLine("directory that is a link is left alone: what it holds is wherever it points. Each");
+        builder.AppendLine("leg's line says what was removed and the room left on its filesystem; --dry-run says");
+        builder.AppendLine("what each holds and removes nothing; --json carries both as each leg's 'space'.");
+        builder.AppendLine();
+        builder.AppendLine("A host whose DssHarness is older than this machine's is updated first, as for any");
+        builder.AppendLine("command, and the update needs room: a host that is both full and behind has to be");
+        builder.AppendLine("freed by hand once.");
+        builder.AppendLine();
+        builder.AppendLine("A leg is placed only where its host has the room its build still needs, as it is");
+        builder.AppendLine("only where the programs it starts are: a build that fills a disk dies half way, and");
+        builder.AppendLine("takes any other leg building there with it. What a build needs is what its");
+        builder.AppendLine("directory comes to once built - the leg's buildSpaceGiB, or, left out, what a build");
+        builder.AppendLine("of its variant recorded as it finished: in this tree's copy, or else in the main");
+        builder.AppendLine("checkout's copy on that host - less what the directory already holds. Legs building");
+        builder.AppendLine("on one filesystem of a host are counted together, in the order they were selected,");
+        builder.AppendLine("since every build directory stays once built; one that does not fit beside those");
+        builder.AppendLine("before it is skipped-unavailable:");
+        builder.AppendLine();
+        builder.AppendLine("  ssh vps: 3.2 GiB free on '/', and this leg needs ~8 GiB, what the main");
+        builder.AppendLine("  checkout's copy of the same variant came to there");
+        builder.AppendLine();
+        builder.AppendLine("A leg nothing has measured that declares no buildSpaceGiB is placed as it always");
+        builder.AppendLine("was, and so is one whose directory no build of this version recorded. Nothing is");
+        builder.AppendLine("walked to decide: the room is the filesystem's own count, and what a directory holds");
+        builder.AppendLine("is what its build recorded. Commands that build nothing - sync, clean - need no room.");
+        builder.AppendLine();
+        builder.AppendLine("A WSL distribution's disk is a file that grows on a drive of this machine, whatever");
+        builder.AppendLine("room the distribution measures for itself - a terabyte, by default. A WSL leg needs");
+        builder.AppendLine("its room on that drive too, which this machine's own legs on the drive fill as well.");
+        builder.AppendLine();
+        builder.AppendLine($"'{ToolPackage.Command} legs -v' says the room on each host it measured - where its copies are");
+        builder.AppendLine("kept, and the main checkout for this machine, with the drive a WSL distribution's");
+        builder.AppendLine("disk grows on - so a host that is nearly full shows before a run fills it; --json");
+        builder.AppendLine("always carries it, as each host's 'space' and a WSL distribution's 'diskImageSpace'.");
+
+        return builder.ToString();
+    }
+
     private static string RenderWorktrees()
     {
         var builder = new StringBuilder();
@@ -944,6 +1018,13 @@ internal static class HelpCommand
         builder.AppendLine("                                every build warns when it went deeper");
         builder.AppendLine("  worktrees.pathLimit           replaces the platform limit; set it only when");
         builder.AppendLine("                                every tool in the build handles long paths");
+        builder.AppendLine();
+        builder.AppendLine("A Ninja build leaves out of that warning the outputs ninja says no target of it");
+        builder.AppendLine("produces any more - those of a target renamed or removed - since a new worktree's");
+        builder.AppendLine("build, starting from clean, never holds them: it notes them instead, where one is");
+        builder.AppendLine("deeper than the reserve, naming 'ninja -t cleandead', which removes them. The");
+        builder.AppendLine("harness removes nothing. Another generator, or a ninja before 1.10, is measured as");
+        builder.AppendLine("before.");
         builder.AppendLine();
         builder.AppendLine("Worktrees always belong to the main checkout, so running create-worktree from");
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
@@ -1192,7 +1273,8 @@ internal static class HelpCommand
         builder.AppendLine("  developerEnvironments  what a toolchain's legs start in, set up on the host");
         builder.AppendLine("                 that runs them: visualStudio runs that instance's vcvarsall.bat");
         builder.AppendLine("  legs           units of work: os + processor (+ emulator) + project + toolchain");
-        builder.AppendLine("                 + config (+ sanitizer)");
+        builder.AppendLine("                 + config (+ sanitizer); buildSpaceGiB, the room a leg's build");
+        builder.AppendLine("                 comes to, is 'help space'");
         builder.AppendLine("  legSets        named groups of legs, selected with --legs like a leg");
         builder.AppendLine("  tools          external tools to verify and install");
         builder.AppendLine("  predefinedRunners  multi-phase procedures such as a corpus test or a benchmark");
@@ -1249,6 +1331,15 @@ internal static class HelpCommand
         builder.AppendLine("before the leg starts.");
         builder.AppendLine("A host running a leg another machine sent it reads the section that machine");
         builder.AppendLine("names it by, never 'local', which in their shared file is the machine that sent it.");
+        builder.AppendLine();
+        builder.AppendLine("An ssh host's holdAwakeSeconds holds it awake between commands, until a command's");
+        builder.AppendLine("own keepAwake takes over: as each command finishes with it, the host starts a");
+        builder.AppendLine("DssHarness of its own that runs its keepAwake - {pid} filled in with that process -");
+        builder.AppendLine("for that many seconds, and goes on once the connection has ended. The next command's");
+        builder.AppendLine("own keepAwake ends it there, as does an update of DssHarness there, and a newer");
+        builder.AppendLine("hold replaces an older one. It needs keepAwake, which it runs; a hold that cannot be");
+        builder.AppendLine("left is said and fails nothing. On a Windows host, OpenSSH may end that process with");
+        builder.AppendLine("the connection.");
         builder.AppendLine();
         builder.AppendLine("A host's keepAwake - [\"caffeinate\", \"-dimsu\", \"-w\", \"{pid}\"] on macOS - runs on that");
         builder.AppendLine("host while a leg's own work does, {pid} filled in with the DssHarness process");

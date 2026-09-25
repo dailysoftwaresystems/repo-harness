@@ -346,21 +346,28 @@ public sealed class HostExecServiceTests
 
     /// <summary>
     /// Asked for WSL's default distribution inside a synced copy on Linux, where there is no WSL at all,
-    /// the refusal says where the command belongs, as every host a copy cannot reach does. WSL is asked
-    /// before any connection is opened, so the connector - which says it for every other refusal - never
-    /// sees this one.
+    /// the command ends saying where it belongs, as it does for every host a copy cannot reach. WSL is asked
+    /// before any connection is opened, so the connector - which records every other refusal - never sees
+    /// this one.
     /// </summary>
     [Fact]
     public async Task TheDefaultDistribution_AskedForInASyncedCopy_SaysWhereTheCommandBelongs()
     {
+        var notices = new StringWriter();
+        var refusals = new SyncedCopyRefusals(new ConsoleHarnessOutput(new StringWriter(), notices, verbose: false));
+        var fixture = Create(
+            platform: HostDoubles.Platform(PlatformId.Linux),
+            loader: HostDoubles.Loader(Config, Root, syncedCopy: true),
+            copyRefusals: refusals);
+
         var exception = await Assert.ThrowsAsync<HarnessException>(
-            () => Create(
-                    platform: HostDoubles.Platform(PlatformId.Linux),
-                    loader: HostDoubles.Loader(Config, Root, syncedCopy: true))
-                .Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
+            () => fixture.Service.RunAsync(Root, null, string.Empty, ["verify-git"], TestContext.Current.CancellationToken));
 
         Assert.Equal(HarnessExit.HostUnavailable, exception.ExitCode);
-        Assert.Equal($"WSL exists only on Windows, and this machine runs linux. {HostConnector.SyncedCopyNotice}", exception.Message);
+        Assert.Equal("WSL exists only on Windows, and this machine runs linux", exception.Message);
+
+        refusals.SayOnce("host-exec");
+        Assert.Contains(HostConnector.SyncedCopyNotice, notices.ToString(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -411,7 +418,8 @@ public sealed class HostExecServiceTests
         Func<HostConnection, HostCommand, ProcessResult>? respond = null,
         IHostPlatform? platform = null,
         bool verbose = false,
-        IHarnessContextLoader? loader = null)
+        IHarnessContextLoader? loader = null,
+        SyncedCopyRefusals? copyRefusals = null)
     {
         var inspector = new RecordingInspector(report ?? Reachable);
 
@@ -424,7 +432,8 @@ public sealed class HostExecServiceTests
             inspector,
             commands,
             platform ?? HostDoubles.Platform(),
-            new ConsoleHarnessOutput(output, error, verbose));
+            new ConsoleHarnessOutput(output, error, verbose),
+            copyRefusals ?? new SyncedCopyRefusals(new ConsoleHarnessOutput(output, error, verbose)));
 
         return new Fixture(service, inspector, commands, error, output);
     }

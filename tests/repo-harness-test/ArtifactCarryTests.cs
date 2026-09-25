@@ -540,12 +540,9 @@ public sealed class ArtifactCarryTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             local,
             factory,
-            new LegsService(
-                harness.ContextLoader,
-                new RecordingInspector(host => host.Kind == HostKind.Local
+            new LegsService(harness.ContextLoader, new RecordingInspector(host => host.Kind == HostKind.Local
                     ? new HostReport { Host = host, Os = "windows", Processor = "x86_64" }
-                    : new HostReport { Host = host, Os = "linux", Processor = "arm64" }),
-                harness.Output),
+                    : new HostReport { Host = host, Os = "linux", Processor = "arm64" }), harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -575,7 +572,7 @@ public sealed class ArtifactCarryTests
                 harness.GitClient,
                 harness.Platform),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Output),
+            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,

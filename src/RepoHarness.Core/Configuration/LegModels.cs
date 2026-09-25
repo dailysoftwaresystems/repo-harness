@@ -54,6 +54,18 @@ public sealed class LegConfig
 
     /// <summary>What this leg covers, shown in the ledger.</summary>
     public string? Description { get; init; }
+
+    /// <summary>
+    /// How much room, in GiB, this leg's build directory comes to once built. Left out, what a build of its
+    /// variant last measured stands for it, where one did.
+    /// </summary>
+    /// <remarks>
+    /// A leg is placed only where its host has the room its build still needs: this, or what a build of its
+    /// variant measured - in this tree's copy there, or else in the main checkout's - less what its build
+    /// directory already holds. Declared for a leg nothing has measured yet, above all the first build of a
+    /// variant anywhere on a host. A leg whose need nothing says is placed as though it needed none.
+    /// </remarks>
+    public double? BuildSpaceGiB { get; init; }
 }
 
 /// <summary>

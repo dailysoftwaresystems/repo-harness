@@ -4,6 +4,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
 
 namespace RepoHarness.Core.Hosts;
 
@@ -31,7 +32,7 @@ public static class HostAgentProtocol
     /// and its own version. With the number left as it was, the same host refuses the request over
     /// whichever field it happens not to know, which says nothing about why.
     /// </remarks>
-    public const int Version = 4;
+    public const int Version = 5;
 
     /// <summary>
     /// How requests and answers are written. Dictionaries and lists are read with the converters
@@ -57,7 +58,7 @@ public static class HostAgentProtocol
     /// Commands a host is never asked to run. A host that passed the work on to another host would leave
     /// the machine that asked unable to say where anything ran.
     /// </summary>
-    public static IReadOnlyList<string> NotForwardable { get; } = [CommandName, HostExecService.CommandName];
+    public static IReadOnlyList<string> NotForwardable { get; } = [CommandName, HostExecService.CommandName, Execution.HoldAwakeService.CommandName];
 
     /// <summary>Whether <paramref name="command"/> is one a host is never asked to run, in whatever case it is typed.</summary>
     public static bool IsNotForwardable(string command) => NotForwardable.Contains(command, StringComparer.OrdinalIgnoreCase);
@@ -159,6 +160,12 @@ public enum HostAgentRequestKind
 
     /// <summary>Run one DssHarness command in a directory on the host.</summary>
     Run,
+
+    /// <summary>
+    /// Hold the host awake until the next command's own keepAwake takes over, or the hold's seconds are up:
+    /// started, detached, and answered at once.
+    /// </summary>
+    Hold,
 }
 
 /// <summary>A request to the DssHarness on a host.</summary>
@@ -192,8 +199,27 @@ public sealed class HostAgentRequest
     public Dictionary<string, List<string>> ToolSearchDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Where to measure the room on the host's filesystem - where its copies of the repository are kept -
+    /// absolute or from the home directory; <see langword="null"/> to measure none. Info only.
+    /// </summary>
+    public string? SpaceAt { get; init; }
+
+    /// <summary>
+    /// The build directories there, absolute or from the home directory, whose room to measure and whose
+    /// record to read: each selected leg's own, and the main checkout's copy of the same variant. Info only.
+    /// </summary>
+    public List<string> Builds { get; init; } = [];
+
+    /// <summary>
+    /// How long a hold keeps the host awake, at most, in seconds; zero ends the hold that stands there, with
+    /// nothing held after it. Hold only.
+    /// </summary>
+    public int HoldAwakeSeconds { get; init; }
+
+    /// <summary>
     /// The command that keeps the host awake while this request is served, as the configuration declares it
-    /// for that host, or empty where it declares none. Run only for a <see cref="HostAgentRequestKind.Run"/>.
+    /// for that host, or empty where it declares none: for a <see cref="HostAgentRequestKind.Run"/>, and the
+    /// command a <see cref="HostAgentRequestKind.Hold"/> holds the host with.
     /// </summary>
     /// <remarks>
     /// Carried rather than read there, because the host's copy has no configuration until a first sync has
@@ -278,7 +304,33 @@ public sealed class HostAgentInfo
     /// order the search looked: what a leg there appends to the PATH of every process it starts.
     /// </summary>
     public List<string> ProgramDirectories { get; init; } = [];
+
+    /// <summary>
+    /// The room on the filesystem the request's <see cref="HostAgentRequest.SpaceAt"/> is on; <see langword="null"/>
+    /// where none was asked about, or it could not be measured.
+    /// </summary>
+    public DiskSpace? Space { get; init; }
+
+    /// <summary>Why the room at <see cref="HostAgentRequest.SpaceAt"/> could not be measured, where it could not.</summary>
+    public string? SpaceUnmeasured { get; init; }
+
+    /// <summary>
+    /// Each build directory the request asked about, as it asked: a list rather than a map, because a path
+    /// compares exactly on Linux, and a map in this protocol is read back ignoring case.
+    /// </summary>
+    public List<BuildDirectoryRoom> Builds { get; init; } = [];
 }
+
+/// <summary>What a build directory on a host holds, as its record says, and the room where it is.</summary>
+/// <param name="Path">The directory, as it was asked about.</param>
+/// <param name="Exists">Whether it is there.</param>
+/// <param name="RecordedBytes">
+/// What its files held together when a build last finished there, as that build recorded it; <see langword="null"/>
+/// where no build recorded it - one that never finished, or an earlier version.
+/// </param>
+/// <param name="Disk">The room on its filesystem - where it will be, where it is not there - or <see langword="null"/>.</param>
+/// <param name="Unmeasured">Why the room could not be measured, where it could not.</param>
+public sealed record BuildDirectoryRoom(string Path, bool Exists, long? RecordedBytes, DiskSpace? Disk, string? Unmeasured);
 
 /// <summary>Whether an emulator works on a host.</summary>
 /// <param name="Available">Whether legs can run through it there.</param>

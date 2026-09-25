@@ -1355,7 +1355,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             factory,
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -1369,8 +1369,8 @@ public sealed class SyncServiceTests
         Assert.Contains("ssh pi", outcome.Message, StringComparison.Ordinal);
         Assert.Contains("ssh mac", outcome.Message, StringComparison.Ordinal);
 
-        var notices = outcome.Message.Split(HostConnector.SyncedCopyNotice).Length - 1;
-        Assert.Equal(syncedCopy ? 1 : 0, notices);
+        // Said once as the command ends, never in its conclusion, where it once repeated each host's refusal.
+        Assert.DoesNotContain(HostConnector.SyncedCopyNotice, outcome.Message, StringComparison.Ordinal);
 
         factory.DidNotReceive().For(Arg.Any<HostReport>());
     }
@@ -1404,7 +1404,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             factory,
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -1456,7 +1456,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -1506,7 +1506,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -1547,7 +1547,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             factory,
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -1614,7 +1614,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             transports,
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -2341,7 +2341,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(loader, inspector, harness.Output),
+            new LegsService(loader, inspector, harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,
@@ -2674,7 +2674,7 @@ public sealed class SyncServiceTests
             new ManifestBuilder(harness.FileSystem, harness.Platform),
             Transport(harness),
             Substitute.For<ISyncTransportFactory>(),
-            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Output),
+            new LegsService(harness.ContextLoader, Substitute.For<IHostInspector>(), harness.Platform, harness.Output),
             harness.GitClient,
             harness.FileSystem,
             harness.Platform,

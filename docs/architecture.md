@@ -235,7 +235,16 @@ The root is configurable because it is spent before a worktree's own name. The d
 characters of the Windows path budget, and a repository whose build paths are long has no name left
 that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
 checked against the real path, so a shorter root never hides an overrun — it only makes one
-avoidable. A root spelled with a `.` segment or a doubled separator inside it -
+avoidable. Every build measures the deepest path it left below its build directory against the
+reserve, and warns where it went deeper. A Ninja build leaves out of that the outputs ninja says no
+target of the current build produces any more - asked as a dry run of `ninja -t cleandead`, which
+names them and removes nothing - since a new worktree's build directory, starting from clean, never
+holds them; it notes them instead, where one is deeper than the reserve, naming the command that
+removes them. A consumer's incremental builds warned every time about the object of a test renamed
+away. `ninja -t query` would not have told it apart - ninja's dependency log still knows the path -
+and what CMake's configure writes is no output of the manifest at all. A leftover ninja does not
+name is still measured, as a target this build had no reason to rebuild, or a file something other
+than a target wrote; another generator, or a ninja too old to know the tool, is measured as before. A root spelled with a `.` segment or a doubled separator inside it -
 `.harness-config/./worktrees` - is refused with the one spelling to write, and so is a
 `sync.exclude` or `sync.neverTransfer` entry spelled that way: each is compared as written, by
 sync's lists and by `init`'s ignore rule, so the file system's reading of it would put the
@@ -679,6 +688,16 @@ is not dependable on such a host.
   but not pinned. A pinned call that fails before any session - the address takes no connection,
   or shows a key the name is not known by - drops the pin for the rest of the connection and runs
   again, with ssh looking the name up itself.
+- **Hosts that sleep.** A personal Mac reached by its mDNS name falls back asleep between commands
+  and answers again moments later; three quick lookups miss it, and a consumer saw a run skip it
+  seconds after a check had reached it, three times in fifteen minutes. A host given
+  `wakeWaitSeconds` is looked up again, and a connection nothing took or that timed out is tried
+  again, every few seconds until the window ends, before its legs are skipped. What a host that is
+  awake says - a key it shows that the name is not known by, a login refused - is never waited on.
+  A host reached after waiting says how long it took, among what measuring it did; one whose window
+  ran out is refused naming the window, and, for the half minute a name's answer is kept, refused
+  at once to the rest of the command rather than waited for by every leg placed there. Left at 0,
+  the default, nothing changes.
 - **PATH truth.** A login shell's PATH is not what a command sees: `/opt/homebrew/bin` is absent
   from an ssh command's PATH on macOS, and `~/.dotnet` is in WSL. Programs the harness depends on
   are resolved to an absolute path once per connection, measured rather than assumed, the same
@@ -1197,6 +1216,21 @@ while a gate ran turned a green suite red, with four test processes live at once
   wall time outrunning the monotonic clock, and marks the phase it interrupted suspect, as it
   does on a host that declares no command at all. The survey asks about the command, so a
   directory it is found in reaches its PATH, and turns no leg away for it.
+- `holdAwakeSeconds` holds an ssh host awake between commands, until a command's own keepAwake
+  takes over there. Every keepAwake a command starts on a host ends with the connection that
+  started it, and a personal Mac falls back asleep in the seconds before the next command, which
+  then cannot find it. So a
+  host that declares it is recorded as each command reaches it, and asked, as the command ends -
+  however it ended - to hold itself awake that long. The DssHarness there records the hold and
+  starts a process of its own, detached from the connection, which runs the host's keepAwake with
+  `{pid}` filled in with itself and goes on once the connection has ended. The next command's own
+  keepAwake ends the hold there, as it starts; a newer hold replaces an older one; a host whose
+  DssHarness is to be updated has its hold ended first, since the hold is a DssHarness running
+  there and no update replaces one that runs; and a hold ends by itself when its seconds are up. The hold's process watches its record rather than being
+  stopped by an id, which a process started since could have been given, and the record is kept
+  among the user's own application data, one per user of the host. A hold that cannot be left is
+  said, and fails nothing. On a Windows host, OpenSSH may end the hold's process with the
+  connection.
 - A host's compiler cache is that cache's own variable in the host's `env` - `CCACHE_DIR` for
   ccache - so two hosts never share one store, and a build keys it against the leg's own tree.
   The `compilerCacheDirectory` key that once said the same is retired, and refused where it is
@@ -1355,6 +1389,75 @@ with it; and a run is resumed from the tree it was started in. A caller never wo
 line names that host's directory, as `logs of <leg> on <host>: <directory>` and as the leg's own
 `runDirectory`.
 
+## Disk space
+
+### Removing a build directory
+
+`clean` removes each selected leg's build directory where the leg runs: in this machine's
+tree, or in the copy of the tree a WSL distribution or an ssh host holds. It is for a disk a
+build filled, where nothing else helped: a build that starts from clean fills it again as it
+goes, and deleting a worktree takes its local tree too. So it writes nothing on the machine it
+removes from before it has removed - no sync, no lock entry, no run records.
+
+- **The lock is read, never written.** A leg is kept from a build of it by the lock that build
+  takes, keyed the same way - host, tree there, variant - on the machine the command runs on and,
+  for a leg on a host, by the DssHarness there in that copy's own lock file. It is read under the
+  machine-wide mutex a run needs to write it, and while nothing holds it the directory is renamed
+  aside, so no run can take the lock between the reading and the renaming. A held lock refuses the
+  leg, `refused-locked`, naming the holder. An entry of a run that has ended is passed over and
+  left in the file: taking it back would write the file.
+- **Renamed, then removed.** A rename writes no file's contents, so it needs no room the disk
+  does not have, and it takes the directory out of a build's way at once; the removal, which
+  can take minutes, happens outside the mutex. A build started meanwhile starts in a new
+  directory. What an interrupted removal left aside, hidden beside the build directory, the next
+  clean of that leg removes first.
+- **A link is left alone.** A build directory that is a link was put somewhere on purpose, and
+  removing the link would free nothing and have the next build fill this disk instead.
+- **Said per leg.** Each leg's line says what was removed and the room left on its filesystem,
+  or, with `--dry-run`, what it holds, removing nothing; `--json` carries both as the leg's
+  `space`. A leg on a host is asked of the DssHarness there, in the copy - once the copy is known
+  to be there, so a tree never synced to a host has nothing removed rather than a host refusing it.
+
+A host whose DssHarness is older than this machine's is brought to this build first, as it is by
+every command that asks it anything, and that write needs room. A host that is both full and
+behind is freed by hand, once.
+
+### Room before a build
+
+A leg is placed only where its host has the room its build still needs, as it is only where the
+programs it starts are. A consumer's two variants - the first builds of a new worktree's copy -
+filled a host's disk half way through and died writing an object, while `legs` said the host
+could run them.
+
+- **What a build needs** is what its build directory comes to once built: the leg's
+  `buildSpaceGiB`, or, left out, what a build of its variant recorded as it finished - in the
+  tree's own copy on that host, or else in the main checkout's copy there - less what the
+  directory already holds. A build records what its directory came to in its `.harness-build`,
+  summed from the walk it already makes of the directory as it finishes.
+- **Nothing is walked to decide.** Each host is asked, in the same measuring that finds its
+  programs, the room on the filesystem its copies are kept on and, for a command that builds,
+  what each leg's build directory - and the main checkout's copy of the same variant - holds as
+  recorded, with the room where each is. The room is the filesystem's own count.
+- **Legs sharing a filesystem add up.** Legs building on one filesystem of one host are counted
+  together, in the order they were selected, because every build directory stays once built. A
+  leg that does not fit beside the ones before it is `skipped-unavailable`, naming what is free,
+  what it needs and why, and what the legs before it need; they are kept.
+- **Unknown is not refused.** A leg nothing has measured that declares no `buildSpaceGiB` is
+  placed as it always was, and so is one whose directory no build of this version recorded,
+  since what that directory holds is an amount nothing measured.
+- **Only a command that builds.** `sync` and `clean` need no room: clean is how room is made.
+- **A WSL distribution's disk grows on this machine's drive.** WSL 2 keeps a distribution's
+  filesystem in a virtual disk file, and what the distribution measures is that disk's own room -
+  a terabyte by default - whatever the drive holding it has left: measured, a distribution said
+  814 GiB free while its drive had 563 GiB. So the room is also measured on the drive WSL
+  registers as holding the disk, a WSL leg needs its room on both, and the drive is counted with
+  this machine's own legs on it, which fill the same room.
+
+`legs -v` says the room on each host it measured - where its copies are kept, and the main
+checkout for this machine, with the drive a WSL distribution's disk grows on - or why it could not
+be measured, so a host that is nearly full shows before a run fills it. `--json` always carries
+it, as each host's `space` and a WSL distribution's `diskImageSpace`.
+
 ## Syncing a tree
 
 `sync` puts a host's copy of the repository in step with this tree. It is the same code path
@@ -1486,7 +1589,9 @@ directory here cannot drift apart.
   syncing again. A `--stage-only` on `sync` would name a mode `sync` is always in.
 - **Artefacts come home** with `--pull`, each file hashed on the far side and checked again on
   arrival. Evidence that a binary built here runs there is not evidence if nobody checked it
-  survived the journey.
+  survived the journey. A leg's line in `run --json` names each file its steps kept as
+  `keptOutputs`, relative to the tree, so a caller passes those paths to `--pull` without walking
+  the host's tree for them.
 
 ## Predefined runners
 

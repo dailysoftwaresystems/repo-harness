@@ -12,6 +12,150 @@ public sealed class PhysicalFileSystemTests
 {
     private static PhysicalFileSystem Create() => new(FilePermissionsFactory.Create());
 
+    /// <summary>
+    /// A directory's size is what its files hold, below it at any depth, walking no directory link:
+    /// what a link points at is not this directory's to free. A directory that is not there holds nothing.
+    /// </summary>
+    [Fact]
+    public void DirectorySize_AddsUpItsFiles_WalkingNoDirectoryLink()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("tree", "a.bin"), new string('a', 1000));
+        temp.WriteFile(Path.Combine("tree", "sub", "deeper", "b.bin"), new string('b', 24));
+        temp.WriteFile(Path.Combine("outside", "big.bin"), new string('c', 5000));
+        var tree = temp.Combine("tree");
+
+        Assert.Equal(1024, Create().DirectorySize(tree));
+        Assert.Equal(0, Create().DirectorySize(temp.Combine("absent")));
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(tree, "out"), temp.Combine("outside"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        Assert.Equal(1024, Create().DirectorySize(tree));
+    }
+
+    /// <summary>
+    /// A build directory linked onto another filesystem is measured there, and named by it: measured through the
+    /// path as written, it was the room of the filesystem the link sits on.
+    /// </summary>
+    [Fact]
+    public void SpaceAt_FollowsALinkOntoAnotherFilesystem()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux() && Directory.Exists("/dev/shm"), "Linux keeps a filesystem of its own at /dev/shm.");
+
+        using var temp = new TempDirectory();
+        var elsewhere = Path.Combine("/dev/shm", "repo-harness-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(elsewhere);
+
+        try
+        {
+            Directory.CreateSymbolicLink(temp.Combine("build"), elsewhere);
+
+            var room = Create().SpaceAt(Path.Combine(temp.Combine("build"), "arm64-gcc-debug"));
+
+            Assert.Equal("/dev/shm", room.Filesystem);
+        }
+        finally
+        {
+            Directory.Delete(elsewhere, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A directory this user cannot read counts as nothing, rather than ending the count: a leftover of a build run
+    /// as another user once failed every clean of the build directory it was in, dry runs among them.
+    /// </summary>
+    [Fact]
+    [UnsupportedOSPlatform("windows")]
+    public void DirectorySize_CountsADirectoryItCannotRead_AsNothing()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Mode bits say who may read a directory on Linux and macOS.");
+
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("tree", "a.bin"), new string('a', 1000));
+        temp.WriteFile(Path.Combine("tree", "locked", "b.bin"), new string('b', 24));
+        var tree = temp.Combine("tree");
+        var locked = Path.Combine(tree, "locked");
+
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            // Root reads it all the same.
+            Assert.Contains(Create().DirectorySize(tree), new[] { 1000L, 1024L });
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    /// <summary>
+    /// The room on a filesystem is measured where the path is, or - for a directory not made yet - where the
+    /// nearest directory above it is, which is the filesystem it will be made on; and named by where that
+    /// filesystem is mounted, above the path.
+    /// </summary>
+    [Fact]
+    public void SpaceAt_MeasuresTheFilesystem_OfTheNearestDirectoryThatExists()
+    {
+        using var temp = new TempDirectory();
+        var here = Create().SpaceAt(temp.Path);
+        var notYet = Create().SpaceAt(temp.Combine(Path.Combine("not", "made", "yet")));
+
+        Assert.True(here.TotalBytes > 0, $"a filesystem of {here.TotalBytes} bytes");
+        Assert.InRange(here.FreeBytes, 0, here.TotalBytes);
+        Assert.Equal(here.Filesystem, notYet.Filesystem);
+        Assert.Equal(here.TotalBytes, notYet.TotalBytes);
+        Assert.StartsWith(
+            here.Filesystem,
+            Path.GetFullPath(temp.Path),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    }
+
+    /// <summary>A directory moves whole, and what it held is where it went.</summary>
+    [Fact]
+    public void MoveDirectory_MovesItWhole()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("from", "sub", "file.txt"), "x");
+
+        Create().MoveDirectory(temp.Combine("from"), temp.Combine("to"));
+
+        Assert.False(Directory.Exists(temp.Combine("from")));
+        Assert.True(File.Exists(temp.Combine(Path.Combine("to", "sub", "file.txt"))));
+    }
+
+    /// <summary>
+    /// A link is told from what it points at, and from a directory below a link, which is not one itself;
+    /// nothing at all is no link.
+    /// </summary>
+    [Fact]
+    public void IsLink_IsTheLinkItself_NotWhatIsBelowOrBeyondIt()
+    {
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("target", "sub", "file.txt"), "x");
+
+        try
+        {
+            Directory.CreateSymbolicLink(temp.Combine("link"), temp.Combine("target"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip($"This machine does not allow creating symbolic links: {ex.Message}");
+        }
+
+        Assert.True(Create().IsLink(temp.Combine("link")));
+        Assert.False(Create().IsLink(temp.Combine("target")));
+        Assert.False(Create().IsLink(temp.Combine(Path.Combine("link", "sub"))));
+        Assert.False(Create().IsLink(temp.Combine("absent")));
+    }
+
     [Fact]
     public void WriteAllTextAtomic_WritesUtf8WithoutAByteOrderMark_CreatingParentDirectories()
     {
@@ -151,10 +295,10 @@ public sealed class PhysicalFileSystemTests
     }
 
     /// <summary>
-    /// A file the walk listed but could not stat is asked again directly, and one gone since the walk
-    /// listed it - its directory gone too, or not - is left out rather than failing the walk: on Linux and
-    /// macOS a file removed between the listing and the stat is exactly that, and one deleted at the wrong
-    /// moment left a build nothing to date its changes against.
+    /// A file the walk listed but could not stat is asked again directly, for when it was written and what
+    /// it holds, and one gone since the walk listed it - its directory gone too, or not - is left out rather
+    /// than failing the walk: on Linux and macOS a file removed between the listing and the stat is exactly
+    /// that, and one deleted at the wrong moment left a build nothing to date its changes against.
     /// </summary>
     [Fact]
     public void Dated_AsksAgainAFileTheWalkCouldNotStat_AndLeavesOutOneGoneSince()
@@ -173,7 +317,7 @@ public sealed class PhysicalFileSystemTests
             new WrittenFile(temp.Combine("gone", "scratch.o"), unstatted),
         ]).ToList();
 
-        Assert.Equal([new WrittenFile(kept, keptTime)], dated);
+        Assert.Equal([new WrittenFile(kept, keptTime) { Length = 1 }], dated);
     }
 
     /// <summary>

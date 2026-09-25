@@ -318,6 +318,45 @@ public sealed class ConfigStoreTests
         Assert.Equal("leg: {leg}, minutes: (?<budget>[0-9]+)", config.Ci.WorkflowBudgetPattern);
     }
 
+    /// <summary>
+    /// A host's hold between commands is some seconds or none, and holds the host with its keepAwake: a hold
+    /// on a host that declares none would hold it with nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(-5, "[\"caffeinate\", \"-w\", \"{pid}\"]", "hosts.ssh 'mac' holdAwakeSeconds cannot be negative, found -5")]
+    [InlineData(600, "null", "hosts.ssh 'mac' holdAwakeSeconds holds the host awake with its keepAwake, and it declares none")]
+    public void Load_RejectsAHoldThatCannotHoldAnything(int seconds, string keepAwake, string expected)
+    {
+        var exception = LoadInvalid(
+            "{ \"sshItems\": [\"mac\"], \"hosts\": { \"ssh\": { \"mac\": { \"repositoryPath\": \"/Users/me/repo\", \"keepAwake\": "
+            + keepAwake + ", \"holdAwakeSeconds\": " + seconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + " } } } }");
+
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A host's wake window is some seconds or none: a negative one is no window.</summary>
+    [Fact]
+    public void Load_RejectsANegativeWakeWindow()
+    {
+        var exception = LoadInvalid(
+            "{ \"sshItems\": [\"mac\"], \"hosts\": { \"ssh\": { \"mac\": { \"repositoryPath\": \"/Users/me/repo\", \"wakeWaitSeconds\": -1 } } } }");
+
+        Assert.Contains("hosts.ssh 'mac' wakeWaitSeconds cannot be negative, found -1", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A leg's buildSpaceGiB is a positive number of GiB: none, or less, is no need anybody measured.</summary>
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-2")]
+    public void Load_RejectsABuildSpaceThatIsNoRoom(string room)
+    {
+        var exception = LoadInvalid(
+            "{ \"buildConfigs\": { \"debug\": {} }, \"legs\": { \"native\": { \"os\": \"linux\", \"processor\": \"x86_64\", \"config\": \"debug\", \"buildSpaceGiB\": "
+            + room + " } } }");
+
+        Assert.Contains($"leg 'native' buildSpaceGiB must be a positive number of GiB, found {room}", exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Load_RejectsAPathLimitBelowOne()
     {

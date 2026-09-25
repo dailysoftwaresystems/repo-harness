@@ -1,4 +1,5 @@
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Platform;
 
 namespace RepoHarness.Core.Build;
@@ -46,6 +47,22 @@ public sealed record VariantKey(string Processor, string Toolchain, string Confi
         ArgumentException.ThrowIfNullOrWhiteSpace(treeRoot);
 
         return Path.Combine(treeRoot, BuildRootName, DirectoryName);
+    }
+
+    /// <summary>The build directory below a tree <paramref name="host"/> keeps, spelt as that host spells a path.</summary>
+    /// <param name="host">The host the tree is on.</param>
+    /// <param name="treeRoot">The root of the tree there.</param>
+    /// <remarks>
+    /// Joined with '/', which every host takes as a separator: this machine's own joining gives a Windows
+    /// backslash, which a WSL distribution or a Linux or macOS ssh host reads as part of a name it never finds.
+    /// </remarks>
+    public string DirectoryOn(HostId host, string treeRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(treeRoot);
+
+        return host.Kind == HostKind.Local
+            ? DirectoryUnder(treeRoot)
+            : $"{treeRoot.TrimEnd('/', '\\')}/{BuildRootName}/{DirectoryName}";
     }
 
     /// <summary>The directory every variant's build directory sits under.</summary>

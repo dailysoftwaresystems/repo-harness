@@ -209,6 +209,37 @@ public sealed record PlacedLeg(
         };
     }
 
+    /// <summary>The lock a build of this leg takes: the tree it works in shared, and its variant its own.</summary>
+    /// <param name="runId">The run taking it.</param>
+    /// <param name="command">The command taking it.</param>
+    /// <remarks>
+    /// One key for every command that builds in, or removes, the leg's build directory: a clean keyed apart
+    /// from the build would not see one running, and would move its directory away under it.
+    /// </remarks>
+    public LockRequest BuildLock(RunId runId, string command) => BuildLock(Host.Host, HostTreeRoot, Variant, runId, command);
+
+    /// <summary>The lock a build of a leg of <paramref name="variant"/> in <paramref name="hostTreeRoot"/> on <paramref name="host"/> takes.</summary>
+    /// <param name="host">The host the leg builds on.</param>
+    /// <param name="hostTreeRoot">The tree it builds in there.</param>
+    /// <param name="variant">Its variant.</param>
+    /// <param name="runId">The run taking it.</param>
+    /// <param name="command">The command taking it.</param>
+    public static LockRequest BuildLock(HostId host, string hostTreeRoot, VariantKey variant, RunId runId, string command)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(variant);
+
+        return new LockRequest
+        {
+            Host = host.ToString(),
+            Tree = hostTreeRoot,
+            Variant = variant.DirectoryName,
+            Scope = LockScope.TreeShared,
+            RunId = runId,
+            Command = command,
+        };
+    }
+
     /// <summary>What the executor needs to schedule this leg.</summary>
     /// <remarks>
     /// A local leg carries no tree key, because it needs no sync: the executor announces a transfer
@@ -313,22 +344,13 @@ public static class LegRunPlan
         var project = VariantKey.ProjectFor(config, leg);
         var variant = VariantKey.For(config, leg, host.Os ?? string.Empty);
 
-        // A leg naming a worktree acts on that tree; every path below derives from it, which is what
-        // keeps a worktree's build output out of the main checkout's build directory. On a host a leg
-        // was sent to, its tree is the copy it was sent to, which is that worktree's own: the worktree
-        // it names is on the machine that sent it, and nothing in the copy is at that path.
-        var treeRoot = here is null && leg.Worktree is { Length: > 0 } worktree
-            ? context.Layout.WorktreePathUnder(config.Worktrees.Root, worktree)
-            : context.Layout.RepositoryRoot;
+        var treeRoot = LegTrees.Here(context, leg, here);
 
         // Where the work actually happens. A leg on another machine works in that machine's copy of its
-        // tree - the main checkout's, or a worktree's own beside it - and describing it with a path from
-        // this one would key its lock, its sync and its build directory by a directory the work never
-        // touches. Resolved here rather than at the moment of the sync, so a host that declares no
-        // repositoryPath is refused before anything starts.
-        var hostTreeRoot = host.Host.Kind == HostKind.Local
-            ? treeRoot
-            : HostCopies.Of(config, host.Host, context.Layout, treeRoot, comparison);
+        // tree, and describing it with a path from this one would key its lock, its sync and its build
+        // directory by a directory the work never touches. Resolved here rather than at the moment of the
+        // sync, so a host that declares no repositoryPath is refused before anything starts.
+        var hostTreeRoot = LegTrees.On(context, host.Host, treeRoot, comparison);
 
         // Read under the name the reader knows the host by. A host running a leg another machine
         // dispatched to it is 'local' to itself, and 'local' in the configuration the two share is
@@ -344,7 +366,7 @@ public static class LegRunPlan
             variant,
             treeRoot,
             hostTreeRoot,
-            variant.DirectoryUnder(hostTreeRoot),
+            variant.DirectoryOn(host.Host, hostTreeRoot),
             config.Hosts.SettingsFor(named),
             leg.Emulator is { Length: > 0 })
         {

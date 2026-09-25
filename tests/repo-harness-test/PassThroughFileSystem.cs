@@ -26,6 +26,14 @@ internal class PassThroughFileSystem(IFileSystem inner) : IFileSystem
 
     public virtual void DeleteDirectory(string path) => inner.DeleteDirectory(path);
 
+    public virtual void MoveDirectory(string source, string destination) => inner.MoveDirectory(source, destination);
+
+    public virtual bool IsLink(string path) => inner.IsLink(path);
+
+    public virtual long DirectorySize(string path) => inner.DirectorySize(path);
+
+    public virtual DiskSpace SpaceAt(string path) => inner.SpaceAt(path);
+
     public virtual IEnumerable<string> EnumerateFiles(string path, bool recursive) => inner.EnumerateFiles(path, recursive);
 
     public virtual IEnumerable<WrittenFile> EnumerateWrittenFiles(string path) => inner.EnumerateWrittenFiles(path);

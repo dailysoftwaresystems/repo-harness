@@ -386,6 +386,7 @@ public sealed partial class HelpTests
     [InlineData("exit-codes")]
     [InlineData("config")]
     [InlineData("legs")]
+    [InlineData("space")]
     [InlineData("worktrees")]
     [InlineData("anchors")]
     [InlineData("layout")]
@@ -400,6 +401,84 @@ public sealed partial class HelpTests
         Assert.Equal(0, result.ExitCode);
         Assert.True(result.StandardOutput.Length > 200, $"topic '{topic}' produced little output");
         Assert.DoesNotContain("Unknown topic", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The runner topic says a leg's line names what its steps kept, as the path sync --pull takes.
+    /// </summary>
+    [Fact]
+    public async Task RunnerTopic_SaysALegsLineNamesWhatItKept_AsSyncPullTakesIt()
+    {
+        var result = await CliRunner.RunAsync(["help", "runner"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("names each file its steps kept as keptOutputs, relative to the tree", text, StringComparison.Ordinal);
+        Assert.Contains("sync --pull' takes to bring it back", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The worktrees topic says a Ninja build leaves its dead outputs out of the path budget's warning, and names
+    /// the ninja command that removes them, removing nothing itself.
+    /// </summary>
+    [Fact]
+    public async Task WorktreesTopic_SaysDeadOutputsAreLeftOutOfTheWarning_AndWhatRemovesThem()
+    {
+        var result = await CliRunner.RunAsync(["help", "worktrees"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("A Ninja build leaves out of that warning the outputs ninja says no target of it produces any more", text, StringComparison.Ordinal);
+        Assert.Contains("naming 'ninja -t cleandead', which removes them. The harness removes nothing.", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The config topic says a hold between commands runs the host's keepAwake, ends when a command's own starts,
+    /// and needs keepAwake.
+    /// </summary>
+    [Fact]
+    public async Task ConfigTopic_SaysAHoldBetweenCommandsEndsWhenACommandsOwnKeepAwakeStarts()
+    {
+        var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("holdAwakeSeconds holds it awake between commands, until a command's own keepAwake takes over", text, StringComparison.Ordinal);
+        Assert.Contains("The next command's own keepAwake ends it there", text, StringComparison.Ordinal);
+        Assert.Contains("It needs keepAwake, which it runs", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The legs topic says what a wake window retries and what it never does, with the delay the code uses.
+    /// </summary>
+    [Fact]
+    public async Task LegsTopic_SaysWhatAWakeWindowTriesAgain_AndWhatItNeverDoes()
+    {
+        var result = await CliRunner.RunAsync(["help", "legs"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("hosts.ssh.<name>.wakeWaitSeconds", text, StringComparison.Ordinal);
+        Assert.Contains($"every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed", text, StringComparison.Ordinal);
+        Assert.Contains("a key or a login the host refuses is never waited on", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The space topic says what clean leaves alone and why it frees a full disk: nothing is written first,
+    /// a build of the leg holds it off, and a host behind this machine's build needs room to be updated.
+    /// </summary>
+    [Fact]
+    public async Task SpaceTopic_SaysCleanWritesNothingFirst_AndWhatItLeavesAlone()
+    {
+        var result = await CliRunner.RunAsync(["help", "space"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("It writes nothing where it removes before it has removed", text, StringComparison.Ordinal);
+        Assert.Contains("refused-locked", text, StringComparison.Ordinal);
+        Assert.Contains("--dry-run", text, StringComparison.Ordinal);
+        Assert.Contains("A build directory that is a link is left alone", text, StringComparison.Ordinal);
+        Assert.Contains("both full and behind has to be freed by hand once", text, StringComparison.Ordinal);
+        Assert.Contains("A leg is placed only where its host has the room its build still needs", text, StringComparison.Ordinal);
+        Assert.Contains("the leg's buildSpaceGiB", text, StringComparison.Ordinal);
+        Assert.Contains("Commands that build nothing - sync, clean - need no room.", text, StringComparison.Ordinal);
+        Assert.Contains("legs -v' says the room on each host it measured", text, StringComparison.Ordinal);
     }
 
     /// <summary>

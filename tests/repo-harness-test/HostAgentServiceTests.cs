@@ -42,6 +42,49 @@ public sealed class HostAgentServiceTests
         Assert.Equal("arm64", info.Processor);
     }
 
+    /// <summary>
+    /// Asked about the room, the host answers the room where its copies are kept, and for each build directory
+    /// whether it is there, what the build that last finished there recorded it came to, and the room where it
+    /// is - or would be. A path from the home directory is read from this user's; one no build recorded says
+    /// nothing about what it holds. Nothing is walked.
+    /// </summary>
+    [Fact]
+    public async Task Info_AnswersTheRoom_AndWhatEachBuildDirectoryRecorded()
+    {
+        using var home = new TempDirectory();
+        var built = home.Combine(Path.Combine("repo", "build", "arm64-gcc-debug"));
+        home.WriteFile(Path.Combine("repo", "build", "arm64-gcc-debug", ".harness-build"), "clean\narm64-gcc-debug\nsize 4096\n");
+        home.WriteFile(Path.Combine("repo", "build", "arm64-gcc-release", "unrecorded.o"), "x");
+        using var output = new StringWriter();
+
+        var request = JsonSerializer.Serialize(
+            new HostAgentRequest
+            {
+                Kind = HostAgentRequestKind.Info,
+                SpaceAt = "~/repo",
+                Builds = ["~/repo/build/arm64-gcc-debug", built, "~/repo/build/arm64-gcc-release", "~/repo.worktree-x/build/arm64-gcc-debug"],
+            },
+            HostAgentProtocol.JsonOptions);
+
+        await Service(home.Path).ServeAsync(new StringReader(request), output, new StringWriter(), NothingRuns, TestContext.Current.CancellationToken);
+
+        var info = JsonSerializer.Deserialize<HostAgentInfo>(output.ToString(), HostAgentProtocol.JsonOptions)!;
+
+        Assert.NotNull(info.Space);
+        Assert.True(info.Space.TotalBytes > 0);
+        Assert.Null(info.SpaceUnmeasured);
+
+        Assert.Equal(
+            [
+                ("~/repo/build/arm64-gcc-debug", true, (long?)4096),
+                (built, true, 4096),
+                ("~/repo/build/arm64-gcc-release", true, null),
+                ("~/repo.worktree-x/build/arm64-gcc-debug", false, null),
+            ],
+            info.Builds.Select(room => (room.Path, room.Exists, room.RecordedBytes)));
+        Assert.All(info.Builds, room => Assert.Equal(info.Space.Filesystem, room.Disk?.Filesystem));
+    }
+
     [Fact]
     public async Task Run_RunsTheCommand_InTheHostsCopy_WithItsArgumentsUnchanged_AndSaysHowItFinished()
     {
@@ -197,6 +240,7 @@ public sealed class HostAgentServiceTests
     [Theory]
     [InlineData(HostExecService.CommandName)]
     [InlineData(HostAgentProtocol.CommandName)]
+    [InlineData(HoldAwakeService.CommandName)]
     public async Task Run_RefusesToPassTheWorkOnToAnotherHost(string command)
     {
         using var temp = new TempDirectory();
@@ -384,6 +428,8 @@ public sealed class HostAgentServiceTests
             new DeveloperEnvironmentProbe(platform, processRunner),
             fileSystem,
             new LocalProgramResolver(platform, FilePermissionsFactory.Create()),
-            new KeepAwake(keepingAwake ?? processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)));
+            new KeepAwake(keepingAwake ?? processRunner, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false)),
+                new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), Path.Combine(TestHost.TemporaryRoot, "holds", Guid.NewGuid().ToString("N") + ".json")),
+                new RecordingLauncher());
     }
 }

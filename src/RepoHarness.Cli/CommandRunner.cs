@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
+using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
@@ -92,6 +93,12 @@ internal static class CommandRunner
             catch (Exception ex)
             {
                 return Fail(output, commandName, ex, answersWithLedger);
+            }
+            finally
+            {
+                // However the command ended: after each host's own refusal and the command's conclusion, and with
+                // each host it reached that asks to be held awake between commands held.
+                await services.GetRequiredService<CommandEnd>().EndAsync(commandName).ConfigureAwait(false);
             }
         };
     }

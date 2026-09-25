@@ -1,3 +1,4 @@
+using System.Globalization;
 using RepoHarness.Core.Platform;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
@@ -26,6 +27,12 @@ public sealed record HostConnectionResult
 
     /// <summary>Why the host cannot be reached; empty when it can.</summary>
     public string Problem { get; init; } = string.Empty;
+
+    /// <summary>
+    /// How long the host took to answer, where it was reached only after waiting for it to wake; said with what
+    /// inspection did there, so the window a host is given can be judged against what it took.
+    /// </summary>
+    public string? Woke { get; init; }
 
     /// <summary>A host that cannot be reached, and why.</summary>
     /// <param name="problem">Why, as a lower-case fragment with its remedy after a semicolon.</param>
@@ -64,20 +71,23 @@ public sealed class HostConnector(
     IHostCommandRunner hostCommands,
     IHostSecretsStore secrets,
     IHostAddressResolver addresses,
-    IHostProgramResolver programs) : IHostConnector
+    IHostProgramResolver programs,
+    SshWakeWindow wakeWindow,
+    SyncedCopyRefusals copyRefusals) : IHostConnector
 {
     /// <summary>Longest one probe of a connected host may take.</summary>
     public static readonly TimeSpan ProbeBudget = TimeSpan.FromMinutes(2);
 
     /// <summary>
-    /// What is said, after why, of a host a command typed in a copy the harness synced to a host could not
-    /// reach: that it is such a copy, and where the command belongs.
+    /// What is said, once a command typed in a copy the harness synced to a host could not reach a host: that
+    /// it is such a copy, and where the command belongs.
     /// </summary>
     /// <remarks>
     /// Said for every kind of host, because inside a copy every kind is refused for the same underlying
     /// reason. Connection data is gitignored and never synced, and a copy on Linux or macOS has no WSL to
     /// reach at all; either way a leg naming another host is placed by the machine that syncs here. Each
-    /// kind's own refusal is still said first: what is missing is true, only not the whole of it.
+    /// kind's own refusal is still said: what is missing is true, only not the whole of it. Said once, as the
+    /// command ends (<see cref="SyncedCopyRefusals"/>), because it is the same for every host.
     /// </remarks>
     public const string SyncedCopyNotice =
         "This tree is a copy the harness synced to a host: connection data is never synced, so nothing here "
@@ -90,6 +100,8 @@ public sealed class HostConnector(
     private readonly IHostSecretsStore _secrets = secrets;
     private readonly IHostAddressResolver _addresses = addresses;
     private readonly IHostProgramResolver _programs = programs;
+    private readonly SshWakeWindow _wakeWindow = wakeWindow;
+    private readonly SyncedCopyRefusals _copyRefusals = copyRefusals;
 
     public Task<HostConnectionResult> ConnectAsync(
         HarnessContext context,
@@ -110,33 +122,24 @@ public sealed class HostConnector(
     }
 
     /// <summary>
-    /// <paramref name="connecting"/>'s result, with <see cref="SyncedCopyNotice"/> after the refusal of a
-    /// host that a command typed in a synced copy could not reach.
+    /// <paramref name="connecting"/>'s result, recording a host that a command typed in a synced copy could not
+    /// reach, so the command ends with <see cref="SyncedCopyNotice"/>.
     /// </summary>
     /// <remarks>
     /// Here, where every kind of host is reached, rather than in each refusal: the ssh kind's missing item
     /// once said it alone, and a WSL leg in the same copy was refused only as WSL existing solely on Windows
     /// - true, and no help to a reader who had typed the command in the wrong tree.
     /// </remarks>
-    private static async Task<HostConnectionResult> FromACopyAsync(HarnessContext context, Task<HostConnectionResult> connecting)
+    private async Task<HostConnectionResult> FromACopyAsync(HarnessContext context, Task<HostConnectionResult> connecting)
     {
         var result = await connecting.ConfigureAwait(false);
 
-        return context.IsSyncedCopy && result is { Connection: null, Problem.Length: > 0 }
-            ? result with { Problem = InACopy(result.Problem) }
-            : result;
-    }
+        if (context.IsSyncedCopy && result is { Connection: null, Problem.Length: > 0 })
+        {
+            _copyRefusals.Refused();
+        }
 
-    /// <summary>
-    /// <paramref name="refusal"/>, then <see cref="SyncedCopyNotice"/>: why a host could not be reached from a
-    /// synced copy, in its own words, then where the command belongs.
-    /// </summary>
-    /// <param name="refusal">Why the host could not be reached, with or without a full stop of its own.</param>
-    public static string InACopy(string refusal)
-    {
-        ArgumentNullException.ThrowIfNull(refusal);
-
-        return $"{refusal.TrimEnd().TrimEnd('.')}. {SyncedCopyNotice}";
+        return result;
     }
 
     /// <summary>
@@ -260,6 +263,21 @@ public sealed class HostConnector(
             return HostConnectionResult.Refused("ssh was not found on this machine");
         }
 
+        // The window a host that sleeps is given to wake, measured from here; none for any other host, which is
+        // asked as it always was. One whose window ran out a moment ago, earlier in this command, is refused as
+        // it was then, rather than waited for again by every leg placed there.
+        TimeSpan? window = settings.WakeWaitSeconds > 0 ? TimeSpan.FromSeconds(settings.WakeWaitSeconds) : null;
+        var started = _wakeWindow.Now;
+        var deadline = started + (window ?? TimeSpan.Zero);
+
+        if (window is not null && _wakeWindow.RanOut(host) is { } ranOut)
+        {
+            return HostConnectionResult.Refused(ranOut);
+        }
+
+        var lookups = 0;
+        var connections = 1;
+
         var connection = new HostConnection
         {
             Host = host,
@@ -286,9 +304,22 @@ public sealed class HostConnector(
         {
             var resolution = await _addresses.ResolveAsync(seen?.HostName ?? item.Address, cancellationToken).ConfigureAwait(false);
 
+            if (!resolution.Resolved && window is not null)
+            {
+                resolution = await _wakeWindow.KeepResolvingAsync(resolution, deadline, cancellationToken).ConfigureAwait(false);
+                lookups = resolution.Attempts;
+            }
+
             if (!resolution.Resolved)
             {
-                return HostConnectionResult.Refused(HostAddressResolver.Unresolved(resolution, item.Address));
+                var unresolved = HostAddressResolver.Unresolved(resolution, item.Address, window);
+
+                if (window is not null)
+                {
+                    _wakeWindow.Remember(host, unresolved);
+                }
+
+                return HostConnectionResult.Refused(unresolved);
             }
 
             connection = connection with
@@ -299,6 +330,14 @@ public sealed class HostConnector(
 
         var budget = TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds) + ProbeBudget;
         var probe = await _hostCommands.ProbeShellAsync(connection, budget, cancellationToken).ConfigureAwait(false);
+
+        if (!probe.Succeeded && window is not null)
+        {
+            var probing = connection;
+            (probe, connections) = await _wakeWindow
+                .KeepProbingAsync(probe, deadline, token => _hostCommands.ProbeShellAsync(probing, budget, token), cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         if (!probe.Succeeded)
         {
@@ -312,12 +351,22 @@ public sealed class HostConnector(
             // echo exits 255 nowhere, so here that code is ssh's own, whatever it failed over. And no
             // session has opened yet on this connection, so whatever ssh failed over - a key it refused
             // among them - the host could not be reached for this command.
-            return HostConnectionResult.Refused(probe switch
+            var refusal = probe switch
             {
                 { TimedOut: true } => $"the host could not be reached: it did not answer within {budget.TotalSeconds:0} seconds ({client})",
                 { ExitCode: HostProbes.SshFailed } => $"{HostProbes.CouldNotReach(HostProbes.Excerpt(probe.StandardError))} ({client})",
                 _ => $"{HostProbes.Failure("its shell could not run echo", probe)} ({client})",
-            });
+            };
+
+            if (window is { } waited && HostProbes.MayBeWaking(probe))
+            {
+                refusal = string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{refusal}; tried {connections} time(s) over the {waited.TotalSeconds:0} seconds wakeWaitSeconds gives it to wake");
+                _wakeWindow.Remember(host, refusal);
+            }
+
+            return HostConnectionResult.Refused(refusal);
         }
 
         connection = connection with { Shell = RemoteCommandLine.ReadShellProbe(probe.StandardOutput) };
@@ -337,6 +386,12 @@ public sealed class HostConnector(
                     cancellationToken)
                 .ConfigureAwait(false),
             Superuser = item.Superuser,
+            Woke = lookups > 0 || connections > 1
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"answered after {(_wakeWindow.Now - started).TotalSeconds:0} seconds of waiting for it to wake "
+                    + $"({lookups} lookup(s) of its name, {connections} connection attempt(s))")
+                : null,
         };
     }
 

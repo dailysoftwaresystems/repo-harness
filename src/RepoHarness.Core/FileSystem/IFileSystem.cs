@@ -42,6 +42,36 @@ public interface IFileSystem
     /// </summary>
     void DeleteDirectory(string path);
 
+    /// <summary>
+    /// Moves the directory at <paramref name="source"/> to <paramref name="destination"/>, on the same
+    /// volume: a rename, which writes no file's contents and so needs no room the volume does not have.
+    /// </summary>
+    /// <param name="source">The directory to move.</param>
+    /// <param name="destination">Where it goes, which must not exist.</param>
+    void MoveDirectory(string source, string destination);
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is itself a link or a junction, whatever the directories above it are;
+    /// false where nothing is there.
+    /// </summary>
+    /// <param name="path">The path to look at.</param>
+    bool IsLink(string path);
+
+    /// <summary>
+    /// How many bytes the files under <paramref name="path"/> hold: each link counted as itself, and none
+    /// walked, and a directory this user cannot read counted as nothing. Zero where it does not exist.
+    /// </summary>
+    /// <param name="path">The directory to measure.</param>
+    long DirectorySize(string path);
+
+    /// <summary>
+    /// The room on the filesystem <paramref name="path"/> is on - or would be on, measured at the nearest
+    /// directory on the way up to it that exists, as for a copy not made yet.
+    /// </summary>
+    /// <param name="path">The path to measure the filesystem of.</param>
+    /// <exception cref="IOException">The filesystem could not be asked.</exception>
+    DiskSpace SpaceAt(string path);
+
     /// <summary>Enumerates files under <paramref name="path"/>, recursively when asked.</summary>
     /// <remarks>
     /// A directory reached through a link or a junction is never walked: a link inside a tree leads

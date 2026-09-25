@@ -4,6 +4,7 @@ using RepoHarness.Core.Execution;
 using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Output;
 using RepoHarness.Core.Platform;
+using RepoHarness.Core.Processes;
 using RepoHarness.Core.Results;
 
 namespace RepoHarness.Core.Hosts;
@@ -20,7 +21,9 @@ public sealed class HostAgentService(
     DeveloperEnvironmentProbe developerEnvironmentProbe,
     IFileSystem fileSystem,
     LocalProgramResolver programs,
-    KeepAwake keepAwake)
+    KeepAwake keepAwake,
+    HoldAwakeStore holds,
+    IDetachedProcessLauncher launcher)
 {
     private readonly IHostPlatform _platform = platform;
     private readonly IToolIdentityProvider _identity = identity;
@@ -29,6 +32,8 @@ public sealed class HostAgentService(
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly LocalProgramResolver _programs = programs;
     private readonly KeepAwake _keepAwake = keepAwake;
+    private readonly HoldAwakeStore _holds = holds;
+    private readonly IDetachedProcessLauncher _launcher = launcher;
 
     /// <summary>Reads one request from <paramref name="input"/> and serves it.</summary>
     /// <param name="input">
@@ -111,14 +116,94 @@ public sealed class HostAgentService(
                 await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
             }
 
-            var info = await DescribeAsync(request.Emulators, request.DeveloperEnvironments, request.Programs, request.ToolSearchDirectories, abandoned.Token)
+            var info = await DescribeAsync(
+                    request.Emulators,
+                    request.DeveloperEnvironments,
+                    request.Programs,
+                    request.ToolSearchDirectories,
+                    new RoomQuestions(request.SpaceAt, request.Builds),
+                    abandoned.Token)
                 .ConfigureAwait(false);
             await output.WriteLineAsync(JsonSerializer.Serialize(info, HostAgentProtocol.JsonOptions)).ConfigureAwait(false);
             await output.FlushAsync(cancellationToken).ConfigureAwait(false);
             return HarnessExit.Success;
         }
 
+        if (request.Kind == HostAgentRequestKind.Hold)
+        {
+            return await HoldAsync(request, output, error).ConfigureAwait(false);
+        }
+
         return await RunAsync(request, output, error, run, abandoned.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Serves a hold request: makes it the hold that stands on this machine, replacing any before it, starts the
+    /// process that holds the machine awake - detached, so it goes on once this request's connection has ended -
+    /// and answers at once, with the completion line last, as a run request answers.
+    /// </summary>
+    private async Task<int> HoldAsync(HostAgentRequest request, TextWriter output, TextWriter error)
+    {
+        if (string.IsNullOrWhiteSpace(request.Nonce))
+        {
+            return await RefuseAsync(error, HarnessExit.UsageError, "the hold request carries no nonce to mark its answer with").ConfigureAwait(false);
+        }
+
+        await WriteStartedAsync(output, error, request.Nonce).ConfigureAwait(false);
+
+        var exitCode = await ServeHoldAsync(request, error).ConfigureAwait(false);
+
+        await error.WriteLineAsync(HostAgentProtocol.CompletionLine(request.Nonce, exitCode)).ConfigureAwait(false);
+        await error.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+
+        return exitCode;
+    }
+
+    private async Task<int> ServeHoldAsync(HostAgentRequest request, TextWriter error)
+    {
+        // Asked of a host whose DssHarness is to be updated: a hold is a DssHarness running there too, and one
+        // that stands would keep the update off until its seconds ran out. It stops as it sees its state gone.
+        if (request.HoldAwakeSeconds == 0)
+        {
+            try
+            {
+                _holds.End();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return await RefuseAsync(error, HarnessExit.HostUnavailable, $"the hold here could not be ended: {ex.Message.TrimEnd('.')}").ConfigureAwait(false);
+            }
+
+            return HarnessExit.Success;
+        }
+
+        if (request.KeepAwake.Count == 0 || request.HoldAwakeSeconds < 1)
+        {
+            return await RefuseAsync(error, HarnessExit.UsageError, "the hold request names no keepAwake command to hold this host with, or no seconds to hold it for").ConfigureAwait(false);
+        }
+
+        var generation = HostAgentProtocol.NewNonce();
+
+        try
+        {
+            _holds.Write(new HoldAwakeState(
+                generation,
+                DateTimeOffset.UtcNow.AddSeconds(request.HoldAwakeSeconds),
+                [.. request.KeepAwake],
+                new Dictionary<string, string>(request.KeepAwakeEnvironment, StringComparer.OrdinalIgnoreCase),
+                [.. request.KeepAwakeDirectories]));
+
+            _launcher.StartSelf([HoldAwakeService.CommandName, generation]);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ProgramStartException)
+        {
+            // Nothing holds the host: a state written for a process that never started is ended with it.
+            _holds.End();
+
+            return await RefuseAsync(error, HarnessExit.HostUnavailable, $"this host could not be held awake: {ex.Message.TrimEnd('.')}").ConfigureAwait(false);
+        }
+
+        return HarnessExit.Success;
     }
 
     /// <summary>
@@ -129,18 +214,21 @@ public sealed class HostAgentService(
     /// <param name="developerEnvironments">The developer environments to look for, by name.</param>
     /// <param name="programs">The programs to find, the way a leg here will start them.</param>
     /// <param name="searchDirectories">The repository's <c>toolSearchDirectories</c>, of which this machine takes its own platform's.</param>
+    /// <param name="room">Where to measure the room here, and which build directories to measure and read the record of.</param>
     /// <param name="cancellationToken">Stops the checks.</param>
     public async Task<HostAgentInfo> DescribeAsync(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
         IReadOnlyDictionary<string, List<string>> searchDirectories,
+        RoomQuestions room,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(emulators);
         ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
         ArgumentNullException.ThrowIfNull(searchDirectories);
+        ArgumentNullException.ThrowIfNull(room);
 
         // By the function the leg's own run uses, on the machine that will run it. Answered from
         // anywhere else this would be a second opinion about this machine's PATH, and a second
@@ -169,6 +257,10 @@ public sealed class HostAgentService(
 
         var current = _identity.Current;
 
+        // Measured here, where the builds will write, and cheaply: the room is the filesystem's own count,
+        // and what a build directory holds is what the build that last finished there recorded, never a walk.
+        var (space, unmeasured) = room.SpaceAt is { Length: > 0 } spaceAt ? DiskSpace.Measure(_fileSystem, ResolveDirectory(spaceAt)) : (null, null);
+
         return new HostAgentInfo
         {
             Version = current.Version,
@@ -179,7 +271,22 @@ public sealed class HostAgentService(
             DeveloperEnvironments = environments,
             Programs = [.. found.Found.Values],
             ProgramDirectories = [.. found.Directories],
+            Space = space,
+            SpaceUnmeasured = unmeasured,
+            Builds = [.. room.Builds.Distinct(StringComparer.Ordinal).Select(BuildRoom)],
         };
+    }
+
+    /// <summary>
+    /// What the build directory <paramref name="asked"/> holds, as the build that last finished there recorded
+    /// it, and the room where it is: a record that cannot be read records nothing.
+    /// </summary>
+    private BuildDirectoryRoom BuildRoom(string asked)
+    {
+        var directory = ResolveDirectory(asked);
+        var (space, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
+
+        return new BuildDirectoryRoom(asked, _fileSystem.DirectoryExists(directory), Build.BuildRecord.BytesIn(_fileSystem, directory), space, unmeasured);
     }
 
     /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>

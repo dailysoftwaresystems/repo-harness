@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Processes;
 using RepoHarness.Core.Repository;
 using RepoHarness.Core.Results;
@@ -88,6 +89,34 @@ public sealed record HostReport
     /// <summary>What inspection changed on the host, such as installing DssHarness.</summary>
     public IReadOnlyList<string> Actions { get; init; } = [];
 
+    /// <summary>
+    /// The room on the filesystem its copies of the repository are kept on - the main checkout, for this
+    /// machine - or <see langword="null"/> where it was not asked, or could not be measured.
+    /// </summary>
+    public FileSystem.DiskSpace? Space { get; init; }
+
+    /// <summary>Why <see cref="Space"/> could not be measured, where it could not.</summary>
+    public string? SpaceUnmeasured { get; init; }
+
+    /// <summary>
+    /// For a WSL distribution, the room on this machine's drive holding the distribution's disk, which grows
+    /// there as the distribution writes whatever room it measures for itself; <see langword="null"/> for any
+    /// other host, or where it was not asked or could not be measured.
+    /// </summary>
+    public FileSystem.DiskSpace? DiskImageSpace { get; init; }
+
+    /// <summary>Why <see cref="DiskImageSpace"/> could not be measured, where it was asked and could not.</summary>
+    public string? DiskImageUnmeasured { get; init; }
+
+    /// <summary>What each build directory it was asked about holds, as its record says, and the room where it is.</summary>
+    public IReadOnlyList<BuildDirectoryRoom> Builds { get; init; } = [];
+
+    /// <summary>
+    /// How long it is to be held awake as a command finishes with it, until the next command's own keepAwake
+    /// takes over, as its <c>holdAwakeSeconds</c> says; zero for none.
+    /// </summary>
+    public int HoldAwakeSeconds { get; init; }
+
     /// <summary>How to reach DssHarness there; <see langword="null"/> for this machine and for a host that is unavailable.</summary>
     public HostSession? Session { get; init; }
 }
@@ -109,6 +138,7 @@ public interface IHostInspector
     /// <param name="emulators">The emulators to check there, by name.</param>
     /// <param name="developerEnvironments">The developer environments to look for there, by name.</param>
     /// <param name="programs">The programs to find there, the way a leg there will start them.</param>
+    /// <param name="room">Where to measure the room there, and which build directories; none where left out.</param>
     /// <param name="cancellationToken">Stops the measuring.</param>
     Task<HostReport> InspectAsync(
         HarnessContext context,
@@ -116,7 +146,23 @@ public interface IHostInspector
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>What a host is asked about the room on it.</summary>
+/// <param name="SpaceAt">
+/// Where to measure the room on its filesystem - where its copies of the repository are kept - absolute or
+/// from the home directory; <see langword="null"/> to measure none.
+/// </param>
+/// <param name="Builds">
+/// The build directories there whose room to measure and whose record to read, absolute or from the home
+/// directory.
+/// </param>
+public sealed record RoomQuestions(string? SpaceAt, IReadOnlyList<string> Builds)
+{
+    /// <summary>Nothing asked.</summary>
+    public static RoomQuestions None { get; } = new(null, []);
 }
 
 /// <summary>What a host is asked when it is measured.</summary>
@@ -124,18 +170,23 @@ public interface IHostInspector
 /// <param name="DeveloperEnvironments">The developer environments to look for, by name.</param>
 /// <param name="Programs">The programs to find.</param>
 /// <param name="SearchDirectories">The repository's <c>toolSearchDirectories</c>.</param>
+/// <param name="Room">Where to measure the room, and which build directories.</param>
 internal sealed record HostQuestions(
     IReadOnlyDictionary<string, EmulatorConfig> Emulators,
     IReadOnlyDictionary<string, DeveloperEnvironmentConfig> DeveloperEnvironments,
     IReadOnlyList<string> Programs,
-    IReadOnlyDictionary<string, List<string>> SearchDirectories);
+    IReadOnlyDictionary<string, List<string>> SearchDirectories,
+    RoomQuestions Room);
 
 /// <inheritdoc cref="IHostInspector"/>
 public sealed class HostInspector(
     IHostCommandRunner hostCommands,
     IHostConnector connector,
     IToolIdentityProvider identity,
-    HostAgentService agent) : IHostInspector
+    HostAgentService agent,
+    HoldAwakeRegistry holds,
+    IWslDiskImages wslDiskImages,
+    IFileSystem fileSystem) : IHostInspector
 {
     /// <summary>The program every host needs before DssHarness can be installed or run there.</summary>
     public const string DotnetProgram = "dotnet";
@@ -150,6 +201,9 @@ public sealed class HostInspector(
     private readonly IHostConnector _connector = connector;
     private readonly IToolIdentityProvider _identity = identity;
     private readonly HostAgentService _agent = agent;
+    private readonly HoldAwakeRegistry _holds = holds;
+    private readonly IWslDiskImages _wslDiskImages = wslDiskImages;
+    private readonly IFileSystem _fileSystem = fileSystem;
 
     public Task<HostReport> InspectAsync(
         HarnessContext context,
@@ -157,6 +211,7 @@ public sealed class HostInspector(
         IReadOnlyDictionary<string, EmulatorConfig> emulators,
         IReadOnlyDictionary<string, DeveloperEnvironmentConfig> developerEnvironments,
         IReadOnlyList<string> programs,
+        RoomQuestions? room = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -165,18 +220,45 @@ public sealed class HostInspector(
         ArgumentNullException.ThrowIfNull(developerEnvironments);
         ArgumentNullException.ThrowIfNull(programs);
 
-        var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories);
+        var questions = new HostQuestions(emulators, developerEnvironments, programs, context.Config.ToolSearchDirectories, room ?? RoomQuestions.None);
 
-        return host.Kind == HostKind.Local
-            ? InspectLocalAsync(questions, cancellationToken)
-            : InspectRemoteAsync(context, host, questions, cancellationToken);
+        return host.Kind switch
+        {
+            HostKind.Local => InspectLocalAsync(questions, cancellationToken),
+            HostKind.Wsl when questions.Room.SpaceAt is not null => WithDiskImageAsync(InspectRemoteAsync(context, host, questions, cancellationToken)),
+            _ => InspectRemoteAsync(context, host, questions, cancellationToken),
+        };
+    }
+
+    /// <summary>
+    /// <paramref name="inspecting"/>'s report of a WSL distribution, with the room on this machine's drive that
+    /// holds the distribution's disk: what the distribution measures is its virtual disk's room, which a full
+    /// drive does not shrink.
+    /// </summary>
+    private async Task<HostReport> WithDiskImageAsync(Task<HostReport> inspecting)
+    {
+        var report = await inspecting.ConfigureAwait(false);
+
+        if (report.Session is null)
+        {
+            return report;
+        }
+
+        if (_wslDiskImages.DirectoryOf(report.Host.Name) is not { Length: > 0 } directory)
+        {
+            return report with { DiskImageUnmeasured = "WSL names no directory holding its disk" };
+        }
+
+        var (space, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
+
+        return report with { DiskImageSpace = space, DiskImageUnmeasured = unmeasured };
     }
 
     /// <summary>This machine is measured in-process: the build doing the measuring is the one that would run its legs.</summary>
     private async Task<HostReport> InspectLocalAsync(HostQuestions questions, CancellationToken cancellationToken)
     {
         var info = await _agent
-            .DescribeAsync(questions.Emulators, questions.DeveloperEnvironments, questions.Programs, questions.SearchDirectories, cancellationToken)
+            .DescribeAsync(questions.Emulators, questions.DeveloperEnvironments, questions.Programs, questions.SearchDirectories, questions.Room, cancellationToken)
             .ConfigureAwait(false);
 
         return Answered(new HostReport { Host = HostId.Local }, info, session: null);
@@ -203,6 +285,13 @@ public sealed class HostInspector(
             // itself awake: its own copy has no configuration to read until a first sync has put one there.
             KeepAwake = context.Config.Hosts.SettingsFor(host).KeepAwake is { Count: > 0 } awake ? [.. awake] : [],
             KeepAwakeEnvironment = new Dictionary<string, string>(context.Config.Hosts.SettingsFor(host).Env, StringComparer.OrdinalIgnoreCase),
+
+            // Said with what inspection did there, so how long a host took to wake is seen beside the window
+            // it was given.
+            Actions = opened.Woke is { } woke ? [woke] : [],
+            HoldAwakeSeconds = context.Config.Hosts.Ssh.GetValueOrDefault(host.Name) is { } ssh && host.Kind == HostKind.Ssh
+                ? ssh.HoldAwakeSeconds
+                : 0,
         };
 
         if (opened.Connection is not { } connection)
@@ -212,7 +301,13 @@ public sealed class HostInspector(
 
         try
         {
-            return await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+            var prepared = await PrepareAsync(found, connection, questions, cancellationToken).ConfigureAwait(false);
+
+            // Reached here, and nowhere else, so a host is held when the command ends however the command
+            // then ended - a sibling host whose measuring failed included.
+            _holds.Reached(prepared);
+
+            return prepared;
         }
         catch (HarnessException ex) when (HostConnector.Unreached(ex) is { } reason)
         {
@@ -269,7 +364,7 @@ public sealed class HostInspector(
             return found with { Reason = reason };
         }
 
-        return await AskAsync(found with { Actions = action is null ? [] : [action] }, connection, windowsHost, questions, root, cancellationToken)
+        return await AskAsync(found with { Actions = action is null ? found.Actions : [.. found.Actions, action] }, connection, windowsHost, questions, root, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -382,6 +477,8 @@ public sealed class HostInspector(
                 ToolSearchDirectories = new Dictionary<string, List<string>>(
                     questions.SearchDirectories,
                     StringComparer.OrdinalIgnoreCase),
+                SpaceAt = questions.Room.SpaceAt,
+                Builds = [.. questions.Room.Builds],
             },
             HostAgentProtocol.JsonOptions);
 
@@ -462,18 +559,55 @@ public sealed class HostInspector(
     /// </summary>
     private async Task<string?> WhyNotUpdateAsync(HostConnection connection, bool windowsHost, CancellationToken cancellationToken)
     {
+        var (busy, running) = await WhyBusyAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false);
+
+        if (!running)
+        {
+            return busy;
+        }
+
+        // A hold a command left there, keeping the host awake between commands, is a DssHarness running there
+        // too, and one no command ends until its own keepAwake starts there - which no command gets to while
+        // the host cannot be updated. So it is ended through the DssHarness it runs, which stops it as it next
+        // reads its state, and the host is looked at again once it has had time to.
+        if (!await _holds.EndAsync(connection, ToolPackage.PathFromHome(windowsHost, connection.Shell), cancellationToken).ConfigureAwait(false))
+        {
+            return busy;
+        }
+
+        for (var look = 0; look < 3; look++)
+        {
+            await Task.Delay(_holds.StopsWithin, cancellationToken).ConfigureAwait(false);
+
+            (busy, running) = await WhyBusyAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false);
+
+            if (!running)
+            {
+                return busy;
+            }
+        }
+
+        return busy;
+    }
+
+    /// <summary>
+    /// Why DssHarness on the host must not be replaced now, and whether that is because it is running there
+    /// rather than because that could not be told; no reason where nothing stops it.
+    /// </summary>
+    private async Task<(string? Reason, bool Running)> WhyBusyAsync(HostConnection connection, bool windowsHost, CancellationToken cancellationToken)
+    {
         var listing = windowsHost
             ? await RunAsync(connection, "tasklist", ["/FO", "CSV", "/NH"], ProbeBudget, cancellationToken).ConfigureAwait(false)
             : await RunAsync(connection, "ps", ["-A", "-o", "comm="], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
         if (!listing.Succeeded)
         {
-            return HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing, connection);
+            return (HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing, connection), false);
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
-            ? $"{ToolPackage.Id} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
-            : null;
+            ? ($"{ToolPackage.Id} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished", true)
+            : (null, false);
     }
 
     /// <summary>
@@ -552,6 +686,9 @@ public sealed class HostInspector(
             .GroupBy(location => location.Program, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal),
         ProgramDirectories = info.ProgramDirectories,
+        Space = info.Space,
+        SpaceUnmeasured = info.SpaceUnmeasured,
+        Builds = info.Builds,
         Session = session,
     };
 

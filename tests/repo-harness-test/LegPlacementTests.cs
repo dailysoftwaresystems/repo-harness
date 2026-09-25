@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RepoHarness.Core.Configuration;
+using RepoHarness.Core.FileSystem;
 using RepoHarness.Core.Execution;
 using RepoHarness.Core.Hosts;
 using RepoHarness.Core.Legs;
@@ -251,6 +252,32 @@ public sealed class LegPlacementTests
         Assert.Equal(HarnessExit.Success, outcome.ExitCode);
         Assert.Contains("arm  runs on wsl Ubuntu (linux x86_64) through qemu-arm64", outcome.Details!);
         Assert.Contains("wsl Ubuntu: installed DssHarness 1.2.0", outcome.Details!);
+    }
+
+    /// <summary>
+    /// With -v each host's room is a line of its own - or why it could not be measured - so a host that is
+    /// nearly full shows before a run fills it; without it, nothing is said. As data it is always there.
+    /// </summary>
+    [Fact]
+    public void Render_SaysEachHostsRoom_UnderVerbose_AndAlwaysAsData()
+    {
+        var vps = new HostReport { Host = HostId.Ssh("vps"), Os = "linux", Processor = "arm64", Space = new DiskSpace(33L << 30, 48L << 30, "/") };
+        var unmeasured = Windows with { SpaceUnmeasured = "the drive is not ready" };
+        var report = new LegsReport([new LegPlacement(Selected("a"), vps, null)], [unmeasured, vps], Named: false);
+
+        var quiet = LegsReports.Render(report, json: false);
+        var verbose = LegsReports.Render(report, json: false, verbose: true);
+
+        Assert.DoesNotContain(quiet.Details!, line => line.Contains("free of", StringComparison.Ordinal));
+        Assert.Contains("ssh vps: 33 GiB free of 48 GiB on '/'", verbose.Details!);
+        Assert.Contains("local: the room there could not be measured: the drive is not ready", verbose.Details!);
+
+        using var document = JsonDocument.Parse(Assert.Single(LegsReports.Render(report, json: true).Data));
+        var hosts = document.RootElement.GetProperty("hosts");
+
+        Assert.Equal(33L << 30, hosts[1].GetProperty("space").GetProperty("freeBytes").GetInt64());
+        Assert.Equal("/", hosts[1].GetProperty("space").GetProperty("filesystem").GetString());
+        Assert.Equal("the drive is not ready", hosts[0].GetProperty("spaceUnmeasured").GetString());
     }
 
     [Fact]
