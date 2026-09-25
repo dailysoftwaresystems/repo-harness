@@ -569,6 +569,19 @@ public sealed class RemoteLegRunnerTests
             HostAgentProtocol.JsonOptions)!;
     }
 
+    /// <summary>
+    /// A leg placed on a host names the tree its sync writes as a reader names it - the host's copy, then the
+    /// host - never by the key its sync is shared by, whose parts a NUL joins.
+    /// </summary>
+    [Fact]
+    public void ALegOnAHost_NamesTheTreeItsSyncWrites_AsAReaderNamesIt()
+    {
+        var plan = Leg().ToPlan();
+
+        Assert.Equal("'/home/dev/repo' on wsl Example-Linux", plan.Tree);
+        Assert.Contains(' ', plan.TreeKey);
+    }
+
     private static PlacedLeg Leg()
     {
         var host = new HostReport

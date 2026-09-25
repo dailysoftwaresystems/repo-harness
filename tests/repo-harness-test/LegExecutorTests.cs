@@ -304,6 +304,32 @@ public sealed class LegExecutorTests
         Assert.Equal(["local:/repo", "wsl Ubuntu:/home/repo"], synced.Order(StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// A leg's sync is said naming the tree and its host as a reader names them, never by its key, whose parts a
+    /// NUL joins: a consumer found one in every WSL leg's progress line, which made grep call the log binary.
+    /// </summary>
+    [Fact]
+    public async Task ALegsSync_IsSaidNamingItsTree_NeverByItsKey()
+    {
+        var factory = new HarnessFactory();
+        var ledger = new LegLedger(factory.Output, "test");
+
+        await Executor(factory).RunAsync(
+            new LegExecutionRequest
+            {
+                Legs = [Leg("wsl") with { TreeKey = CompositeKey.Of("wsl Ubuntu", "~/src/repo"), Tree = "'~/src/repo' on wsl Ubuntu" }],
+                SyncTree = (_, _) => Task.CompletedTask,
+                RunLeg = (leg, _) => Task.FromResult<LegEntry?>(Passed(leg)),
+            },
+            ledger,
+            TestContext.Current.CancellationToken);
+
+        var said = factory.StandardOutput.ToString() + factory.StandardError;
+
+        Assert.Contains("wsl: sync of '~/src/repo' on wsl Ubuntu", said, StringComparison.Ordinal);
+        Assert.DoesNotContain('\0', said);
+    }
+
     [Fact]
     public async Task ALegThatReachesNoVerdict_IsPoisonedRatherThanDropped()
     {
