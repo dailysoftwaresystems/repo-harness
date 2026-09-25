@@ -517,18 +517,55 @@ public sealed class HostInspector(
     /// </summary>
     private async Task<string?> WhyNotUpdateAsync(HostConnection connection, bool windowsHost, CancellationToken cancellationToken)
     {
+        var (busy, running) = await WhyBusyAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false);
+
+        if (!running)
+        {
+            return busy;
+        }
+
+        // A hold a command left there, keeping the host awake between commands, is a DssHarness running there
+        // too, and one no command ends until its own keepAwake starts there - which no command gets to while
+        // the host cannot be updated. So it is ended through the DssHarness it runs, which stops it as it next
+        // reads its state, and the host is looked at again once it has had time to.
+        if (!await _holds.EndAsync(connection, ToolPackage.PathFromHome(windowsHost, connection.Shell), cancellationToken).ConfigureAwait(false))
+        {
+            return busy;
+        }
+
+        for (var look = 0; look < 3; look++)
+        {
+            await Task.Delay(_holds.StopsWithin, cancellationToken).ConfigureAwait(false);
+
+            (busy, running) = await WhyBusyAsync(connection, windowsHost, cancellationToken).ConfigureAwait(false);
+
+            if (!running)
+            {
+                return busy;
+            }
+        }
+
+        return busy;
+    }
+
+    /// <summary>
+    /// Why DssHarness on the host must not be replaced now, and whether that is because it is running there
+    /// rather than because that could not be told; no reason where nothing stops it.
+    /// </summary>
+    private async Task<(string? Reason, bool Running)> WhyBusyAsync(HostConnection connection, bool windowsHost, CancellationToken cancellationToken)
+    {
         var listing = windowsHost
             ? await RunAsync(connection, "tasklist", ["/FO", "CSV", "/NH"], ProbeBudget, cancellationToken).ConfigureAwait(false)
             : await RunAsync(connection, "ps", ["-A", "-o", "comm="], ProbeBudget, cancellationToken).ConfigureAwait(false);
 
         if (!listing.Succeeded)
         {
-            return HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing, connection);
+            return (HostProbes.Failure("its running processes could not be listed, so DssHarness there was not updated", listing, connection), false);
         }
 
         return HostProbes.ListsProcess(listing.StandardOutput, ToolPackage.Command)
-            ? $"{ToolPackage.Id} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished"
-            : null;
+            ? ($"{ToolPackage.Id} is running there, so it was not updated to {_identity.Current.Version}; run again once it has finished", true)
+            : (null, false);
     }
 
     /// <summary>

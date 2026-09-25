@@ -221,6 +221,11 @@ public sealed class BuildService(
         // and a build stopped for running long would start from clean every time and never finish.
         var recorded = Began(request, guards.Opening);
 
+        // What the directory came to when a build last ran all its phases, read before this build's record
+        // replaces it: a build that stops part way leaves only part of what the next build from clean needs.
+        var ranThrough = false;
+        var cameTo = BuildRecord.BytesIn(_fileSystem, buildDirectory);
+
         // When this build began touching the directory, so that what it wrote there can be told from what
         // it found. A directory kept between builds holds objects of targets that no longer exist - a test
         // renamed shorter leaves the old name's object behind - and the deepest path in it is often one of
@@ -279,6 +284,8 @@ public sealed class BuildService(
                 return await FinishAsync(result.Verdict(), null).ConfigureAwait(false);
             }
         }
+
+        ranThrough = true;
 
         if (request.Project.BuildOutputs.Count == 0)
         {
@@ -393,12 +400,14 @@ public sealed class BuildService(
             // built on top of objects this tool had just called untrustworthy.
             //
             // With what the directory came to, which is the room its next build from clean needs, and the
-            // room a first build of this variant in another copy on this machine needs: see LegRoom.
+            // room a first build of this variant in another copy on this machine needs: see LegRoom. Only a
+            // build that ran all its phases says that; one stopped part way says no more than the larger of
+            // what it left and what the last whole build came to, and nothing where none did.
             Record(buildDirectory, recorded with
             {
                 Unordered = recorded.Unordered ?? Unordered(phases, seen, guards.Opening),
                 Newest = left.Newest,
-                Bytes = left.Bytes,
+                Bytes = ranThrough ? left.Bytes : cameTo is { } whole && left.Bytes is { } part ? Math.Max(whole, part) : null,
             });
 
             return new BuildResult(verdict, buildDirectory, phases, rebuilt, dependencies) { Compilers = compilers };
@@ -1159,6 +1168,16 @@ public sealed class BuildService(
         }
     }
 
+    /// <summary>What ninja says of the outputs no target of this build produces any more; never a failure of the build.</summary>
+    private async Task<NinjaDeadOutputs> ReadDeadOutputsAsync(
+        BuildRequest request,
+        string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
+        CancellationToken cancellationToken)
+        => await _deadOutputCheck
+            .CheckAsync(buildDirectory, request.ProgramDirectories, _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram, environment, cancellationToken)
+            .ConfigureAwait(false);
+
     /// <summary>
     /// The dependency report for a cmake build, or why it could not be produced.
     /// </summary>
@@ -1172,15 +1191,6 @@ public sealed class BuildService(
     /// a header change; a run that could not perform it and passed anyway reports "no such object
     /// found" when what happened is that nobody looked.
     /// </remarks>
-    private async Task<NinjaDeadOutputs> ReadDeadOutputsAsync(
-        BuildRequest request,
-        string buildDirectory,
-        IReadOnlyDictionary<string, string?> environment,
-        CancellationToken cancellationToken)
-        => await _deadOutputCheck
-            .CheckAsync(buildDirectory, request.ProgramDirectories, _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram, environment, cancellationToken)
-            .ConfigureAwait(false);
-
     private async Task<(NinjaDependencyReport? Report, string? Unreadable)> ReadDependenciesAsync(
         BuildRequest request,
         string buildDirectory,

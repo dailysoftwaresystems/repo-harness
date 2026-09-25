@@ -209,6 +209,37 @@ public sealed record PlacedLeg(
         };
     }
 
+    /// <summary>The lock a build of this leg takes: the tree it works in shared, and its variant its own.</summary>
+    /// <param name="runId">The run taking it.</param>
+    /// <param name="command">The command taking it.</param>
+    /// <remarks>
+    /// One key for every command that builds in, or removes, the leg's build directory: a clean keyed apart
+    /// from the build would not see one running, and would move its directory away under it.
+    /// </remarks>
+    public LockRequest BuildLock(RunId runId, string command) => BuildLock(Host.Host, HostTreeRoot, Variant, runId, command);
+
+    /// <summary>The lock a build of a leg of <paramref name="variant"/> in <paramref name="hostTreeRoot"/> on <paramref name="host"/> takes.</summary>
+    /// <param name="host">The host the leg builds on.</param>
+    /// <param name="hostTreeRoot">The tree it builds in there.</param>
+    /// <param name="variant">Its variant.</param>
+    /// <param name="runId">The run taking it.</param>
+    /// <param name="command">The command taking it.</param>
+    public static LockRequest BuildLock(HostId host, string hostTreeRoot, VariantKey variant, RunId runId, string command)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(variant);
+
+        return new LockRequest
+        {
+            Host = host.ToString(),
+            Tree = hostTreeRoot,
+            Variant = variant.DirectoryName,
+            Scope = LockScope.TreeShared,
+            RunId = runId,
+            Command = command,
+        };
+    }
+
     /// <summary>What the executor needs to schedule this leg.</summary>
     /// <remarks>
     /// A local leg carries no tree key, because it needs no sync: the executor announces a transfer

@@ -406,16 +406,7 @@ public sealed class LegRunService(
         var attempt = await _runLock
             .TryAcquireAsync(
                 context.Layout,
-                new LockRequest
-                {
-                    Host = leg.Host.Host.ToString(),
-                    Tree = leg.HostTreeRoot,
-                    Variant = leg.Variant.DirectoryName,
-                    Scope = LockScope.TreeShared,
-                    RunId = runId,
-                    Command = ledger.CommandName,
-                    Force = request.ForceLock,
-                },
+                leg.BuildLock(runId, ledger.CommandName) with { Force = request.ForceLock },
                 cancellationToken)
             .ConfigureAwait(false);
 

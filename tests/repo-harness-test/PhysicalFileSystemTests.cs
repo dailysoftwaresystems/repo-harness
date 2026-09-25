@@ -41,6 +41,62 @@ public sealed class PhysicalFileSystemTests
     }
 
     /// <summary>
+    /// A build directory linked onto another filesystem is measured there, and named by it: measured through the
+    /// path as written, it was the room of the filesystem the link sits on.
+    /// </summary>
+    [Fact]
+    public void SpaceAt_FollowsALinkOntoAnotherFilesystem()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux() && Directory.Exists("/dev/shm"), "Linux keeps a filesystem of its own at /dev/shm.");
+
+        using var temp = new TempDirectory();
+        var elsewhere = Path.Combine("/dev/shm", "repo-harness-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(elsewhere);
+
+        try
+        {
+            Directory.CreateSymbolicLink(temp.Combine("build"), elsewhere);
+
+            var room = Create().SpaceAt(Path.Combine(temp.Combine("build"), "arm64-gcc-debug"));
+
+            Assert.Equal("/dev/shm", room.Filesystem);
+        }
+        finally
+        {
+            Directory.Delete(elsewhere, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A directory this user cannot read counts as nothing, rather than ending the count: a leftover of a build run
+    /// as another user once failed every clean of the build directory it was in, dry runs among them.
+    /// </summary>
+    [Fact]
+    [UnsupportedOSPlatform("windows")]
+    public void DirectorySize_CountsADirectoryItCannotRead_AsNothing()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Mode bits say who may read a directory on Linux and macOS.");
+
+        using var temp = new TempDirectory();
+        temp.WriteFile(Path.Combine("tree", "a.bin"), new string('a', 1000));
+        temp.WriteFile(Path.Combine("tree", "locked", "b.bin"), new string('b', 24));
+        var tree = temp.Combine("tree");
+        var locked = Path.Combine(tree, "locked");
+
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            // Root reads it all the same.
+            Assert.Contains(Create().DirectorySize(tree), new[] { 1000L, 1024L });
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    /// <summary>
     /// The room on a filesystem is measured where the path is, or - for a directory not made yet - where the
     /// nearest directory above it is, which is the filesystem it will be made on; and named by where that
     /// filesystem is mounted, above the path.

@@ -345,6 +345,88 @@ public sealed class LegsServiceTests
     }
 
     /// <summary>
+    /// Two hosts are two disks, though each names its filesystem '/': legs on each are counted apart, and both
+    /// fit where either alone does.
+    /// </summary>
+    [Fact]
+    public async Task LegsOnTwoHosts_AreCountedApart_ThoughTheirFilesystemsShareAName()
+    {
+        var fixture = Create(
+            new()
+            {
+                ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 5 },
+                ["x64"] = new LegConfig { Os = "linux", Processor = "x86_64", Config = "debug", Wsl = "Ubuntu", BuildSpaceGiB = 5 },
+            },
+            rooms: (_, path) => Room(path, exists: false, recorded: null, free: 8));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.All(report.Placements, placement => Assert.True(placement.Runnable, placement.Reason));
+        Assert.Equal(["ssh pi", "wsl Ubuntu"], report.Placements.Select(placement => placement.Host!.Host.ToString()).Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// What a leg declares is its need before anything recorded; what its own copy's build recorded is before
+    /// the main checkout's copy's.
+    /// </summary>
+    [Theory]
+    [InlineData(2.0, null, true)]
+    [InlineData(null, 3L << 30, true)]
+    [InlineData(null, null, false)]
+    public async Task ALegsNeed_IsWhatItDeclares_ThenWhatItsOwnCopyRecorded_ThenTheMainCheckouts(double? declared, long? own, bool fits)
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", Worktree = "feature", BuildSpaceGiB = declared } },
+            rooms: (_, path) => path.Contains(".worktree-", StringComparison.Ordinal)
+                ? Room(path, exists: own is not null, recorded: own, free: 5)
+                : Room(path, exists: true, recorded: 10L << 30, free: 5));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(fits, Assert.Single(report.Placements).Runnable);
+    }
+
+    /// <summary>
+    /// Two legs that name one build directory need its room once: planning the run refuses them as sharing it,
+    /// which a refusal for room the second never takes would otherwise hide.
+    /// </summary>
+    [Fact]
+    public async Task TwoLegsNamingOneBuildDirectory_NeedItsRoomOnce()
+    {
+        var fixture = Create(
+            new()
+            {
+                ["a"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 5 },
+                ["b"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 5 },
+            },
+            rooms: (_, path) => Room(path, exists: false, recorded: null, free: 8));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.All(report.Placements, placement => Assert.True(placement.Runnable, placement.Reason));
+    }
+
+    /// <summary>
+    /// A leg whose need is known, on a host whose room could not be measured, is placed - nothing says it will
+    /// not fit - and said to be unchecked, with why, rather than placed as though it had been checked.
+    /// </summary>
+    [Fact]
+    public async Task ALegWhoseRoomCouldNotBeMeasured_IsPlaced_AndSaidToBeUnchecked()
+    {
+        var fixture = Create(
+            new() { ["arm"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "debug", BuildSpaceGiB = 5 } },
+            rooms: (_, path) => new BuildDirectoryRoom(path, false, null, null, "the drive of a UNC path cannot be measured"));
+
+        var report = await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
+
+        Assert.True(Assert.Single(report.Placements).Runnable);
+        Assert.Contains(
+            "leg 'arm' was placed on ssh pi without its room checked, which could not be measured there: the drive of a UNC path cannot be measured",
+            fixture.Error.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A host is asked the room where its copies are kept and each build directory a leg would fill there; a
     /// command that builds nothing asks about none, and turns nothing away for room: clean is how room is made.
     /// </summary>

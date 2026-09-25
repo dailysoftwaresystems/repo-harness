@@ -106,6 +106,28 @@ internal sealed record BuildRecord(
         return text.ToString();
     }
 
+    /// <summary>
+    /// What the build that last finished in <paramref name="buildDirectory"/> recorded it came to, or
+    /// <see langword="null"/> where nothing did: a record nobody can read says no more than none.
+    /// </summary>
+    /// <param name="fileSystem">Reads the record.</param>
+    /// <param name="buildDirectory">The build directory.</param>
+    public static long? BytesIn(IFileSystem fileSystem, string buildDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+
+        var record = Path.Combine(buildDirectory, FileName);
+
+        try
+        {
+            return fileSystem.FileExists(record) ? Parse(fileSystem.ReadAllText(record)).Bytes : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The record <paramref name="text"/> holds, in this version's words or an earlier one's.</summary>
     /// <param name="text">What the file holds.</param>
     public static BuildRecord Parse(string text)

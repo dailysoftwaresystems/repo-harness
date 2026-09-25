@@ -53,8 +53,8 @@ public sealed record VariantKey(string Processor, string Toolchain, string Confi
     /// <param name="host">The host the tree is on.</param>
     /// <param name="treeRoot">The root of the tree there.</param>
     /// <remarks>
-    /// A WSL distribution or an ssh host keeps its copies at POSIX paths, which this machine's own joining
-    /// would give a Windows backslash: a name no such host finds.
+    /// Joined with '/', which every host takes as a separator: this machine's own joining gives a Windows
+    /// backslash, which a WSL distribution or a Linux or macOS ssh host reads as part of a name it never finds.
     /// </remarks>
     public string DirectoryOn(HostId host, string treeRoot)
     {
@@ -62,7 +62,7 @@ public sealed record VariantKey(string Processor, string Toolchain, string Confi
 
         return host.Kind == HostKind.Local
             ? DirectoryUnder(treeRoot)
-            : $"{treeRoot.TrimEnd('/')}/{BuildRootName}/{DirectoryName}";
+            : $"{treeRoot.TrimEnd('/', '\\')}/{BuildRootName}/{DirectoryName}";
     }
 
     /// <summary>The directory every variant's build directory sits under.</summary>

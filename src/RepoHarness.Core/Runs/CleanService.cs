@@ -47,6 +47,7 @@ public sealed class CleanService(
     RunLock runLock,
     ISyncTransportFactory transports,
     RemoteLegRunner remoteLegs,
+    LegExecutor legExecutor,
     IFileSystem fileSystem,
     IHostPlatform platform,
     IHarnessOutput output)
@@ -68,6 +69,7 @@ public sealed class CleanService(
     private readonly RunLock _runLock = runLock;
     private readonly ISyncTransportFactory _transports = transports;
     private readonly RemoteLegRunner _remoteLegs = remoteLegs;
+    private readonly LegExecutor _legExecutor = legExecutor;
     private readonly IFileSystem _fileSystem = fileSystem;
     private readonly IHostPlatform _platform = platform;
     private readonly IHarnessOutput _output = output;
@@ -103,10 +105,27 @@ public sealed class CleanService(
             ledger.Record(entry);
         }
 
+        LegExecution execution;
+
+        // Through the executor every leg-running command uses, so each leg ends with a line of its own: a host
+        // that stops answering skips its own legs and no other's, and an interrupted clean still says what it
+        // had removed, naming the legs it left.
         try
         {
-            await Task
-                .WhenAll(placed.Select(async leg => ledger.Record(await CleanAsync(context, leg, request, cancellationToken).ConfigureAwait(false))))
+            execution = await _legExecutor
+                .RunAsync(
+                    new LegExecutionRequest
+                    {
+                        Legs = [.. placed.Select(leg => leg.ToPlan())],
+                        RunLeg = async (plan, token) => await CleanAsync(
+                                context,
+                                placed.Single(leg => string.Equals(leg.Name, plan.Name, StringComparison.Ordinal)),
+                                request,
+                                token)
+                            .ConfigureAwait(false),
+                    },
+                    ledger,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (HarnessException ex)
@@ -117,11 +136,11 @@ public sealed class CleanService(
         }
 
         var built = ledger.Build(factor);
-        var exitCode = built.ExitCodeGiven(cancelled: false, unfinished: []);
-        var message = built.Summarize(cancelled: false, unfinished: []);
+        var exitCode = built.ExitCodeGiven(execution.Cancelled, execution.Unfinished);
+        var message = built.Summarize(execution.Cancelled, execution.Unfinished);
 
         return request.Json
-            ? new CommandOutcome(exitCode, message) { Data = [built.ToJson(cancelled: false, unfinished: [])], Quiet = true }
+            ? new CommandOutcome(exitCode, message) { Data = [built.ToJson(execution.Cancelled, execution.Unfinished)], Quiet = true }
             : new CommandOutcome(exitCode, message, built.Render());
     }
 
@@ -130,17 +149,8 @@ public sealed class CleanService(
     {
         var started = Stopwatch.GetTimestamp();
 
-        // The lock a build of this leg takes, keyed as the build keys it - by the host, the tree there and the
-        // variant - so a build holding it is seen, and a build about to take it is kept out.
-        var building = new LockRequest
-        {
-            Host = leg.Host.Host.ToString(),
-            Tree = leg.HostTreeRoot,
-            Variant = leg.Variant.DirectoryName,
-            Scope = LockScope.TreeShared,
-            RunId = RunId.New(),
-            Command = CommandName,
-        };
+        // The lock a build of this leg takes, so a build holding it is seen, and a build about to take it is kept out.
+        var building = leg.BuildLock(RunId.New(), CommandName);
 
         if (leg.Host.Host.Kind == HostKind.Local)
         {
@@ -240,10 +250,13 @@ public sealed class CleanService(
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             var remains = _fileSystem.DirectoryExists(aside)
-                ? $"; what is left of it is at '{aside}', and the next clean of this leg removes it"
+                ? $"; what is left of it is at '{aside}', which the next clean of this leg tries again to remove"
                 : string.Empty;
 
-            return Entry(leg, LegVerdict.Failed, $"'{directory}' could not be removed: {ex.Message.TrimEnd('.')}{remains}");
+            return Entry(
+                leg,
+                LegVerdict.Failed,
+                $"'{directory}' could not be {(dryRun ? "measured" : "removed")}: {ex.Message.TrimEnd('.')}{remains}");
         }
     }
 

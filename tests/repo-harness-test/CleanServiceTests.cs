@@ -91,15 +91,12 @@ public sealed class CleanServiceTests
 
         await using var held = await runLock.AcquireAsync(
             new HarnessLayout(temp.Path, temp.Path),
-            new LockRequest
-            {
-                Host = HostId.Local.ToString(),
-                Tree = temp.Path,
-                Variant = Path.GetFileName(directory),
-                Scope = LockScope.TreeShared,
-                RunId = RunId.New(),
-                Command = "build",
-            },
+            PlacedLeg.BuildLock(
+                HostId.Local,
+                temp.Path,
+                VariantKey.For(config, config.Legs.Single().Value, harness.Platform.PlatformKey),
+                RunId.New(),
+                "build"),
             TestContext.Current.CancellationToken);
 
         var (outcome, leg) = await CleanAsync(temp, harness, config, runLock: runLock);
@@ -232,15 +229,7 @@ public sealed class CleanServiceTests
 
         await using var held = await runLock.AcquireAsync(
             new HarnessLayout(temp.Path, temp.Path),
-            new LockRequest
-            {
-                Host = HostId.Ssh(HostName).ToString(),
-                Tree = HostTree,
-                Variant = "arm64-none-debug",
-                Scope = LockScope.TreeShared,
-                RunId = RunId.New(),
-                Command = "test",
-            },
+            PlacedLeg.BuildLock(HostId.Ssh(HostName), HostTree, VariantKey.For(OneHostLeg(), OneHostLeg().Legs["arm"], "linux"), RunId.New(), "test"),
             TestContext.Current.CancellationToken);
 
         var (_, leg) = await CleanAsync(temp, harness, OneHostLeg(), OnTheHost(), runLock, hosts, transports: transports);
@@ -256,6 +245,29 @@ public sealed class CleanServiceTests
         BuildConfigs = { ["debug"] = new BuildConfiguration() },
         Legs = { ["native"] = HostDoubles.Leg(harness.Platform.PlatformKey, harness.Platform.Processor) },
     };
+
+    /// <summary>
+    /// A host that never says how a leg's clean finished skips that leg, and every other leg still has its line:
+    /// the first leg to fail once ended the command, and the legs after it were never said at all.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatNeverAnswers_SkipsEachOfItsLegs_AndEveryLegHasItsLine()
+    {
+        using var temp = new TempDirectory();
+        var harness = new HarnessFactory();
+        var config = OneHostLeg();
+        config.BuildConfigs["release"] = new BuildConfiguration();
+        config.Legs["arm-release"] = new LegConfig { Os = "linux", Processor = "arm64", Config = "release", Ssh = HostName };
+
+        // The connection ends before the agent says how the command finished.
+        var hosts = new ScriptedHostCommands((_, _) => HostResults.Ok(string.Empty));
+
+        var (outcome, legs) = await CleanEveryLegAsync(temp, harness, config, OnTheHost(), hosts: hosts);
+
+        Assert.Equal(["arm", "arm-release"], legs.Select(leg => leg.GetProperty("leg").GetString()).Order(StringComparer.Ordinal));
+        Assert.All(legs, leg => Assert.Equal("skipped-unavailable", leg.GetProperty("verdict").GetString()));
+        Assert.NotEqual(HarnessExit.Success, outcome.ExitCode);
+    }
 
     private static HarnessConfig OneHostLeg() => new()
     {
@@ -318,6 +330,23 @@ public sealed class CleanServiceTests
         bool copyThere = true,
         ISyncTransportFactory? transports = null)
     {
+        var (outcome, legs) = await CleanEveryLegAsync(temp, harness, config, inspector, runLock, hosts, dryRun, copyThere, transports);
+
+        return (outcome, Assert.Single(legs));
+    }
+
+    /// <summary>Cleans every leg of <paramref name="config"/>, and returns the outcome and each leg's line.</summary>
+    private static async Task<(CommandOutcome Outcome, IReadOnlyList<JsonElement> Legs)> CleanEveryLegAsync(
+        TempDirectory temp,
+        HarnessFactory harness,
+        HarnessConfig config,
+        RecordingInspector? inspector = null,
+        RunLock? runLock = null,
+        ScriptedHostCommands? hosts = null,
+        bool dryRun = false,
+        bool copyThere = true,
+        ISyncTransportFactory? transports = null)
+    {
         var loader = HostDoubles.Loader(config, temp.Path);
 
         if (transports is null)
@@ -339,6 +368,7 @@ public sealed class CleanServiceTests
             runLock ?? new RunLock(harness.FileSystem, harness.Output, harness.Identity),
             transports,
             new RemoteLegRunner(hosts ?? new ScriptedHostCommands((_, command) => throw HostResults.Unexpected(command)), harness.Output),
+            new LegExecutor(harness.Platform, harness.Output),
             harness.FileSystem,
             harness.Platform,
             harness.Output);
@@ -347,6 +377,6 @@ public sealed class CleanServiceTests
 
         using var document = JsonDocument.Parse(Assert.Single(outcome.Data));
 
-        return (outcome, Assert.Single(document.RootElement.GetProperty("legs").EnumerateArray().ToList()).Clone());
+        return (outcome, [.. document.RootElement.GetProperty("legs").EnumerateArray().Select(leg => leg.Clone())]);
     }
 }

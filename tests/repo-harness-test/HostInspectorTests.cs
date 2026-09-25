@@ -471,6 +471,42 @@ public sealed class HostInspectorTests
         AssertToolUntouched(fixture);
     }
 
+    /// <summary>
+    /// A host that is behind, whose only DssHarness running is the hold a command left there, has the hold ended
+    /// through its DssHarness and is updated: nothing else ends a hold before its seconds run out, and every
+    /// command was otherwise turned away from the host, as though a run were going on there.
+    /// </summary>
+    [Fact]
+    public async Task AHostThatIsBehind_WhoseOnlyDssHarnessIsAHold_HasItEnded_AndIsUpdated()
+    {
+        var ended = false;
+        var info = HostThat(installed: "1.1.9");
+
+        using var fixture = new Fixture(PlatformId.Windows, respond: (connection, command) =>
+        {
+            if (command.Program is "ps" or "tasklist")
+            {
+                return HostResults.Ok(ended ? "bash\n" : "bash\nDssHarness\n");
+            }
+
+            if (command.Arguments.FirstOrDefault() == HostAgentProtocol.CommandName
+                && JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions) is { Kind: HostAgentRequestKind.Hold, HoldAwakeSeconds: 0 } end)
+            {
+                ended = true;
+                command.OnErrorLine?.Invoke(HostAgentProtocol.CompletionLine(end.Nonce!, HarnessExit.Success));
+                return HostResults.Ok(string.Empty);
+            }
+
+            return info(connection, command);
+        });
+
+        var report = await fixture.InspectAsync(HostId.Wsl(Distro));
+
+        Assert.True(report.Available, report.Reason);
+        Assert.True(ended);
+        Assert.Equal(["updated DssHarness 1.1.9 to 1.2.0"], report.Actions);
+    }
+
     [Fact]
     public async Task AHostThatIsBehind_IsNotUpdated_WhenItsProcessesCannotBeListed()
     {
@@ -665,6 +701,27 @@ public sealed class HostInspectorTests
 
         Assert.DoesNotContain("wakeWaitSeconds", plain.Reason, StringComparison.Ordinal);
         Assert.Equal(calls, wakeLookup.Calls);
+    }
+
+    /// <summary>
+    /// A host whose name answers but whose connections go untaken for the whole window is refused naming the
+    /// window, and, asked for again in the same command, refused at once rather than connected to again.
+    /// </summary>
+    [Fact]
+    public async Task AHostWhoseConnectionsGoUntakenForTheWindow_IsRefusedNamingIt_AndIsNotTriedAgain()
+    {
+        using var fixture = new Fixture(PlatformId.Windows, respond: HostThat(), wakeWaitSeconds: 1, wakePoll: TimeSpan.FromMilliseconds(100));
+        fixture.Commands.ShellProbe = HostResults.Failed(HostProbes.SshFailed, "ssh: connect to host host.invalid port 2222: Connection refused\n");
+
+        var report = await fixture.InspectAsync(HostId.Ssh(SshName));
+        var probes = fixture.Commands.ShellProbes.Count;
+        var again = await fixture.InspectAsync(HostId.Ssh(SshName));
+
+        Assert.False(report.Available);
+        Assert.Contains("over the 1 seconds wakeWaitSeconds gives it to wake", report.Reason, StringComparison.Ordinal);
+        Assert.True(probes > 1);
+        Assert.Equal(report.Reason, again.Reason);
+        Assert.Equal(probes, fixture.Commands.ShellProbes.Count);
     }
 
     /// <summary>
@@ -1165,7 +1222,8 @@ public sealed class HostInspectorTests
             bool syncedCopy = false,
             int wakeWaitSeconds = 0,
             INameLookup? wakeLookup = null,
-            int holdAwakeSeconds = 0)
+            int holdAwakeSeconds = 0,
+            TimeSpan? wakePoll = null)
         {
             Repository = new TempDirectory();
 
@@ -1243,10 +1301,10 @@ public sealed class HostInspectorTests
                 secrets,
                 addresses,
                 programs,
-                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, TimeSpan.Zero),
+                new SshWakeWindow(wakeLookup ?? Substitute.For<INameLookup>(), TimeProvider.System, wakePoll ?? TimeSpan.Zero),
                 CopyRefusals);
 
-            Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false));
+            Holds = new HoldAwakeRegistry(Commands, new ConsoleHarnessOutput(new StringWriter(), new StringWriter(), verbose: false), stopsWithin: TimeSpan.Zero);
             _inspector = new HostInspector(Commands, connector, identity, agent, Holds);
         }
 

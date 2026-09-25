@@ -21,7 +21,8 @@ namespace RepoHarness.Core.Legs;
 /// that directory already holds. Nothing is walked: each build records what its directory came to as it
 /// finishes. Legs sharing a filesystem on one host are counted together, in the order they were selected,
 /// because every build directory stays once built; a leg that no longer fits beside the ones before it is
-/// turned away, and they are kept. A leg whose need nothing says is placed as it always was.
+/// turned away, and they are kept. A leg whose need nothing says is placed as it always was; one whose need
+/// is known where the room could not be measured is placed and said to be unchecked.
 /// </remarks>
 public static class LegRoom
 {
@@ -77,13 +78,14 @@ public static class LegRoom
 
     /// <summary>
     /// <paramref name="placements"/>, with each placed leg whose host lacks the room its build still needs
-    /// turned away - skipped-unavailable, saying what is free and what it needs.
+    /// turned away - skipped-unavailable, saying what is free and what it needs - and each leg placed with a
+    /// known need where the room could not be measured, said as that.
     /// </summary>
     /// <param name="context">The repository and its configuration.</param>
     /// <param name="placements">Where each selected leg was placed, in the order the legs were selected.</param>
     /// <param name="here">The host this machine is to the machine that sent the legs here, or <see langword="null"/>.</param>
     /// <param name="comparison">How this machine compares paths.</param>
-    public static IReadOnlyList<LegPlacement> Apply(
+    public static (IReadOnlyList<LegPlacement> Placements, IReadOnlyList<string> Unchecked) Apply(
         HarnessContext context,
         IReadOnlyList<LegPlacement> placements,
         HostId? here,
@@ -94,6 +96,8 @@ public static class LegRoom
 
         var placed = placements.ToList();
         var taken = new Dictionary<(HostId Host, string Filesystem), (long Bytes, List<string> Legs)>();
+        var directories = new HashSet<(HostId Host, string Directory)>();
+        var unmeasured = new List<string>();
 
         for (var index = 0; index < placed.Count; index++)
         {
@@ -103,10 +107,25 @@ public static class LegRoom
                 continue;
             }
 
-            var key = (host.Host, need.Disk.Filesystem);
+            if (need.Disk is not { } disk)
+            {
+                unmeasured.Add(
+                    $"leg '{placement.Leg.Name}' was placed on {host.Host} without its room checked, which could not be "
+                    + $"measured there: {need.Unmeasured}");
+                continue;
+            }
+
+            // Counted once however many legs name it: two legs building one directory are refused as that when
+            // the run is planned, and would otherwise be refused here for room the second never takes.
+            if (!directories.Add((host.Host, need.Directory)))
+            {
+                continue;
+            }
+
+            var key = (host.Host, disk.Filesystem);
             var before = taken.TryGetValue(key, out var counted) ? counted : (Bytes: 0L, Legs: new List<string>());
 
-            if (before.Bytes + need.Bytes > need.Disk.FreeBytes)
+            if (before.Bytes + need.Bytes > disk.FreeBytes)
             {
                 var beside = before.Legs.Count == 0
                     ? string.Empty
@@ -116,7 +135,7 @@ public static class LegRoom
                     placement.Leg,
                     null,
                     (here is null ? $"{host.Host}: " : string.Empty)
-                    + $"{DiskSpace.Size(need.Disk.FreeBytes)} free on '{need.Disk.Filesystem}', and this leg needs ~{DiskSpace.Size(need.Bytes)}, "
+                    + $"{DiskSpace.Size(disk.FreeBytes)} free on '{disk.Filesystem}', and this leg needs ~{DiskSpace.Size(need.Bytes)}, "
                     + $"{need.Source}{beside}")
                 {
                     Verdict = LegVerdict.SkippedUnavailable,
@@ -128,14 +147,22 @@ public static class LegRoom
             taken[key] = (before.Bytes + need.Bytes, [.. before.Legs, placement.Leg.Name]);
         }
 
-        return placed;
+        return (placed, unmeasured);
     }
+
+    /// <summary>What a leg's build still needs on its host, and what is known of the room there.</summary>
+    /// <param name="Bytes">What it still needs.</param>
+    /// <param name="Disk">The room where its build directory is, or <see langword="null"/> where it could not be measured.</param>
+    /// <param name="Source">What said how much it needs.</param>
+    /// <param name="Directory">Its build directory there.</param>
+    /// <param name="Unmeasured">Why the room could not be measured, where it could not.</param>
+    private sealed record Needed(long Bytes, DiskSpace? Disk, string Source, string Directory, string? Unmeasured);
 
     /// <summary>
     /// What <paramref name="leg"/>'s build still needs on <paramref name="host"/>, where something says, with
     /// the room where its build directory is and what said so; <see langword="null"/> where nothing does.
     /// </summary>
-    private static (long Bytes, DiskSpace Disk, string Source)? Need(
+    private static Needed? Need(
         HarnessContext context,
         SelectedLeg leg,
         HostReport host,
@@ -143,7 +170,7 @@ public static class LegRoom
         StringComparison comparison)
     {
         if (Paths(context, leg.Leg, host.Host, here, comparison) is not { } paths
-            || Answered(host, paths.Own) is not { Disk: { } disk } own)
+            || Answered(host, paths.Own) is not { } own)
         {
             return null;
         }
@@ -161,7 +188,7 @@ public static class LegRoom
         long? present = !own.Exists ? 0 : own.RecordedBytes;
 
         return expected is { } bytes && present is { } held
-            ? (Math.Max(0, bytes - held), disk, source)
+            ? new Needed(Math.Max(0, bytes - held), own.Disk, source, paths.Own, own.Unmeasured ?? "no reason was given")
             : null;
     }
 

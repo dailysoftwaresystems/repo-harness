@@ -210,7 +210,10 @@ public sealed class HostAgentRequest
     /// </summary>
     public List<string> Builds { get; init; } = [];
 
-    /// <summary>How long a hold keeps the host awake, at most, in seconds. Hold only.</summary>
+    /// <summary>
+    /// How long a hold keeps the host awake, at most, in seconds; zero ends the hold that stands there, with
+    /// nothing held after it. Hold only.
+    /// </summary>
     public int HoldAwakeSeconds { get; init; }
 
     /// <summary>

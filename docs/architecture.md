@@ -693,7 +693,7 @@ is not dependable on such a host.
   seconds after a check had reached it, three times in fifteen minutes. A host given
   `wakeWaitSeconds` is looked up again, and a connection nothing took or that timed out is tried
   again, every few seconds until the window ends, before its legs are skipped. What a host that is
-  awake says - a key it shows that the name is not known by, a login refused - is never tried again.
+  awake says - a key it shows that the name is not known by, a login refused - is never waited on.
   A host reached after waiting says how long it took, among what measuring it did; one whose window
   ran out is refused naming the window, and, for the half minute a name's answer is kept, refused
   at once to the rest of the command rather than waited for by every leg placed there. Left at 0,
@@ -1216,15 +1216,17 @@ while a gate ran turned a green suite red, with four test processes live at once
   wall time outrunning the monotonic clock, and marks the phase it interrupted suspect, as it
   does on a host that declares no command at all. The survey asks about the command, so a
   directory it is found in reaches its PATH, and turns no leg away for it.
-- `holdAwakeSeconds` holds an ssh host awake between commands, and never during one. Every
-  keepAwake a command starts on a host ends with the connection that started it, and a personal
-  Mac falls back asleep in the seconds before the next command, which then cannot find it. So a
+- `holdAwakeSeconds` holds an ssh host awake between commands, until a command's own keepAwake
+  takes over there. Every keepAwake a command starts on a host ends with the connection that
+  started it, and a personal Mac falls back asleep in the seconds before the next command, which
+  then cannot find it. So a
   host that declares it is recorded as each command reaches it, and asked, as the command ends -
   however it ended - to hold itself awake that long. The DssHarness there records the hold and
   starts a process of its own, detached from the connection, which runs the host's keepAwake with
   `{pid}` filled in with itself and goes on once the connection has ended. The next command's own
-  keepAwake ends the hold there, as it starts; a newer hold replaces an older one; and a hold
-  ends by itself when its seconds are up. The hold's process watches its record rather than being
+  keepAwake ends the hold there, as it starts; a newer hold replaces an older one; a host whose
+  DssHarness is to be updated has its hold ended first, since the hold is a DssHarness running
+  there and no update replaces one that runs; and a hold ends by itself when its seconds are up. The hold's process watches its record rather than being
   stopped by an id, which a process started since could have been given, and the record is kept
   among the user's own application data, one per user of the host. A hold that cannot be left is
   said, and fails nothing. On a Windows host, OpenSSH may end the hold's process with the

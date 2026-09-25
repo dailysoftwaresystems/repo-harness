@@ -161,6 +161,22 @@ public sealed class HostAgentService(
 
     private async Task<int> ServeHoldAsync(HostAgentRequest request, TextWriter error)
     {
+        // Asked of a host whose DssHarness is to be updated: a hold is a DssHarness running there too, and one
+        // that stands would keep the update off until its seconds ran out. It stops as it sees its state gone.
+        if (request.HoldAwakeSeconds == 0)
+        {
+            try
+            {
+                _holds.End();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return await RefuseAsync(error, HarnessExit.HostUnavailable, $"the hold here could not be ended: {ex.Message.TrimEnd('.')}").ConfigureAwait(false);
+            }
+
+            return HarnessExit.Success;
+        }
+
         if (request.KeepAwake.Count == 0 || request.HoldAwakeSeconds < 1)
         {
             return await RefuseAsync(error, HarnessExit.UsageError, "the hold request names no keepAwake command to hold this host with, or no seconds to hold it for").ConfigureAwait(false);
@@ -268,24 +284,9 @@ public sealed class HostAgentService(
     private BuildDirectoryRoom BuildRoom(string asked)
     {
         var directory = ResolveDirectory(asked);
-        var record = Path.Combine(directory, Build.BuildRecord.FileName);
-        long? recorded = null;
-
-        try
-        {
-            if (_fileSystem.FileExists(record))
-            {
-                recorded = Build.BuildRecord.Parse(_fileSystem.ReadAllText(record)).Bytes;
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // A record nobody can read says nothing about what the directory holds, as none says nothing.
-        }
-
         var (space, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
 
-        return new BuildDirectoryRoom(asked, _fileSystem.DirectoryExists(directory), recorded, space, unmeasured);
+        return new BuildDirectoryRoom(asked, _fileSystem.DirectoryExists(directory), Build.BuildRecord.BytesIn(_fileSystem, directory), space, unmeasured);
     }
 
     /// <summary>Marks where this request's own output begins, on each stream that carries any of it.</summary>

@@ -103,6 +103,12 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
         while (!result.Succeeded && HostProbes.MayBeWaking(result) && Now < deadline)
         {
             await WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
+
+            if (Now >= deadline)
+            {
+                break;
+            }
+
             attempts++;
             result = await probe(cancellationToken).ConfigureAwait(false);
         }

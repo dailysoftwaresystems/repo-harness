@@ -69,7 +69,7 @@ public sealed class SshWakeWindowTests
 
     /// <summary>
     /// A host that answered - a key it showed that the name is not known by, a login refused - would answer the
-    /// same however long it was waited for, so it is never tried again.
+    /// same however long it was waited for, so it is never waited on.
     /// </summary>
     [Theory]
     [InlineData("Host key verification failed.")]

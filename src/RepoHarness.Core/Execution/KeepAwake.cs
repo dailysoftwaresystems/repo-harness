@@ -80,9 +80,9 @@ public sealed class KeepAwake
     /// for that hold's own command.
     /// </param>
     /// <remarks>
-    /// A hold exists between commands, and never during one: the command a leg or a request starts here holds
-    /// the machine itself, so the hold ends the moment it starts, and a command that holds nothing - one that
-    /// declares no keepAwake - leaves it standing.
+    /// A hold exists between commands, until a command's own keepAwake takes over: the command a leg or a
+    /// request starts here holds the machine itself, so the hold ends the moment it starts, and a command that
+    /// holds nothing - one that declares no keepAwake, or only measures the host - leaves it standing.
     /// </remarks>
     public IAsyncDisposable Hold(
         string commandName,

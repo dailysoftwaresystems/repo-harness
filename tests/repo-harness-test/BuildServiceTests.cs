@@ -102,6 +102,36 @@ public sealed class BuildServiceTests
     }
 
     /// <summary>
+    /// A build stopped part way records no size of its own: what it left is part of what the next build from
+    /// clean needs, and a first build of the variant elsewhere read it as the whole and filled a disk. It keeps
+    /// the larger of what it left and what the last whole build came to, and nothing where none did.
+    /// </summary>
+    [Fact]
+    public async Task ABuildStoppedPartWay_RecordsNoSizeOfItsOwn()
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        string[] leaves = [Path.Combine("bin", "app.dll"), Path.Combine("obj", "a.o")];
+
+        var (failing, _) = await TrackedWithFactoryAsync(temp, token, exitCode: 2, leaves: leaves);
+        Assert.NotEqual(LegVerdict.Passed, (await failing.BuildAsync(Config(), request, token)).Verdict.Verdict);
+        Assert.Null(BuildRecord.Parse(await File.ReadAllTextAsync(RecordOf(request, temp), token)).Bytes);
+
+        using var again = new TempDirectory();
+        var passingRequest = Request(again, outputs: ["bin/app.dll"]);
+        var (passing, factory) = await TrackedWithFactoryAsync(again, token, leaves: leaves);
+        Assert.Equal(LegVerdict.Passed, (await passing.BuildAsync(Config(), passingRequest, token)).Verdict.Verdict);
+        var whole = BuildRecord.Parse(await File.ReadAllTextAsync(RecordOf(passingRequest, again), token)).Bytes;
+
+        Assert.NotNull(whole);
+        Assert.NotEqual(
+            LegVerdict.Passed,
+            (await Service(factory, exitCode: 2, leaves: [Path.Combine("obj", "a.o")]).BuildAsync(Config(), passingRequest, token)).Verdict.Verdict);
+        Assert.True(BuildRecord.Parse(await File.ReadAllTextAsync(RecordOf(passingRequest, again), token)).Bytes >= whole);
+    }
+
+    /// <summary>
     /// A path an earlier build left is reported as a leftover, with the remedy for one, and never as
     /// something this build produced.
     /// </summary>

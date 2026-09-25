@@ -12,7 +12,7 @@ using RepoHarness.Core.Results;
 namespace RepoHarness.Tests;
 
 /// <summary>
-/// A host that sleeps is held awake between commands, and never during one: each command, finishing with it,
+/// A host that sleeps is held awake between commands, until a command's own keepAwake takes over: each command, finishing with it,
 /// leaves it a hold, which the host runs on its own once the connection has ended, and which the next command's
 /// own keepAwake ends there.
 /// </summary>
@@ -48,7 +48,7 @@ public sealed class HoldAwakeTests
 
     /// <summary>
     /// A command that starts its own keepAwake ends the hold standing on the machine: a hold exists between
-    /// commands, never during one. One that holds nothing leaves it standing, and so does the hold's own.
+    /// commands, until a command's own takes over. One that holds nothing leaves it standing, and so does the hold's own.
     /// </summary>
     [Fact]
     public async Task AKeepAwakeStarting_EndsTheHold_AndOneThatHoldsNothingLeavesIt()
@@ -110,8 +110,8 @@ public sealed class HoldAwakeTests
     }
 
     /// <summary>
-    /// A hold with nothing to hold the host with, or no time to hold it for, is refused, and nothing is started;
-    /// one whose process would not start is refused, and leaves no hold standing for a process that never ran.
+    /// A hold for less than no time is refused, and nothing is started; one whose process would not start is
+    /// refused, and leaves no hold standing for a process that never ran.
     /// </summary>
     [Fact]
     public async Task AHoldThatCannotBeKept_IsRefused_AndLeavesNoHoldStanding()
@@ -121,7 +121,7 @@ public sealed class HoldAwakeTests
         var launcher = new RecordingLauncher();
 
         var empty = await Agent(store, launcher).ServeAsync(
-            new StringReader(HoldRequest(seconds: 0)), new StringWriter(), new StringWriter(), (_, _, _) => Task.FromResult(0), TestContext.Current.CancellationToken);
+            new StringReader(HoldRequest(seconds: -1)), new StringWriter(), new StringWriter(), (_, _, _) => Task.FromResult(0), TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.UsageError, empty);
         Assert.Empty(launcher.Started);
@@ -136,6 +136,29 @@ public sealed class HoldAwakeTests
         Assert.Equal(HarnessExit.HostUnavailable, unstarted);
         Assert.Contains("this host could not be held awake: 'dssharness' could not be started: gone", error.ToString(), StringComparison.Ordinal);
         Assert.Null(store.Read());
+    }
+
+    /// <summary>
+    /// A hold of no seconds ends the hold that stands, and starts nothing: how a host whose DssHarness is to be
+    /// updated is rid of a hold, which would otherwise keep the update off until its seconds ran out.
+    /// </summary>
+    [Fact]
+    public async Task AHoldOfNoSeconds_EndsTheHoldThatStands_AndStartsNothing()
+    {
+        using var temp = new TempDirectory();
+        var store = Store(temp);
+        var launcher = new RecordingLauncher();
+
+        await Agent(store, launcher).ServeAsync(
+            new StringReader(HoldRequest(seconds: 600)), new StringWriter(), new StringWriter(), (_, _, _) => Task.FromResult(0), TestContext.Current.CancellationToken);
+        Assert.NotNull(store.Read());
+
+        var ended = await Agent(store, launcher).ServeAsync(
+            new StringReader(HoldRequest(seconds: 0)), new StringWriter(), new StringWriter(), (_, _, _) => Task.FromResult(0), TestContext.Current.CancellationToken);
+
+        Assert.Equal(HarnessExit.Success, ended);
+        Assert.Null(store.Read());
+        Assert.Single(launcher.Started);
     }
 
     /// <summary>
@@ -236,6 +259,43 @@ public sealed class HoldAwakeTests
         Assert.Equal("mac", request.KeepAwakeEnvironment["RH_HOST"]);
         Assert.Equal(["/opt/homebrew/bin"], request.KeepAwakeDirectories);
         Assert.Contains("ssh mac: held awake for up to 600 seconds", output.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// As a command ends, it leaves a hold on each host it reached that asks for one, and says once that a synced
+    /// copy could not reach a host: what runs every command asks this of it, whatever the command was.
+    /// </summary>
+    [Fact]
+    public async Task AsACommandEnds_ItLeavesItsHolds_AndSaysTheCopyNoticeOnce()
+    {
+        var sent = new List<HostAgentRequest>();
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            var request = JsonSerializer.Deserialize<HostAgentRequest>(command.StandardInput, HostAgentProtocol.JsonOptions)!;
+
+            lock (sent)
+            {
+                sent.Add(request);
+            }
+
+            command.OnErrorLine?.Invoke(HostAgentProtocol.CompletionLine(request.Nonce!, HarnessExit.Success));
+            return HostResults.Ok(string.Empty);
+        });
+
+        var said = new StringWriter();
+        var output = new ConsoleHarnessOutput(said, said, verbose: false);
+        var holds = new HoldAwakeRegistry(hosts, output);
+        var refusals = new SyncedCopyRefusals(output);
+
+        holds.Reached(Reached(HostId.Ssh("mac"), hold: 600));
+        refusals.Refused();
+        refusals.Refused();
+
+        await new CommandEnd(refusals, holds).EndAsync("test");
+
+        Assert.Equal(600, Assert.Single(sent).HoldAwakeSeconds);
+        Assert.Single(said.ToString().Split(HostConnector.SyncedCopyNotice)[1..]);
     }
 
     /// <summary>A hold a host refused, or never answered, is said, and fails nothing: the command's own work is done.</summary>

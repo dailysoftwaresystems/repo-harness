@@ -132,7 +132,7 @@ public sealed class SshHostConfig : RemoteHostConfig
     /// <summary>
     /// Seconds to keep trying a host that does not answer yet - its name resolving to nothing, a connection
     /// nothing took or that timed out - before its legs are skipped as unavailable. Zero, the default, tries
-    /// as every host is tried: three lookups within a second, and one connection.
+    /// as every host is tried: three lookups within a second, and no waiting.
     /// </summary>
     /// <remarks>
     /// For a machine that sleeps: a personal Mac reached by its mDNS name falls back asleep between commands

@@ -440,7 +440,7 @@ public sealed partial class HelpTests
         var result = await CliRunner.RunAsync(["help", "config"], TestContext.Current.CancellationToken);
         var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-        Assert.Contains("holdAwakeSeconds holds it awake between commands, and never during one", text, StringComparison.Ordinal);
+        Assert.Contains("holdAwakeSeconds holds it awake between commands, until a command's own keepAwake takes over", text, StringComparison.Ordinal);
         Assert.Contains("The next command's own keepAwake ends it there", text, StringComparison.Ordinal);
         Assert.Contains("It needs keepAwake, which it runs", text, StringComparison.Ordinal);
     }
@@ -456,7 +456,7 @@ public sealed partial class HelpTests
 
         Assert.Contains("hosts.ssh.<name>.wakeWaitSeconds", text, StringComparison.Ordinal);
         Assert.Contains($"every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed", text, StringComparison.Ordinal);
-        Assert.Contains("a key or a login the host refuses is never tried again", text, StringComparison.Ordinal);
+        Assert.Contains("a key or a login the host refuses is never waited on", text, StringComparison.Ordinal);
     }
 
     /// <summary>

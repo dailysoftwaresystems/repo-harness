@@ -59,7 +59,7 @@ public interface IFileSystem
 
     /// <summary>
     /// How many bytes the files under <paramref name="path"/> hold: each link counted as itself, and none
-    /// walked. Zero where it does not exist.
+    /// walked, and a directory this user cannot read counted as nothing. Zero where it does not exist.
     /// </summary>
     /// <param name="path">The directory to measure.</param>
     long DirectorySize(string path);

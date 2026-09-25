@@ -855,11 +855,12 @@ internal static class HelpCommand
         builder.AppendLine("A host that sleeps between commands can be given hosts.ssh.<name>.wakeWaitSeconds.");
         builder.AppendLine($"Its name is then looked up again, and a connection nothing took or that timed out");
         builder.AppendLine($"tried again, every {SshWakeWindow.DefaultPollDelay.TotalSeconds:0} seconds until that many seconds have passed, before its");
-        builder.AppendLine("legs are skipped; a key or a login the host refuses is never tried again. Reached,");
+        builder.AppendLine("legs are skipped; a key or a login the host refuses is never waited on. Reached,");
         builder.AppendLine("its report says how long it took to wake; not reached, its reason names the window,");
-        builder.AppendLine("and the rest of that command is refused it at once rather than waiting again. Left");
-        builder.AppendLine("at 0, a host is looked up three times within a second and connected to once. Never");
-        builder.AppendLine("for a host that is simply off, which would then cost the window on every command.");
+        builder.AppendLine("and for the half minute a name's answer is kept the command is refused it at once");
+        builder.AppendLine("rather than waiting again. Left at 0, a host is looked up three times within a second");
+        builder.AppendLine("and never waited for. Never for a host that is simply off, which would then cost the");
+        builder.AppendLine("window on every command.");
         builder.AppendLine();
         builder.AppendLine("Every WSL distribution and ssh host runs DssHarness itself, installed as a global");
         builder.AppendLine($".NET tool from nuget.org, so it needs the .NET {ToolPackage.MinimumSdkMajor} SDK. It must be this machine's build:");
@@ -977,7 +978,7 @@ internal static class HelpCommand
         builder.AppendLine("is what its build recorded. Commands that build nothing - sync, clean - need no room.");
         builder.AppendLine();
         builder.AppendLine($"'{ToolPackage.Command} legs -v' says the room on each host it measured - where its copies are");
-        builder.AppendLine("kept, and the tree it is typed in for this machine - so a host that is nearly full");
+        builder.AppendLine("kept, and the main checkout for this machine - so a host that is nearly full");
         builder.AppendLine("shows before a run fills it; --json always carries it, as each host's 'space'.");
 
         return builder.ToString();
@@ -1326,13 +1327,14 @@ internal static class HelpCommand
         builder.AppendLine("A host running a leg another machine sent it reads the section that machine");
         builder.AppendLine("names it by, never 'local', which in their shared file is the machine that sent it.");
         builder.AppendLine();
-        builder.AppendLine("An ssh host's holdAwakeSeconds holds it awake between commands, and never during");
-        builder.AppendLine("one: as each command finishes with it, the host starts a DssHarness of its own that");
-        builder.AppendLine("runs its keepAwake - {pid} filled in with that process - for that many seconds, and");
-        builder.AppendLine("goes on once the connection has ended. The next command's own keepAwake ends it");
-        builder.AppendLine("there, and a newer hold replaces an older one. It needs keepAwake, which it runs; a");
-        builder.AppendLine("hold that cannot be left is said and fails nothing. On a Windows host, OpenSSH may");
-        builder.AppendLine("end that process with the connection.");
+        builder.AppendLine("An ssh host's holdAwakeSeconds holds it awake between commands, until a command's");
+        builder.AppendLine("own keepAwake takes over: as each command finishes with it, the host starts a");
+        builder.AppendLine("DssHarness of its own that runs its keepAwake - {pid} filled in with that process -");
+        builder.AppendLine("for that many seconds, and goes on once the connection has ended. The next command's");
+        builder.AppendLine("own keepAwake ends it there, as does an update of DssHarness there, and a newer");
+        builder.AppendLine("hold replaces an older one. It needs keepAwake, which it runs; a hold that cannot be");
+        builder.AppendLine("left is said and fails nothing. On a Windows host, OpenSSH may end that process with");
+        builder.AppendLine("the connection.");
         builder.AppendLine();
         builder.AppendLine("A host's keepAwake - [\"caffeinate\", \"-dimsu\", \"-w\", \"{pid}\"] on macOS - runs on that");
         builder.AppendLine("host while a leg's own work does, {pid} filled in with the DssHarness process");

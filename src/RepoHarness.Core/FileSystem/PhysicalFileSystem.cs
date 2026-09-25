@@ -132,7 +132,9 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
 
         var total = 0L;
 
-        foreach (var length in Walk(path, recursive: true, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.Length))
+        // A directory this user cannot read counts as nothing, rather than ending the count: a leftover of a
+        // build run as another user would otherwise stop every clean of the directory it is in.
+        foreach (var length in Walk(path, recursive: true, (ref FileSystemEntry entry) => !entry.IsDirectory, (ref FileSystemEntry entry) => entry.Length, ignoreInaccessible: true))
         {
             total += length;
         }
@@ -154,6 +156,10 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             existing = parent;
         }
 
+        // Where it leads, through every link along it: a build directory linked onto another disk is on that
+        // disk, and measured through the path as written it was the room of the disk the link sits on.
+        existing = Followed(existing);
+
         try
         {
             // Windows measures a volume through its root, and refuses a longer path; elsewhere the call
@@ -166,6 +172,57 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         {
             throw new IOException($"The room on the filesystem of '{path}' cannot be asked: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// <paramref name="path"/>, with each directory link along it - a symbolic link, or a junction on Windows -
+    /// replaced by where it finally leads; the path as it is where a link cannot be followed.
+    /// </summary>
+    private static string Followed(string path)
+    {
+        var current = path;
+
+        try
+        {
+            // Bounded, as the system bounds a chain of links: one that loops is left as it is.
+            for (var hops = 0; hops < 40 && LinkAlong(current) is var (link, rest); hops++)
+            {
+                if (new DirectoryInfo(link).ResolveLinkTarget(returnFinalTarget: true) is not { } target)
+                {
+                    break;
+                }
+
+                current = rest.Length == 0 ? target.FullName : Path.Join(target.FullName, rest);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Measured where it is written: a link nobody may read is still somewhere.
+        }
+
+        return current;
+    }
+
+    /// <summary>The first directory link along <paramref name="path"/>, and what follows it; none where there is none.</summary>
+    private static (string Link, string After)? LinkAlong(string path)
+    {
+        var root = Path.GetPathRoot(path) ?? string.Empty;
+        var parts = path[root.Length..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        var prefix = root;
+
+        for (var index = 0; index < parts.Length; index++)
+        {
+            prefix = Path.Join(prefix, parts[index]);
+
+            if (new DirectoryInfo(prefix).LinkTarget is not null)
+            {
+                return (prefix, string.Join(Path.DirectorySeparatorChar, parts[(index + 1)..]));
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -268,7 +325,8 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
         string path,
         bool recursive,
         FileSystemEnumerable<T>.FindPredicate include,
-        FileSystemEnumerable<T>.FindTransform transform)
+        FileSystemEnumerable<T>.FindTransform transform,
+        bool ignoreInaccessible = false)
         => new(
             path,
             transform,
@@ -276,7 +334,7 @@ public sealed class PhysicalFileSystem(IFilePermissions filePermissions) : IFile
             {
                 RecurseSubdirectories = recursive,
                 AttributesToSkip = 0,
-                IgnoreInaccessible = false,
+                IgnoreInaccessible = ignoreInaccessible,
                 MatchType = MatchType.Win32,
             })
         {

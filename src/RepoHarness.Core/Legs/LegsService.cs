@@ -135,11 +135,16 @@ public sealed class LegsService(IHarnessContextLoader contextLoader, IHostInspec
         // A leg is refused a host without the room its build needs before it starts, as it is one without the
         // programs: started, it died with the disk full half way through, and took any other leg building there
         // with it.
-        var placements = LegRoom.Apply(
+        var (placements, roomUnchecked) = LegRoom.Apply(
             context,
             [.. selection.Legs.Select(leg => LegPlacement.Place(config, leg, workload, reports, here))],
             here,
             _platform.PathComparison);
+
+        foreach (var note in roomUnchecked)
+        {
+            _output.Warn(CommandName, note);
+        }
 
         // Each leg that cannot run is its own warning, naming it and saying why, while the others go on.
         foreach (var placement in placements.Where(placement => !placement.Runnable))
