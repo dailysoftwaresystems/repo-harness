@@ -1,5 +1,6 @@
 using RepoHarness.Core.Configuration;
 using RepoHarness.Core.Results;
+using RepoHarness.Core.Worktrees;
 
 namespace RepoHarness.Tests;
 
@@ -648,6 +649,153 @@ public sealed class WorktreeDeletionTests
         Assert.Contains("as after moving it by hand", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.Contains(" worktree repair ", outcome.Outcome.Message, StringComparison.Ordinal);
         Assert.True(Directory.Exists(moved));
+    }
+
+    [Fact]
+    public async Task ALockedWorktree_IsStillRefused_WhenItsUncommittedChangesAreToBeDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "locked");
+        await harness.RunGitAsync(temp.Path, ["worktree", "lock", "--reason", "on a USB disk", path], cancellationToken);
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "locked");
+
+        AssertRefusedWithTheChangeKept(outcome, "it is locked: on a USB disk", change);
+    }
+
+    [Fact]
+    public async Task ACommitOnlyADetachedHeadNames_IsStillRefused_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "detached");
+        File.WriteAllText(Path.Combine(path, "work.txt"), "committed here only");
+        await harness.CommitAllAsync(path, "work", cancellationToken);
+        var head = (await harness.GitClient.ResolveCommitAsync(path, "HEAD", cancellationToken))![..12];
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "detached");
+
+        AssertRefusedWithTheChangeKept(outcome, $"1 commit(s) up to {head}", change);
+    }
+
+    [Fact]
+    public async Task ACommitOnlyAnOlderStashEntryHolds_IsStillRefused_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        // Only the newest stash keeps a commit. This worktree's stash holds its commit until a stash
+        // made in the main checkout comes after it.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "stashed");
+        File.WriteAllText(Path.Combine(path, "work.txt"), "committed on a detached HEAD");
+        await harness.CommitAllAsync(path, "work", cancellationToken);
+        var head = (await harness.GitClient.ResolveCommitAsync(path, "HEAD", cancellationToken))![..12];
+        File.WriteAllText(Path.Combine(path, "work.txt"), "then changed and stashed");
+        await harness.RunGitAsync(path, ["stash", "--quiet"], cancellationToken);
+        File.WriteAllText(Path.Combine(temp.Path, "README.md"), "changed and stashed in the main checkout");
+        await harness.RunGitAsync(temp.Path, ["stash", "--quiet"], cancellationToken);
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "stashed");
+
+        AssertRefusedWithTheChangeKept(outcome, $"1 commit(s) up to {head}", change);
+    }
+
+    [Fact]
+    public async Task ASubmoduleCommitNoRemoteTrackingRefContains_IsStillRefused_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        // The superproject reports the submodule's new commit as a change, and discarding that change
+        // must not take the commit, which lives in a repository deleted with the worktree.
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "subcommit");
+        await CommitInSubmoduleAsync(harness, Path.Combine(path, "lib"));
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "subcommit");
+
+        AssertRefusedWithTheChangeKept(outcome, "submodule 'lib' holds 1 commit(s) no remote-tracking ref or tag contains", change);
+    }
+
+    [Fact]
+    public async Task ASubmoduleHoldingAStash_IsStillRefused_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        using var temp = new TempDirectory();
+        using var library = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var (harness, path) = await PrepareWithSubmoduleAsync(temp, library, "substash");
+        var submodule = Path.Combine(path, "lib");
+        File.WriteAllText(Path.Combine(submodule, "README.md"), "stashed inside the submodule");
+        await harness.RunGitAsync(
+            submodule,
+            ["-c", "user.email=harness@test.invalid", "-c", "user.name=Harness Test", "stash", "--quiet"],
+            cancellationToken);
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "substash");
+
+        AssertRefusedWithTheChangeKept(outcome, "submodule 'lib' holds a stash", change);
+    }
+
+    [Fact]
+    public async Task AWorktreeMovedByHand_IsStillRefused_WhenItsUncommittedChangesAreToBeDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var harness = await PrepareAsync(temp);
+        var original = await CreateAsync(harness, temp, "before");
+        var moved = HarnessFactory.WorktreePath(temp.Path, "after");
+        Directory.Move(original, moved);
+        var change = Uncommitted(moved);
+
+        var outcome = await DiscardingAsync(harness, temp, "after");
+
+        AssertRefusedWithTheChangeKept(outcome, "as after moving it by hand", change);
+    }
+
+    [Fact]
+    public async Task AnotherRepositoryAtTheWorktreePath_IsStillRefused_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = HarnessFactory.WorktreePath(temp.Path, "clone");
+        await harness.RunGitAsync(temp.Path, ["clone", "--quiet", temp.Path, path], cancellationToken);
+        var change = Uncommitted(path);
+
+        var outcome = await DiscardingAsync(harness, temp, "clone");
+
+        AssertRefusedWithTheChangeKept(outcome, "'clone' is not a worktree of this repository", change);
+    }
+
+    /// <summary>Leaves a file git does not know in <paramref name="path"/>, and returns it.</summary>
+    private static string Uncommitted(string path)
+    {
+        var change = Path.Combine(path, "notes.txt");
+        File.WriteAllText(change, "never committed");
+        return change;
+    }
+
+    /// <summary>Deletes worktree <paramref name="name"/> without --force, discarding its uncommitted changes.</summary>
+    private static Task<WorktreeOutcome> DiscardingAsync(HarnessFactory harness, TempDirectory temp, string name)
+        => harness.WorktreeService.DeleteAsync(
+            temp.Path, name, force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: TestContext.Current.CancellationToken);
+
+    /// <summary>
+    /// Asserts a deletion discarding uncommitted changes was refused for <paramref name="reason"/>, leaving
+    /// <paramref name="change"/> on disk: the waiver reaches no other check, and a refusal never offers it again.
+    /// </summary>
+    private static void AssertRefusedWithTheChangeKept(WorktreeOutcome outcome, string reason, string change)
+    {
+        Assert.Equal(HarnessExit.Refused, outcome.Outcome.ExitCode);
+        Assert.Contains(reason, outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("uncommitted change", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("--discard-uncommitted", outcome.Outcome.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(change), "The refused delete discarded the uncommitted change.");
     }
 
     /// <summary>The index and every shared index file in a worktree's git directory, by name, with their bytes.</summary>

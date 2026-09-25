@@ -111,7 +111,7 @@ public sealed class WorktreeRootAndEvidenceTests
         await harness.RunGitAsync(created.Path, ["add", "notes.txt"], cancellationToken);
 
         var stillRefused = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "feature", force: false, deleteEvidence: true, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: true, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, stillRefused.Outcome.ExitCode);
 
@@ -123,10 +123,33 @@ public sealed class WorktreeRootAndEvidenceTests
         await harness.RunGitAsync(created.Path, ["rm", "-f", "--quiet", "notes.txt"], cancellationToken);
 
         var deleted = await harness.WorktreeService.DeleteAsync(
-            temp.Path, "feature", force: true, deleteEvidence: true, cancellationToken);
+            temp.Path, "feature", force: true, deleteEvidence: true, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.False(Directory.Exists(created.Path));
+    }
+
+    [Fact]
+    public async Task EvidenceStillRefusesTheDeletion_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        // --discard-uncommitted is about what git reports; evidence is what git was never told about.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp, Settings(evidence: ["scratchpad"]));
+
+        var created = await harness.WorktreeService.CreateAsync(temp.Path, "feature", useRandomName: false, cancellationToken);
+        Directory.CreateDirectory(Path.Combine(created.Path, "scratchpad"));
+        await File.WriteAllTextAsync(Path.Combine(created.Path, "scratchpad", "timings.txt"), "42\n", cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(created.Path, "notes.txt"), "never committed\n", cancellationToken);
+
+        var refused = await harness.WorktreeService.DeleteAsync(
+            temp.Path, "feature", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
+        Assert.Contains("scratchpad", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.Contains("--delete-evidence", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(created.Path, "scratchpad", "timings.txt")), "The refused delete removed the evidence.");
+        Assert.True(File.Exists(Path.Combine(created.Path, "notes.txt")), "The refused delete discarded the uncommitted change.");
     }
 
     [Fact]

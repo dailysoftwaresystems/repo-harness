@@ -367,7 +367,7 @@ public sealed class WorktreeServiceTests
         var outcome = await harness.WorktreeService.DeleteAsync(temp.Path, "many", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(
-            "Worktree 'many' was not deleted, because it has 5 uncommitted change(s) that would be lost: a.txt, b.txt, c.txt and 2 more (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
+            "Worktree 'many' was not deleted, because it has 5 uncommitted change(s) that would be lost: a.txt, b.txt, c.txt and 2 more (commit them to a branch, run 'git stash -u', or pass --discard-uncommitted to delete them with the worktree); fix that, or pass --force to delete it anyway.",
             outcome.Outcome.Message);
     }
 
@@ -408,6 +408,47 @@ public sealed class WorktreeServiceTests
 
         Assert.True(outcome.Succeeded, outcome.Outcome.Message);
         Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WithDiscardUncommitted_DeletesUncommittedWork_SayingHowMuchItDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = HarnessFactory.WorktreePath(temp.Path, "landed");
+        await harness.WorktreeService.CreateAsync(temp.Path, "landed", useRandomName: false, cancellationToken);
+        File.WriteAllText(Path.Combine(path, "README.md"), "modified");
+        File.WriteAllText(Path.Combine(path, "b.txt"), "staged");
+        await harness.RunGitAsync(path, ["add", "b.txt"], cancellationToken);
+        File.WriteAllText(Path.Combine(path, "c.txt"), "never committed");
+        Directory.CreateDirectory(Path.Combine(path, "d"));
+        File.WriteAllText(Path.Combine(path, "d", "e.txt"), "never committed either");
+
+        var outcome = await harness.WorktreeService.DeleteAsync(
+            temp.Path, "landed", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+        Assert.Contains("discarded 4 uncommitted change(s): README.md, b.txt, c.txt and 1 more", outcome.Outcome.Details ?? []);
+
+        var worktrees = await harness.GitClient.ListWorktreesAsync(temp.Path, cancellationToken);
+        Assert.DoesNotContain(worktrees, worktree => PathAssert.AreSame(path, worktree.Path));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WithDiscardUncommitted_SaysNothingOfDiscarding_WhenNothingWasUncommitted()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.WorktreeService.CreateAsync(temp.Path, "clean", useRandomName: false, cancellationToken);
+
+        var outcome = await harness.WorktreeService.DeleteAsync(
+            temp.Path, "clean", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.DoesNotContain(outcome.Outcome.Details ?? [], detail => detail.Contains("discarded", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -465,6 +506,27 @@ public sealed class WorktreeServiceTests
 
         Assert.True(forced.Succeeded, forced.Outcome.Message);
         Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_StillRefusesADirectoryThatIsNotAWorktreeOfItsOwn_WhenUncommittedChangesAreToBeDiscarded()
+    {
+        // What such a directory holds was never checked, so there is nothing known to discard.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        await harness.CommitAllAsync(temp.Path, "harness", cancellationToken);
+        var path = HarnessFactory.WorktreePath(temp.Path, "orphan");
+        await harness.WorktreeService.CreateAsync(temp.Path, "orphan", useRandomName: false, cancellationToken);
+        File.Delete(Path.Combine(path, ".git"));
+        File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
+
+        var refused = await harness.WorktreeService.DeleteAsync(
+            temp.Path, "orphan", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
+        Assert.Contains("is not a worktree git can find", refused.Outcome.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
     }
 
     [Fact]

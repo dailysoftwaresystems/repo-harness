@@ -19,9 +19,13 @@ public sealed record LegPlan
 
     /// <summary>
     /// What identifies the host's tree this leg works in, such as the host and the tree root.
-    /// Legs sharing it share one sync. Empty where the leg needs no sync.
+    /// Legs sharing it share one sync. Empty where the leg needs no sync. A key, never said: its parts
+    /// may be joined by a character no reader should see.
     /// </summary>
     public string TreeKey { get; init; } = string.Empty;
+
+    /// <summary>The host's tree this leg works in, as a message names it, such as <c>'~/repo' on wsl Ubuntu</c>.</summary>
+    public string Tree { get; init; } = string.Empty;
 
     /// <summary>
     /// How two tree keys compare, wherever legs are grouped by one: ignoring case, as the run lock
@@ -324,7 +328,9 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             // tree was in place would be testing the previous run's sources.
             if (request.SyncTree is { } sync && leg.TreeKey.Length > 0)
             {
-                ledger.Transition(leg.Name, $"sync of {leg.TreeKey}");
+                // The tree as a reader names it, never its key: a key joins its parts with a NUL, which a
+                // consumer found in the progress line of every leg on a host, where it made grep call the log binary.
+                ledger.Transition(leg.Name, leg.Tree.Length > 0 ? $"sync of {leg.Tree}" : "sync of its host's copy");
                 await Shared(syncs, syncGate, leg.TreeKey, sync, cancellationToken).ConfigureAwait(false);
             }
 

@@ -296,7 +296,7 @@ public sealed class HostCopiesTests
         record.Claim(layout, Entry(theirs, created.Path));
 
         var service = Service(harness, answering);
-        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.HostUnavailable, deleted.Outcome.ExitCode);
         Assert.Equal(
@@ -316,13 +316,13 @@ public sealed class HostCopiesTests
         Assert.True(Directory.Exists(theirs));
         Assert.Equal([Entry(onMac, created.Path, Mac)], record.Of(layout, "feature"));
 
-        var again = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var again = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.HostUnavailable, again.Outcome.ExitCode);
         Assert.StartsWith("Worktree 'feature' is gone already, and 1 of its copies on hosts are not yet dealt with", again.Outcome.Message, StringComparison.Ordinal);
 
         answering.Add(Mac);
-        var finished = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var finished = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(finished.Succeeded, finished.Outcome.Message);
         Assert.Equal("Worktree 'feature' is gone already; each copy of it left on a host is dealt with.", finished.Outcome.Message);
@@ -330,7 +330,7 @@ public sealed class HostCopiesTests
         Assert.False(Directory.Exists(onMac));
         Assert.Empty(record.Of(layout, "feature"));
 
-        var nothing = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var nothing = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, nothing.Outcome.ExitCode);
         Assert.Equal("No worktree named 'feature'.", nothing.Outcome.Message);
@@ -355,7 +355,7 @@ public sealed class HostCopiesTests
         Record(harness).Claim(layout, Entry(onPi, elsewhere));
         var service = Service(harness, new HashSet<HostId> { Pi });
 
-        var kept = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var kept = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, kept.Outcome.ExitCode);
         Assert.Equal(
@@ -365,7 +365,7 @@ public sealed class HostCopiesTests
         Assert.True(Directory.Exists(onPi));
 
         Directory.Delete(elsewhere);
-        var removed = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var removed = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(removed.Succeeded, removed.Outcome.Message);
         Assert.Equal([$"ssh pi: removed its copy at '{onPi}', of the worktree that was at '{elsewhere}'"], removed.Outcome.Details);
@@ -400,7 +400,7 @@ public sealed class HostCopiesTests
         Assert.NotNull(building.Handle);
 
         var service = Service(harness, new HashSet<HostId> { Pi });
-        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, deleted.Outcome.ExitCode);
         Assert.Contains(deleted.Outcome.Details ?? [], line => line.StartsWith($"ssh pi: its copy at '{onPi}' stays, and is still recorded: ", StringComparison.Ordinal)
@@ -408,7 +408,7 @@ public sealed class HostCopiesTests
         Assert.True(Directory.Exists(onPi));
 
         await building.Handle.DisposeAsync();
-        var again = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var again = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(again.Succeeded, again.Outcome.Message);
         Assert.Equal([$"ssh pi: removed its copy at '{onPi}'"], again.Outcome.Details);
@@ -466,13 +466,13 @@ public sealed class HostCopiesTests
         Assert.NotNull(building.Handle);
 
         var service = Service(harness, new HashSet<HostId> { Pi });
-        var refused = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var refused = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, refused.Outcome.ExitCode);
         Assert.True(Directory.Exists(leg.HostTreeRoot));
 
         await building.Handle.DisposeAsync();
-        var removed = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var removed = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(removed.Succeeded, removed.Outcome.Message);
         Assert.False(Directory.Exists(leg.HostTreeRoot));
@@ -502,7 +502,7 @@ public sealed class HostCopiesTests
         record.Claim(layout, Entry(onPi, created.Path));
 
         var service = Service(harness, new HashSet<HostId> { Pi }, new HoldsOpen(harness.FileSystem, "build"));
-        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.CommandFailed, deleted.Outcome.ExitCode);
         Assert.Contains("2 of its copies on hosts are not yet dealt with", deleted.Outcome.Message, StringComparison.Ordinal);
@@ -536,7 +536,7 @@ public sealed class HostCopiesTests
 
         var both = new HashSet<HostId> { Pi, Mac };
         var deleted = await Service(harness, both, record: new WritesNoRecord(harness.FileSystem)).DeleteAsync(
-            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, deleted.Outcome.ExitCode);
         Assert.Contains("2 of its copies on hosts are not yet dealt with", deleted.Outcome.Message, StringComparison.Ordinal);
@@ -545,7 +545,7 @@ public sealed class HostCopiesTests
         Assert.False(Directory.Exists(onPi));
         Assert.False(Directory.Exists(onMac));
 
-        var again = await Service(harness, both).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var again = await Service(harness, both).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(again.Succeeded, again.Outcome.Message);
         Assert.Equal([$"ssh pi: found nothing at '{onPi}' to remove", $"ssh mac: found nothing at '{onMac}' to remove"], again.Outcome.Details);
@@ -579,7 +579,7 @@ public sealed class HostCopiesTests
         Record(harness).Claim(layout, Entry(onPi, created.Path));
 
         var deleted = await Service(harness, new HashSet<HostId> { Pi }, record: new WritesNoRecord(harness.FileSystem)).DeleteAsync(
-            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, deleted.Outcome.ExitCode);
         Assert.Contains("2 of its copies on hosts are not yet dealt with", deleted.Outcome.Message, StringComparison.Ordinal);
@@ -625,7 +625,7 @@ public sealed class HostCopiesTests
             return Answering(host);
         });
 
-        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, interruption.Token);
+        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: interruption.Token);
 
         Assert.Equal(HarnessExit.Cancelled, deleted.Outcome.ExitCode);
         Assert.Equal(
@@ -657,7 +657,7 @@ public sealed class HostCopiesTests
         Record(harness).Claim(layout, Entry(mainCopy, created.Path));
 
         var deleted = await Service(harness, new HashSet<HostId> { Pi }).DeleteAsync(
-            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.Contains(
@@ -687,7 +687,7 @@ public sealed class HostCopiesTests
         Record(harness).Claim(layout, Entry(copy, created.Path, gone));
 
         var inspector = new RecordingInspector(Answering);
-        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.Contains(
@@ -734,7 +734,7 @@ public sealed class HostCopiesTests
         Record(harness).Claim(layout, Entry(onGpu, created.Path, gpu));
 
         var inspector = new RecordingInspector(Answering);
-        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: true, deleteEvidence: false, cancellationToken);
+        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: true, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.Contains($"ssh gpu: removed its copy at '{onGpu}'", deleted.Outcome.Details ?? []);
@@ -777,7 +777,7 @@ public sealed class HostCopiesTests
             return Answering(host);
         });
 
-        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await Service(harness, inspector).DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.Contains($"ssh mac: removed its copy at '{onMac}'", deleted.Outcome.Details ?? []);
@@ -807,7 +807,7 @@ public sealed class HostCopiesTests
         harness.FileSystem.DeleteDirectory(created.Path);
 
         var deleted = await Service(harness, new HashSet<HostId> { Pi }).DeleteAsync(
-            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+            temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.True(deleted.Succeeded, deleted.Outcome.Message);
         Assert.Contains($"ssh pi: removed its copy at '{onPi}'", deleted.Outcome.Details ?? []);
@@ -834,13 +834,13 @@ public sealed class HostCopiesTests
         File.WriteAllText(path, "not json");
         var service = Service(harness, new HashSet<HostId> { Pi });
 
-        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken);
+        var deleted = await service.DeleteAsync(temp.Path, "feature", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, deleted.Outcome.ExitCode);
         Assert.StartsWith("Worktree 'feature' was deleted, and none of its copies on hosts was removed: ", deleted.Outcome.Message, StringComparison.Ordinal);
         Assert.False(Directory.Exists(created.Path));
 
-        var unknown = await service.DeleteAsync(temp.Path, "nothing", force: false, deleteEvidence: false, cancellationToken);
+        var unknown = await service.DeleteAsync(temp.Path, "nothing", force: false, deleteEvidence: false, cancellationToken: cancellationToken);
 
         Assert.Equal(HarnessExit.Refused, unknown.Outcome.ExitCode);
         Assert.StartsWith(
@@ -858,7 +858,7 @@ public sealed class HostCopiesTests
         var harness = await PrepareAsync(temp);
 
         var deleted = await Service(harness, new HashSet<HostId>()).DeleteAsync(
-            temp.Path, "nothing", force: false, deleteEvidence: false, TestContext.Current.CancellationToken);
+            temp.Path, "nothing", force: false, deleteEvidence: false, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(HarnessExit.Refused, deleted.Outcome.ExitCode);
         Assert.Equal("No worktree named 'nothing'.", deleted.Outcome.Message);

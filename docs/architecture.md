@@ -366,7 +366,9 @@ names everything it found on one line, each with its remedy, and exits 13:
   marked assume-unchanged or skip-worktree, so those present on disk are compared on a copy of
   the index with the marks cleared, which applies git's own line-ending rules and never touches
   the real index. A skip-worktree file absent from disk, as a sparse checkout leaves it, is not
-  a change.
+  a change. `--discard-uncommitted` deletes the changes with the worktree while every other
+  check still runs, and says how many it discarded, naming a few; a refusal for another reason
+  names none of them. `--force` deletes them too, and skips everything else as well.
 - **Commits nothing else names.** A detached worktree's HEAD can be the only name for the
   commits made there. They are counted when no branch, tag, remote-tracking ref, the newest
   stash, or the HEAD of another worktree reaches them, so a worktree on a branch, or whose
@@ -416,11 +418,13 @@ history of a repository nested inside one included.
 
 - Checked, removal is plain `git worktree remove`. git's own check still catches a file changed
   since ours, a file added unless `status.showUntrackedFiles` is `no`, or a lock; a worktree
-  holding submodules is removed with `--force`, which git requires for one, and that skips even
-  this check. When git fails part way, as on a file another program holds open, its record and
-  some files may already be gone: the command deletes nothing more, exits 20 and says what is
-  left, and `delete-worktree <name> --force` finishes it, which is safe because every check
-  passed before removal began.
+  holding submodules is removed with `--force`, which git requires for one, and so is one whose
+  uncommitted changes `--discard-uncommitted` discards, which git's check would refuse. That
+  skips even this check, though git still keeps a lock, which only a second `--force` overrides.
+  When git fails part way, as on a file another program holds open, its record and some files
+  may already be gone: the command deletes nothing more, exits 20 and says what is left, and
+  `delete-worktree <name> --force` finishes it, which is safe because every check passed before
+  removal began.
 - Forced, it is `git worktree remove --force --force`, which overrides a lock. A directory git
   leaves behind is deleted, and git is then asked again to clear its record, which it can once
   the directory is gone. A file that cannot be deleted is reported with exit 20 and what to do

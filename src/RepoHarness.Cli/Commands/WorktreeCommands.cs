@@ -67,12 +67,18 @@ internal static class DeleteWorktreeCommand
         Description = "Delete the configured evidence directories with the worktree. Every other check still runs.",
     };
 
+    private static readonly Option<bool> DiscardUncommittedOption = new("--discard-uncommitted")
+    {
+        Description = "Delete the worktree's uncommitted changes with it, saying how many. Every other check still runs.",
+    };
+
     internal static Command Create()
     {
         var command = new Command(Name, "Remove a worktree and everything under it, and its copies on hosts; refuses one holding work that would be lost, a locked one, or one whose evidence directories hold measurements, without --force.");
         command.Arguments.Add(NameArgument);
         command.Options.Add(ForceOption);
         command.Options.Add(DeleteEvidenceOption);
+        command.Options.Add(DiscardUncommittedOption);
         GlobalOptions.AddTo(command);
 
         command.SetAction(CommandRunner.Wrap(Name, async (context, cancellationToken) =>
@@ -83,6 +89,7 @@ internal static class DeleteWorktreeCommand
                     context.ParseResult.GetRequiredValue(NameArgument),
                     context.ParseResult.GetValue(ForceOption),
                     context.ParseResult.GetValue(DeleteEvidenceOption),
+                    context.ParseResult.GetValue(DiscardUncommittedOption),
                     cancellationToken)
                 .ConfigureAwait(false);
 

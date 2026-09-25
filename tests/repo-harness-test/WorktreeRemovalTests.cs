@@ -105,6 +105,45 @@ public sealed class WorktreeRemovalTests
     }
 
     [Fact]
+    public async Task UncommittedChangesBeingDiscarded_AreRemovedPastGitsOwnCheck_ForcedOnce()
+    {
+        // git's check would refuse the very changes being discarded. Forced once, git still keeps a lock.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "discarded");
+        File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
+        var git = new InterceptingGitClient(harness.GitClient);
+
+        var outcome = await Service(harness, git).DeleteAsync(
+            temp.Path, "discarded", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        Assert.False(Directory.Exists(path));
+        var removal = Assert.Single(git.Runs, run => run.Arguments is ["worktree", "remove", ..]);
+        Assert.True(removal.Arguments is ["worktree", "remove", "--force", var removed] && PathAssert.AreSame(path, removed), string.Join(' ', removal.Arguments));
+    }
+
+    [Fact]
+    public async Task NothingToDiscard_LeavesGitsOwnCheckInPlace()
+    {
+        // Asked to discard what a clean worktree does not hold, the removal is the plain one, so git
+        // still catches a file changed since the check.
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var harness = await PrepareAsync(temp);
+        var path = await CreateAsync(harness, temp, "clean");
+        var git = new InterceptingGitClient(harness.GitClient);
+
+        var outcome = await Service(harness, git).DeleteAsync(
+            temp.Path, "clean", force: false, deleteEvidence: false, discardUncommitted: true, cancellationToken: cancellationToken);
+
+        Assert.True(outcome.Succeeded, outcome.Outcome.Message);
+        var removal = Assert.Single(git.Runs, run => run.Arguments is ["worktree", "remove", ..]);
+        Assert.True(removal.Arguments is ["worktree", "remove", var removed] && PathAssert.AreSame(path, removed), string.Join(' ', removal.Arguments));
+    }
+
+    [Fact]
     public async Task AFailureReportedWhileClearingTheRecord_IsCheckedAgainstTheRecordItself()
     {
         // With the directory gone, git clears the record; what decides the outcome is whether the

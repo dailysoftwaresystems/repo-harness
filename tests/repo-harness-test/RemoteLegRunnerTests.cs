@@ -569,6 +569,35 @@ public sealed class RemoteLegRunnerTests
             HostAgentProtocol.JsonOptions)!;
     }
 
+    /// <summary>
+    /// A leg placed on a host names the tree its sync writes as a reader names it - the host's copy, then the
+    /// host - never by the key its sync is shared by, whose parts a NUL joins. A consumer found that NUL in the
+    /// progress line of every leg on a host, over ssh as over WSL.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "'/home/dev/repo' on wsl Example-Linux")]
+    [InlineData(true, "'/home/dev/repo' on ssh example-mac")]
+    public void ALegOnAHost_NamesTheTreeItsSyncWrites_AsAReaderNamesIt(bool overSsh, string tree)
+    {
+        var leg = Leg();
+
+        if (overSsh)
+        {
+            var mac = HostId.Ssh("example-mac");
+
+            leg = leg with
+            {
+                Host = leg.Host with { Host = mac, Session = new HostSession(new HostConnection { Host = mac }, ".dotnet/tools/dssharness") },
+                HostSettings = new SshHostConfig { RepositoryPath = "/home/dev/repo" },
+            };
+        }
+
+        var plan = leg.ToPlan();
+
+        Assert.Equal(tree, plan.Tree);
+        Assert.Contains('\0', plan.TreeKey);
+    }
+
     private static PlacedLeg Leg()
     {
         var host = new HostReport

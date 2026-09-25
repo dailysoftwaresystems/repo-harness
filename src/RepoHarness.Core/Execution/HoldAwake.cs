@@ -44,7 +44,9 @@ public sealed class HoldAwakeStore(IFileSystem fileSystem, string path)
     /// <remarks>
     /// macOS's lookup of it asks the system for the account's home rather than reading <c>HOME</c>, which every
     /// other path a process there derives honors - and which a process given another home, as a test gives it,
-    /// then does not reach. Its place below that home is the same.
+    /// then does not reach. Its place below that home is the same. Windows's lookup asks the system for the
+    /// account's folder, which no environment moves, so the <c>LOCALAPPDATA</c> the process was given comes first:
+    /// it names that same folder unless the process was given another.
     /// </remarks>
     private static string ApplicationData()
     {
@@ -52,6 +54,13 @@ public sealed class HoldAwakeStore(IFileSystem fileSystem, string path)
             && Environment.GetFolderPath(Environment.SpecialFolder.UserProfile, Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } home)
         {
             return Path.Combine(home, "Library", "Application Support");
+        }
+
+        if (OperatingSystem.IsWindows()
+            && Environment.GetEnvironmentVariable("LOCALAPPDATA") is { Length: > 0 } given
+            && Path.IsPathFullyQualified(given))
+        {
+            return given;
         }
 
         return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } own

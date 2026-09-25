@@ -1051,8 +1051,10 @@ internal static class HelpCommand
         builder.AppendLine("with everything in them, the history of a repository nested inside one and the");
         builder.AppendLine("records of every run started in the worktree included.");
         builder.AppendLine("A worktree whose evidenceRoots directory holds anything is refused;");
-        builder.AppendLine("--delete-evidence waives that one check and nothing else. --force skips every");
-        builder.AppendLine("check and overrides a lock; whatever the worktree held is lost.");
+        builder.AppendLine("--delete-evidence waives that one check and nothing else, and so does");
+        builder.AppendLine("--discard-uncommitted for uncommitted changes, which it deletes with the");
+        builder.AppendLine("worktree, saying how many and naming a few. --force skips every check and");
+        builder.AppendLine("overrides a lock; whatever the worktree held is lost.");
         builder.AppendLine();
         builder.AppendLine("An interruption during the deletion can leave it partly done, on any platform;");
         builder.AppendLine("running delete-worktree again with --force finishes it.");

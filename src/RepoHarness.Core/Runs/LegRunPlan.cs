@@ -251,6 +251,7 @@ public sealed record PlacedLeg(
         Name = Name,
         BuildDirectory = BuildDirectory,
         TreeKey = Host.Host.Kind == HostKind.Local ? string.Empty : TreeKey,
+        Tree = Host.Host.Kind == HostKind.Local ? string.Empty : $"'{HostTreeRoot}' on {Named}",
         Emulated = Emulated,
         MachineKey = Host.Host.MachineKey,
         Host = Named.ToString(),

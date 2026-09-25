@@ -317,13 +317,34 @@ public sealed partial class CliEndToEndTests
         // One line on standard error, naming what would be lost and the way past.
         Assert.Equal(HarnessExit.Refused, refused.ExitCode);
         Assert.Equal(
-            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
+            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, run 'git stash -u', or pass --discard-uncommitted to delete them with the worktree); fix that, or pass --force to delete it anyway.",
             Assert.Single(refused.StandardError.ReplaceLineEndings("\n").Trim().Split('\n')));
         Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
 
         var forced = await CliRunner.RunAsync(["delete-worktree", "wt", "--force", "-C", temp.Path], cancellationToken);
 
         Assert.Equal(HarnessExit.Success, forced.ExitCode);
+        Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task DeleteWorktree_WithDiscardUncommitted_DeletesUncommittedWork_AndSaysWhatItDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await PrepareRepositoryAsync(temp);
+        var path = HarnessFactory.WorktreePath(temp.Path, "wt");
+
+        var created = await CliRunner.RunAsync(["create-worktree", "wt", "-C", temp.Path], cancellationToken);
+        Assert.Equal(HarnessExit.Success, created.ExitCode);
+        File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
+
+        var deleted = await CliRunner.RunAsync(["delete-worktree", "wt", "--discard-uncommitted", "-C", temp.Path], cancellationToken);
+
+        Assert.Equal(HarnessExit.Success, deleted.ExitCode);
+        Assert.Contains(
+            "delete-worktree: discarded 1 uncommitted change(s): notes.txt",
+            deleted.StandardOutput.ReplaceLineEndings("\n").Split('\n'));
         Assert.False(Directory.Exists(path));
     }
 
@@ -652,21 +673,10 @@ public sealed partial class CliEndToEndTests
     [Fact]
     public async Task AHold_OutlivesTheAgentThatStartedIt_AndEndsWhenItIsEnded()
     {
-        Assert.SkipWhen(
-            OperatingSystem.IsWindows(),
-            "Windows keeps a user's application data where no environment can move it, so a test cannot keep a hold apart from the machine's own.");
-
         using var temp = new TempDirectory();
         var token = TestContext.Current.CancellationToken;
-        var home = temp.Combine("home");
         var watched = temp.Combine("watched.txt");
-        Directory.CreateDirectory(home);
-
-        var environment = new Dictionary<string, string?>(StringComparer.Ordinal)
-        {
-            ["HOME"] = home,
-            ["XDG_DATA_HOME"] = Path.Combine(home, ".local", "share"),
-        };
+        var (environment, holds) = OwnUserData(temp);
 
         var request = JsonSerializer.Serialize(
             new HostAgentRequest
@@ -692,8 +702,8 @@ public sealed partial class CliEndToEndTests
         await Task.Delay(TimeSpan.FromSeconds(1), token);
         Assert.True(Running(holder), "the hold ended before anything ended it");
 
-        var state = Assert.Single(Directory.EnumerateFiles(home, "hold-awake.json", SearchOption.AllDirectories));
-        new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), state).End();
+        Assert.True(File.Exists(holds), "the hold was not kept in the user's data the CLI was given");
+        new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), holds).End();
 
         await EventuallyAsync(() => !Running(holder), token);
 
@@ -720,6 +730,31 @@ public sealed partial class CliEndToEndTests
         }
 
         Assert.True(done(), "what was waited for did not happen within a minute");
+    }
+
+    /// <summary>
+    /// An environment giving the CLI a user's data of its own, below <paramref name="temp"/>, and the file it then
+    /// keeps the hold between commands in: a test reaching a hold never reaches the one the machine's user holds.
+    /// </summary>
+    private static (Dictionary<string, string?> Environment, string Holds) OwnUserData(TempDirectory temp)
+    {
+        var home = temp.Combine("home");
+        var local = Path.Combine(home, "AppData", "Local");
+        var share = Path.Combine(home, ".local", "share");
+        Directory.CreateDirectory(home);
+
+        var data = OperatingSystem.IsMacOS() ? Path.Combine(home, "Library", "Application Support")
+            : OperatingSystem.IsWindows() ? local
+            : share;
+
+        var environment = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["HOME"] = home,
+            ["XDG_DATA_HOME"] = share,
+            ["LOCALAPPDATA"] = local,
+        };
+
+        return (environment, Path.Combine(data, "dssharness", "hold-awake.json"));
     }
 
     /// <summary>
@@ -2078,16 +2113,22 @@ public sealed partial class CliEndToEndTests
     /// A host's keepAwake is started while a leg's own work runs, filled in with the DssHarness
     /// process running it. Here the command writes what it was given, and the leg's test waits for
     /// that file before it can pass: the command ran during the work, and was given a process - the
-    /// CLI's own, which runs apart from this test and whose id only it knows.
+    /// CLI's own, which runs apart from this test and whose id only it knows. Starting, it ends the
+    /// hold standing between commands: here one kept in the user's data the CLI was given, so the
+    /// hold the machine's own user may have standing is never the one it ends.
     /// </summary>
     [Fact]
-    public async Task AHostsKeepAwake_RunsDuringALegsWork_GivenTheProcessRunningIt()
+    public async Task AHostsKeepAwake_RunsDuringALegsWork_GivenTheProcessRunningIt_AndEndsTheHoldBetweenCommands()
     {
         using var temp = new TempDirectory();
         var harness = new HarnessFactory();
         var platform = harness.Platform;
         var token = TestContext.Current.CancellationToken;
         var awake = temp.Combine("awake.txt");
+        var (environment, holds) = OwnUserData(temp);
+
+        new HoldAwakeStore(new PhysicalFileSystem(FilePermissionsFactory.Create()), holds)
+            .Write(new HoldAwakeState("0123456789abcdef", DateTimeOffset.UtcNow.AddHours(1), [], [], []));
 
         await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
         {
@@ -2121,12 +2162,13 @@ public sealed partial class CliEndToEndTests
             },
         });
 
-        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "-C", temp.Path], token);
+        var test = await CliRunner.RunAsync(["test", "--no-build", "--legs", "native", "-C", temp.Path], token, environment: environment);
 
         Assert.Equal(HarnessExit.Success, test.ExitCode);
         Assert.True(
             int.TryParse(await File.ReadAllTextAsync(awake, token), NumberStyles.None, CultureInfo.InvariantCulture, out var pid) && pid > 0,
             "keepAwake was not given the process running the leg");
+        Assert.False(File.Exists(holds), "the hold standing in the user's data the CLI was given was not ended");
     }
 
     /// <summary>The operating system of the leg <see cref="PrepareRunnerAsync"/> declares that no host provides.</summary>
