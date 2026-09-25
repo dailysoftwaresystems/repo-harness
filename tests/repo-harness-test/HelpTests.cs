@@ -404,6 +404,20 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
+    /// The worktrees topic says a Ninja build leaves its dead outputs out of the path budget's warning, and names
+    /// the ninja command that removes them, removing nothing itself.
+    /// </summary>
+    [Fact]
+    public async Task WorktreesTopic_SaysDeadOutputsAreLeftOutOfTheWarning_AndWhatRemovesThem()
+    {
+        var result = await CliRunner.RunAsync(["help", "worktrees"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("A Ninja build leaves out of that warning the outputs ninja says no target of it produces any more", text, StringComparison.Ordinal);
+        Assert.Contains("naming 'ninja -t cleandead', which removes them. The harness removes nothing.", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The config topic says a hold between commands runs the host's keepAwake, ends when a command's own starts,
     /// and needs keepAwake.
     /// </summary>

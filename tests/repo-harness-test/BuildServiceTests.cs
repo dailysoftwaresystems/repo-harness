@@ -156,6 +156,74 @@ public sealed class BuildServiceTests
         Assert.DoesNotContain("this build produced a path", said, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Where ninja says a leftover is an output no target of this build produces any more - the object of a
+    /// target renamed away - it is left out of the reserve's check, which a new worktree's build, starting from
+    /// clean, never holds it for; noted rather than warned about, naming what removes it, and only where it is
+    /// deeper than the reserve. A consumer's incremental builds warned about one such object every time.
+    /// </summary>
+    [Fact]
+    public async Task ALeftoverNinjaSaysIsDead_IsLeftOutOfTheCheck_AndNoted_NamingWhatRemovesIt()
+    {
+        var (said, noted) = await LeftoverAsync("Cleaning...\nRemove obj/a-target-that-no-longer-exists/with-a-very-long-name-indeed-left-behind.cpp.obj\n1 files.\n");
+
+        Assert.DoesNotContain("worktrees.pathBudgetReserve declares", said, StringComparison.Ordinal);
+        Assert.Contains("1 output(s) below this build directory are ones no target of this build produces any more", noted, StringComparison.Ordinal);
+        Assert.Contains("with-a-very-long-name-indeed-left-behind.cpp.obj", noted, StringComparison.Ordinal);
+        Assert.Contains("'ninja -t cleandead' in this build directory removes them", noted, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A leftover ninja did not call dead is still measured against the reserve - a target this build had no
+    /// reason to rebuild wrote it, or something that is no target's output did - and said so, never as one that
+    /// no longer exists; a ninja that could not say keeps the wording that says either.
+    /// </summary>
+    [Fact]
+    public async Task ALeftoverNinjaDidNotCallDead_IsStillMeasured_AndSaidAsOneATargetOrSomethingElseWrote()
+    {
+        var (said, noted) = await LeftoverAsync("Cleaning...\n0 files.\n");
+
+        Assert.Contains("worktrees.pathBudgetReserve declares", said, StringComparison.Ordinal);
+        Assert.Contains("ninja counts it among no target's dead outputs", said, StringComparison.Ordinal);
+        Assert.DoesNotContain("one that no longer exists", said, StringComparison.Ordinal);
+        Assert.DoesNotContain("produces any more", noted, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Builds once, leaves an old object deeper than the reserve in a ninja build directory, builds again with
+    /// ninja answering <paramref name="ninja"/>, and returns what the second build warned and noted.
+    /// </summary>
+    private static async Task<(string Warned, string Noted)> LeftoverAsync(string ninja)
+    {
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+        var request = Request(temp, outputs: ["bin/app.dll"]);
+        var (service, factory) = await TrackedWithFactoryAsync(temp, token, leaves: [Path.Combine("bin", "app.dll")], deadOutputs: new RecordingRunner(ninja));
+
+        var config = new HarnessConfig
+        {
+            Defaults = new HarnessDefaults { StallSeconds = 0 },
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 40 },
+        };
+
+        Assert.Equal(LegVerdict.Passed, (await service.BuildAsync(config, request, token)).Verdict.Verdict);
+
+        var directory = request.Variant.DirectoryUnder(temp.Path);
+        var leftover = Path.Combine(directory, "obj", "a-target-that-no-longer-exists", "with-a-very-long-name-indeed-left-behind.cpp.obj");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(leftover)!);
+        await File.WriteAllTextAsync(leftover, "stale\n", token);
+        File.SetLastWriteTimeUtc(leftover, DateTime.UtcNow.AddHours(-6));
+        await File.WriteAllTextAsync(Path.Combine(directory, NinjaDependencyCheck.ManifestFileName), string.Empty, token);
+
+        factory.StandardError.GetStringBuilder().Clear();
+        factory.StandardOutput.GetStringBuilder().Clear();
+
+        Assert.Equal(LegVerdict.Passed, (await service.BuildAsync(config, request, token)).Verdict.Verdict);
+
+        return (factory.StandardError.ToString(), factory.StandardOutput.ToString());
+    }
+
     [Fact]
     public async Task ABuildThatExitedZeroAndProducedNothingItDeclared_IsUnwitnessed()
     {
@@ -1302,7 +1370,8 @@ public sealed class BuildServiceTests
         TempDirectory temp,
         CancellationToken cancellationToken,
         int exitCode = 0,
-        IReadOnlyList<string>? leaves = null)
+        IReadOnlyList<string>? leaves = null,
+        IProcessRunner? deadOutputs = null)
     {
         var factory = new HarnessFactory();
 
@@ -1312,7 +1381,7 @@ public sealed class BuildServiceTests
         await File.WriteAllTextAsync(temp.Combine("src.cs"), "class App;" + Environment.NewLine, cancellationToken);
         await factory.CommitAllAsync(temp.Path, "initial", cancellationToken);
 
-        return (Service(factory, exitCode, leaves: leaves), factory);
+        return (Service(factory, exitCode, leaves: leaves, deadOutputs: deadOutputs), factory);
     }
 
     /// <summary>
@@ -1547,12 +1616,16 @@ public sealed class BuildServiceTests
         IFileSystem? fileSystem = null,
         TimeProvider? wallClock = null,
         IProcessRunner? compilers = null,
-        IReadOnlyList<string>? leaves = null)
+        IReadOnlyList<string>? leaves = null,
+        IProcessRunner? deadOutputs = null)
         => new(
             new PhaseRunner(new Leaving(phases ?? new QuietRunner(exitCode), leaves ?? [App]), factory.FileSystem, factory.Output, wallClock ?? new SteppingClock()),
             new BuildDirectoryGuard(factory.FileSystem, factory.Platform, factory.FilePermissions),
             new CMakeToolchainReader(factory.FileSystem),
             new NinjaDependencyCheck(dependencies ?? new QuietRunner(exitCode), factory.FileSystem),
+
+            // Asked of its own runner: the dependency check's is counted by tests that ask it alone.
+            new NinjaDeadOutputCheck(deadOutputs ?? new QuietRunner(1), factory.FileSystem),
             new CompilerVersionProbe(compilers ?? new QuietRunner(exitCode), fileSystem ?? factory.FileSystem),
             new InputFingerprint(fileSystem ?? factory.FileSystem, factory.Platform),
             new ProcessSampler(processTable ?? new QuietProcessTable(), factory.Platform, factory.Output),

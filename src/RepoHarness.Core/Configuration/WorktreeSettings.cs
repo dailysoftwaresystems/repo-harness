@@ -52,7 +52,8 @@ public sealed class WorktreeSettings
     /// <remarks>
     /// Checked by every build, which measures the longest path it actually produced below its build
     /// directory and warns with both numbers when this is lower, so the number cannot go stale
-    /// unnoticed.
+    /// unnoticed. A Ninja build leaves out the outputs ninja says no target of it produces any more,
+    /// which a new worktree's build never holds, and notes them instead.
     /// </remarks>
     public int PathBudgetReserve { get; init; } = 163;
 

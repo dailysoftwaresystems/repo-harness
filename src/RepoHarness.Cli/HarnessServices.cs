@@ -140,6 +140,7 @@ internal static class HarnessServices
         services.AddSingleton<DeveloperEnvironmentProbe>();
         services.AddSingleton<DeveloperEnvironmentProvider>();
         services.AddSingleton<NinjaDependencyCheck>();
+        services.AddSingleton<NinjaDeadOutputCheck>();
         services.AddSingleton<IBuildService, BuildService>();
 
         // Sync. The local transport is registered as the interface because it is also what a host

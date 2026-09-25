@@ -95,6 +95,7 @@ public sealed class BuildService(
     BuildDirectoryGuard buildDirectoryGuard,
     CMakeToolchainReader toolchainReader,
     NinjaDependencyCheck dependencyCheck,
+    NinjaDeadOutputCheck deadOutputCheck,
     CompilerVersionProbe compilerVersions,
     InputFingerprint fingerprints,
     ProcessSampler processSampler,
@@ -110,6 +111,7 @@ public sealed class BuildService(
     private readonly BuildDirectoryGuard _buildDirectoryGuard = buildDirectoryGuard;
     private readonly CMakeToolchainReader _toolchainReader = toolchainReader;
     private readonly NinjaDependencyCheck _dependencyCheck = dependencyCheck;
+    private readonly NinjaDeadOutputCheck _deadOutputCheck = deadOutputCheck;
     private readonly CompilerVersionProbe _compilerVersions = compilerVersions;
     private readonly InputFingerprint _fingerprints = fingerprints;
     private readonly ProcessSampler _processSampler = processSampler;
@@ -374,7 +376,8 @@ public sealed class BuildService(
         {
             var seen = await guards.CloseAsync(cancellationToken).ConfigureAwait(false);
             var verdict = seen.Decide(request.Leg, [reached]);
-            var left = Survey(buildDirectory, began);
+            var dead = await ReadDeadOutputsAsync(request, buildDirectory, environment, cancellationToken).ConfigureAwait(false);
+            var left = Survey(buildDirectory, began, dead);
 
             ContentionWarnings.Write(_output, CommandName, request.Leg, seen.Contention!, config.Contention);
             WarnWhenDeeperThanTheReserve(request, left, config.Worktrees.PathBudgetReserve, phases);
@@ -429,6 +432,20 @@ public sealed class BuildService(
             return;
         }
 
+        // Left out of the check, and noted rather than warned about: a new worktree's build directory starts
+        // from clean and never holds an output no target produces any more, so the reserve has nothing to answer
+        // for it. Said only where one is deeper than the reserve - where the check would have warned - so a
+        // directory whose dead outputs harm nothing stays quiet. The harness removes nothing: ninja does, asked.
+        if (left.DeadDeepest.Length > reserve)
+        {
+            _output.Info(
+                CommandName,
+                $"{request.Leg}: {left.DeadCount} output(s) below this build directory are ones no target of this build "
+                + $"produces any more, the deepest {left.DeadDeepest.Length} characters long ('{left.DeadDeepest}'), past the "
+                + $"{reserve} worktrees.pathBudgetReserve declares; they were left out of that check, since a new "
+                + "worktree's build never holds them, and 'ninja -t cleandead' in this build directory removes them.");
+        }
+
         // Which build wrote a file is read from its date, and a clock that stepped during this one puts
         // that beyond saying: an object stamped inside the step can date before a build that preceded it.
         // Said as not checked, rather than guessed at, because both readings are actionable and wrong.
@@ -463,11 +480,18 @@ public sealed class BuildService(
         // almost nothing, so most of what is there is older than it every time; a date cannot tell an object
         // of a target that still exists from one of a target renamed away, and a consumer was told to raise
         // the reserve for an object that no target owned - which their own budget arithmetic had no room for.
+        //
+        // Where ninja has said which outputs no target produces any more, this is none of them: a target this
+        // build had no reason to rebuild wrote it, or something that is no target's output - configure, a test.
         var whose = left.Deepest.Length >= left.Leftover.Length
             ? "this build wrote it"
-            : "this build did not write it, so it is either a target this build had no reason to rebuild, or "
-                + "one that no longer exists - if no target owns it, start this variant's build directory from "
-                + "clean instead";
+            : left.NinjaAnswered
+                ? "this build did not write it, and ninja counts it among no target's dead outputs, so it is a target "
+                    + "this build had no reason to rebuild, or a file something other than a target wrote, such as "
+                    + "configure or a test"
+                : "this build did not write it, so it is either a target this build had no reason to rebuild, or "
+                    + "one that no longer exists - if no target owns it, start this variant's build directory from "
+                    + "clean instead";
 
         _output.Warn(
             CommandName,
@@ -494,7 +518,25 @@ public sealed class BuildService(
     /// <param name="Bytes">
     /// What the files in it hold, together; <see langword="null"/> where it could not all be read.
     /// </param>
-    private sealed record Left(string Deepest, WrittenFile? Newest, string? Unreadable, string Leftover = "", long? Bytes = 0);
+    /// <param name="DeadDeepest">
+    /// The longest path below the directory that ninja says no target of this build produces any more, as the
+    /// host spells it; empty where it says of none. Counted in neither <paramref name="Deepest"/> nor
+    /// <paramref name="Leftover"/>.
+    /// </param>
+    /// <param name="DeadCount">How many such outputs are there.</param>
+    /// <param name="NinjaAnswered">
+    /// Whether ninja said which outputs no target produces any more, so a leftover it did not name is one a
+    /// target of this build, or something other than a target, wrote.
+    /// </param>
+    private sealed record Left(
+        string Deepest,
+        WrittenFile? Newest,
+        string? Unreadable,
+        string Leftover = "",
+        long? Bytes = 0,
+        string DeadDeepest = "",
+        int DeadCount = 0,
+        bool NinjaAnswered = false);
 
     /// <summary>
     /// Walks <paramref name="buildDirectory"/> once for what is in it: the deepest path below it and the
@@ -516,7 +558,11 @@ public sealed class BuildService(
     /// <see langword="null"/> to take every path as this build's - for a walk made for the newest file
     /// alone, where nothing asks which build wrote it.
     /// </param>
-    private Left Survey(string buildDirectory, DateTime? began = null)
+    /// <param name="dead">
+    /// What ninja says no target of this build produces any more, counted apart from both; or
+    /// <see langword="null"/> where nothing was asked.
+    /// </param>
+    private Left Survey(string buildDirectory, DateTime? began = null, NinjaDeadOutputs? dead = null)
     {
         if (!_fileSystem.DirectoryExists(buildDirectory))
         {
@@ -529,8 +575,18 @@ public sealed class BuildService(
         var mine = began?.AddSeconds(-2);
         var deepest = string.Empty;
         var leftover = string.Empty;
+        var deadDeepest = string.Empty;
+        var deadCount = 0;
         var bytes = 0L;
         WrittenFile? newest = null;
+
+        // As ninja canonicalizes a path, and compared as this file system compares names: ninja names an output
+        // as its manifest does, below the build directory or absolute.
+        var deadPaths = dead is { Answered: true, Paths.Count: > 0 }
+            ? new HashSet<string>(
+                dead.Paths.Select(path => NinjaManifest.Normalize(Path.IsPathRooted(path) ? Path.GetRelativePath(buildDirectory, path) : path)),
+                PathCase.In(_fileSystem, buildDirectory))
+            : null;
 
         try
         {
@@ -539,7 +595,16 @@ public sealed class BuildService(
                 var below = Path.GetRelativePath(buildDirectory, file.Path);
                 bytes += file.Length;
 
-                if (mine is null || file.LastWriteTimeUtc >= mine)
+                if (deadPaths?.Contains(NinjaManifest.Normalize(below)) == true)
+                {
+                    deadCount++;
+
+                    if (below.Length > deadDeepest.Length)
+                    {
+                        deadDeepest = below;
+                    }
+                }
+                else if (mine is null || file.LastWriteTimeUtc >= mine)
                 {
                     if (below.Length > deepest.Length)
                     {
@@ -562,7 +627,7 @@ public sealed class BuildService(
             return new Left(string.Empty, null, ex.Message, Bytes: null);
         }
 
-        return new Left(deepest, newest, null, leftover, bytes);
+        return new Left(deepest, newest, null, leftover, bytes, deadDeepest, deadCount, dead?.Answered ?? false);
     }
 
     /// <summary>
@@ -1107,6 +1172,15 @@ public sealed class BuildService(
     /// a header change; a run that could not perform it and passed anyway reports "no such object
     /// found" when what happened is that nobody looked.
     /// </remarks>
+    private async Task<NinjaDeadOutputs> ReadDeadOutputsAsync(
+        BuildRequest request,
+        string buildDirectory,
+        IReadOnlyDictionary<string, string?> environment,
+        CancellationToken cancellationToken)
+        => await _deadOutputCheck
+            .CheckAsync(buildDirectory, request.ProgramDirectories, _buildDirectoryGuard.Read(buildDirectory)?.MakeProgram, environment, cancellationToken)
+            .ConfigureAwait(false);
+
     private async Task<(NinjaDependencyReport? Report, string? Unreadable)> ReadDependenciesAsync(
         BuildRequest request,
         string buildDirectory,

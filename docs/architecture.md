@@ -235,7 +235,16 @@ The root is configurable because it is spent before a worktree's own name. The d
 characters of the Windows path budget, and a repository whose build paths are long has no name left
 that fits; a shorter root such as `.worktrees` buys those characters back. The budget is still
 checked against the real path, so a shorter root never hides an overrun — it only makes one
-avoidable. A root spelled with a `.` segment or a doubled separator inside it -
+avoidable. Every build measures the deepest path it left below its build directory against the
+reserve, and warns where it went deeper. A Ninja build leaves out of that the outputs ninja says no
+target of the current build produces any more - asked as a dry run of `ninja -t cleandead`, which
+names them and removes nothing - since a new worktree's build directory, starting from clean, never
+holds them; it notes them instead, where one is deeper than the reserve, naming the command that
+removes them. A consumer's incremental builds warned every time about the object of a test renamed
+away. `ninja -t query` would not have told it apart - ninja's dependency log still knows the path -
+and what CMake's configure writes is no output of the manifest at all. A leftover ninja does not
+name is still measured, as a target this build had no reason to rebuild, or a file something other
+than a target wrote; another generator, or a ninja too old to know the tool, is measured as before. A root spelled with a `.` segment or a doubled separator inside it -
 `.harness-config/./worktrees` - is refused with the one spelling to write, and so is a
 `sync.exclude` or `sync.neverTransfer` entry spelled that way: each is compared as written, by
 sync's lists and by `init`'s ignore rule, so the file system's reading of it would put the

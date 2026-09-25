@@ -1009,6 +1009,13 @@ internal static class HelpCommand
         builder.AppendLine("  worktrees.pathLimit           replaces the platform limit; set it only when");
         builder.AppendLine("                                every tool in the build handles long paths");
         builder.AppendLine();
+        builder.AppendLine("A Ninja build leaves out of that warning the outputs ninja says no target of it");
+        builder.AppendLine("produces any more - those of a target renamed or removed - since a new worktree's");
+        builder.AppendLine("build, starting from clean, never holds them: it notes them instead, where one is");
+        builder.AppendLine("deeper than the reserve, naming 'ninja -t cleandead', which removes them. The");
+        builder.AppendLine("harness removes nothing. Another generator, or a ninja before 1.10, is measured as");
+        builder.AppendLine("before.");
+        builder.AppendLine();
         builder.AppendLine("Worktrees always belong to the main checkout, so running create-worktree from");
         builder.AppendLine("inside a worktree adds a sibling rather than nesting one.");
         builder.AppendLine();

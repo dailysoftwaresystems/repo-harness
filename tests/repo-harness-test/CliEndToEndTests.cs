@@ -1453,6 +1453,84 @@ public sealed partial class CliEndToEndTests
     }
 
     /// <summary>
+    /// A real incremental build, by the cmake, ninja and C compiler on this machine, of a tree one of whose targets
+    /// was renamed away since its last build: that target's object is still in the build directory, deeper than the
+    /// path budget's reserve, and ninja says no target produces it any more. It is left out of the check and noted,
+    /// naming what removes it, and the warning a consumer's builds gave every time is not given. Skipped where this
+    /// machine has no CMake, no Ninja, or no C compiler.
+    /// </summary>
+    [Fact]
+    public async Task ARealIncrementalBuild_LeavesATargetRenamedAwayOutOfThePathBudget()
+    {
+        const string Renamed = "a_target_with_a_long_name_that_a_later_commit_renames_away_from_the_project";
+
+        var harness = new HarnessFactory();
+        var platform = harness.Platform;
+        var compiler = OperatingSystem.IsWindows() ? "gcc" : "cc";
+
+        Assert.SkipUnless(
+            harness.ProcessRunner.FindExecutable("cmake") is not null
+                && harness.ProcessRunner.FindExecutable("ninja") is not null
+                && harness.ProcessRunner.FindExecutable(compiler) is not null,
+            $"This machine lacks cmake, ninja or {compiler}, which a real build needs.");
+
+        using var temp = new TempDirectory();
+        var token = TestContext.Current.CancellationToken;
+
+        // Real builds, which ninja orders by the times of the files they write: on a clock that steps, what they
+        // do proves nothing here.
+        using var clock = new ClockWatch();
+
+        await harness.InitializeHarnessAsync(temp.Path, token, new HarnessConfig
+        {
+            Toolchains = { ["cc"] = new ToolchainConfig { Platforms = [platform.PlatformKey], Generator = "Ninja", Env = { ["CC"] = compiler } } },
+            BuildConfigs = { ["debug"] = new BuildConfiguration { CmakeBuildType = "Debug" } },
+            Projects =
+            {
+                new ProjectConfig
+                {
+                    Name = "app",
+                    Type = "cmake",
+                    Path = ".",
+                    BuildOutputs = [BuildOutput.Keyed([new("windows", "probe.exe"), new("all", "probe")])],
+                },
+            },
+            Legs = { ["native"] = new LegConfig { Os = platform.PlatformKey, Processor = platform.Processor, Config = "debug", Toolchain = "cc" } },
+
+            // Past everything a build of this tree writes but the renamed target's object.
+            Worktrees = new WorktreeSettings { PathBudgetReserve = 80, PathBudgetMargin = 2 },
+        });
+
+        // Ignored, as a repository ignores its builds: committed, a build's own files would be inputs it changes.
+        temp.WriteFile(".gitignore", "build/\n");
+        temp.WriteFile("main.c", "int main(void) { return 0; }\n");
+        temp.WriteFile("other.c", "int main(void) { return 1; }\n");
+        temp.WriteFile("CMakeLists.txt", $"cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\nadd_executable({Renamed} other.c)\n");
+        await harness.CommitAllAsync(temp.Path, "two targets", token);
+
+        try
+        {
+            var first = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            Assert.True(first.ExitCode == HarnessExit.Success, first.StandardError + first.StandardOutput);
+
+            temp.WriteFile("CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(probe C)\nadd_executable(probe main.c)\nadd_executable(short other.c)\n");
+            await harness.CommitAllAsync(temp.Path, "one renamed", token);
+
+            var second = await CliRunner.RunAsync(["build", "--legs", "native", "--json", "-C", temp.Path], token);
+
+            Assert.True(second.ExitCode == HarnessExit.Success, second.StandardError + second.StandardOutput);
+            Assert.Contains("output(s) below this build directory are ones no target of this build produces any more", second.StandardError, StringComparison.Ordinal);
+            Assert.Contains(Renamed, second.StandardError, StringComparison.Ordinal);
+            Assert.DoesNotContain("WARN - native: the deepest path below this build directory", second.StandardError, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (!clock.Held)
+        {
+            Assert.Skip($"Its builds did not run on an honest clock - {clock.Seen}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// A real configure of a C++ project whose C only a dependency's project() enables, as googletest's
     /// does, by the CMake on this machine: its answer names C's compiler with no id, and C is identified
     /// from CMake's own record of it - named on the leg's line, and held to the toolchain's compilerId,
