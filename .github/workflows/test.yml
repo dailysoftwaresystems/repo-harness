@@ -67,6 +67,10 @@ jobs:
         run: dotnet build RepoHarness.slnx --configuration Release --no-restore
 
       - name: Test
-        # global.json selects Microsoft.Testing.Platform as the test runner, which is what
-        # xunit.v3 speaks. The exit code is non-zero when any test fails.
-        run: dotnet test --project tests/repo-harness-test/repo-harness-test.csproj --configuration Release --no-build
+        # The suite's own binary, which exits non-zero when any test fails. Run directly, it
+        # says what dotnet test keeps to itself: each test still running after two minutes,
+        # named again every two minutes it runs on, and the slowest tests once the run ends.
+        # And it is stopped short of the job's own limit: a job that limit ended kept no log,
+        # so nothing said which test had hung.
+        timeout-minutes: 15
+        run: dotnet build/bin/repo-harness-test/release/repo-harness-test.dll --xunit-diagnostics on --long-running 120 --show-slowest-tests 20
