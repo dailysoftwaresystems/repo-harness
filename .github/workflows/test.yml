@@ -67,10 +67,11 @@ jobs:
         run: dotnet build RepoHarness.slnx --configuration Release --no-restore
 
       - name: Test
-        # The suite's own binary, which exits non-zero when any test fails. Run directly, it
-        # says what dotnet test keeps to itself: each test still running after two minutes,
-        # named again every two minutes it runs on, and the slowest tests once the run ends.
-        # And it is stopped short of the job's own limit: a job that limit ended kept no log,
-        # so nothing said which test had hung.
+        # The suite's own executable, which exits non-zero when any test fails: never through
+        # dotnet, which the suite then finds running it and starts its children with by path.
+        # Run directly, it says what dotnet test keeps to itself: each test still running after
+        # two minutes, named again every two minutes it runs on, and the slowest tests once the
+        # run ends. And it is stopped short of the job's own limit: a job that limit ended kept
+        # no log, so nothing said which test had hung.
         timeout-minutes: 15
-        run: dotnet build/bin/repo-harness-test/release/repo-harness-test.dll --xunit-diagnostics on --long-running 120 --show-slowest-tests 20
+        run: ./build/bin/repo-harness-test/release/repo-harness-test${{ runner.os == 'Windows' && '.exe' || '' }} --xunit-diagnostics on --long-running 120 --show-slowest-tests 20
