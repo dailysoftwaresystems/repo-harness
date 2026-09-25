@@ -89,8 +89,8 @@ public sealed record HostReport
     public IReadOnlyList<string> Actions { get; init; } = [];
 
     /// <summary>
-    /// The room on the filesystem its copies of the repository are kept on - the tree the command was typed
-    /// in, for this machine - or <see langword="null"/> where it was not asked, or could not be measured.
+    /// The room on the filesystem its copies of the repository are kept on - the main checkout, for this
+    /// machine - or <see langword="null"/> where it was not asked, or could not be measured.
     /// </summary>
     public FileSystem.DiskSpace? Space { get; init; }
 

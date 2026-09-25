@@ -8,6 +8,23 @@ namespace RepoHarness.Core.FileSystem;
 /// <param name="Filesystem">Where it is mounted - its drive on Windows - as a reader would look it up.</param>
 public sealed record DiskSpace(long FreeBytes, long TotalBytes, string Filesystem)
 {
+    /// <summary>The room on the filesystem <paramref name="path"/> is on, or why it could not be measured.</summary>
+    /// <param name="fileSystem">Measures it.</param>
+    /// <param name="path">A path on the filesystem.</param>
+    public static (DiskSpace? Space, string? Unmeasured) Measure(IFileSystem fileSystem, string path)
+    {
+        ArgumentNullException.ThrowIfNull(fileSystem);
+
+        try
+        {
+            return (fileSystem.SpaceAt(path), null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (null, ex.Message.TrimEnd('.'));
+        }
+    }
+
     /// <summary>The room as it is said: <c>12.3 GiB free of 48 GiB on '/'</c>.</summary>
     public string Describe() => $"{Size(FreeBytes)} free of {Size(TotalBytes)} on '{Filesystem}'";
 

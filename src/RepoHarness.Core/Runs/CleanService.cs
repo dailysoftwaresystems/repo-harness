@@ -186,7 +186,7 @@ public sealed class CleanService(
             {
                 var holds = _fileSystem.DirectorySize(directory);
                 var left = _fileSystem.DirectorySize(aside);
-                var room = Room(directory, out var unmeasured);
+                var (room, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
 
                 var said = _fileSystem.DirectoryExists(directory) ? $"{DiskSpace.Size(holds)} in '{directory}'" : $"nothing at '{directory}'";
 
@@ -195,7 +195,7 @@ public sealed class CleanService(
                     said += $", and {DiskSpace.Size(left)} a removal that did not finish left at '{aside}'";
                 }
 
-                return Entry(leg, LegVerdict.Passed, $"{said}; {room?.Describe() ?? unmeasured}") with
+                return Entry(leg, LegVerdict.Passed, $"{said}; {room?.Describe() ?? Unmeasured(unmeasured)}") with
                 {
                     Space = new BuildSpace(directory, holds + left, Removed: false, room),
                 };
@@ -229,10 +229,10 @@ public sealed class CleanService(
                 _fileSystem.DeleteDirectory(aside);
             }
 
-            var after = Room(directory, out var why);
+            var (after, why) = DiskSpace.Measure(_fileSystem, directory);
             var done = moved || removed > 0 ? $"removed {DiskSpace.Size(removed)} from '{directory}'" : $"nothing to remove at '{directory}'";
 
-            return Entry(leg, LegVerdict.Passed, $"{done}; {after?.Describe() ?? why}") with
+            return Entry(leg, LegVerdict.Passed, $"{done}; {after?.Describe() ?? Unmeasured(why)}") with
             {
                 Space = new BuildSpace(directory, removed, Removed: moved || removed > 0, after),
             };
@@ -247,21 +247,7 @@ public sealed class CleanService(
         }
     }
 
-    /// <summary>The room on the filesystem <paramref name="directory"/> is on, or why it could not be measured.</summary>
-    private DiskSpace? Room(string directory, out string unmeasured)
-    {
-        unmeasured = string.Empty;
-
-        try
-        {
-            return _fileSystem.SpaceAt(directory);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            unmeasured = $"the room on its filesystem could not be measured: {ex.Message.TrimEnd('.')}";
-            return null;
-        }
-    }
+    private static string Unmeasured(string? why) => $"the room on its filesystem could not be measured: {why}";
 
     private static LegEntry Entry(PlacedLeg leg, LegVerdict verdict, string detail)
         => new() { Leg = leg.Name, Verdict = verdict, Detail = detail, Emulated = leg.Emulated };

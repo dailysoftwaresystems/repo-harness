@@ -243,7 +243,7 @@ public sealed class HostAgentService(
 
         // Measured here, where the builds will write, and cheaply: the room is the filesystem's own count,
         // and what a build directory holds is what the build that last finished there recorded, never a walk.
-        var (space, unmeasured) = room.SpaceAt is { Length: > 0 } spaceAt ? Room(ResolveDirectory(spaceAt)) : (null, null);
+        var (space, unmeasured) = room.SpaceAt is { Length: > 0 } spaceAt ? DiskSpace.Measure(_fileSystem, ResolveDirectory(spaceAt)) : (null, null);
 
         return new HostAgentInfo
         {
@@ -259,19 +259,6 @@ public sealed class HostAgentService(
             SpaceUnmeasured = unmeasured,
             Builds = [.. room.Builds.Distinct(StringComparer.Ordinal).Select(BuildRoom)],
         };
-    }
-
-    /// <summary>The room on the filesystem <paramref name="path"/> is on, or why it could not be measured.</summary>
-    private (DiskSpace? Space, string? Unmeasured) Room(string path)
-    {
-        try
-        {
-            return (_fileSystem.SpaceAt(path), null);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return (null, ex.Message.TrimEnd('.'));
-        }
     }
 
     /// <summary>
@@ -296,7 +283,7 @@ public sealed class HostAgentService(
             // A record nobody can read says nothing about what the directory holds, as none says nothing.
         }
 
-        var (space, unmeasured) = Room(directory);
+        var (space, unmeasured) = DiskSpace.Measure(_fileSystem, directory);
 
         return new BuildDirectoryRoom(asked, _fileSystem.DirectoryExists(directory), recorded, space, unmeasured);
     }

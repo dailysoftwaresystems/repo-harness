@@ -69,7 +69,7 @@ public static class LegsReports
                     host.ToolPath,
                     host.Actions,
 
-                    // The room where its copies are kept - the tree the command was typed in, for this machine -
+                    // The room where its copies are kept - the main checkout, for this machine -
                     // or why it could not be measured: whole here, where -v adds nothing a script has to ask for.
                     host.Space,
                     host.SpaceUnmeasured,

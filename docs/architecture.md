@@ -1445,8 +1445,8 @@ could run them.
   since what that directory holds is an amount nothing measured.
 - **Only a command that builds.** `sync` and `clean` need no room: clean is how room is made.
 
-`legs -v` says the room on each host it measured - where its copies are kept, and the tree the
-command was typed in for this machine - or why it could not be measured, so a host that is nearly
+`legs -v` says the room on each host it measured - where its copies are kept, and the main
+checkout for this machine - or why it could not be measured, so a host that is nearly
 full shows before a run fills it. `--json` always carries it, as each host's `space`.
 
 ## Syncing a tree

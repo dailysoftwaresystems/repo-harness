@@ -55,7 +55,7 @@ public sealed class HoldAwakeRegistry(IHostCommandRunner hostCommands, IHarnessO
     {
         var session = host.Session!;
         var nonce = HostAgentProtocol.NewNonce();
-        int? finished = null;
+        var lines = new HostAgentLines(nonce);
         string? said = null;
 
         var request = JsonSerializer.Serialize(
@@ -82,11 +82,7 @@ public sealed class HoldAwakeRegistry(IHostCommandRunner hostCommands, IHarnessO
                         Timeout = Budget,
                         OnErrorLine = line =>
                         {
-                            if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
-                            {
-                                finished = code;
-                            }
-                            else if (FailureLine.TryRead(line, HostAgentProtocol.CommandName, out var refusal))
+                            if (lines.Error(line) && FailureLine.TryRead(line, HostAgentProtocol.CommandName, out var refusal))
                             {
                                 said = refusal;
                             }
@@ -95,7 +91,7 @@ public sealed class HoldAwakeRegistry(IHostCommandRunner hostCommands, IHarnessO
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            if (finished == HarnessExit.Success)
+            if (lines.Finished == HarnessExit.Success)
             {
                 _output.Detail(
                     commandName,
@@ -106,7 +102,7 @@ public sealed class HoldAwakeRegistry(IHostCommandRunner hostCommands, IHarnessO
             _output.Warn(
                 commandName,
                 $"{host.Host}: could not be held awake until the next command: "
-                + (said ?? (finished is { } code ? $"it exited {code}" : HostProbes.NeverFinished("the hold", result, session.Connection))));
+                + (said ?? (lines.Finished is { } code ? $"it exited {code}" : HostProbes.NeverFinished("the hold", result, session.Connection))));
         }
         catch (HarnessException ex)
         {

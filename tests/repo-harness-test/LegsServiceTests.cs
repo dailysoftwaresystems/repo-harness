@@ -366,7 +366,7 @@ public sealed class LegsServiceTests
         await fixture.Service.CheckAsync(Root, null, LegWorkload.BuildAndTest, here: null, TestContext.Current.CancellationToken);
 
         var building = fixture.Inspector.RoomAsked.Last(entry => entry.Host == HostId.Ssh("pi")).Room;
-        Assert.StartsWith("/home/pi/repo", Assert.Single(building.Builds), StringComparison.Ordinal);
+        Assert.Equal("/home/pi/repo/build/arm64-none-debug", Assert.Single(building.Builds));
     }
 
     /// <summary>What a host answers about a build directory: whether it is there, what it recorded, the room on '/'.</summary>

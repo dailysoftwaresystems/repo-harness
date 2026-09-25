@@ -335,7 +335,7 @@ public static class LegRunPlan
             variant,
             treeRoot,
             hostTreeRoot,
-            variant.DirectoryUnder(hostTreeRoot),
+            variant.DirectoryOn(host.Host, hostTreeRoot),
             config.Hosts.SettingsFor(named),
             leg.Emulator is { Length: > 0 })
         {

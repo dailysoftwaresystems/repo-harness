@@ -50,6 +50,30 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
     /// </summary>
     private static readonly TimeSpan Budget = TimeSpan.FromMinutes(10);
 
+    /// <summary>Runs ninja in <paramref name="buildDirectory"/> as the build ran it, within the budget of a probe.</summary>
+    /// <param name="buildDirectory">The build directory, which ninja runs in.</param>
+    /// <param name="arguments">What ninja is asked.</param>
+    /// <param name="appendToPath">
+    /// The directories the build was given, for a ninja looked up by name: the one the survey found for the
+    /// build, not "not installed".
+    /// </param>
+    /// <param name="program">The ninja the build ran, as its configuration recorded it, or <see langword="null"/> to look one up.</param>
+    /// <param name="environment">The environment the build's phases ran in.</param>
+    internal static ProcessRequest Request(
+        string buildDirectory,
+        IReadOnlyList<string> arguments,
+        IReadOnlyList<string> appendToPath,
+        string? program,
+        IReadOnlyDictionary<string, string?>? environment) => new()
+        {
+            FileName = string.IsNullOrWhiteSpace(program) ? Program : ProcessRunner.Anchored(program, buildDirectory),
+            Arguments = arguments,
+            AppendToPath = appendToPath,
+            Environment = environment ?? new Dictionary<string, string?>(StringComparer.Ordinal),
+            WorkingDirectory = buildDirectory,
+            Timeout = Budget,
+        };
+
     /// <summary>
     /// A header line of <c>ninja -t deps</c>: the object, then how many dependencies it recorded.
     /// Whether the record is valid or stale is deliberately not read — a valid record of zero
@@ -147,18 +171,7 @@ public sealed partial class NinjaDependencyCheck(IProcessRunner processRunner, I
         {
             result = await _processRunner
                 .RunAsync(
-                    new ProcessRequest
-                    {
-                        FileName = string.IsNullOrWhiteSpace(program) ? Program : ProcessRunner.Anchored(program, buildDirectory),
-                        Arguments = ["-C", buildDirectory, "-t", "deps"],
-
-                        // The directories the build was given, for a ninja looked up by name: the one
-                        // the survey found for the build, not "not installed".
-                        AppendToPath = appendToPath,
-                        Environment = environment ?? new Dictionary<string, string?>(StringComparer.Ordinal),
-                        WorkingDirectory = buildDirectory,
-                        Timeout = Budget,
-                    },
+                    Request(buildDirectory, ["-C", buildDirectory, "-t", "deps"], appendToPath, program, environment),
                     cancellationToken)
                 .ConfigureAwait(false);
         }

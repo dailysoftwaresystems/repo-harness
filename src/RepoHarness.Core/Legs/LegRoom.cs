@@ -191,7 +191,7 @@ public static class LegRoom
             var main = LegTrees.On(context, host, context.Layout.MainCheckoutRoot, comparison);
             var own = LegTrees.On(context, host, LegTrees.Here(context, leg, here), comparison);
 
-            return (main, variant.DirectoryUnder(own), variant.DirectoryUnder(main));
+            return (main, variant.DirectoryOn(host, own), variant.DirectoryOn(host, main));
         }
         catch (HarnessException)
         {

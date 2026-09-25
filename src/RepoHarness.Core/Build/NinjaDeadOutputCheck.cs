@@ -36,9 +36,6 @@ public sealed class NinjaDeadOutputCheck(IProcessRunner processRunner, IFileSyst
     /// <summary>What the dry run prints before each output it would remove.</summary>
     private const string RemovePrefix = "Remove ";
 
-    /// <summary>How long the dry run may take: it reads two logs and prints, so this bounds a hang.</summary>
-    private static readonly TimeSpan Budget = TimeSpan.FromMinutes(10);
-
     private readonly IProcessRunner _processRunner = processRunner;
     private readonly IFileSystem _fileSystem = fileSystem;
 
@@ -69,17 +66,8 @@ public sealed class NinjaDeadOutputCheck(IProcessRunner processRunner, IFileSyst
         {
             result = await _processRunner
                 .RunAsync(
-                    new ProcessRequest
-                    {
-                        FileName = string.IsNullOrWhiteSpace(program) ? NinjaDependencyCheck.Program : ProcessRunner.Anchored(program, buildDirectory),
-
-                        // -n: named, never removed. The harness removes nothing of a build directory it keeps.
-                        Arguments = ["-C", buildDirectory, "-n", "-t", "cleandead"],
-                        AppendToPath = appendToPath,
-                        Environment = environment ?? new Dictionary<string, string?>(StringComparer.Ordinal),
-                        WorkingDirectory = buildDirectory,
-                        Timeout = Budget,
-                    },
+                    // -n: named, never removed. The harness removes nothing of a build directory it keeps.
+                    NinjaDependencyCheck.Request(buildDirectory, ["-C", buildDirectory, "-n", "-t", "cleandead"], appendToPath, program, environment),
                     cancellationToken)
                 .ConfigureAwait(false);
         }

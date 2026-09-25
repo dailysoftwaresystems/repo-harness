@@ -140,12 +140,7 @@ public sealed class HostExecService(
             },
             HostAgentProtocol.JsonOptions);
 
-        int? finished = null;
-
-        // Whether the host's agent has begun answering, on each stream: until it has, that stream carries
-        // the host's login shell.
-        var serving = false;
-        var reporting = false;
+        var lines = new HostAgentLines(nonce);
 
         var result = await _hostCommands.RunAsync(
             session.Connection,
@@ -162,44 +157,14 @@ public sealed class HostExecService(
                 HoldStandardInputOpen = true,
                 OnOutputLine = line =>
                 {
-                    if (HostAgentProtocol.IsStartedLine(line, nonce))
+                    if (lines.Output(line))
                     {
-                        reporting = true;
-                        return;
+                        _output.Raw(line);
                     }
-
-                    // Nothing the host said before its agent began is this command's output: a login shell
-                    // writes to the same stream, and what it says is the host's business.
-                    if (!reporting)
-                    {
-                        return;
-                    }
-
-                    _output.Raw(line);
                 },
                 OnErrorLine = line =>
                 {
-                    // Read before the gate, and never behind it: how the command finished is the one thing
-                    // that must survive a host whose profile writes to this stream, because a line that
-                    // never arrives is reported as a command that may not have run at all.
-                    if (HostAgentProtocol.TryReadCompletionLine(line, nonce, out var code))
-                    {
-                        finished = code;
-                        return;
-                    }
-
-                    if (HostAgentProtocol.IsStartedLine(line, nonce))
-                    {
-                        serving = true;
-                        return;
-                    }
-
-                    // Nothing else the host said before its agent began is this command's output: a login
-                    // shell writes to the same stream, and one consumer's printed the account's home layout
-                    // on every session, which a relayed line then published. The agent's own lines pass all
-                    // the same, because a request refused before it could be read carries no nonce to mark,
-                    // and that refusal is the whole of what the reader has to go on.
-                    if (!serving && !HostAgentProtocol.IsAgentsOwnLine(line))
+                    if (!lines.Error(line))
                     {
                         return;
                     }
@@ -215,7 +180,7 @@ public sealed class HostExecService(
 
         // The command's exit code comes from its completion line, never from the transport: ssh exits 255, and
         // wsl.exe with codes of its own, when the connection fails, and neither is the command's result.
-        if (finished is not { } exitCode)
+        if (lines.Finished is not { } exitCode)
         {
             return CommandOutcome.Failed(
                 HarnessExit.HostUnavailable,
