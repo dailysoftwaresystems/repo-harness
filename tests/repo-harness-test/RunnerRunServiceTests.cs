@@ -203,6 +203,11 @@ public sealed class RunnerRunServiceTests
         Assert.True(File.Exists(kept), $"expected '{kept}' to have been kept");
         Assert.Equal("carried", await File.ReadAllTextAsync(kept, TestContext.Current.CancellationToken));
 
+        // And named on the leg's line as sync --pull takes it: relative to the tree, with forward slashes.
+        Assert.Equal(
+            [$".harness-config/runner/actions/corpus/artifacts/{RunId}/{Leg}/pack/payload.txt"],
+            result.Entry.KeptOutputs);
+
         // And the working space is gone, including what the second step wrote there and never
         // asked to keep.
         Assert.False(

@@ -462,6 +462,10 @@ public sealed class RunnerRunService(
             // The last step that did not pass, for a leg that did not: one whose failure was excused, or
             // that went on past its failure, is the last only where nothing after it failed.
             LogTail = decided.Verdict.Verdict == LegVerdict.Passed ? [] : PhaseResult.TailOf(state.Phases),
+
+            // Named as sync --pull takes them, so a caller brings back what the leg kept without walking the
+            // host's tree for it: every attempt of this run, since a resumed run keeps what an earlier one kept.
+            KeptOutputs = scratch is null ? [] : KeptOutputs.Under(_fileSystem, request.TreeRoot, scratch.Artifacts),
         };
 
         return new RunnerLegResult(

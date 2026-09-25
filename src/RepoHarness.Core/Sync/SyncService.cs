@@ -901,16 +901,10 @@ public sealed class SyncService(
                     continue;
                 }
 
-                var kept = Path.Combine(child, HarnessLayout.ActionArtifactsDirectoryName, runId);
-
-                if (_fileSystem.DirectoryExists(kept))
-                {
-                    foreach (var file in _fileSystem.EnumerateFiles(kept, recursive: true))
-                    {
-                        found.Add(PathPatterns.Normalize(
-                            Path.GetRelativePath(layout.RepositoryRoot, file)));
-                    }
-                }
+                found.AddRange(Runners.KeptOutputs.Under(
+                    _fileSystem,
+                    layout.RepositoryRoot,
+                    Path.Combine(child, HarnessLayout.ActionArtifactsDirectoryName, runId)));
 
                 Collect(child, depth + 1);
             }

@@ -1580,7 +1580,9 @@ directory here cannot drift apart.
   syncing again. A `--stage-only` on `sync` would name a mode `sync` is always in.
 - **Artefacts come home** with `--pull`, each file hashed on the far side and checked again on
   arrival. Evidence that a binary built here runs there is not evidence if nobody checked it
-  survived the journey.
+  survived the journey. A leg's line in `run --json` names each file its steps kept as
+  `keptOutputs`, relative to the tree, so a caller passes those paths to `--pull` without walking
+  the host's tree for them.
 
 ## Predefined runners
 

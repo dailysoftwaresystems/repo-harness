@@ -260,6 +260,9 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
 
             // Measured there, of the directory there: the host's own path and filesystem.
             Space = entry.Space,
+
+            // Relative to the tree, which is the same path in this machine's tree: what sync --pull takes.
+            KeptOutputs = [.. entry.KeptOutputs ?? []],
         };
     }
 
@@ -287,5 +290,6 @@ public sealed class RemoteLegRunner(IHostCommandRunner hostCommands, IHarnessOut
         IReadOnlyList<string>? ManualSteps = null,
         IReadOnlyList<string>? UnselectedSteps = null,
         IReadOnlyList<string>? RanSteps = null,
-        BuildSpace? Space = null);
+        BuildSpace? Space = null,
+        IReadOnlyList<string>? KeptOutputs = null);
 }

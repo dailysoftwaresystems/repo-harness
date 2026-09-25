@@ -404,6 +404,19 @@ public sealed partial class HelpTests
     }
 
     /// <summary>
+    /// The runner topic says a leg's line names what its steps kept, as the path sync --pull takes.
+    /// </summary>
+    [Fact]
+    public async Task RunnerTopic_SaysALegsLineNamesWhatItKept_AsSyncPullTakesIt()
+    {
+        var result = await CliRunner.RunAsync(["help", "runner"], TestContext.Current.CancellationToken);
+        var text = string.Join(' ', result.StandardOutput.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        Assert.Contains("names each file its steps kept as keptOutputs, relative to the tree", text, StringComparison.Ordinal);
+        Assert.Contains("sync --pull' takes to bring it back", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The worktrees topic says a Ninja build leaves its dead outputs out of the path budget's warning, and names
     /// the ninja command that removes them, removing nothing itself.
     /// </summary>

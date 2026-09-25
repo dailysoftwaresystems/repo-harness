@@ -208,6 +208,26 @@ public sealed class LedgerReportTests
         Assert.Equal(["build"], legs[2].GetProperty("unselectedSteps").EnumerateArray().Select(step => step.GetString()));
     }
 
+    /// <summary>
+    /// A leg's line names each file its steps kept, as sync --pull takes it; a leg that kept nothing names none.
+    /// </summary>
+    [Fact]
+    public void TheDocument_NamesWhatEachLegKept()
+    {
+        var report = LedgerReport.From(
+        [
+            Entry("win", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty),
+            Entry("lin", LegVerdict.Passed, TimeSpan.FromSeconds(1), string.Empty) with { KeptOutputs = ["a/artifacts/r/lin/pack/payload.txt"] },
+        ],
+        durationWarningFactor: 0);
+
+        using var document = JsonDocument.Parse(report.ToJson(cancelled: false, unfinished: []));
+        var legs = document.RootElement.GetProperty("legs").EnumerateArray().ToList();
+
+        Assert.False(legs[0].TryGetProperty("keptOutputs", out _));
+        Assert.Equal(["a/artifacts/r/lin/pack/payload.txt"], legs[1].GetProperty("keptOutputs").EnumerateArray().Select(path => path.GetString()));
+    }
+
     [Fact]
     public void TheTable_HasTheFourColumnsInOrder()
     {

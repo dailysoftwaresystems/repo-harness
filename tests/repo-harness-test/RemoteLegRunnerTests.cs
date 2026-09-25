@@ -135,6 +135,31 @@ public sealed class RemoteLegRunnerTests
     }
 
     /// <summary>
+    /// What a leg's steps kept on a host travels on its line, each relative to the tree: the same path in this
+    /// machine's tree, which sync --pull takes to bring it back.
+    /// </summary>
+    [Fact]
+    public async Task WhatALegKeptOnAHost_IsNamedOnItsLine_AsSyncPullTakesIt()
+    {
+        const string Kept = ".harness-config/runner/actions/corpus/artifacts/run-1/wsl-debug/pack/payload.txt";
+
+        var written = LedgerReport
+            .From([new LegEntry { Leg = "wsl-debug", Verdict = LegVerdict.Passed, KeptOutputs = [Kept] }], durationWarningFactor: 0)
+            .ToJson(cancelled: false, unfinished: []);
+
+        var hosts = new ScriptedHostCommands((_, command) =>
+        {
+            Answer(command, written);
+
+            return HostResults.Finished(command, 0);
+        });
+
+        var entry = await Runner(hosts).RunAsync("run", Leg(), [], TestContext.Current.CancellationToken);
+
+        Assert.Equal([Kept], entry.KeptOutputs);
+    }
+
+    /// <summary>
     /// The last lines the phase that failed on a host printed travel on the leg's line, read from the very
     /// document the host writes: its log stays on that host, and a reader here has nothing else.
     /// </summary>

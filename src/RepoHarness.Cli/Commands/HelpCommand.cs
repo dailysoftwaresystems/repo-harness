@@ -446,6 +446,10 @@ internal static class HelpCommand
         builder.AppendLine("emptied when the action finishes, whatever the verdict, so anything a later run");
         builder.AppendLine("needs has to say 'persist'.");
         builder.AppendLine();
+        builder.AppendLine("A leg's line in --json names each file its steps kept as keptOutputs, relative to the");
+        builder.AppendLine($"tree - the path '{ToolPackage.Command} sync --pull' takes to bring it back from the host that");
+        builder.AppendLine("kept it.");
+        builder.AppendLine();
         builder.AppendLine("Outputs are kept as soon as the step that made them passes, not at the end of the");
         builder.AppendLine("run, because a later step reads them. A step that FAILED keeps nothing, although it");
         builder.AppendLine("may have written the file: carrying evidence out of work that did not pass is what");

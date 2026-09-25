@@ -156,6 +156,12 @@ public sealed record LegEntry
     /// </summary>
     public BuildSpace? Space { get; init; }
 
+    /// <summary>
+    /// Each file the leg's steps kept, relative to its tree with forward slashes: the path <c>sync --pull</c>
+    /// takes to bring it back from the host that kept it.
+    /// </summary>
+    public IReadOnlyList<string> KeptOutputs { get; init; } = [];
+
     /// <summary>What the harness spent outside the leg's own commands.</summary>
     public TimeSpan Overhead => Duration > CommandTime ? Duration - CommandTime : TimeSpan.Zero;
 }
