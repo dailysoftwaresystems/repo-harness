@@ -268,7 +268,6 @@ public sealed class HostConnector(
         // it was then, rather than waited for again by every leg placed there.
         TimeSpan? window = settings.WakeWaitSeconds > 0 ? TimeSpan.FromSeconds(settings.WakeWaitSeconds) : null;
         var started = _wakeWindow.Now;
-        var deadline = started + (window ?? TimeSpan.Zero);
 
         if (window is not null && _wakeWindow.RanOut(host) is { } ranOut)
         {
@@ -304,9 +303,9 @@ public sealed class HostConnector(
         {
             var resolution = await _addresses.ResolveAsync(seen?.HostName ?? item.Address, cancellationToken).ConfigureAwait(false);
 
-            if (!resolution.Resolved && window is not null)
+            if (!resolution.Resolved && window is { } resolving)
             {
-                resolution = await _wakeWindow.KeepResolvingAsync(resolution, deadline, cancellationToken).ConfigureAwait(false);
+                resolution = await _wakeWindow.KeepResolvingAsync(resolution, started, resolving, cancellationToken).ConfigureAwait(false);
                 lookups = resolution.Attempts;
             }
 
@@ -331,11 +330,11 @@ public sealed class HostConnector(
         var budget = TimeSpan.FromSeconds(settings.ConnectTimeoutSeconds) + ProbeBudget;
         var probe = await _hostCommands.ProbeShellAsync(connection, budget, cancellationToken).ConfigureAwait(false);
 
-        if (!probe.Succeeded && window is not null)
+        if (!probe.Succeeded && window is { } waking)
         {
             var probing = connection;
             (probe, connections) = await _wakeWindow
-                .KeepProbingAsync(probe, deadline, token => _hostCommands.ProbeShellAsync(probing, budget, token), cancellationToken)
+                .KeepProbingAsync(probe, started, waking, token => _hostCommands.ProbeShellAsync(probing, budget, token), cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -389,7 +388,7 @@ public sealed class HostConnector(
             Woke = lookups > 0 || connections > 1
                 ? string.Create(
                     CultureInfo.InvariantCulture,
-                    $"answered after {(_wakeWindow.Now - started).TotalSeconds:0} seconds of waiting for it to wake "
+                    $"answered after {_wakeWindow.Since(started).TotalSeconds:0} seconds of waiting for it to wake "
                     + $"({lookups} lookup(s) of its name, {connections} connection attempt(s))")
                 : null,
         };

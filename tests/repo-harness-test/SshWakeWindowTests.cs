@@ -20,7 +20,7 @@ public sealed class SshWakeWindowTests
         var lookup = new ScriptedLookup(clock, answersOnCall: 3, step: TimeSpan.FromSeconds(1));
         var window = new SshWakeWindow(lookup, clock, TimeSpan.Zero);
 
-        var resolution = await window.KeepResolvingAsync(Missed("mac.local"), Start + TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var resolution = await window.KeepResolvingAsync(Missed("mac.local"), window.Now, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         Assert.True(resolution.Resolved);
         Assert.Equal(6, resolution.Attempts);
@@ -35,7 +35,7 @@ public sealed class SshWakeWindowTests
         var lookup = new ScriptedLookup(clock, answersOnCall: int.MaxValue, step: TimeSpan.FromSeconds(10));
         var window = new SshWakeWindow(lookup, clock, TimeSpan.Zero);
 
-        var resolution = await window.KeepResolvingAsync(Missed("mac.local"), Start + TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var resolution = await window.KeepResolvingAsync(Missed("mac.local"), window.Now, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
         Assert.False(resolution.Resolved);
         Assert.Equal(3, lookup.Calls);
@@ -55,7 +55,35 @@ public sealed class SshWakeWindowTests
 
         var (result, attempts) = await window.KeepProbingAsync(
             Refused(),
-            Start + TimeSpan.FromSeconds(60),
+            window.Now,
+            TimeSpan.FromSeconds(60),
+            _ =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(5));
+                return Task.FromResult(tries.Dequeue());
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(4, attempts);
+    }
+
+    /// <summary>
+    /// A window lasts as long as it says however the time of day is set meanwhile: measured by the time of day, a
+    /// clock set ahead ended it after one try - a flaky test on a machine whose clock steps showed it - and one set
+    /// back would draw it out by as much.
+    /// </summary>
+    [Fact]
+    public async Task AWindow_LastsItsLength_HoweverTheTimeOfDayIsSetMeanwhile()
+    {
+        var clock = new SetAheadClock(Start);
+        var tries = new Queue<ProcessResult>([Refused(), TimedOut(), Answered()]);
+        var window = new SshWakeWindow(new ScriptedLookup(clock, int.MaxValue, TimeSpan.Zero), clock, TimeSpan.Zero);
+
+        var (result, attempts) = await window.KeepProbingAsync(
+            Refused(),
+            window.Now,
+            TimeSpan.FromSeconds(60),
             _ =>
             {
                 clock.Advance(TimeSpan.FromSeconds(5));
@@ -82,7 +110,8 @@ public sealed class SshWakeWindowTests
 
         var (result, attempts) = await window.KeepProbingAsync(
             failed,
-            Start + TimeSpan.FromSeconds(60),
+            window.Now,
+            TimeSpan.FromSeconds(60),
             _ => throw new InvalidOperationException("A host that answered was tried again."),
             TestContext.Current.CancellationToken);
 
@@ -122,14 +151,36 @@ public sealed class SshWakeWindowTests
 
     private static ProcessResult Answered() => HostResults.Ok("%COMSPEC%\n");
 
-    /// <summary>A clock that moves only when told.</summary>
-    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
+    /// <summary>A clock that moves only when told, its timestamps with it.</summary>
+    private class ManualClock(DateTimeOffset start) : TimeProvider
     {
+        private readonly DateTimeOffset _start = start;
         private DateTimeOffset _now = start;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
         public override DateTimeOffset GetUtcNow() => _now;
 
-        public void Advance(TimeSpan by) => _now += by;
+        public override long GetTimestamp() => (_now - _start).Ticks;
+
+        public virtual void Advance(TimeSpan by) => _now += by;
+    }
+
+    /// <summary>
+    /// A clock whose time of day is set an hour ahead each time it moves, as a machine syncing its time sets it,
+    /// while time itself passes as told.
+    /// </summary>
+    private sealed class SetAheadClock(DateTimeOffset start) : ManualClock(start)
+    {
+        private TimeSpan _setAhead;
+
+        public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + _setAhead;
+
+        public override void Advance(TimeSpan by)
+        {
+            base.Advance(by);
+            _setAhead += TimeSpan.FromHours(1);
+        }
     }
 
     /// <summary>A name that answers from a given call on, each lookup taking the time it is told to.</summary>

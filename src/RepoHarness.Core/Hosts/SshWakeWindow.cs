@@ -17,7 +17,7 @@ namespace RepoHarness.Core.Hosts;
 /// command places there do not each wait the whole window again.
 /// </remarks>
 /// <param name="lookup">How a name is looked up, asked afresh each time: an answer kept would miss the wake.</param>
-/// <param name="clock">What measures the window.</param>
+/// <param name="clock">What measures the window: its timestamps, which only move forward, never its time of day.</param>
 /// <param name="pollDelay">
 /// How long to wait between tries. Passed in rather than fixed so that a test measures the trying and not
 /// the waiting; production uses <see cref="DefaultPollDelay"/>.
@@ -30,40 +30,49 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
     /// </summary>
     public static readonly TimeSpan DefaultPollDelay = TimeSpan.FromSeconds(5);
 
-    private readonly ConcurrentDictionary<HostId, (string Refusal, DateTimeOffset Until)> _ranOut = new();
+    private readonly ConcurrentDictionary<HostId, (string Refusal, long Kept)> _ranOut = new();
 
     private readonly INameLookup _lookup = lookup;
     private readonly TimeProvider _clock = clock;
     private readonly TimeSpan _pollDelay = pollDelay;
 
-    /// <summary>Now, as the window is measured.</summary>
-    public DateTimeOffset Now => _clock.GetUtcNow();
+    /// <summary>
+    /// Now, on the clock a window is measured by: one that only moves forward, at the pace time passes. Never the
+    /// time of day, which a machine may set while a host wakes - as one that syncs its time does - and which then
+    /// cut a window short, or drew it out by as much as the clock was set back.
+    /// </summary>
+    public long Now => _clock.GetTimestamp();
+
+    /// <summary>How long it has been since <paramref name="then"/>, a <see cref="Now"/> read earlier.</summary>
+    /// <param name="then">When it was.</param>
+    public TimeSpan Since(long then) => _clock.GetElapsedTime(then);
 
     /// <summary>Why <paramref name="host"/>'s window ran out a moment ago, or <see langword="null"/>.</summary>
     /// <param name="host">The host.</param>
     public string? RanOut(HostId host)
-        => _ranOut.TryGetValue(host, out var kept) && kept.Until > Now ? kept.Refusal : null;
+        => _ranOut.TryGetValue(host, out var kept) && Since(kept.Kept) < HostAddressResolver.CacheLifetime ? kept.Refusal : null;
 
     /// <summary>Keeps <paramref name="refusal"/> as why <paramref name="host"/>'s window ran out, for as long as a name's answer is kept.</summary>
     /// <param name="host">The host.</param>
     /// <param name="refusal">Why it could not be reached, window and all.</param>
-    public void Remember(HostId host, string refusal) => _ranOut[host] = (refusal, Now + HostAddressResolver.CacheLifetime);
+    public void Remember(HostId host, string refusal) => _ranOut[host] = (refusal, Now);
 
     /// <summary>
-    /// Looks the name <paramref name="missed"/> missed up again, until it resolves or <paramref name="deadline"/>
-    /// passes, and says how many lookups it took in all.
+    /// Looks the name <paramref name="missed"/> missed up again, until it resolves or the window ends, and says
+    /// how many lookups it took in all.
     /// </summary>
     /// <param name="missed">The resolution that found nothing, with the lookups it made.</param>
-    /// <param name="deadline">When the window ends.</param>
+    /// <param name="started">When the window began, a <see cref="Now"/>.</param>
+    /// <param name="window">How long it lasts.</param>
     /// <param name="cancellationToken">Stops the looking.</param>
-    public async Task<AddressResolution> KeepResolvingAsync(AddressResolution missed, DateTimeOffset deadline, CancellationToken cancellationToken)
+    public async Task<AddressResolution> KeepResolvingAsync(AddressResolution missed, long started, TimeSpan window, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(missed);
 
         var attempts = missed.Attempts;
 
         // Asked at once, then after each wait: a miss kept from earlier in this command is no lookup of now.
-        while (Now < deadline)
+        while (Since(started) < window)
         {
             attempts++;
 
@@ -72,7 +81,7 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
                 return new AddressResolution(missed.Address, Resolved: true, attempts, HostAddressResolver.Preferred(found));
             }
 
-            await WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
+            await WaitAsync(started, window, cancellationToken).ConfigureAwait(false);
         }
 
         return missed with { Attempts = attempts };
@@ -80,15 +89,17 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
 
     /// <summary>
     /// Runs <paramref name="probe"/> again while what it fails with is what a waking host explains, until it
-    /// succeeds or <paramref name="deadline"/> passes, and says what the last try came to and how many there were.
+    /// succeeds or the window ends, and says what the last try came to and how many there were.
     /// </summary>
     /// <param name="failed">What the first try came to.</param>
-    /// <param name="deadline">When the window ends.</param>
+    /// <param name="started">When the window began, a <see cref="Now"/>.</param>
+    /// <param name="window">How long it lasts.</param>
     /// <param name="probe">One try.</param>
     /// <param name="cancellationToken">Stops the trying.</param>
     public async Task<(ProcessResult Result, int Attempts)> KeepProbingAsync(
         ProcessResult failed,
-        DateTimeOffset deadline,
+        long started,
+        TimeSpan window,
         Func<CancellationToken, Task<ProcessResult>> probe,
         CancellationToken cancellationToken)
     {
@@ -100,11 +111,11 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
 
         // A try that itself takes connectTimeoutSeconds is charged to the window when it returns: the last one
         // may end after the window does, and none starts once it has.
-        while (!result.Succeeded && HostProbes.MayBeWaking(result) && Now < deadline)
+        while (!result.Succeeded && HostProbes.MayBeWaking(result) && Since(started) < window)
         {
-            await WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
+            await WaitAsync(started, window, cancellationToken).ConfigureAwait(false);
 
-            if (Now >= deadline)
+            if (Since(started) >= window)
             {
                 break;
             }
@@ -117,9 +128,9 @@ public sealed class SshWakeWindow(INameLookup lookup, TimeProvider clock, TimeSp
     }
 
     /// <summary>Waits the delay between tries, or what is left of the window where that is less.</summary>
-    private Task WaitAsync(DateTimeOffset deadline, CancellationToken cancellationToken)
+    private Task WaitAsync(long started, TimeSpan window, CancellationToken cancellationToken)
     {
-        var left = deadline - Now;
+        var left = window - Since(started);
 
         return Task.Delay(left < _pollDelay ? (left > TimeSpan.Zero ? left : TimeSpan.Zero) : _pollDelay, cancellationToken);
     }
