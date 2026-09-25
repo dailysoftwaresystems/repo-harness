@@ -317,13 +317,34 @@ public sealed partial class CliEndToEndTests
         // One line on standard error, naming what would be lost and the way past.
         Assert.Equal(HarnessExit.Refused, refused.ExitCode);
         Assert.Equal(
-            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, or run 'git stash -u'); fix that, or pass --force to delete it anyway.",
+            "delete-worktree: FAIL - Worktree 'wt' was not deleted, because it has 1 uncommitted change(s) that would be lost: notes.txt (commit them to a branch, run 'git stash -u', or pass --discard-uncommitted to delete them with the worktree); fix that, or pass --force to delete it anyway.",
             Assert.Single(refused.StandardError.ReplaceLineEndings("\n").Trim().Split('\n')));
         Assert.True(File.Exists(Path.Combine(path, "notes.txt")), "The refused delete removed uncommitted work.");
 
         var forced = await CliRunner.RunAsync(["delete-worktree", "wt", "--force", "-C", temp.Path], cancellationToken);
 
         Assert.Equal(HarnessExit.Success, forced.ExitCode);
+        Assert.False(Directory.Exists(path));
+    }
+
+    [Fact]
+    public async Task DeleteWorktree_WithDiscardUncommitted_DeletesUncommittedWork_AndSaysWhatItDiscarded()
+    {
+        using var temp = new TempDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await PrepareRepositoryAsync(temp);
+        var path = HarnessFactory.WorktreePath(temp.Path, "wt");
+
+        var created = await CliRunner.RunAsync(["create-worktree", "wt", "-C", temp.Path], cancellationToken);
+        Assert.Equal(HarnessExit.Success, created.ExitCode);
+        File.WriteAllText(Path.Combine(path, "notes.txt"), "never committed");
+
+        var deleted = await CliRunner.RunAsync(["delete-worktree", "wt", "--discard-uncommitted", "-C", temp.Path], cancellationToken);
+
+        Assert.Equal(HarnessExit.Success, deleted.ExitCode);
+        Assert.Contains(
+            "delete-worktree: discarded 1 uncommitted change(s): notes.txt",
+            deleted.StandardOutput.ReplaceLineEndings("\n").Split('\n'));
         Assert.False(Directory.Exists(path));
     }
 

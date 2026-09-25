@@ -34,6 +34,8 @@ public interface IWorktreeService
     /// unchecked, except the evidence roots the configuration declares: one of those holding
     /// anything is refused unless <paramref name="deleteEvidence"/> is set, because a worktree's
     /// measurements are ignored precisely because they are not source, and losing them is silent.
+    /// <paramref name="discardUncommitted"/> waives the uncommitted changes alone, which are then
+    /// deleted with the worktree and counted in the outcome; every other check still runs.
     /// <paramref name="force"/> skips every check and overrides a lock.
     /// </summary>
     /// <exception cref="HarnessException">
@@ -44,6 +46,7 @@ public interface IWorktreeService
         string name,
         bool force,
         bool deleteEvidence,
+        bool discardUncommitted = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>Lists existing worktrees with the commit each was made from.</summary>
@@ -352,6 +355,7 @@ public sealed class WorktreeService(
         string name,
         bool force,
         bool deleteEvidence,
+        bool discardUncommitted = false,
         CancellationToken cancellationToken = default)
     {
         // Only the shape is checked, not the length: a worktree created under a longer
@@ -428,6 +432,7 @@ public sealed class WorktreeService(
         }
 
         var holdsSubmodules = false;
+        IReadOnlyList<string> discarded = [];
 
         if (!force)
         {
@@ -458,6 +463,14 @@ public sealed class WorktreeService(
                 return Unchecked(worktreeName, ex.Message);
             }
 
+            // Waived, the uncommitted changes are left out of what is weighed, and nothing else is:
+            // every other finding still refuses, and a refusal never names what was to be discarded.
+            if (discardUncommitted)
+            {
+                discarded = findings.Changes;
+                findings = findings with { Changes = [] };
+            }
+
             if (findings.StopsDeletion)
             {
                 return Refused(Describe(worktreeName, path, layout.MainCheckoutRoot, findings));
@@ -486,7 +499,7 @@ public sealed class WorktreeService(
             {
                 outcome = force
                     ? await RemoveForcedAsync(layout, worktreeName, path, identity.AdministrativeDirectory, inspector, stopping.Token).ConfigureAwait(false)
-                    : await RemoveCheckedAsync(layout, worktreeName, path, identity.AdministrativeDirectory!, holdsSubmodules, stopping.Token).ConfigureAwait(false);
+                    : await RemoveCheckedAsync(layout, worktreeName, path, identity.AdministrativeDirectory!, holdsSubmodules, discarded.Count > 0, stopping.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stopping.IsCancellationRequested)
             {
@@ -497,6 +510,17 @@ public sealed class WorktreeService(
         if (!outcome.Succeeded)
         {
             return outcome;
+        }
+
+        if (discarded.Count > 0)
+        {
+            outcome = outcome with
+            {
+                Outcome = outcome.Outcome with
+                {
+                    Details = [.. outcome.Outcome.Details ?? [], $"discarded {discarded.Count} uncommitted change(s): {Listed(discarded)}"],
+                },
+            };
         }
 
         // Only once the worktree is really gone. Forgetting it earlier would lose the record of a
@@ -666,8 +690,10 @@ public sealed class WorktreeService(
     /// <summary>
     /// Removes a worktree whose checks passed. Plain removal runs git's own check as well, which still
     /// catches a file changed since ours, a file added unless status.showUntrackedFiles is no, or a
-    /// lock. git refuses every worktree that holds submodules, so for those alone it is told to go
-    /// ahead, skipping that check: their work, and the lock, were checked already.
+    /// lock. git refuses every worktree that holds submodules, so for those it is told to go ahead,
+    /// skipping that check: their work, and the lock, were checked already. So it is for one whose
+    /// uncommitted changes are being discarded, which git's check would refuse; once forced, git still
+    /// keeps a lock, which only forcing twice overrides.
     /// </summary>
     private async Task<WorktreeOutcome> RemoveCheckedAsync(
         HarnessLayout layout,
@@ -675,9 +701,10 @@ public sealed class WorktreeService(
         string path,
         string administrativeDirectory,
         bool holdsSubmodules,
+        bool discardsChanges,
         CancellationToken stopping)
     {
-        string[] arguments = holdsSubmodules
+        string[] arguments = holdsSubmodules || discardsChanges
             ? ["worktree", "remove", "--force", path]
             : ["worktree", "remove", path];
 
@@ -1006,14 +1033,9 @@ public sealed class WorktreeService(
 
         if (findings.Changes.Count > 0)
         {
-            var named = string.Join(", ", findings.Changes.Take(NamedChangeLimit).Select(Printable));
-            var listed = findings.Changes.Count > NamedChangeLimit
-                ? $"{named} and {findings.Changes.Count - NamedChangeLimit} more"
-                : named;
-
             reasons.Add(
-                $"it has {findings.Changes.Count} uncommitted change(s) that would be lost: {listed} "
-                + "(commit them to a branch, or run 'git stash -u')");
+                $"it has {findings.Changes.Count} uncommitted change(s) that would be lost: {Listed(findings.Changes)} "
+                + "(commit them to a branch, run 'git stash -u', or pass --discard-uncommitted to delete them with the worktree)");
         }
 
         if (findings.Commits > 0 && findings.Head is { } head)
@@ -1055,6 +1077,14 @@ public sealed class WorktreeService(
         }
 
         return $"Worktree '{name}' was not deleted, because {string.Join("; ", reasons)}; fix that, or pass --force to delete it anyway.";
+    }
+
+    /// <summary>The first few of <paramref name="changes"/> by name, and how many more there are.</summary>
+    private static string Listed(IReadOnlyList<string> changes)
+    {
+        var named = string.Join(", ", changes.Take(NamedChangeLimit).Select(Printable));
+
+        return changes.Count > NamedChangeLimit ? $"{named} and {changes.Count - NamedChangeLimit} more" : named;
     }
 
     /// <summary>
