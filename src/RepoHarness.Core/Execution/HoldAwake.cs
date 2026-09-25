@@ -35,16 +35,29 @@ public sealed class HoldAwakeStore(IFileSystem fileSystem, string path)
     private readonly IFileSystem _fileSystem = fileSystem;
 
     /// <summary>Where a hold is kept for the user running this process.</summary>
-    public static string DefaultPath
-        => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } own
-                ? own
-                : Path.GetTempPath(),
-            "dssharness",
-            "hold-awake.json");
+    public static string DefaultPath => Path.Combine(ApplicationData(), "dssharness", "hold-awake.json");
 
     /// <summary>The file the state is kept in.</summary>
     public string Location { get; } = path;
+
+    /// <summary>This user's own application data directory, below the home directory this process was given.</summary>
+    /// <remarks>
+    /// macOS's lookup of it asks the system for the account's home rather than reading <c>HOME</c>, which every
+    /// other path a process there derives honors - and which a process given another home, as a test gives it,
+    /// then does not reach. Its place below that home is the same.
+    /// </remarks>
+    private static string ApplicationData()
+    {
+        if (OperatingSystem.IsMacOS()
+            && Environment.GetFolderPath(Environment.SpecialFolder.UserProfile, Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } home)
+        {
+            return Path.Combine(home, "Library", "Application Support");
+        }
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.DoNotVerify) is { Length: > 0 } own
+            ? own
+            : Path.GetTempPath();
+    }
 
     /// <summary>Makes <paramref name="state"/> the hold that stands, ending any before it.</summary>
     /// <param name="state">The hold.</param>
