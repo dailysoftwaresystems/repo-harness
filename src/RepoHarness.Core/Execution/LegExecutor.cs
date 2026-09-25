@@ -329,7 +329,7 @@ public sealed class LegExecutor(IHostPlatform platform, IHarnessOutput output)
             if (request.SyncTree is { } sync && leg.TreeKey.Length > 0)
             {
                 // The tree as a reader names it, never its key: a key joins its parts with a NUL, which a
-                // consumer found in every WSL leg's progress line, where it made grep call the log binary.
+                // consumer found in the progress line of every leg on a host, where it made grep call the log binary.
                 ledger.Transition(leg.Name, leg.Tree.Length > 0 ? $"sync of {leg.Tree}" : "sync of its host's copy");
                 await Shared(syncs, syncGate, leg.TreeKey, sync, cancellationToken).ConfigureAwait(false);
             }

@@ -306,7 +306,7 @@ public sealed class LegExecutorTests
 
     /// <summary>
     /// A leg's sync is said naming the tree and its host as a reader names them, never by its key, whose parts a
-    /// NUL joins: a consumer found one in every WSL leg's progress line, which made grep call the log binary.
+    /// NUL joins: a consumer found one in the progress line of every leg on a host, which made grep call the log binary.
     /// </summary>
     [Fact]
     public async Task ALegsSync_IsSaidNamingItsTree_NeverByItsKey()
